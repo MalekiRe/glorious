@@ -319,6 +319,7 @@ fn closed_effect_row_fingerprint(
         return Err(InstanceKeyError::OpenEffectRow { slot });
     }
     let wrapper = Type::Callable {
+        safety: crate::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),

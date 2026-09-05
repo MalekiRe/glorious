@@ -21,11 +21,15 @@ no compiler milestone.
 The first shared raw-storage crate is now implemented and tested: 12 unit and
 two native embedding tests also pass Miri's strict-provenance checks. It provides
 aligned uninitialized allocations and explicit ownership handoff, not guest
-pointer execution or a complete native/VM ABI. The first U2 slice adds source
-raw-pointer types across inference, specialization, Core, and MIR, with 12
-focused tests. The full workspace passes 2,481 tests (two existing ignored
-manual benchmarks); all 48 source entries pass in 72.39 seconds. Unsafe scopes,
-call contracts, pointer execution, and U3–U6 remain open; see the evidence above.
+pointer execution or a complete native/VM ABI. U2 now includes raw-pointer types,
+explicit unsafe scopes, unsafe callable/trait contracts, and source-independent
+Core/MIR checks, with 22 focused tests. Callable safety stays separate from the
+unsafe-execution requirement, including on lifted bodies. The current bytecode
+format rejects these requirements; raw operations and U3–U6 remain open.
+The latest completed workspace run passes 2,491 tests (two existing ignored
+manual benchmarks), 122.429 seconds wall including build; all 48 source entries
+pass in 69.91 seconds. See the
+prerequisite evidence above for the exact checkpoint and generation changes.
 
 ## Present
 

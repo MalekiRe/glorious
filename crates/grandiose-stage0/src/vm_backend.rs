@@ -2814,6 +2814,11 @@ fn emit_with_specialized_lifted_targets(
     function: &MirFunction,
     specialized_lifted_targets: &BTreeSet<DefKey>,
 ) -> Result<CandidateVmArtifact, VmArtifactError> {
+    if function.safety == crate::Safety::Unsafe || function.unsafe_execution {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "unsafe contracts require the versioned unsafe bytecode profile",
+        });
+    }
     if function
         .validate_with_specialized_lifted_targets(specialized_lifted_targets)
         .is_err()
@@ -3400,6 +3405,7 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
             parameters,
             result,
             effects,
+            safety: crate::Safety::Safe,
             ..
         } => {
             // A callable value owns its HRTB binder. Bytecode deliberately

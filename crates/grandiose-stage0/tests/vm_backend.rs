@@ -1537,6 +1537,8 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
         Box::new(StructuralU32Expr::Param(0)),
     );
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-symbolic-const-caller")),
         captures: 0,
@@ -1733,6 +1735,8 @@ struct LeaveFixtureOffsets {
 fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     let effect = DefKey(Digest::of_bytes(b"vm-non-type-effect"));
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-non-type-effect-caller")),
         captures: 0,
@@ -8386,6 +8390,8 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
 fn vm_executes_verified_multiblock_mir_boolean_control_flow() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let mir = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-branch")),
         captures: 0,
@@ -8464,6 +8470,8 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
         source: CoreId(u32::MAX),
     };
     let mir = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-edge-arguments")),
         captures: 0,
@@ -8531,6 +8539,8 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
 fn vm_omits_identity_cfg_edge_transfers() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let mir = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-identity-edge")),
         captures: 0,
@@ -8583,6 +8593,8 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let owner = DefKey(Digest::of_bytes(b"mir-leave-owner"));
     let mir = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cleanup-leave")),
         captures: 0,
@@ -8734,6 +8746,8 @@ fn vm_leave_in_cfg_successor_retains_outer_handler_depth() {
     let owner = DefKey(Digest::of_bytes(b"successor-leave-owner"));
     let effect = DefKey(Digest::of_bytes(b"successor-leave-effect"));
     let mut mir = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"successor-leave")),
         captures: 0,
@@ -9107,6 +9121,8 @@ fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
         source: CoreId(u32::MAX),
     };
     let mir = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-trap-terminal")),
         captures: 0,

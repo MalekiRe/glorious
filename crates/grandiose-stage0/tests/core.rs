@@ -538,7 +538,7 @@ fn typed_core_selects_aliased_hrtb_inherited_method_values_from_child_assumption
         matches!(
             &expression.kind,
             CoreKind::TraitMethod { .. }
-                if matches!(expression.ty, Type::Callable { lifetime_binders: 1, .. })
+                if matches!(expression.ty, Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 1, .. })
         )
     }), "Child-bound inherited HRTB method value was not retained in Core: {:#?}", core.expressions);
 }
@@ -639,14 +639,14 @@ fn typed_core_freezes_open_hrtb_effect_rows_selected_by_a_positive_trait_impl() 
         "effect Trace<T> { [1,1] note(value: T) -> i64; } trait Gate { type Effects<'a, e: EffectRow>: EffectRow; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, e> } where Self: Gate<Effects<'a, e> = {Trace<i64>, | e}>; } trait Top: Gate {} type Callback<E: EffectRow> = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a, E> }; impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where i64: Gate<Effects<'a, e> = {Trace<i64>, | e}> { *value } } impl Top for i64 where i64: Gate {} pub fn main<e: EffectRow>() -> Callback<e> { Top::relay }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    assert!(matches!(core.expression(core.root).ty, Type::Callable { lifetime_binders: 1, .. }));
+    assert!(matches!(core.expression(core.root).ty, Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 1, .. }));
     assert!(core.expressions.iter().any(|expression| {
         matches!(
             &expression.kind,
             CoreKind::TraitMethod { .. }
                 if matches!(
                     &expression.ty,
-                    Type::Callable { lifetime_binders: 1, effects, .. }
+                    Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 1, effects, .. }
                         if effects.effects.is_empty()
                             && effects.projections.len() == 1
                             && matches!(effects.projections[0].item_arguments.as_slice(), [GenericArgument::Lifetime(Lifetime::Bound { .. }), GenericArgument::EffectRow(EffectRow { tail: Some(EffectTail::Generic(0)), .. })])
@@ -815,6 +815,9 @@ fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
 fn typed_core_validation_rejects_dangling_expression_edges() {
     let package = PackageKey("core-validation@0.1.0".into());
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Block(vec![CoreId(1)]),
@@ -868,6 +871,9 @@ fn typed_core_projection_validation_rechecks_frozen_trait_evidence() {
         item_arguments: vec![],
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![("value".into(), Type::Generic(0))],
         expressions: vec![CoreExpr {
             kind: CoreKind::Local("value".into()),
@@ -945,6 +951,9 @@ fn typed_core_rejects_alias_spelled_delayed_effect_projection_metadata() {
     }
     .canonicalized();
     let mut body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -1025,11 +1034,15 @@ fn typed_core_rechecks_hrtb_effect_projection_evidence_in_function_metadata() {
         end: 1,
     };
     let mut body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Function {
                 definition: key("main"),
                 arguments: vec![GenericArgument::Type(Type::Callable {
+                    safety: grandiose_stage0::Safety::Safe,
                     lifetime_binders: 1,
                     parameters: vec![Type::Reference {
                         mutability: grandiose_stage0::Mutability::Shared,
@@ -1077,6 +1090,9 @@ fn typed_core_rechecks_hrtb_effect_projection_evidence_in_function_metadata() {
 fn typed_core_validation_rejects_impossible_structural_projection() {
     let package = PackageKey("core-structural-validation@0.1.0".into());
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Field {
@@ -1179,6 +1195,9 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
         end: 1,
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1256,6 +1275,9 @@ fn placeflow_does_not_freeze_a_capture_loan_without_source_storage() {
         callable: CallableId(0),
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1321,10 +1343,14 @@ fn typed_core_validation_rejects_inference_in_callable_effect_arguments() {
         end: 1,
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
             ty: Type::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],
                 result: Box::new(Type::Unit),
@@ -1357,6 +1383,9 @@ fn forged_nominal_effect_row_inference_cannot_cross_the_core_or_mir_boundary() {
         end: 1,
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -1406,6 +1435,9 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
         end: 1,
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::TraitMethod {
@@ -1426,6 +1458,7 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
                 deferred: None,
             },
             ty: Type::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],
                 result: Box::new(Type::Unit),
@@ -1470,6 +1503,9 @@ fn typed_core_semantic_fingerprint_ignores_arena_allocation_order_and_spans() {
         end: start + 1,
     };
     let first = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1493,6 +1529,9 @@ fn typed_core_semantic_fingerprint_ignores_arena_allocation_order_and_spans() {
         recovered: false,
     };
     let second = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1534,6 +1573,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         item_arguments: vec![],
     };
     let callable = |projections| Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
@@ -1551,6 +1591,9 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         end: 1,
     };
     let body = |ty| TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -1621,6 +1664,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
     );
 
     let hrtb_gat_with_row = body(Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![],
         result: Box::new(Type::Projection {
@@ -1650,6 +1694,9 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
     );
 
     let malformed_const = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Function {
@@ -2422,6 +2469,9 @@ fn placeflow_ignores_a_forged_conflicting_suffix_after_a_direct_transfer() {
     };
     let i64 = Type::Scalar(ScalarType::I64);
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![("value".into(), i64.clone())],
         expressions: vec![
             CoreExpr {
@@ -5024,6 +5074,9 @@ fn escapeflow_fails_closed_for_a_forged_nested_external_store_place() {
         }),
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![("slot".into(), slot.clone())],
         expressions: vec![
             CoreExpr {
@@ -5616,6 +5669,7 @@ fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking(
         end: 1,
     };
     let callable_type = |invocation| Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
         result: Box::new(Type::Scalar(ScalarType::I64)),
@@ -5625,6 +5679,9 @@ fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking(
     for quantity in [Quantity::AFFINE, Quantity::new(2, Some(2)).unwrap()] {
         let callback = callable_type(quantity);
         let mut core = TypedBody {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_scopes: Default::default(),
+            unsafe_implementations: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {
@@ -6012,6 +6069,9 @@ fn forged_array_reference_slots_keep_reborrow_and_escape_provenance() {
         referent: Box::new(i64.clone()),
     };
     let mut body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -6154,6 +6214,9 @@ fn forged_aggregate_reference_carrier_cannot_be_replaced_while_child_reborrow_is
     };
     let array = Type::Array(Box::new(reference.clone()));
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -6493,6 +6556,9 @@ fn frozen_core_rejects_bound_lifetimes_that_escape_callable_binders() {
         referent: Box::new(Type::Scalar(ScalarType::I64)),
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -6526,10 +6592,14 @@ fn frozen_core_rejects_bound_lifetimes_that_escape_callable_binders() {
     );
 
     let scoped = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
             ty: Type::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 lifetime_binders: 1,
                 parameters: vec![Type::Reference {
                     mutability: grandiose_stage0::Mutability::Shared,
@@ -6576,7 +6646,7 @@ fn typed_closures_elaborate_stacked_higher_ranked_binders() {
     };
     assert!(matches!(
         parameters.as_slice(),
-        [Type::Callable { lifetime_binders: 2, parameters, result, .. }]
+        [Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 2, parameters, result, .. }]
             if matches!(parameters.as_slice(), [
                 Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. },
                 Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 1 }, .. },
@@ -6758,6 +6828,9 @@ fn typed_core_rejects_replayed_capture_environment_brand() {
         end: 1,
     };
     let body = TypedBody {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_scopes: Default::default(),
+        unsafe_implementations: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {

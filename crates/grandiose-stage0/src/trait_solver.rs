@@ -1355,6 +1355,7 @@ impl TraitSolver {
                 )?),
             }),
             Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -1365,6 +1366,7 @@ impl TraitSolver {
                 nested_binders.push(lifetime_binders);
                 nested_binders.extend_from_slice(hrtb_binders);
                 Ok(Type::Callable {
+                    safety,
                     lifetime_binders,
                     parameters: parameters
                         .into_iter()
@@ -1992,6 +1994,19 @@ impl TraitSolver {
             Ok(goal) => goal,
             Err(answer) => return answer,
         };
+        if matches!(
+            goal.subject,
+            Type::Callable {
+                safety: crate::Safety::Unsafe,
+                ..
+            }
+        ) && (is_intrinsic_callable_trait(&goal.relation)
+            || is_intrinsic_label_trait(&goal.relation))
+        {
+            // Even caller-provided assumptions cannot relabel an explicitly
+            // unsafe function value as safe callable/label evidence.
+            return TraitAnswerIndex::NoSolution;
+        }
         if accept_direct_assumption && self.assumption_proves(&goal, assumptions) {
             return TraitAnswerIndex::Proven(assumption_evidence(&goal));
         }
@@ -2038,6 +2053,14 @@ impl TraitSolver {
             let Some(substitution) = match_rule(&rule.implementation, &goal) else {
                 continue;
             };
+            let required_safety = if rule.implementation.negative {
+                crate::Safety::Safe
+            } else {
+                self.traits.get(&goal.relation.definition).map_or(crate::Safety::Safe, |header| header.safety)
+            };
+            if rule.implementation.safety != required_safety {
+                return TraitAnswerIndex::NoSolution;
+            }
             let mut viable = true;
             for (subject, relation) in &rule.implementation.where_bounds {
                 let obligation = TraitGoal {
@@ -2094,7 +2117,12 @@ impl TraitSolver {
     /// can shadow or implement.  Its sole proof rule is the frozen callable
     /// shape: the single positional relation argument is the input tuple.
     fn solve_intrinsic_callable_goal(&self, goal: &TraitGoal) -> TraitAnswerIndex {
-        let Type::Callable { parameters, .. } = &goal.subject else {
+        let Type::Callable {
+            safety: crate::Safety::Safe,
+            parameters,
+            ..
+        } = &goal.subject
+        else {
             return TraitAnswerIndex::NoSolution;
         };
         let inputs = match goal.relation.arguments.as_slice() {
@@ -2117,7 +2145,7 @@ impl TraitSolver {
             return TraitAnswerIndex::NoSolution;
         };
         let Type::Callable {
-            parameters, result, ..
+            safety: crate::Safety::Safe, parameters, result, ..
         } = &goal.subject
         else {
             return TraitAnswerIndex::NoSolution;
@@ -3047,6 +3075,7 @@ fn match_type_at(
             _ => None,
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
@@ -3054,12 +3083,13 @@ fn match_type_at(
             invocation,
         } => match actual {
             Type::Callable {
+                safety: actual_safety,
                 lifetime_binders: actual_lifetime_binders,
                 parameters: actual_parameters,
                 result: actual_result,
                 effects: actual_effects,
                 invocation: actual_invocation,
-            } if lifetime_binders == actual_lifetime_binders
+            } if safety == actual_safety && lifetime_binders == actual_lifetime_binders
                 && parameters.len() == actual_parameters.len()
                 && invocation == actual_invocation =>
             {
@@ -3455,12 +3485,14 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             referent: Box::new(substitute_type(referent, substitution)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
                 .iter()
@@ -3534,6 +3566,7 @@ fn substitute_callable_signature(
     substitution: &ImplementationSubstitution,
 ) -> CallableSignature {
     CallableSignature {
+        safety: value.safety,
         generics: 0,
         generic_kinds: vec![],
         parameters: value
@@ -3825,7 +3858,7 @@ mod tests {
         for leaf in leaves {
             let variants = [leaf.clone(), Type::Tuple(vec![leaf.clone()]), Type::Array(Box::new(leaf.clone())),
                 Type::Reference { mutability: crate::Mutability::Unique, lifetime: crate::Lifetime::Generic(0), referent: Box::new(leaf.clone()) },
-                Type::Callable { lifetime_binders: 1, parameters: vec![leaf.clone()], result: Box::new(leaf.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE },
+                Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 1, parameters: vec![leaf.clone()], result: Box::new(leaf.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE },
                 Type::StaticData { element: Box::new(leaf.clone()), tag: 7, alignment: 8 },
                 Type::Nominal { definition, arguments: vec![GenericArgument::Type(leaf), GenericArgument::Lifetime(crate::Lifetime::Static),
                     GenericArgument::ConstU32(2), GenericArgument::ConstQuantity(crate::Quantity::AFFINE), GenericArgument::EffectRow(EffectRow::empty()),
@@ -3851,8 +3884,8 @@ mod tests {
         for nested in [projection.clone(), constant] {
             let variants = [nested.clone(), Type::Tuple(vec![nested.clone()]), Type::Array(Box::new(nested.clone())),
                 Type::Reference { mutability: crate::Mutability::Shared, lifetime: crate::Lifetime::Static, referent: Box::new(nested.clone()) },
-                Type::Callable { lifetime_binders: 0, parameters: vec![nested.clone()], result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
-                Type::Callable { lifetime_binders: 0, parameters: vec![], result: Box::new(nested.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
+                Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![nested.clone()], result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
+                Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(nested.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
                 Type::Nominal { definition, arguments: vec![GenericArgument::Type(nested)] }];
             for value in variants {
                 assert!(!type_projection_normalization_is_identity(&value), "{value:?}");
@@ -3866,7 +3899,7 @@ mod tests {
             name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
         }], tail: None };
         let opaque = [Type::StaticData { element: Box::new(projection), tag: 1, alignment: 1 },
-            Type::Callable { lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
+            Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
             Type::Nominal { definition, arguments: vec![GenericArgument::EffectRow(row)] }];
         for value in opaque {
             assert!(type_projection_normalization_is_identity(&value));

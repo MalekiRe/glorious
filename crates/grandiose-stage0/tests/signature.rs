@@ -157,6 +157,7 @@ fn frozen_callable_signatures_retain_named_associated_item_equalities() {
 fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
     let intrinsic = intrinsic_callable_trait_definition();
     let callable = Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Scalar(ScalarType::I64)),
@@ -171,6 +172,7 @@ fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
     interface.definitions.insert(
         DefKey(Digest::of_bytes(b"forged-intrinsic-fn-signature")),
         ElaboratedHeader::Callable(CallableSignature {
+            safety: grandiose_stage0::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![],
@@ -274,6 +276,7 @@ fn frozen_interfaces_reject_forged_intrinsic_runs_in_implementations() {
     interface.definitions.insert(
         DefKey(Digest::of_bytes(b"forged-intrinsic-runs-in-implementation")),
         ElaboratedHeader::Implementation(ElaboratedImplementation {
+            safety: grandiose_stage0::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             negative: false,
@@ -307,6 +310,7 @@ fn frozen_interfaces_reject_forged_intrinsic_label_contracts() {
     interface.definitions.insert(
         DefKey(Digest::of_bytes(b"forged-intrinsic-label-signature")),
         ElaboratedHeader::Callable(CallableSignature {
+            safety: grandiose_stage0::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![],
@@ -315,6 +319,7 @@ fn frozen_interfaces_reject_forged_intrinsic_label_contracts() {
             invocation: Quantity::ONCE,
             where_bounds: vec![(
                 Type::Callable {
+                    safety: grandiose_stage0::Safety::Safe,
                     lifetime_binders: 0,
                     parameters: vec![Type::Scalar(ScalarType::I64)],
                     result: Box::new(Type::Scalar(ScalarType::I64)),
@@ -416,7 +421,7 @@ fn signatures_canonicalize_higher_ranked_lifetimes_without_capturing_outer_binde
     };
     assert!(matches!(
         &signature.parameters[0],
-        Type::Callable { lifetime_binders: 1, parameters, result, .. }
+        Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 1, parameters, result, .. }
             if matches!(parameters.as_slice(), [Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. }])
                 && matches!(result.as_ref(), Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. })
     ));
@@ -520,7 +525,7 @@ fn stacked_higher_ranked_binders_are_alpha_canonical() {
     assert_eq!(first, second);
     assert!(matches!(
         first,
-        Type::Callable { lifetime_binders: 2, parameters, result, .. }
+        Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 2, parameters, result, .. }
             if matches!(parameters.as_slice(), [
                 Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. },
                 Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 1 }, .. },
@@ -2231,6 +2236,7 @@ fn frozen_associated_effect_rows_are_canonical_sets() {
     let mut inference = grandiose_stage0::InferContext::default();
     let first = inference
         .type_fingerprint(grandiose_stage0::Type::Callable {
+            safety: grandiose_stage0::Safety::Safe,
             lifetime_binders: 0,
             parameters: signature.parameters.clone(),
             result: Box::new(signature.result.clone()),
@@ -2240,6 +2246,7 @@ fn frozen_associated_effect_rows_are_canonical_sets() {
         .unwrap();
     let second = inference
         .type_fingerprint(grandiose_stage0::Type::Callable {
+            safety: grandiose_stage0::Safety::Safe,
             lifetime_binders: 0,
             parameters: signature.parameters.clone(),
             result: Box::new(signature.result.clone()),

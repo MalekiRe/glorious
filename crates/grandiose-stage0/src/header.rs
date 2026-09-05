@@ -10,7 +10,7 @@ use crate::{
     quantity::Quantity,
     scanner::{DeclarationKind, DeclarationShell, TokenRange},
     source::{LexedFile, Span, TokenKind},
-    types::{ConstKind, GenericKind, PointerMutability},
+    types::{ConstKind, GenericKind, PointerMutability, Safety},
 };
 
 /// A declaration's generic binders, including the small but semantically
@@ -100,6 +100,7 @@ pub enum HeaderType {
     },
     Tuple(Vec<HeaderType>),
     Callable {
+        safety: Safety,
         /// Lifetimes quantified by this callable type.  These bind only the
         /// parameter/result tree of this type, not its surrounding declaration.
         /// Keeping the binder on the syntax node gives `for<'a> (&'a T) -> ...`
@@ -193,6 +194,7 @@ pub struct NominalFieldHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableHeader {
+    pub safety: Safety,
     pub generics: GenericParameters,
     pub parameters: Vec<HeaderParameter>,
     pub result: Option<HeaderType>,
@@ -326,6 +328,7 @@ pub struct ImplementationMethodHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitHeader {
+    pub safety: Safety,
     /// Auto traits use structural, coinductive selection when no explicit
     /// implementation decides the goal.
     pub auto_trait: bool,
@@ -345,6 +348,7 @@ pub struct TraitMethodHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImplementationHeader {
+    pub safety: Safety,
     pub generics: GenericParameters,
     pub negative: bool,
     pub relation: TraitRefHeader,
@@ -505,6 +509,9 @@ impl HeaderParse {
         if parser.word() == Some("pub") {
             parser.position += 1;
         }
+        if shell.safety == Safety::Unsafe {
+            parser.position += 1;
+        }
         if shell.kind == DeclarationKind::HostImport {
             // Scanner froze `host CAP fn`; only `fn` and its ABI remain for
             // the ordinary callable parser.
@@ -522,7 +529,9 @@ impl HeaderParse {
         }
         let header = match shell.kind {
             DeclarationKind::Function | DeclarationKind::HostImport => {
-                ParsedHeader::Function(parser.callable())
+                let mut callable = parser.callable();
+                callable.safety = shell.safety;
+                ParsedHeader::Function(callable)
             }
             DeclarationKind::TypeAlias => {
                 parser.identifier();
@@ -612,13 +621,15 @@ impl HeaderParse {
                     diagnostics: vec![],
                     recovered: false,
                 };
-                let value = body_parser.trait_header(generics, supertraits, shell.auto_trait);
+                let value = body_parser.trait_header(generics, supertraits, shell.auto_trait, shell.safety);
                 parser.diagnostics.extend(body_parser.diagnostics);
                 parser.recovered |= body_parser.recovered;
                 ParsedHeader::Trait(value)
             }
             DeclarationKind::Implementation => {
-                ParsedHeader::Implementation(parser.implementation(shell.body))
+                let mut implementation = parser.implementation(shell.body);
+                implementation.safety = shell.safety;
+                ParsedHeader::Implementation(implementation)
             }
             DeclarationKind::Effect => {
                 parser.identifier();
@@ -685,6 +696,7 @@ impl Parser<'_> {
         generics: GenericParameters,
         supertraits: Vec<TraitRefHeader>,
         auto_trait: bool,
+        safety: Safety,
     ) -> TraitHeader {
         let mut associated_types = vec![];
         let mut associated_consts = vec![];
@@ -693,6 +705,7 @@ impl Parser<'_> {
         if !self.punctuation('{') {
             self.error("G3232", "expected `{` after trait declaration");
             return TraitHeader {
+                safety,
                 auto_trait,
                 generics,
                 supertraits,
@@ -800,6 +813,12 @@ impl Parser<'_> {
                 });
                 continue;
             }
+            let safety = if self.word() == Some("unsafe") {
+                self.position += 1;
+                Safety::Unsafe
+            } else {
+                Safety::Safe
+            };
             if self.word() == Some("fn") {
                 self.position += 1;
             }
@@ -812,6 +831,7 @@ impl Parser<'_> {
             let parameters = self.callable_parameters();
             let result = self.callable_result();
             let method = CallableHeader {
+                safety,
                 generics: method_generics,
                 parameters,
                 result,
@@ -836,6 +856,7 @@ impl Parser<'_> {
             self.error("G3239", "expected `}` after trait declaration");
         }
         TraitHeader {
+            safety,
             auto_trait,
             generics,
             supertraits,
@@ -879,6 +900,7 @@ impl Parser<'_> {
                 if body_parser.word() != Some("type")
                     && body_parser.word() != Some("const")
                     && body_parser.word() != Some("fn")
+                    && body_parser.word() != Some("unsafe")
                     && !body_parser.callable_member_ahead()
                 {
                     body_parser.skip_item_body();
@@ -948,8 +970,14 @@ impl Parser<'_> {
                     });
                     continue;
                 }
-                if body_parser.word() == Some("fn") || body_parser.callable_member_ahead() {
+                if matches!(body_parser.word(), Some("fn" | "unsafe")) || body_parser.callable_member_ahead() {
                     let start = body_parser.current().unwrap();
+                    let safety = if body_parser.word() == Some("unsafe") {
+                        body_parser.position += 1;
+                        Safety::Unsafe
+                    } else {
+                        Safety::Safe
+                    };
                     if body_parser.word() == Some("fn") {
                         body_parser.position += 1;
                     }
@@ -961,6 +989,7 @@ impl Parser<'_> {
                     let parameters = body_parser.callable_parameters();
                     let result = body_parser.callable_result();
                     let signature = CallableHeader {
+                        safety,
                         generics,
                         parameters,
                         result,
@@ -1022,6 +1051,7 @@ impl Parser<'_> {
         self.diagnostics.extend(body_parser.diagnostics);
         self.recovered |= body_parser.recovered;
         ImplementationHeader {
+            safety: Safety::Safe,
             generics,
             negative,
             relation,
@@ -1473,6 +1503,7 @@ impl Parser<'_> {
         let effects = self.effect_row_annotation();
         let where_bounds = self.where_bounds();
         CallableHeader {
+            safety: Safety::Safe,
             generics,
             parameters,
             result,
@@ -1756,6 +1787,31 @@ impl Parser<'_> {
         generics
     }
     fn ty(&mut self) -> HeaderType {
+        if self.word() == Some("unsafe") {
+            self.position += 1;
+            if self.word() == Some("fn") {
+                self.position += 1;
+            }
+            return match self.ty() {
+                HeaderType::Callable {
+                    lifetime_binders,
+                    parameters,
+                    result,
+                    effects,
+                    ..
+                } => HeaderType::Callable {
+                    safety: Safety::Unsafe,
+                    lifetime_binders,
+                    parameters,
+                    result,
+                    effects,
+                },
+                _ => {
+                    self.error("G3330", "`unsafe` must qualify a callable type");
+                    HeaderType::Recovered
+                }
+            };
+        }
         // Higher-ranked callable types use an explicit lifetime-only binder
         // prefix: `for<'a, 'b> (&'a T, &'b U) -> R`.  This is deliberately
         // parsed here rather than as declaration generics: the binders are
@@ -1774,11 +1830,13 @@ impl Parser<'_> {
             let body = self.ty();
             return match body {
                 HeaderType::Callable {
+                    safety,
                     lifetime_binders: nested,
                     parameters,
                     result,
                     effects,
                 } => HeaderType::Callable {
+                    safety,
                     lifetime_binders: lifetime_binders.into_iter().chain(nested).collect(),
                     parameters,
                     result,
@@ -1875,6 +1933,7 @@ impl Parser<'_> {
             if self.operator("->") {
                 let result = self.ty();
                 return HeaderType::Callable {
+                    safety: Safety::Safe,
                     lifetime_binders: vec![],
                     parameters: values,
                     result: Box::new(result),

@@ -1262,6 +1262,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
     }
     match role {
         PrimitiveRole::Abort => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![],
@@ -1275,6 +1276,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         PrimitiveRole::BranchBool => {
             let result = Type::Generic(0);
             let thunk = Type::Callable {
+                safety: crate::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],
                 result: Box::new(result.clone()),
@@ -1282,6 +1284,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 invocation: Quantity::ONCE,
             };
             crate::CallableSignature {
+                safety: crate::Safety::Safe,
                 generics: 1,
                 generic_kinds: vec![crate::GenericKind::Type],
                 parameters: vec![Type::Scalar(ScalarType::Bool), thunk.clone(), thunk],
@@ -1294,6 +1297,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             }
         }
         PrimitiveRole::TextByteLen => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Text)],
@@ -1305,6 +1309,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::TextConcat => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -1319,6 +1324,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::TextEq => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -1333,6 +1339,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::TextFromUtf8Checked => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Bytes)],
@@ -1344,6 +1351,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::TextAsBytes => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Text)],
@@ -1355,6 +1363,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::CharFromU32Checked => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::U32)],
@@ -1366,6 +1375,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::CharToU32 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Char)],
@@ -1377,6 +1387,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::BytesLen | PrimitiveRole::BytesUtf8ValidUpTo => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Bytes)],
@@ -1388,6 +1399,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::Blake3 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Bytes)],
@@ -1399,6 +1411,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::BytesConcat => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -1413,6 +1426,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::BytesGet => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -1427,6 +1441,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::BytesSlice => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -1442,6 +1457,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::BytesFromArrayMove => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Array(Box::new(Type::Scalar(ScalarType::U8)))],
@@ -1453,6 +1469,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::BytesToArray => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Bytes)],
@@ -1475,6 +1492,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         | PrimitiveRole::U32WrappingShr
         | PrimitiveRole::U32CheckedShl
         | PrimitiveRole::U32CheckedShr => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::U32), Type::Scalar(ScalarType::U32)],
@@ -1487,6 +1505,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         },
         PrimitiveRole::U32Eq | PrimitiveRole::U32Lt | PrimitiveRole::U32Le => {
             crate::CallableSignature {
+                safety: crate::Safety::Safe,
                 generics: 0,
                 generic_kinds: vec![],
                 parameters: vec![Type::Scalar(ScalarType::U32), Type::Scalar(ScalarType::U32)],
@@ -1499,6 +1518,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             }
         }
         PrimitiveRole::U32ToUsize => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::U32)],
@@ -1510,6 +1530,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::UsizeToU32Checked => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Scalar(ScalarType::Usize)],
@@ -1528,6 +1549,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         | PrimitiveRole::IntBitAnd
         | PrimitiveRole::IntBitOr
         | PrimitiveRole::IntBitXor => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Generic(0)],
@@ -1539,6 +1561,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntWrappingNeg => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1550,6 +1573,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI64 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1561,6 +1585,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI64 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1572,6 +1597,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU32 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1583,6 +1609,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU32 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1594,6 +1621,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToUsize => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1605,6 +1633,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU8 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1616,6 +1645,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU16 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1627,6 +1657,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI16 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1638,6 +1669,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI32 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1649,6 +1681,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI32 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1660,6 +1693,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI8 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1671,6 +1705,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI8 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1682,6 +1717,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU64 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1693,6 +1729,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU64 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1704,6 +1741,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToIsize => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1715,6 +1753,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU128 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1726,6 +1765,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU128 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1737,6 +1777,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI128 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1748,6 +1789,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI128 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1759,6 +1801,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToIsize => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1770,6 +1813,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToUsize => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1781,6 +1825,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU8 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1792,6 +1837,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU16 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1803,6 +1849,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI16 => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1814,6 +1861,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntBitNot => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0)],
@@ -1825,6 +1873,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntShl => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Scalar(crate::ScalarType::U32)],
@@ -1837,6 +1886,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         },
         PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
             crate::CallableSignature {
+                safety: crate::Safety::Safe,
                 generics: 1,
                 generic_kinds: vec![crate::GenericKind::Type],
                 parameters: vec![Type::Generic(0), Type::Generic(0)],
@@ -1849,6 +1899,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             }
         }
         PrimitiveRole::IntShr => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Scalar(crate::ScalarType::U32)],
@@ -1869,6 +1920,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             Type::Scalar(ScalarType::Usize),
         ),
         PrimitiveRole::ArrayUtf8ValidUpTo => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Reference {
@@ -1884,6 +1936,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::ArrayPushUtf8Char => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Reference {
@@ -1942,6 +1995,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         )
         .with_where_bounds(array_use_bound()),
         PrimitiveRole::ArrayInsertUtf8FromSlice => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -2006,6 +2060,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             ]),
         ),
         PrimitiveRole::ArrayPopUtf8Char => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::Reference {
@@ -2024,6 +2079,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::ArrayUtf8CharAt => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -2112,6 +2168,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             array_signature(vec![Type::Array(Box::new(Type::Generic(0)))], Type::Unit)
         }
         PrimitiveRole::StaticLen => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![static_utf8_data()],
@@ -2123,6 +2180,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::StaticSubslice => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![
@@ -2138,6 +2196,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::StaticGetShared => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![static_utf8_data(), Type::Scalar(ScalarType::Usize)],
@@ -2153,6 +2212,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::StaticAsArray => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![static_utf8_data()],
@@ -2168,6 +2228,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::StaticRawAsArray => crate::CallableSignature {
+            safety: crate::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
             parameters: vec![Type::StaticData {
@@ -2201,6 +2262,7 @@ fn static_utf8_data() -> Type {
 fn expected_float_signature(primitive: FloatPrimitive) -> crate::CallableSignature {
     let (parameters, result) = primitive.scalar_signature();
     crate::CallableSignature {
+        safety: crate::Safety::Safe,
         generics: 0,
         generic_kinds: vec![],
         parameters: parameters.into_iter().map(Type::Scalar).collect(),
@@ -2231,6 +2293,7 @@ fn array_borrow_reference(mutability: Mutability) -> Type {
 
 fn array_borrow_signature(parameters: Vec<Type>, result: Type) -> crate::CallableSignature {
     crate::CallableSignature {
+        safety: crate::Safety::Safe,
         generics: 2,
         generic_kinds: vec![crate::GenericKind::Lifetime, crate::GenericKind::Type],
         parameters,
@@ -2245,6 +2308,7 @@ fn array_borrow_signature(parameters: Vec<Type>, result: Type) -> crate::Callabl
 
 fn array_signature(parameters: Vec<Type>, result: Type) -> crate::CallableSignature {
     crate::CallableSignature {
+        safety: crate::Safety::Safe,
         generics: 1,
         generic_kinds: vec![crate::GenericKind::Type],
         parameters,

@@ -40,6 +40,7 @@ pub struct DeclarationShell {
     /// `auto trait` is retained by scanning so header parsing can preserve
     /// the declaration's solver policy without inspecting source text again.
     pub auto_trait: bool,
+    pub safety: crate::Safety,
     /// Exact request capability required by a host-import declaration.
     pub host_capability: Option<String>,
     pub span: Span,
@@ -125,6 +126,12 @@ impl Scanner<'_> {
             public = true;
             self.position += 1;
         }
+        let safety = if self.word_at(self.position) == Some("unsafe") {
+            self.position += 1;
+            crate::Safety::Unsafe
+        } else {
+            crate::Safety::Safe
+        };
         let auto_trait = self.word_at(self.position) == Some("auto");
         if auto_trait {
             self.position += 1;
@@ -160,6 +167,17 @@ impl Scanner<'_> {
             self.unexpected(start_position);
             return;
         }
+        if safety == crate::Safety::Unsafe
+            && !matches!(
+                kind,
+                DeclarationKind::Function
+                    | DeclarationKind::Trait
+                    | DeclarationKind::Implementation
+            )
+        {
+            self.unexpected(start_position);
+            return;
+        }
         if host_capability.is_some() {
             if kind != DeclarationKind::Function || auto_trait {
                 self.unexpected(start_position);
@@ -186,6 +204,7 @@ impl Scanner<'_> {
             name,
             visibility_public: public,
             auto_trait,
+            safety,
             host_capability,
             span,
             header: TokenRange {

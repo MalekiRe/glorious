@@ -104,6 +104,7 @@ pub fn intrinsic_available_type_definition() -> DefKey {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
+    pub safety: crate::Safety,
     pub generics: u32,
     /// Generic binder kinds in the same slot order as the source header.
     /// Callers use this to keep const substitutions out of the type namespace.
@@ -162,6 +163,7 @@ pub struct ElaboratedAssociatedEffectBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedTrait {
+    pub safety: crate::Safety,
     /// Source-declared auto traits admit structural, coinductive proof search.
     pub auto_trait: bool,
     pub generics: u32,
@@ -204,6 +206,7 @@ pub struct ElaboratedAssociatedConst {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedImplementation {
+    pub safety: crate::Safety,
     pub generics: u32,
     /// Kinds of implementation binders in source-slot order.  This is part
     /// of the frozen impl identity: in particular `impl<'a> Marker for
@@ -526,6 +529,7 @@ fn enum_constructor_alias(
     Some((
         definition,
         CallableSignature {
+            safety: crate::Safety::Safe,
             generics: generic_kinds.len() as u32,
             generic_kinds: generic_kinds.clone(),
             parameters,
@@ -1349,6 +1353,23 @@ impl ElaboratedInterface {
             ElaboratedHeader::Implementation(implementation) => Some(implementation),
             _ => None,
         }) {
+            let trait_safety = match self.definitions.get(&implementation.relation.definition) {
+                Some(ElaboratedHeader::Trait(header)) => header.safety,
+                _ => crate::Safety::Safe,
+            };
+            let required_safety = if implementation.negative { crate::Safety::Safe } else { trait_safety };
+            if implementation.safety != required_safety {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4203",
+                    message: if implementation.negative {
+                        "negative implementations cannot assert unsafe invariants"
+                    } else if trait_safety == crate::Safety::Unsafe {
+                        "implementing an unsafe trait requires `unsafe impl`"
+                    } else {
+                        "`unsafe impl` requires an unsafe trait"
+                    }.into(),
+                });
+            }
             if implementation.negative {
                 let mut items = implementation
                     .associated_types
@@ -2023,6 +2044,7 @@ impl ElaboratedInterface {
             }
         }
         let Type::Callable {
+            safety,
             parameters,
             result,
             effects,
@@ -2031,6 +2053,12 @@ impl ElaboratedInterface {
         else {
             return;
         };
+        if *safety != crate::Safety::Safe {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4200",
+                message: "unsafe callable cannot supply safe `Fn` evidence".into(),
+            });
+        }
         if inputs.is_some_and(|inputs| inputs != parameters) {
             diagnostics.push(SignatureDiagnostic {
                 code: "G4166",
@@ -2080,12 +2108,15 @@ impl ElaboratedInterface {
             return;
         };
         let Type::Callable {
-            parameters, result, ..
+            safety, parameters, result, ..
         } = subject
         else {
             return;
         };
-        if parameters.as_slice() != [payload.clone()] || !matches!(result.as_ref(), Type::Never) {
+        if *safety != crate::Safety::Safe
+            || parameters.as_slice() != [payload.clone()]
+            || !matches!(result.as_ref(), Type::Never)
+        {
             diagnostics.push(SignatureDiagnostic {
                 code: "G4171",
                 message: "intrinsic `Label<B>` requires an escaping callable `(B) -> !`".into(),
@@ -2465,6 +2496,7 @@ impl ElaboratedInterface {
         };
         validate_generic_arguments(&signature.generic_kinds, arguments)?;
         Ok(CallableSignature {
+            safety: signature.safety,
             generics: 0,
             generic_kinds: vec![],
             parameters: signature
@@ -2520,6 +2552,7 @@ impl ElaboratedInterface {
             return None;
         }
         Some(CallableSignature {
+            safety: signature.safety,
             generics: 0,
             generic_kinds: vec![],
             parameters: signature
@@ -3194,6 +3227,7 @@ fn instantiate_trait_method_contract(
             }),
     );
     CallableSignature {
+        safety: method.safety,
         generics: method.generics,
         generic_kinds: method.generic_kinds.clone(),
         parameters: method
@@ -3402,12 +3436,14 @@ fn normalize_selected_contract_type(
             referent: Box::new(normalize_selected_contract_type(*referent, solver, fuel - 1)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -3622,12 +3658,14 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
             referent: Box::new(replace_trait_self_type(*referent, self_ty)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -3827,12 +3865,14 @@ fn rebase_method_lifetimes(
             )),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -4332,6 +4372,7 @@ impl Elaborator<'_> {
             );
         }
         CallableSignature {
+            safety: header.safety,
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
             parameters,
@@ -4367,6 +4408,7 @@ impl Elaborator<'_> {
                     where_associated_effect_bindings,
                 ) = self.callable_where_bounds(&method.signature.where_bounds);
                 let signature = CallableSignature {
+                    safety: method.signature.safety,
                     generics: method.signature.generics.len() as u32,
                     generic_kinds: method.signature.generics.kinds(),
                     parameters: method
@@ -4395,6 +4437,7 @@ impl Elaborator<'_> {
             })
             .collect();
         let result = ElaboratedTrait {
+            safety: header.safety,
             auto_trait: header.auto_trait,
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
@@ -4620,6 +4663,7 @@ impl Elaborator<'_> {
                     where_associated_effect_bindings,
                 ) = self.callable_where_bounds(&method.signature.where_bounds);
                 let signature = CallableSignature {
+                    safety: method.signature.safety,
                     generics: method.signature.generics.len() as u32,
                     generic_kinds: method.signature.generics.kinds(),
                     parameters: method
@@ -4648,6 +4692,7 @@ impl Elaborator<'_> {
             })
             .collect();
         let result = ElaboratedImplementation {
+            safety: header.safety,
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
             negative: header.negative,
@@ -5405,6 +5450,7 @@ impl Elaborator<'_> {
                 Type::Tuple(values.iter().map(|value| self.ty(value)).collect())
             }
             HeaderType::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -5425,6 +5471,7 @@ impl Elaborator<'_> {
                 let effects = self.effect_row(effects);
                 self.bound_lifetime_scopes.pop();
                 Type::Callable {
+                    safety: *safety,
                     lifetime_binders: lifetime_binders.len() as u32,
                     parameters,
                     result,
@@ -6179,12 +6226,14 @@ fn normalize_alias_type(
             )),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -6314,12 +6363,14 @@ fn substitute_alias_generic_identity(value: Type, arguments: &[GenericArgument])
             referent: Box::new(substitute_alias_generic_identity(*referent, arguments)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -6536,12 +6587,14 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             referent: Box::new(substitute_alias_generics(*referent, arguments)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -6741,12 +6794,14 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
             referent: Box::new(substitute_trait_type_generics(*referent, arguments)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()

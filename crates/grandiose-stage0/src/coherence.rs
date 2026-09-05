@@ -900,6 +900,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
         }
         (
             Type::Callable {
+                safety: left_safety,
                 lifetime_binders: left_binders,
                 parameters: left_parameters,
                 result: left_result,
@@ -907,13 +908,14 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
                 invocation: left_invocation,
             },
             Type::Callable {
+                safety: right_safety,
                 lifetime_binders: right_binders,
                 parameters: right_parameters,
                 result: right_result,
                 effects: right_effects,
                 invocation: right_invocation,
             },
-        ) if left_binders == right_binders
+        ) if left_safety == right_safety && left_binders == right_binders
             && left_parameters.len() == right_parameters.len()
             && left_invocation == right_invocation =>
         {
@@ -925,6 +927,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             let result = unify_overlap_type(left_result, right_result, bindings)?;
             let effects = unify_overlap_effect_row(left_effects, right_effects, bindings)?;
             Some(Type::Callable {
+                safety: *left_safety,
                 lifetime_binders: *left_binders,
                 parameters,
                 result: Box::new(result),
@@ -1224,12 +1227,14 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
                 .collect(),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
                 .iter()
@@ -1384,12 +1389,14 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
                 .collect(),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
                 .iter()
@@ -1497,6 +1504,7 @@ mod frozen_overlap_tests {
 
     fn higher_ranked(referent: Type, tail: u32) -> Type {
         Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 1,
             parameters: vec![Type::Reference {
                 mutability: Mutability::Shared,

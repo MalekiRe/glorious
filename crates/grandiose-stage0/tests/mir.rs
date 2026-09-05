@@ -29,6 +29,8 @@ fn local(ty: Type) -> MirLocalDecl {
 #[test]
 fn mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering() {
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-uninitialized-source-storage")),
         captures: 0,
@@ -64,6 +66,8 @@ fn mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering() {
 fn mir_rejects_addressable_storage_invalidation_while_unique_loan_is_live() {
     let i64 = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-live-addressable-loan")),
         captures: 0,
@@ -133,6 +137,8 @@ fn mir_rejects_path_dependent_source_storage_initialization_at_a_join() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64 = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-path-dependent-storage")),
         captures: 0,
@@ -228,6 +234,8 @@ fn mir_rejects_cleanup_that_disarms_a_protected_leave_payload() {
         }],
     };
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-protected-cleanup-payload")),
         captures: 0,
@@ -283,6 +291,8 @@ fn mir_rejects_cleanup_that_disarms_a_protected_leave_payload() {
 #[test]
 fn mir_rejects_a_forged_nonfinite_replay_budget() {
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-replay-budget")),
         captures: 0,
@@ -322,6 +332,8 @@ fn mir_rejects_a_forged_nonfinite_replay_budget() {
 fn mir_rejects_one_label_brand_with_contradictory_destinations() {
     let owner = DefKey(Digest::of_bytes(b"forged-mir-label-contract-owner"));
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-label-contract")),
         captures: 0,
@@ -425,6 +437,8 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
 #[test]
 fn mir_rejects_a_forged_payload_distinct_nan_constant() {
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-nan-payload")),
         captures: 0,
@@ -453,6 +467,8 @@ fn mir_rejects_a_forged_payload_distinct_nan_constant() {
 #[test]
 fn mir_rejects_a_literal_pattern_that_violates_the_lossless_lexer_contract() {
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-malformed-text-pattern")),
         captures: 0,
@@ -491,6 +507,8 @@ fn mir_rejects_a_literal_pattern_that_violates_the_lossless_lexer_contract() {
 #[test]
 fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     let leave = |cleanup| MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-cleanup")),
         captures: 0,
@@ -576,6 +594,8 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
 
 fn graph() -> MirFunction {
     MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cfg")),
         captures: 0,
@@ -635,6 +655,8 @@ fn optimizer_does_not_fold_blocks_without_static_entry_evidence() {
     let text = Type::Scalar(ScalarType::Text);
     let i64 = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-unreached-folding-boundary")),
         captures: 0,
@@ -934,6 +956,8 @@ fn mir_templates_may_defer_associated_const_projection_but_vm_emission_rejects_i
         }],
     };
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-associated-const-function")),
         captures: 0,
@@ -964,6 +988,8 @@ fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
         arguments: vec![],
     };
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-pattern-arity-function")),
         captures: 0,
@@ -1009,6 +1035,8 @@ fn mir_validation_rejects_nominal_pattern_field_type_forgery() {
         arguments: vec![],
     };
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-pattern-layout-function")),
         captures: 0,
@@ -1061,6 +1089,8 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
         referent: Box::new(i64.clone()),
     };
     let forged_capability = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-shared-to-unique-reborrow")),
         captures: 0,
@@ -1103,6 +1133,8 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
     );
 
     let forged_referent = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-whole-borrow-referent")),
         captures: 0,
@@ -1149,6 +1181,8 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
 fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
     let array = Type::Array(Box::new(Type::Scalar(ScalarType::I64)));
     let pattern = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-array-pattern-forgery")),
         captures: 0,
@@ -1178,6 +1212,8 @@ fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
     );
 
     let projection = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-array-projection-forgery")),
         captures: 0,
@@ -1209,6 +1245,8 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
     let outer = DefKey(Digest::of_bytes(b"forged-mir-nested-outer"));
     let inner = DefKey(Digest::of_bytes(b"forged-mir-nested-inner"));
     let forged = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-mir-nested-resume")),
         captures: 0,
@@ -1327,6 +1365,7 @@ fn frozen_control_tables_build_nested_label_and_handler_scopes() {
     let effect = DefKey(Digest::of_bytes(b"scope-effect"));
     let i64_ty = Type::Scalar(ScalarType::I64);
     let label_value = Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![i64_ty.clone()],
         result: Box::new(Type::Never),
@@ -1334,6 +1373,8 @@ fn frozen_control_tables_build_nested_label_and_handler_scopes() {
         invocation: Quantity::ONCE,
     };
     let frozen = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -1517,6 +1558,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
 
     let mut scoped_hrtb_gat = graph();
     let scoped_hrtb_gat_type = Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![],
         result: Box::new(Type::Projection {
@@ -1826,6 +1868,7 @@ fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
     };
     let mut function = graph();
     function.locals[1].ty = Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
@@ -1872,6 +1915,7 @@ fn mir_validation_rejects_inference_in_enclosing_mixed_trait_heads() {
 fn mir_validation_rejects_inference_nested_in_callable_effect_arguments() {
     let mut function = graph();
     function.locals.push(local(Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
         result: Box::new(Type::Unit),
@@ -1933,6 +1977,8 @@ fn checked_mir_editor_rolls_back_an_invalid_cfg_edit() {
 fn editor_cfg_function() -> MirFunction {
     let i64_ty = Type::Scalar(ScalarType::I64);
     MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-editor-cfg")),
         captures: 0,
@@ -2271,6 +2317,8 @@ fn externally_visible_handler_merge_function() -> MirFunction {
     let effect = DefKey(Digest::of_bytes(b"editor-merge-handler-effect"));
     let i64_ty = Type::Scalar(ScalarType::I64);
     MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"editor-merge-handler")),
         captures: 0,
@@ -2328,6 +2376,8 @@ fn externally_visible_label_merge_function() -> MirFunction {
     let owner = DefKey(Digest::of_bytes(b"editor-merge-label"));
     let i64_ty = Type::Scalar(ScalarType::I64);
     MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -2430,6 +2480,8 @@ fn leave_handler_depth_merge_function() -> MirFunction {
     let owner = DefKey(Digest::of_bytes(b"editor-merge-leave-handler-depth"));
     let i64_ty = Type::Scalar(ScalarType::I64);
     let mut function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -2556,6 +2608,8 @@ fn checked_mir_editor_rolls_back_leave_and_label_metadata_together() {
 fn checked_mir_editor_preserves_operation_ids_and_tombstones() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-operation-identity")),
         captures: 0,
@@ -2684,6 +2738,8 @@ fn checked_mir_editor_rewrites_operation_inputs_transactionally() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-operation-input-rewrite")),
         captures: 0,
@@ -2763,6 +2819,8 @@ fn checked_mir_editor_rewrites_operation_inputs_transactionally() {
 fn vm_backend_emits_acyclic_edge_transfers_without_temporary_registers() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-acyclic-edge-register-allocation")),
         captures: 0,
@@ -2832,6 +2890,8 @@ fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
 
     let i64_ty = Type::Scalar(ScalarType::I64);
     let arithmetic = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-optimizer")),
         captures: 0,
@@ -2878,6 +2938,8 @@ fn optimizer_folds_reflexive_integer_and_boolean_comparisons_without_constants()
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-reflexive-comparisons")),
         captures: 0,
@@ -2936,6 +2998,8 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
     let char_ty = Type::Scalar(ScalarType::Char);
     let text_ty = Type::Scalar(ScalarType::Text);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-pattern-constants")),
         captures: 0,
@@ -3082,6 +3146,8 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
 fn optimizer_propagates_constants_through_typed_block_arguments() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cross-block-constants")),
         captures: 0,
@@ -3140,6 +3206,8 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-constant-join")),
         captures: 0,
@@ -3225,6 +3293,8 @@ fn optimizer_materializes_agreeing_constant_phi_inputs() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-constant-phi")),
         captures: 0,
@@ -3313,6 +3383,8 @@ fn optimizer_eliminates_identical_general_phi_inputs_and_preserves_execution() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-general-phi")),
         captures: 0,
@@ -3398,6 +3470,8 @@ fn optimizer_eliminates_cyclic_phi_only_when_every_edge_agrees() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let loop_phi = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cyclic-general-phi")),
         captures: 0,
@@ -3459,6 +3533,8 @@ fn optimizer_eliminates_cyclic_phi_only_when_every_edge_agrees() {
     ));
 
     let divergent = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-divergent-general-phi")),
         captures: 0,
@@ -3521,6 +3597,8 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-comparison-constants")),
         captures: 0,
@@ -3631,6 +3709,8 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         }],
     };
     let target = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: callee,
         captures: 1,
@@ -3647,6 +3727,8 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         }],
     };
     let entry_function = |environment: Option<MirCaptureEnvironment>| MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -3654,6 +3736,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         locals: vec![
             local(Type::Scalar(ScalarType::I64)),
             local(Type::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(Type::Scalar(ScalarType::I64)),
                 effects: EffectRow::empty(),
@@ -3662,6 +3745,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
             }),
         ],
         result: Type::Callable {
+            safety: grandiose_stage0::Safety::Safe,
             parameters: vec![],
             result: Box::new(Type::Scalar(ScalarType::I64)),
             effects: EffectRow::empty(),

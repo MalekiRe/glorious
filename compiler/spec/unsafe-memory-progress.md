@@ -12,7 +12,7 @@ self-hosting; it is not needed to implement or certify the initial VM/host ABI.
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Initial Rust substrate passes native and Miri tests; guest budget/admission integration remains |
-| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Raw-pointer type propagation tested; unsafe scopes/contracts and execution remain |
+| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Pointer types and lexical/callable/trait contracts implemented and tested; raw operations remain |
 | U3 | Versioned raw-memory bytecode and safety metadata; host-selected unsafe-enabled execution, independent safe-only verification, authenticated native export admission | Missing |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
@@ -117,8 +117,8 @@ projection specialization, typed closures, linear pointees, lifetime variance,
 higher-ranked escape rejection, and coherence. Safe pointer dereference and
 conversion to a safe reference remain rejected. The existing VM backend rejects
 raw-pointer types rather than encoding them as an old reference or integer.
-Unsafe syntax/call contracts, raw-memory execution, independent admission, and
-actual VM/native interop are not implemented by this type-only checkpoint.
+This initial type-only checkpoint did not implement unsafe syntax/call contracts,
+raw-memory execution, independent admission, or actual VM/native interop.
 
 Validation on September 5: full workspace 2,481 passed, zero failed, two existing
 ignored manual benchmarks; build 34.69 seconds and all 48 source entries passed
@@ -129,3 +129,63 @@ Logs and source evidence: `/tmp/grandiose-raw-pointer-types-zaZWde/`.
 Source-lock SHA-256:
 `92b3be2a22f77e127bb8bff0de757ba7eeddce6bc26291d62c7823bdb5cead9d`.
 No frozen compiler parity contract is closed by these development tests.
+
+## U2: unsafe scope and callable contracts
+
+Stage0 now accepts `unsafe fn`, `unsafe (...) -> Result` callable types (also
+`unsafe fn(...) -> Result`), explicit `unsafe { ... }` blocks, unsafe traits,
+and unsafe trait implementations. The top-level qualifier order is
+`pub unsafe auto trait` or `pub unsafe host CAP fn` where applicable.
+
+Callable safety is independent of effects and invocation quantity. It survives
+inference, aliases, generic and higher-ranked specialization, trait selection,
+normalization, Core, and MIR. Safe and unsafe callable identities are distinct;
+there is no implicit function-pointer safety coercion. An inferred closure may
+receive an unsafe contextual call contract, but that does not authorize unsafe
+operations in its body. Intrinsic `Fn` and `Label` evidence only covers safe
+callables, including when a forged concrete assumption is supplied to the solver.
+
+Invoking an unsafe callable requires an explicit block, including inside an
+`unsafe fn`. Lexical permission is reset in typed/inferred/contextual closures
+and handler arms. Explicit blocks do not disable safe borrow, use, or effect
+checking. Frozen Core stores block identities and independently reconstructs
+permission along structural paths, resetting it at deferred body boundaries;
+removing the scope or moving the call outside it is rejected. Unsafe scopes and
+call contracts participate in semantic identity without changing existing safe
+type or body fingerprint encodings. Handler replay checks do not mistake an
+unsafe scope or unsafe call for a replay-safe empty-effect computation.
+
+An unsafe trait requires `unsafe impl` for a positive implementation. Negative
+implementations make no safety assertion and cannot use `unsafe impl`. A safe
+trait rejects `unsafe impl`; method safety must match the trait's own method
+contract exactly. Trait safety is an implementer obligation, not a blanket
+unsafe requirement on otherwise-safe methods. Frozen Core conservatively records
+all unsafe implementation identities available in its source world, because
+their promises may affect static evidence without emitting pointer operations.
+These are execution requirements, not native-export trust certificates.
+
+MIR retains the callable safety contract separately from its unsafe-execution
+requirement (explicit scopes or available unsafe implementations). Lifted bodies
+and specialization preserve those facts. MIR checks indirect unsafe-call
+requirements and callable-value safety against the actual target. Existing
+bytecode emission rejects unsafe function contracts, unsafe callable values, and
+unsafe implementation requirements rather than erasing them into schema 93.
+This is not U3 admission or an unsafe-capable runtime; raw loads/stores, allocation
+instructions, shared layouts, and native interop remain unimplemented.
+
+The focused group now contains 22 tests covering raw-pointer and unsafe contracts,
+including negative source cases and deliberately altered Core/MIR products.
+The Rust and source `stage0_identity` constructors both advance language/interface
+generations to two, cache generation to five, and verifier generation to seven.
+Bytecode generation 48 and schema 93 are unchanged: this checkpoint rejects,
+rather than executes, the new unsafe requirements.
+
+Final validation on September 5: all 2,491 workspace tests passed, zero failed,
+two existing ignored manual benchmarks. Wall time was 122.429 seconds including
+43.67 seconds build; all 48 source entries passed in 69.91 seconds. The prior
+pre-generation-bump run also passed (129.840 seconds). Source closure audits
+pass before and after; no time or memory guard was relaxed. Logs and source
+evidence: `/tmp/grandiose-unsafe-contracts-FgyrYG/`. Source-lock SHA-256:
+`309f8acd7a563e904b46ea16f7a884d82aa4e09aa0b6ce72389dc46b0044694b`.
+U2 remains partial until raw operations are implemented; U3–U6 and all 11,455
+frozen public compiler contracts remain open.

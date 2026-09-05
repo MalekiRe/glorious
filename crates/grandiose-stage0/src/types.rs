@@ -14,6 +14,16 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InferVar(pub u32);
 
+/// Whether invoking a callable requires programmer-owned unsafe obligations.
+/// This is a type contract, not an effect, implementation trust certificate,
+/// or host authorization to execute unsafe bytecode.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Safety {
+    #[default]
+    Safe,
+    Unsafe,
+}
+
 /// A body-local structural-constant hole.  Const generics have their own
 /// finite domains and must not borrow either the type or effect-row variable
 /// spaces.  Just like [`InferVar`], this identity is allocation-local and is
@@ -461,6 +471,7 @@ pub enum Type {
         pointee: Box<Type>,
     },
     Callable {
+        safety: Safety,
         /// The number of higher-ranked lifetime binders that scope this
         /// callable's parameter/result tree. Bound lifetimes use their
         /// position in this binder list, so their identity is alpha-stable.
@@ -814,6 +825,7 @@ impl InferContext {
             }
             (
                 Type::Callable {
+                    safety: left_safety,
                     lifetime_binders: left_binders,
                     parameters: left_parameters,
                     result: left_result,
@@ -821,15 +833,17 @@ impl InferContext {
                     invocation: left_invocation,
                 },
                 Type::Callable {
+                    safety: right_safety,
                     lifetime_binders: right_binders,
                     parameters: right_parameters,
                     result: right_result,
                     effects: right_effects,
                     invocation: right_invocation,
                 },
-            ) if left_binders == right_binders && left_invocation == right_invocation => {
+            ) if left_safety == right_safety && left_binders == right_binders && left_invocation == right_invocation => {
                 let effects = self.unify_effect_rows(left_effects, right_effects)?;
                 Ok(Type::Callable {
+                    safety: left_safety,
                     lifetime_binders: left_binders,
                     parameters: self.unify_many(left_parameters, right_parameters)?,
                     result: Box::new(self.unify(*left_result, *right_result)?),
@@ -908,12 +922,14 @@ impl InferContext {
                 referent: Box::new(self.zonk(*referent)?),
             }),
             Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
                 effects,
                 invocation,
             } => Ok(Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters: parameters
                     .into_iter()
@@ -2220,13 +2236,16 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             encode_type(referent, output);
         }
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => {
-            output.push(7);
+            // Keep existing safe callable identities stable; unsafe callable
+            // contracts occupy a distinct tag, never an erasable effect bit.
+            output.push(if *safety == Safety::Safe { 7 } else { 17 });
             output.extend_from_slice(&lifetime_binders.to_le_bytes());
             encode_types(parameters, output);
             encode_type(result, output);
@@ -2398,12 +2417,14 @@ pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
             referent: Box::new(canonicalize_type_identity(*referent)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()

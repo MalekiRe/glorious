@@ -111,6 +111,8 @@ pub enum ExprKind {
         fields: Vec<(String, ExprId)>,
     },
     Block(Vec<ExprId>),
+    /// An explicit lexical unsafe obligation scope, never a closure literal.
+    UnsafeBlock(Vec<ExprId>),
     ContextualBlock(Vec<ExprId>),
     /// Compact, inferred callable syntax: `{x, y => expression}`.
     Closure {
@@ -439,6 +441,17 @@ impl Parser<'_> {
     }
 
     fn parse_prefix(&mut self) -> Option<ExprId> {
+        if self.word() == Some("unsafe") {
+            let start = self.advance()?;
+            let block = self.parse_block(false)?;
+            let ExprKind::Block(values) = self.expression(block).kind.clone() else {
+                unreachable!("non-contextual block parser must return a block");
+            };
+            return Some(self.alloc(
+                ExprKind::UnsafeBlock(values),
+                join(self.lexed.tokens[start].span, self.expression(block).span),
+            ));
+        }
         // Canonical source uses a compact label spelling.  It is syntax sugar
         // for the already-owned `label name { ... }` and `transfer name value`
         // forms, so Core continues to mint and validate the lexical brand.
@@ -1539,6 +1552,31 @@ impl Parser<'_> {
     }
 
     fn closure_type(&mut self) -> Option<HeaderType> {
+        if self.word() == Some("unsafe") {
+            self.position += 1;
+            if self.word() == Some("fn") {
+                self.position += 1;
+            }
+            return match self.closure_type()? {
+                HeaderType::Callable {
+                    lifetime_binders,
+                    parameters,
+                    result,
+                    effects,
+                    ..
+                } => Some(HeaderType::Callable {
+                    safety: crate::Safety::Unsafe,
+                    lifetime_binders,
+                    parameters,
+                    result,
+                    effects,
+                }),
+                _ => {
+                    self.error_current("G4009", "`unsafe` must qualify a callable type");
+                    None
+                }
+            };
+        }
         if self.word() == Some("for") {
             self.position += 1;
             if !self.at_operator("<") {
@@ -1567,11 +1605,13 @@ impl Parser<'_> {
             let body = self.closure_type()?;
             return match body {
                 HeaderType::Callable {
+                    safety,
                     lifetime_binders,
                     parameters,
                     result,
                     effects,
                 } => Some(HeaderType::Callable {
+                    safety,
                     lifetime_binders: binders.into_iter().chain(lifetime_binders).collect(),
                     parameters,
                     result,
@@ -1676,6 +1716,7 @@ impl Parser<'_> {
                 let result = self.closure_type()?;
                 let effects = self.closure_effect_row_annotation("G4017")?;
                 return Some(HeaderType::Callable {
+                    safety: crate::Safety::Safe,
                     lifetime_binders: vec![],
                     parameters: values,
                     result: Box::new(result),

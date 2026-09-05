@@ -28,6 +28,8 @@ fn forged_function(
     result: MirLocal,
 ) -> MirFunction {
     MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(name)),
         captures: 0,

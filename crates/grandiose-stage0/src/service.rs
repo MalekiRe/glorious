@@ -3892,12 +3892,14 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
                 .collect(),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
                 .iter()
@@ -4247,12 +4249,14 @@ fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result
                 .collect::<Result<_, _>>()?,
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
                 .iter()
@@ -4702,6 +4706,8 @@ mod tests {
     fn unmaterialized_trait_calls_remain_errors_on_reachable_call_and_callable_edges() {
         fn body(definition: DefKey, instructions: Vec<MirInstruction>) -> MirFunction {
             MirFunction {
+                safety: crate::Safety::Safe,
+                unsafe_execution: false,
                 nominal_copy_descriptors: vec![],
                 definition,
                 captures: 0,
@@ -4810,6 +4816,7 @@ mod tests {
             tail: None,
         };
         let original = Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![Type::Reference {
                 mutability: Mutability::Shared,
@@ -4896,6 +4903,7 @@ mod tests {
     fn materialization_specializes_every_frozen_mir_type_witness() {
         let generic = Type::Generic(0);
         let callable = Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![generic.clone()],
             result: Box::new(generic.clone()),
@@ -4903,6 +4911,8 @@ mod tests {
             invocation: Quantity::ONCE,
         };
         let mut function = MirFunction {
+            safety: crate::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: key("specialize-frozen-mir-witnesses"),
             captures: 0,

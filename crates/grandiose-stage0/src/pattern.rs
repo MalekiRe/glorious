@@ -659,11 +659,13 @@ impl Elaborator<'_> {
                 pointee: Box::new(self.source_type(span, pointee)?),
             }),
             crate::HeaderType::Callable {
+                safety,
                 parameters,
                 result,
                 effects,
                 ..
             } => Some(Type::Callable {
+                safety: *safety,
                 lifetime_binders: 0,
                 parameters: parameters
                     .iter()

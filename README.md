@@ -22,9 +22,10 @@ into bytecode over host-compatible storage. **Self-hosting comes before the
 Glorious LLVM backend**; native-precompiled std and native generic specialization
 are not prerequisites. Shared native/VM objects target zero marshalling. The
 unsafe-enabled profile is not a memory sandbox; safe-only guests may instead use
-safe exports of trusted native libraries. Source raw-pointer types now propagate
-through the compiler; pointer execution, unsafe scopes, and general
-zero-marshalling interop are not available yet. See the
+safe exports of trusted native libraries. Source raw-pointer types, explicit
+unsafe scopes, and unsafe callable/trait contracts now propagate through the
+compiler; pointer execution and general zero-marshalling interop are not
+available yet. The current bytecode format rejects unsafe requirements. See the
 [delivery gates](compiler/spec/unsafe-memory-progress.md).
 
 ## What makes the language different?

@@ -26,6 +26,7 @@ fn local(ty: Type) -> MirLocalDecl {
 
 fn label_type() -> Type {
     Type::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
         result: Box::new(Type::Never),
@@ -141,6 +142,8 @@ fn mir_rejects_duplicate_end_borrow_in_source_storage_cleanup() {
 fn mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave() {
     let owner = DefKey(Digest::of_bytes(b"source-storage-cleanup-nested-leave"));
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -250,6 +253,8 @@ fn vm_round_trips_typed_nonempty_source_storage_erasure_witness() {
         protected_values: vec![MirLocal(0)],
     };
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -352,6 +357,8 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
         referent: Box::new(i64_ty.clone()),
     };
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -437,6 +444,8 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
 fn mir_rejects_direct_storage_dead_while_unique_loan_is_live() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"source-storage-direct-dead-live-unique-loan")),
         captures: 0,
@@ -512,6 +521,8 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
     let owner = DefKey(Digest::of_bytes(b"source-storage-cleanup-drop-flag"));
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,

@@ -708,6 +708,16 @@ pub struct CoreDiagnostic {
 }
 #[derive(Clone, Debug)]
 pub struct TypedBody {
+    pub safety: crate::Safety,
+    /// Explicit unsafe lexical block identities. Scope membership is derived
+    /// from the structured graph, not from a call-site permission bit.
+    /// Closure and handler bodies do not inherit an enclosing scope.
+    pub unsafe_scopes: std::collections::BTreeSet<CoreId>,
+    /// Conservatively retain unsafe implementations available in this source
+    /// world. Their promises may influence static evidence without emitting a
+    /// raw-memory operation. These identities are requirements, not host trust
+    /// certificates, and never grant lexical unsafe permission.
+    pub unsafe_implementations: std::collections::BTreeSet<DefKey>,
     pub parameters: Vec<(String, Type)>,
     pub expressions: Vec<CoreExpr>,
     pub root: CoreId,
@@ -728,6 +738,13 @@ impl TypedBody {
             bytes: Vec::new(),
         };
         encoder.bytes(b"grandiose-stage0-typed-core-v1");
+        if self.safety == crate::Safety::Unsafe {
+            encoder.bytes(b"unsafe-callable-contract");
+        }
+        if !self.unsafe_implementations.is_empty() {
+            encoder.bytes(b"unsafe-implementation-requirements");
+            encoder.debug(&self.unsafe_implementations);
+        }
         encoder.id(self.root);
         Digest::of_bytes(&encoder.bytes)
     }
@@ -739,6 +756,7 @@ impl TypedBody {
     /// producer's implementation details.
     pub fn validate(&self) -> Vec<CoreDiagnostic> {
         let mut diagnostics = Vec::new();
+        let mut needs_unsafe_validation = !self.unsafe_scopes.is_empty();
         if !self.contains(self.root) {
             diagnostics.push(CoreDiagnostic {
                 code: "G4180",
@@ -772,6 +790,7 @@ impl TypedBody {
             }
         }
         for (index, expression) in self.expressions.iter().enumerate() {
+            needs_unsafe_validation |= matches!(expression.ty, Type::Callable { safety: crate::Safety::Unsafe, .. });
             let owner = CoreId(index as u32);
             let mut check = |child: CoreId| {
                 if !self.contains(child) {
@@ -853,7 +872,101 @@ impl TypedBody {
                 });
             }
         }
+        if needs_unsafe_validation {
+            self.validate_unsafe_scopes(&mut diagnostics);
+        }
         diagnostics
+    }
+
+    fn validate_unsafe_scopes(&self, diagnostics: &mut Vec<CoreDiagnostic>) {
+        for scope in &self.unsafe_scopes {
+            if !self
+                .expressions
+                .get(scope.0 as usize)
+                .is_some_and(|expression| matches!(expression.kind, CoreKind::Block(_)))
+            {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4202",
+                    span: self
+                        .expressions
+                        .get(scope.0 as usize)
+                        .map_or_else(invalid_typed_core_span, |expression| expression.span),
+                    message: "Typed Core unsafe scope must name an existing lexical block".into(),
+                });
+            }
+        }
+        // Scope is a property of each structural path, not of an arena node.
+        // A shared expression reached both inside and outside unsafe must be
+        // checked twice. The finite pair set also makes hostile cyclic graphs
+        // total without authorizing a scope through a recursive edge.
+        let mut visited = std::collections::BTreeSet::new();
+        let mut pending = vec![(self.root, false)];
+        while let Some((id, inherited)) = pending.pop() {
+            if !visited.insert((id, inherited)) {
+                continue;
+            }
+            let Some(expression) = self.expressions.get(id.0 as usize) else {
+                continue;
+            };
+            let allowed = inherited
+                || (self.unsafe_scopes.contains(&id)
+                    && matches!(expression.kind, CoreKind::Block(_)));
+            if let CoreKind::Call { callee, .. } = &expression.kind
+                && !allowed
+                && self
+                    .expressions
+                    .get(callee.0 as usize)
+                    .is_some_and(|callee| {
+                        matches!(
+                            callee.ty,
+                            Type::Callable {
+                                safety: crate::Safety::Unsafe,
+                                ..
+                            }
+                        )
+                    })
+            {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4202",
+                    span: expression.span,
+                    message:
+                        "Typed Core unsafe invocation is outside an explicit lexical unsafe scope"
+                            .into(),
+                });
+            }
+            match &expression.kind {
+                CoreKind::Closure { body, .. } => pending.push((*body, false)),
+                CoreKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    pending.push((*computation, allowed));
+                    pending.extend(clauses.iter().map(|clause| (clause.body, false)));
+                }
+                CoreKind::Completion {
+                    computation,
+                    clauses,
+                } => {
+                    pending.push((*computation, allowed));
+                    pending.extend(clauses.iter().map(|clause| (clause.body, false)));
+                }
+                CoreKind::Assign { place, value } => {
+                    pending.push((*value, allowed));
+                    let mut place = place;
+                    while let CorePlace::Field { base, .. } = place {
+                        place = base;
+                    }
+                    if let CorePlace::Deref { reference, .. } = place {
+                        pending.push((*reference, allowed));
+                    }
+                }
+                kind => pending.extend(
+                    core_children(kind)
+                        .into_iter()
+                        .map(|child| (child, allowed)),
+                ),
+            }
+        }
     }
 
     /// Recheck projection evidence at the frozen Core boundary.  Source
@@ -1251,6 +1364,9 @@ impl CoreFingerprintEncoder<'_> {
             return;
         };
         self.ty(&expression.ty);
+        if self.body.unsafe_scopes.contains(&id) {
+            self.bytes(b"explicit-unsafe-scope");
+        }
         self.kind(&expression.kind);
     }
 
@@ -1459,6 +1575,7 @@ impl CoreFingerprintEncoder<'_> {
                             self.ty(&continuation.parameter);
                             self.ty(&continuation.result);
                             self.ty(&Type::Callable {
+                                safety: crate::Safety::Safe,
                                 lifetime_binders: 0,
                                 parameters: vec![],
                                 result: Box::new(Type::Unit),
@@ -2983,6 +3100,8 @@ impl TypedBody {
             })
             .unwrap_or_default();
         let mut elaborator = Elaborator {
+            unsafe_context: false,
+            unsafe_scopes: Default::default(),
             body,
             index,
             signatures,
@@ -3203,6 +3322,10 @@ impl TypedBody {
             .diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         Self {
+            safety: signatures.definitions.get(&definition.key).and_then(callable)
+                .map_or(crate::Safety::Safe, |signature| signature.safety),
+            unsafe_scopes: elaborator.unsafe_scopes,
+            unsafe_implementations: unsafe_implementation_definitions(signatures),
             parameters,
             expressions: elaborator.expressions,
             root,
@@ -3250,6 +3373,8 @@ impl TypedBody {
             }
         }
         let mut elaborator = Elaborator {
+            unsafe_context: false,
+            unsafe_scopes: Default::default(),
             body,
             index,
             signatures,
@@ -3394,6 +3519,9 @@ impl TypedBody {
             .diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         Self {
+            safety: context.signature.safety,
+            unsafe_scopes: elaborator.unsafe_scopes,
+            unsafe_implementations: unsafe_implementation_definitions(signatures),
             parameters,
             expressions: elaborator.expressions,
             root,
@@ -3426,6 +3554,8 @@ impl TypedBody {
         trait_solver: TraitSolver,
     ) -> Self {
         let mut elaborator = Elaborator {
+            unsafe_context: false,
+            unsafe_scopes: Default::default(),
             body,
             index,
             signatures,
@@ -3503,6 +3633,9 @@ impl TypedBody {
             .diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         Self {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: elaborator.unsafe_scopes,
+            unsafe_implementations: unsafe_implementation_definitions(signatures),
             parameters: vec![],
             expressions: elaborator.expressions,
             root,
@@ -3537,6 +3670,8 @@ impl TypedBody {
         trait_solver: TraitSolver,
     ) -> Self {
         let mut elaborator = Elaborator {
+            unsafe_context: false,
+            unsafe_scopes: Default::default(),
             body,
             index,
             signatures,
@@ -3595,6 +3730,9 @@ impl TypedBody {
             .diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         Self {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: elaborator.unsafe_scopes,
+            unsafe_implementations: unsafe_implementation_definitions(signatures),
             parameters: vec![],
             expressions: elaborator.expressions,
             root,
@@ -3620,6 +3758,14 @@ fn callable(header: &ElaboratedHeader) -> Option<&crate::signature::CallableSign
     }
 }
 
+fn unsafe_implementation_definitions(
+    signatures: &ElaboratedInterface,
+) -> std::collections::BTreeSet<DefKey> {
+    signatures.definitions.iter().filter_map(|(definition, header)| {
+        matches!(header, ElaboratedHeader::Implementation(implementation) if implementation.safety == crate::Safety::Unsafe).then_some(*definition)
+    }).collect()
+}
+
 /// Check the one directional relation needed when a callable value is passed
 /// as an argument. Callable parameters are contravariant: a function that
 /// accepts an elided shared borrow can be used where the caller will supply
@@ -3629,6 +3775,7 @@ fn callable(header: &ElaboratedHeader) -> Option<&crate::signature::CallableSign
 fn callable_argument_accepts(required: &Type, provided: &Type) -> bool {
     let (
         Type::Callable {
+            safety: required_safety,
             lifetime_binders: required_binders,
             parameters: required_parameters,
             result: required_result,
@@ -3636,6 +3783,7 @@ fn callable_argument_accepts(required: &Type, provided: &Type) -> bool {
             invocation: required_invocation,
         },
         Type::Callable {
+            safety: provided_safety,
             lifetime_binders: provided_binders,
             parameters: provided_parameters,
             result: provided_result,
@@ -3646,7 +3794,7 @@ fn callable_argument_accepts(required: &Type, provided: &Type) -> bool {
     else {
         return false;
     };
-    required_binders == provided_binders
+    required_safety == provided_safety && required_binders == provided_binders
         && provided_invocation.contains(*required_invocation)
         && required_effects == provided_effects
         && required_result == provided_result
@@ -3711,6 +3859,8 @@ impl ResolvedHandlerClause {
 }
 
 struct Elaborator<'a> {
+    unsafe_context: bool,
+    unsafe_scopes: std::collections::BTreeSet<CoreId>,
     body: &'a BodySyntax,
     index: &'a DefinitionIndex,
     signatures: &'a ElaboratedInterface,
@@ -3958,6 +4108,7 @@ impl Elaborator<'_> {
                 self.alloc(
                     CoreKind::LabelValue { brand: label.brand },
                     Type::Callable {
+                        safety: crate::Safety::Safe,
                         lifetime_binders: 0,
                         parameters: vec![label.result],
                         result: Box::new(Type::Never),
@@ -4038,6 +4189,7 @@ impl Elaborator<'_> {
             ExprKind::Block(values) | ExprKind::ContextualBlock(values) => {
                 self.block_expected(values, None, expression.span)
             }
+            ExprKind::UnsafeBlock(values) => self.unsafe_block(values, None, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, None, expression.span),
             ExprKind::Array(values) => self.array_expected(values, None, expression.span),
             ExprKind::Record {
@@ -4367,6 +4519,7 @@ impl Elaborator<'_> {
         match expression.kind {
             ExprKind::Literal(text) => self.literal_expected(text, expected, expression.span),
             ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
+            ExprKind::UnsafeBlock(values) => self.unsafe_block(values, expected, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
             ExprKind::Array(values) => self.array_expected(values, expected, expression.span),
             // A signed numeric literal is parsed as a prefix expression, so
@@ -4598,6 +4751,7 @@ impl Elaborator<'_> {
             }
             ExprKind::ContextualBlock(values) => match expected {
                 Some(Type::Callable {
+                    safety,
                     parameters,
                     result,
                     effects,
@@ -4605,6 +4759,7 @@ impl Elaborator<'_> {
                     ..
                 }) if parameters.is_empty() => self.contextual_zero_arg_closure(
                     values,
+                    safety,
                     *result,
                     effects,
                     invocation,
@@ -4651,6 +4806,7 @@ impl Elaborator<'_> {
         };
         let actual = self.expressions[value.0 as usize].ty.clone();
         let Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
@@ -4662,6 +4818,7 @@ impl Elaborator<'_> {
         };
         if provided.contains(required) {
             self.expressions[value.0 as usize].ty = Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -4684,6 +4841,7 @@ impl Elaborator<'_> {
                     ..
                 },
                 Type::Callable {
+                    safety,
                     lifetime_binders,
                     parameters,
                     result,
@@ -4691,6 +4849,7 @@ impl Elaborator<'_> {
                     invocation: provided,
                 },
             ) if provided.contains(*required) => Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -4910,6 +5069,7 @@ impl Elaborator<'_> {
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
             Type::Callable {
+                safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters,
                 result: Box::new(signature.result),
@@ -4963,6 +5123,7 @@ impl Elaborator<'_> {
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
             Type::Callable {
+                safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters,
                 result: Box::new(signature.result),
@@ -5051,6 +5212,7 @@ impl Elaborator<'_> {
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
             Type::Callable {
+                safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters,
                 result: Box::new(signature.result),
@@ -5200,6 +5362,14 @@ impl Elaborator<'_> {
     /// Elaborate a lexical block with the result expectation available only
     /// to its tail expression.  Earlier statements execute for their effects
     /// and must not inherit a value contract intended for the block result.
+    fn unsafe_block(&mut self, values: Vec<ExprId>, expected: Option<Type>, span: Span) -> CoreId {
+        let previous = std::mem::replace(&mut self.unsafe_context, true);
+        let block = self.block_expected(values, expected, span);
+        self.unsafe_context = previous;
+        self.unsafe_scopes.insert(block);
+        block
+    }
+
     fn block_expected(
         &mut self,
         values: Vec<ExprId>,
@@ -5304,12 +5474,14 @@ impl Elaborator<'_> {
     fn contextual_zero_arg_closure(
         &mut self,
         values: Vec<ExprId>,
+        safety: crate::Safety,
         result: Type,
         effects: crate::types::EffectRow,
         invocation: crate::quantity::Quantity,
         span: Span,
     ) -> CoreId {
         self.locals.enter();
+        let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
         // A contextual block is a callable body, not an eager continuation
         // of its enclosing expression. Its expected callable row therefore
         // governs any operations in the block, and enclosing handlers cannot
@@ -5330,6 +5502,7 @@ impl Elaborator<'_> {
             })
             .collect::<Vec<_>>();
         self.declared_effects = previous_effects;
+        self.unsafe_context = previous_unsafe;
         self.handled_effects = previous_handled;
         self.handled_operations = previous_handled_operations;
         let body_ty = values
@@ -5367,6 +5540,7 @@ impl Elaborator<'_> {
                 body,
             },
             Type::Callable {
+                safety,
                 lifetime_binders: 0,
                 parameters: vec![],
                 result: Box::new(result),
@@ -5393,6 +5567,7 @@ impl Elaborator<'_> {
         let parameter_count = parameters.len();
         let expected_callable = expected.as_ref().and_then(|expected| {
             let Type::Callable {
+                safety: _,
                 lifetime_binders,
                 parameters,
                 result,
@@ -5488,7 +5663,9 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         let expected_result = contextual_result.or(declared_result);
+        let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
         let body = self.expression_expected(body, expected_result.clone());
+        self.unsafe_context = previous_unsafe;
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
         self.handled_operations = previous_handled_operations;
@@ -5515,6 +5692,7 @@ impl Elaborator<'_> {
             .as_ref()
             .map(|(contract, _, _, _, _)| contract.clone())
             .unwrap_or_else(|| Type::Callable {
+                safety: crate::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: parameters.iter().map(|(_, ty)| ty.clone()).collect(),
                 result: Box::new(result.clone()),
@@ -5547,6 +5725,7 @@ impl Elaborator<'_> {
                 Type::Tuple(values.iter().map(|value| self.header_type(value)).collect())
             }
             HeaderType::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -5573,6 +5752,7 @@ impl Elaborator<'_> {
                     self.closure_effects(effects, self.body.expression(self.body.root).span);
                 self.bound_lifetime_scopes.pop();
                 Type::Callable {
+                    safety: *safety,
                     lifetime_binders: lifetime_binders.len() as u32,
                     parameters,
                     result,
@@ -5791,6 +5971,7 @@ impl Elaborator<'_> {
                 ),
             },
             Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -5801,6 +5982,7 @@ impl Elaborator<'_> {
                 nested_binders.push(lifetime_binders);
                 nested_binders.extend_from_slice(hrtb_binders);
                 Type::Callable {
+                    safety,
                     lifetime_binders,
                     parameters: parameters
                         .into_iter()
@@ -5922,12 +6104,14 @@ impl Elaborator<'_> {
                 referent: Box::new(self.normalize_nested_callable_effect_rows(*referent)),
             },
             Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
                 effects,
                 invocation,
             } => Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters: parameters
                     .into_iter()
@@ -8359,6 +8543,7 @@ impl Elaborator<'_> {
                                 host_import: self.signatures.host_imports.get(&definition).cloned(),
                             },
                             Type::Callable {
+                                safety: signature.safety,
                                 lifetime_binders: 0,
                                 parameters,
                                 result: Box::new(result),
@@ -8455,6 +8640,7 @@ impl Elaborator<'_> {
         span: Span,
     ) -> Option<CoreId> {
         let Type::Callable {
+            safety,
             lifetime_binders,
             parameters: expected_parameters,
             result: expected_result,
@@ -8506,6 +8692,7 @@ impl Elaborator<'_> {
         let expected_effects =
             self.normalize_concrete_hrtb_effect_row(expected_effects, lifetime_binders);
         let bound_callable = self.normalize_selectable_type_projections(Type::Callable {
+            safety: bound_signature.safety,
             lifetime_binders,
             parameters: bound_signature.parameters,
             result: Box::new(bound_signature.result),
@@ -8513,6 +8700,7 @@ impl Elaborator<'_> {
             invocation: bound_signature.invocation,
         });
         let expected = self.normalize_selectable_type_projections(Type::Callable {
+            safety,
             lifetime_binders,
             parameters: expected_parameters,
             result: expected_result,
@@ -8655,6 +8843,7 @@ impl Elaborator<'_> {
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
             Type::Callable {
+                safety: signature.safety,
                 lifetime_binders: 0,
                 parameters,
                 result: Box::new(result),
@@ -9810,6 +9999,7 @@ impl Elaborator<'_> {
                             deferred: Some(deferred),
                         },
                         Type::Callable {
+                            safety: signature.safety,
                             lifetime_binders: 0,
                             parameters: signature.parameters.clone(),
                             result: Box::new(signature.result.clone()),
@@ -9864,6 +10054,7 @@ impl Elaborator<'_> {
                 deferred: None,
             },
             Type::Callable {
+                safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters.clone(),
                 result: Box::new(signature.result.clone()),
@@ -9959,6 +10150,7 @@ impl Elaborator<'_> {
             })
             .unwrap_or(crate::Quantity::ONCE);
         Some(Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters,
             result: Box::new(result),
@@ -9977,6 +10169,7 @@ impl Elaborator<'_> {
             },
         };
         let Type::Callable {
+            safety,
             parameters,
             result,
             effects,
@@ -9985,6 +10178,13 @@ impl Elaborator<'_> {
         else {
             return self.fail(span, "G4105", "called expression is not callable");
         };
+        if safety == crate::Safety::Unsafe && !self.unsafe_context {
+            return self.fail(
+                span,
+                "G4201",
+                "unsafe callable invocation requires an explicit `unsafe` block",
+            );
+        }
         if parameters.len() != arguments.len() {
             return self.fail(
                 span,
@@ -10064,6 +10264,7 @@ impl Elaborator<'_> {
                 (
                     Type::Callable { invocation: required, .. },
                     Type::Callable {
+                        safety,
                         lifetime_binders,
                         parameters,
                         result,
@@ -10071,6 +10272,7 @@ impl Elaborator<'_> {
                         invocation: provided,
                     },
                 ) if provided.contains(*required) => Type::Callable {
+                    safety,
                     lifetime_binders,
                     parameters,
                     result,
@@ -10256,6 +10458,7 @@ impl Elaborator<'_> {
                     continue;
                 };
                 return Some(Type::Callable {
+                    safety: crate::Safety::Safe,
                     lifetime_binders: 0,
                     parameters: vec![payload.clone()],
                     result: Box::new(Type::Never),
@@ -10300,6 +10503,7 @@ impl Elaborator<'_> {
                 _ => continue,
             };
             return Some(Type::Callable {
+                safety: crate::Safety::Safe,
                 lifetime_binders: 0,
                 parameters,
                 result: Box::new(output.value.clone()),
@@ -10562,6 +10766,7 @@ impl Elaborator<'_> {
             self.normalize_concrete_effect_row(signature.effects.clone())
         };
         let callable = self.normalize_selectable_type_projections(Type::Callable {
+            safety: signature.safety,
             lifetime_binders: if hrtb_method_value {
                 expected_lifetime_binders
             } else {
@@ -10577,6 +10782,7 @@ impl Elaborator<'_> {
         };
         let expected = if hrtb_method_value {
             let Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -10587,6 +10793,7 @@ impl Elaborator<'_> {
                 unreachable!("the contextual callable was checked above");
             };
             Type::Callable {
+                safety,
                 lifetime_binders,
                 parameters,
                 result,
@@ -10806,6 +11013,7 @@ impl Elaborator<'_> {
                         deferred: Some(deferred),
                     },
                     Type::Callable {
+                        safety: signature.safety,
                         lifetime_binders: 0,
                         parameters: signature.parameters.clone(),
                         result: Box::new(signature.result.clone()),
@@ -10912,6 +11120,7 @@ impl Elaborator<'_> {
                 deferred: None,
             },
             Type::Callable {
+                safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: parameters.clone(),
                 result: Box::new(signature.result.clone()),
@@ -11302,6 +11511,7 @@ impl Elaborator<'_> {
                 self.locals.define(
                     name.clone(),
                     Type::Callable {
+                        safety: crate::Safety::Safe,
                         lifetime_binders: 0,
                         parameters: vec![operation_result.clone()],
                         result: Box::new(result.clone()),
@@ -11374,7 +11584,9 @@ impl Elaborator<'_> {
                 | CoreHandlerResumption::Discard { .. }
                 | CoreHandlerResumption::Terminal => Some(result.clone()),
             };
+            let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
             let body = self.expression_expected(clause.source.body, body_expected);
+            self.unsafe_context = previous_unsafe;
             if let Some(name) = active_resumption.as_ref() {
                 self.check_resumption_capture_escapes(
                     body,
@@ -11748,7 +11960,9 @@ impl Elaborator<'_> {
                         .push((subject, refinement.pattern.clone()));
                 }
             }
+            let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
             let body = self.expression_expected(clause.body, Some(result.clone()));
+            self.unsafe_context = previous_unsafe;
             self.check_refinement_capture_escapes(body, &self.active_refinement_bindings.clone());
             self.active_refinement_bindings = previous_refinement_bindings;
             self.active_refinement_patterns = previous_refinement_patterns;
@@ -13307,6 +13521,7 @@ impl Elaborator<'_> {
                 continue;
             }
             let Ok(Type::Callable {
+                safety,
                 parameters,
                 result,
                 effects,
@@ -13315,6 +13530,11 @@ impl Elaborator<'_> {
             else {
                 continue;
             };
+            if safety != crate::Safety::Safe {
+                self.error(span, "G4200", "unsafe callable cannot supply safe `Fn` evidence");
+                self.recovered = true;
+                continue;
+            }
             let inputs = match relation.arguments.as_slice() {
                 [crate::GenericArgument::Type(Type::Tuple(inputs))] => inputs.clone(),
                 [crate::GenericArgument::Type(Type::Unit)] => vec![],
@@ -14224,6 +14444,7 @@ fn align_lifetime_types(
         }
         (
             Type::Callable {
+                safety: expected_safety,
                 lifetime_binders: expected_binders,
                 parameters: expected_parameters,
                 result: expected_result,
@@ -14231,13 +14452,14 @@ fn align_lifetime_types(
                 invocation: expected_invocation,
             },
             Type::Callable {
+                safety: actual_safety,
                 lifetime_binders: actual_binders,
                 parameters: actual_parameters,
                 result: actual_result,
                 effects: actual_effects,
                 invocation: actual_invocation,
             },
-        ) if expected_binders == actual_binders
+        ) if expected_safety == actual_safety && expected_binders == actual_binders
             && expected_parameters.len() == actual_parameters.len()
             && expected_invocation == actual_invocation =>
         {
@@ -14252,6 +14474,7 @@ fn align_lifetime_types(
                 align_lifetime_types(actual, expected, substitution, mode, depth + 1)?;
             }
             Ok(Type::Callable {
+                safety: *expected_safety,
                 lifetime_binders: *expected_binders,
                 parameters: actual_parameters.clone(),
                 result: Box::new(align_lifetime_types(
@@ -14315,12 +14538,14 @@ fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
             pointee: Box::new(open_hrtb_callable_body_type(*pointee, binder_depth)),
         },
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -14722,12 +14947,14 @@ fn substitute_call_lifetimes(
             referent: Box::new(substitute_call_lifetimes(*referent, substitution, depth)?),
         }),
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Ok(Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()

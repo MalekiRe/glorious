@@ -2296,6 +2296,7 @@ mod tests {
 
     fn callable(invocation: Quantity) -> Type {
         Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![Type::Scalar(crate::types::ScalarType::I64)],
             result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
@@ -2308,6 +2309,7 @@ mod tests {
     fn forged_move_capture_retains_its_obligation_through_unrestricted_replay() {
         let function = callable(Quantity::ONCE);
         let closure = Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![],
             result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
@@ -2315,6 +2317,9 @@ mod tests {
             invocation: Quantity::UNRESTRICTED,
         };
         let body = TypedBody {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: Default::default(),
+            unsafe_implementations: Default::default(),
             parameters: vec![("function".into(), function.clone())],
             expressions: vec![
                 CoreExpr {
@@ -2408,6 +2413,7 @@ mod tests {
     fn frozen_core_cannot_split_one_exact_callable_obligation_across_two_escapes() {
         let callback = callable(Quantity::ONCE);
         let apply = Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![
                 callback.clone(),
@@ -2433,6 +2439,9 @@ mod tests {
         // it exercises the frozen Core → PlaceFlow → UseFlow boundary that a
         // cache or embedding host could otherwise try to bypass.
         let body = TypedBody {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: Default::default(),
+            unsafe_implementations: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {
@@ -2507,6 +2516,7 @@ mod tests {
     fn frozen_core_joins_alternative_callable_transfers_without_sequencing_them() {
         let callback = callable(Quantity::ONCE);
         let apply = Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![
                 callback.clone(),
@@ -2533,6 +2543,9 @@ mod tests {
         // transfers are selected by distinct completion arms, so an exact
         // callback must retain the one-use interval rather than become [2,2].
         let body = TypedBody {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: Default::default(),
+            unsafe_implementations: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {
@@ -2625,6 +2638,7 @@ mod tests {
     fn frozen_core_cannot_add_direct_use_to_an_outgoing_callable_transfer() {
         let callback = callable(Quantity::ONCE);
         let apply = Type::Callable {
+            safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![
                 callback.clone(),
@@ -2636,6 +2650,9 @@ mod tests {
         };
         let i64 = Type::Scalar(crate::types::ScalarType::I64);
         let body = TypedBody {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: Default::default(),
+            unsafe_implementations: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {

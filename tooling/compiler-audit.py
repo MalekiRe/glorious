@@ -50,7 +50,8 @@ def main():
                        "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs",
                        "crates/grandiose-stage0/src/types.rs", "crates/grandiose-stage0/src/header.rs",
                        "crates/grandiose-stage0/src/body.rs", "crates/grandiose-stage0/src/instance.rs",
-                       "crates/grandiose-stage0/src/escape.rs", "crates/grandiose-stage0/src/pattern.rs"]
+                       "crates/grandiose-stage0/src/escape.rs", "crates/grandiose-stage0/src/pattern.rs",
+                       "crates/grandiose-stage0/src/scanner.rs", "crates/grandiose-stage0/src/useflow.rs"]
     expected = {"schema": 1, "algorithm": "sha256", "files": closure(),
                 "authoring_overrides": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in authoring_paths}}
     # Shared raw storage is a native/runtime prerequisite, not compiler source

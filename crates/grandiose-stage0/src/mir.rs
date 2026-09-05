@@ -4635,6 +4635,10 @@ pub struct MirNominalCopyDescriptor {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirFunction {
+    pub safety: crate::Safety,
+    /// This body contains explicit unsafe implementation scopes. Admission
+    /// is separate from whether calling its public contract is safe.
+    pub unsafe_execution: bool,
     pub definition: DefKey,
     pub nominal_copy_descriptors: Vec<MirNominalCopyDescriptor>,
     /// Captured environment entries occupy the prefix of `parameters`.
@@ -4761,6 +4765,20 @@ impl MirLowering {
                 }],
             };
         }
+        if let Some(crate::ElaboratedHeader::Callable(signature)) =
+            signatures.and_then(|signatures| signatures.definitions.get(&definition))
+            && signature.safety != body.safety
+        {
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: vec![MirDiagnostic {
+                    code: "G6000",
+                    message: "Typed Core callable safety does not match its frozen declaration"
+                        .into(),
+                }],
+            };
+        }
         if !flow.diagnostics.is_empty() {
             return Self {
                 function: None,
@@ -4772,6 +4790,8 @@ impl MirLowering {
             };
         }
         let mut lowerer = Lowerer {
+            safety: body.safety,
+            unsafe_execution: !body.unsafe_scopes.is_empty() || !body.unsafe_implementations.is_empty(),
             body,
             bodies,
             signatures,
@@ -6273,6 +6293,8 @@ impl MirLowering {
                 };
             };
             let function = MirFunction {
+                safety: body.safety,
+                unsafe_execution: !body.unsafe_scopes.is_empty() || !body.unsafe_implementations.is_empty(),
                 nominal_copy_descriptors: lowerer.nominal_copy_descriptors.clone(),
                 definition,
                 captures: 0,
@@ -8591,6 +8613,20 @@ impl MirFunction {
         instruction: &MirInstruction,
         specialized_lifted_targets: &BTreeSet<DefKey>,
     ) -> Result<(), String> {
+        if let MirInstruction::CallIndirect { callee, .. } = instruction
+            && matches!(
+                self.local_type(*callee)?,
+                Type::Callable {
+                    safety: crate::Safety::Unsafe,
+                    ..
+                }
+            )
+            && !self.unsafe_execution
+        {
+            return Err(
+                "MIR unsafe indirect call omitted its unsafe implementation requirement".into(),
+            );
+        }
         match instruction {
             MirInstruction::StorageLive { binding, local }
             | MirInstruction::StorageDead { binding, local } => {
@@ -10429,6 +10465,17 @@ impl MirProgram {
                     {
                         return Err(format!("MIR call targets missing function {callee:?}"));
                     }
+                    match instruction {
+                        MirInstruction::Call { callee, .. } if self.functions[callee].safety == crate::Safety::Unsafe && !function.unsafe_execution => {
+                            return Err("MIR unsafe call omitted its unsafe implementation requirement".into());
+                        }
+                        MirInstruction::MakeCallable { dst, callee, .. } => {
+                            if !matches!(function.local_type(*dst)?, Type::Callable { safety, .. } if *safety == self.functions[callee].safety) {
+                                return Err("MIR callable value erased or changed its target safety contract".into());
+                            }
+                        }
+                        _ => {}
+                    }
                     if let MirInstruction::MakeCallable {
                         callee,
                         captures,
@@ -10992,6 +11039,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
     }
 }
 struct Lowerer<'a> {
+    safety: crate::Safety,
+    unsafe_execution: bool,
     body: &'a TypedBody,
     bodies: &'a BTreeMap<DefKey, TypedBody>,
     signatures: Option<&'a ElaboratedInterface>,
@@ -11460,6 +11509,8 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Return { value: join },
         });
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -11750,6 +11801,8 @@ impl Lowerer<'_> {
                 ]
             };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -12014,6 +12067,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -12245,6 +12300,8 @@ impl Lowerer<'_> {
             protected_values: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -12418,6 +12475,8 @@ impl Lowerer<'_> {
         let transferred = self.lower_label_transfer_path(clause.body, brand)?;
         let clause_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -12634,6 +12693,8 @@ impl Lowerer<'_> {
         self.named = boundary_named;
         self.values = boundary_values;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -12894,6 +12955,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -13105,6 +13168,8 @@ impl Lowerer<'_> {
         let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), computation);
         let pattern = lower_pattern(inner.patterns[0].clone())?;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -13408,6 +13473,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -13669,6 +13736,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -13965,6 +14034,8 @@ impl Lowerer<'_> {
             (MirBlockId(2), vec![skipped], MirBlockId(1), vec![])
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -14380,6 +14451,8 @@ impl Lowerer<'_> {
         }
         self.label_values.remove(&brand);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -14600,6 +14673,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.label_values.remove(&brand);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -14661,6 +14736,8 @@ impl Lowerer<'_> {
         lowered?;
         let entry_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -15078,6 +15155,8 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Unreachable,
         });
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -15231,6 +15310,8 @@ impl Lowerer<'_> {
         let arm = std::mem::take(&mut self.instructions);
         self.label_values.remove(&brand);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -15487,6 +15568,8 @@ impl Lowerer<'_> {
         let result_type = self.body.expression(root).ty.clone();
         let continuation_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -16604,6 +16687,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -16693,6 +16778,8 @@ impl Lowerer<'_> {
         {
             let result = self.value(left)?;
             return Some(MirFunction {
+                safety: self.safety,
+                unsafe_execution: self.unsafe_execution,
                 nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
                 definition: self.definition,
                 captures: 0,
@@ -16742,6 +16829,8 @@ impl Lowerer<'_> {
             (MirBlockId(2), vec![skipped], MirBlockId(1), vec![])
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -16869,6 +16958,8 @@ impl Lowerer<'_> {
         let (false_instructions, false_result) = emit_branch(self, on_false);
         let joined = self.alloc(result_ty.clone(), root);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -17003,6 +17094,8 @@ impl Lowerer<'_> {
         let (false_instructions, false_result) = emit_branch(self, on_false);
         let joined = self.alloc(result_ty.clone(), root);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -17118,6 +17211,8 @@ impl Lowerer<'_> {
         let false_instructions = std::mem::take(&mut self.instructions);
         let joined = self.alloc(result_ty.clone(), root);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -17494,6 +17589,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -17837,6 +17934,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -18098,6 +18197,8 @@ impl Lowerer<'_> {
         blocks[steps.len()].instructions = std::mem::take(&mut self.instructions);
         blocks[steps.len()].terminator = MirTerminator::Return { value: result };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -18400,6 +18501,8 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Unreachable,
         });
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -18866,6 +18969,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -19194,6 +19299,8 @@ impl Lowerer<'_> {
             }
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -19550,6 +19657,8 @@ impl Lowerer<'_> {
             terminator: MirTerminator::Return { value: result },
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -19767,6 +19876,8 @@ impl Lowerer<'_> {
         self.values = base_values;
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -20097,6 +20208,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -20394,6 +20507,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -20557,6 +20672,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -20774,6 +20891,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -21009,6 +21128,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -21229,6 +21350,8 @@ impl Lowerer<'_> {
         self.values = root_values_before_handler;
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -21431,6 +21554,8 @@ impl Lowerer<'_> {
         });
         let handler_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -21881,6 +22006,8 @@ impl Lowerer<'_> {
         self.named = inner_named;
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -22076,6 +22203,8 @@ impl Lowerer<'_> {
         self.named = handler_named;
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -22337,6 +22466,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -22394,6 +22525,8 @@ impl Lowerer<'_> {
         }
         let result = self.value(outward)?;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -22589,6 +22722,8 @@ impl Lowerer<'_> {
         }
         self.named = previous_named;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -22824,6 +22959,8 @@ impl Lowerer<'_> {
         self.named = boundary_named;
         self.values = boundary_values;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -22981,6 +23118,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -23234,6 +23373,8 @@ impl Lowerer<'_> {
                 }),
         );
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -23429,6 +23570,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -23847,6 +23990,8 @@ impl Lowerer<'_> {
         }
         debug_assert_eq!(next as usize, blocks.len());
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -24135,6 +24280,8 @@ impl Lowerer<'_> {
             });
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -24595,6 +24742,8 @@ impl Lowerer<'_> {
             control.leave_handler_depths.insert(MirBlockId(0), 1);
         }
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -25290,6 +25439,8 @@ impl Lowerer<'_> {
         ]);
 
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -25579,6 +25730,8 @@ impl Lowerer<'_> {
             },
         ]);
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -25732,6 +25885,8 @@ impl Lowerer<'_> {
         let inner_resume = std::mem::take(&mut self.instructions);
         self.named = saved_named;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -26297,6 +26452,8 @@ impl Lowerer<'_> {
         self.named = previous_named;
         self.values = previous_values;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -26410,6 +26567,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = previous_named;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -26539,6 +26698,8 @@ impl Lowerer<'_> {
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = previous_named;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -26752,6 +26913,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -26919,6 +27082,8 @@ impl Lowerer<'_> {
         let mut blocks = Vec::new();
         let entry = self.lower_completion_continuation_segment(root, &mut blocks)?;
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -27374,6 +27539,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -27548,6 +27715,8 @@ impl Lowerer<'_> {
             arguments: vec![],
         };
         Some(MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -27561,6 +27730,8 @@ impl Lowerer<'_> {
     }
     fn invalid_function(&self, parameters: Vec<MirLocal>) -> MirFunction {
         MirFunction {
+            safety: self.safety,
+            unsafe_execution: self.unsafe_execution,
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
             captures: 0,
@@ -31522,6 +31693,7 @@ impl Lowerer<'_> {
             } => {
                 let callee = self.lift_closure(
                     callable,
+                    match &self.body.expression(id).ty { Type::Callable { safety, .. } => *safety, _ => return None },
                     &environment,
                     parameters,
                     environment.captures.clone(),
@@ -31877,6 +32049,12 @@ impl Lowerer<'_> {
     /// an effect. The general VM continuation representation owns those cases
     /// once it can describe snapshot copy glue to the verifier.
     fn core_is_replay_safe(&self, id: CoreId) -> bool {
+        // Explicit unsafe operations may observe or mutate raw storage even
+        // with an empty outward effect row. Their lexical scope is not a
+        // replay/duplication certificate for an effect-handler snapshot.
+        if self.body.unsafe_scopes.contains(&id) {
+            return false;
+        }
         match self.body.expression(id).kind.clone() {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
@@ -31914,7 +32092,8 @@ impl Lowerer<'_> {
             CoreKind::Call {
                 callee, arguments, ..
             } => {
-                self.core_is_effect_free(id)
+                !matches!(self.body.expression(callee).ty, Type::Callable { safety: crate::Safety::Unsafe, .. })
+                    && self.core_is_effect_free(id)
                     && self.core_is_replay_safe(callee)
                     && arguments
                         .into_iter()
@@ -32626,6 +32805,7 @@ impl Lowerer<'_> {
     fn lift_closure(
         &mut self,
         callable: CallableId,
+        safety: crate::Safety,
         environment: &CaptureEnvironment,
         parameters: Vec<(String, Type)>,
         captures: Vec<ClosureCapture>,
@@ -32643,6 +32823,10 @@ impl Lowerer<'_> {
             return Some(definition);
         }
         let mut child = Lowerer {
+            safety,
+            // Conservatively retain all source-body scopes, including nested
+            // deferred bodies. This never certifies an unsafe body as safe.
+            unsafe_execution: self.unsafe_execution,
             body: self.body,
             bodies: self.bodies,
             signatures: self.signatures,
@@ -32762,6 +32946,8 @@ impl Lowerer<'_> {
             return None;
         }
         let function = MirFunction {
+            safety,
+            unsafe_execution: child.unsafe_execution,
             nominal_copy_descriptors: child.nominal_copy_descriptors,
             definition,
             captures: captures.len() as u32,
@@ -32977,12 +33163,14 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             referent: Box::new(substitute_generic_type(*referent, substitutions)?),
         }),
         Type::Callable {
+            safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
         } => Some(Type::Callable {
+            safety,
             lifetime_binders,
             parameters: parameters
                 .into_iter()
@@ -33697,6 +33885,8 @@ mod mir_place_arena_tests {
 
     fn operation_validation_function(entries: Vec<Option<MirOperationData>>) -> MirFunction {
         MirFunction {
+            safety: crate::Safety::Safe,
+            unsafe_execution: false,
             definition: DefKey(Digest::of_bytes(b"operation-validation")),
             nominal_copy_descriptors: vec![],
             captures: 0,
@@ -33730,6 +33920,8 @@ mod mir_place_arena_tests {
             value: 1,
         };
         MirFunction {
+            safety: crate::Safety::Safe,
+            unsafe_execution: false,
             definition: DefKey(Digest::of_bytes(b"branch-liveness")),
             nominal_copy_descriptors: vec![],
             captures: 0,
