@@ -10341,6 +10341,40 @@ fn service_lowers_non_tail_completion_let_initializers_into_vm_cfg() {
 }
 
 #[test]
+fn service_lowers_nested_completion_values_with_exact_strict_order_and_scope() {
+    let cases = [
+        ("fn main() -> i64 { handle true { false => 0, true => 2 * handle true { true => 21, false => 0 } } }", 42),
+        ("fn main() -> i64 { handle true { false => 0, true => { let value = handle 2 { 2 => 42, _ => 0 }; value } } }", 42),
+        ("fn main() -> i64 { handle 1 + handle 2 { 2 => 2, _ => 0 } { 3 => 42, _ => 0 } }", 42),
+        ("fn main() -> i64 { 2 + handle true { true => 20 + handle 1 { 1 => 20, _ => 0 }, false => 0 } }", 42),
+        ("fn main() -> i64 { let value = 4; let selected = handle 3 { value => handle value { 3 => 2, _ => 0 } }; value * 10 + selected }", 42),
+        ("fn bump(counter: &mut i64) -> i64 { *counter = *counter + 1; *counter } fn main() -> i64 { let counter = 0; let selected = bump(&mut counter) + handle bump(&mut counter) { 2 => bump(&mut counter) + handle true { true => bump(&mut counter), false => 0 }, _ => 0 }; counter * 100 + selected }", 408),
+        ("struct Token { value: i64 } impl Use<[0, 1]> for Token {} fn take(value: Token) -> i64 { value.value } fn main() -> i64 { let token = Token { value: 42 }; let selected = handle true { true => handle false { false => token, true => Token { value: 0 } }, false => Token { value: 0 } }; take(selected) }", 42),
+        ("fn pick<'a>(flag: Bool, value: &'a mut i64) -> &'a mut i64 { let selected = handle flag { true => handle true { true => value, false => value }, false => value }; selected } fn main() -> i64 { let value = 1; let selected = pick(true, &mut value); *selected = 42; *selected }", 42),
+    ];
+    for (source, expected) in cases {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        let bytes = artifact.canonical_bytes();
+        let verified = decode_and_verify_program(&bytes).unwrap();
+        assert_eq!(verified.run_i64().unwrap(), expected, "{source}");
+    }
+}
+
+#[test]
+fn service_completion_cfg_preserves_ambiguous_reference_return_rejection() {
+    // Frozen callable contracts require one producer for each returned leaf.
+    // A multi-owner return is already opaque even without a completion; CFG
+    // lowering must not bypass that independent source/verification boundary.
+    for body in ["left", "handle flag { true => handle true { true => left, false => right }, false => right }"] {
+        let source = format!("fn pick<'a>(flag: Bool, left: &'a mut i64, right: &'a mut i64) -> &'a mut i64 {{ {body} }} fn main() -> i64 {{ let left = 1; let right = 20; let selected = pick(true, &mut left, &mut right); *selected }}");
+        let error = StageZeroCompiler::new().compile(request(&source)).expect_err("an ambiguous caller-region contract must fail closed");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5023"), "{error:?}");
+    }
+}
+
+#[test]
 fn service_leaves_a_label_from_a_plain_completion_arm() {
     let source = r#"
         pub fn main() -> i64 {
