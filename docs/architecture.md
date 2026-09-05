@@ -10,6 +10,14 @@ supersedes this document's exclusion of unsafe/raw-pointer language support and
 handle-only representation as a universal future requirement. Current G1
 contracts remain unchanged until a versioned implementation lands.
 
+The selected next architecture specializes the compiler and ordinary source std
+to bytecode, including unsafe internals, over actual host-layout memory. The
+Glorious LLVM backend follows working, verified self-hosting; native-precompiled
+std is not required. Initial ABI tests cross the VM/native boundary using host
+fixtures, with the same objects/allocations and explicit call bridges. This
+unsafe-enabled profile is not an in-process memory sandbox. Safe-only admission
+and trusted native safe exports remain a separate execution policy.
+
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by
 [the language core](../glorious-branded-environment-core-spec.md); where this
@@ -334,6 +342,13 @@ Unknown required features or critical sections are compatibility errors; unknown
 noncritical sections are skipped.
 
 ### 4.2 Values, places, and frames
+
+The handle representation below describes the existing generation-1 contract.
+The approved host-compatible bytecode extension instead requires addressable
+shared objects in native-layout storage, stable for the lifetime of pointers and
+loans. Validation metadata may remain out of band; boundary reconstruction and
+stale VM-side payload copies do not satisfy shared representation. Versioned
+implementation and interop evidence are still required.
 
 The VM is a typed register machine. Each register is `Empty` or contains one
 owned value, copyable value, shared reference, or unique reference. `MOVE`

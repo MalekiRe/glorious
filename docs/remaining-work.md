@@ -1,9 +1,14 @@
 # Remaining implementation work
 
 The [unsafe-memory/native-ABI prerequisite](../compiler/spec/unsafe-memory-progress.md)
-is now active compiler-project work. Its safe-only guest verification and trusted
-native-library boundary supersede the unsafe and VM-hardening exclusions below
-for this specific scope; they are not already-implemented capabilities.
+is now active compiler-project work. It requires source libraries specialized
+to bytecode, unsafe-enabled execution over host-compatible memory, and actual
+VM/native ABI tests using host fixtures. The Glorious LLVM backend is deferred
+until after working, verified self-hosting; native Glorious std is not a build
+prerequisite. Safe-only verification and the trusted native-library boundary
+remain required, while unsafe-enabled execution is not a memory sandbox. These
+requirements supersede the unsafe and VM-hardening exclusions below for this
+specific scope; they are not already-implemented capabilities.
 
 This is the open implementation backlog for the Rust Grandiose compiler and G1
 VM. Completed work is intentionally omitted. The eventual wholesale port into

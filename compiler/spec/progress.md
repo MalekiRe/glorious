@@ -6,12 +6,17 @@ and initial source products, not a complete compilation pipeline.
 
 ## Current prerequisite
 
-The September 5 direction adds [unsafe memory and shared native/VM library
-execution](unsafe-memory-progress.md) as prerequisite U0–U6 work. The library
-owns collection/UTF-8/hashing algorithms over a small raw-memory layer. Safe-only
-guests may use safe APIs of trusted native implementations containing unsafe;
-shared-layout interop targets zero marshalling. Existing tests do not certify
-these new capabilities, and recording the decision closes no compiler milestone.
+The September 5 direction selects [host-compatible bytecode and unsafe
+memory](unsafe-memory-progress.md) as prerequisite U0–U6 work. The compiler and
+source libraries, including concrete generic specializations and unsafe
+collection/UTF-8/hashing internals, must run as bytecode over a small raw-memory
+layer. Shared-layout interop targets zero marshalling; initial VM/native tests
+use host ABI fixtures. The Glorious LLVM backend and native Glorious std are
+deferred until after working, verified self-hosting, not prerequisites of it.
+Unsafe-enabled execution is not an in-process memory sandbox. Safe-only guests
+may use safe APIs of trusted native implementations containing unsafe. Existing
+tests do not certify these new capabilities, and recording the decision closes
+no compiler milestone.
 
 The first shared raw-storage crate is now implemented and tested: 12 unit and
 two native embedding tests also pass Miri's strict-provenance checks. It provides
@@ -245,6 +250,9 @@ comparison assignments. Public inventory entries are plans, not passed tests.
 M1: certify transport/control polling, the remaining state-loop/continuation
 cases, interner/map scaling, full allocation/copy accounting, and physical
 representation costs.
+U0–U6 supplies the new raw-memory/ABI and specialized source-library bytecode
+contract. No LLVM backend or native-precompiled Glorious std is needed for this
+gate; native Glorious comparisons follow verified self-hosting.
 HashMap probes and metadata rebuilding use tail calls; collision and growth
 costs still require compiler-scale measurements. VM aggregate transfer can
 rebuild backing objects. Logical storage limits and allocation charges do not

@@ -16,12 +16,15 @@ Its storage, revision, and query machinery precedes the semantic port. The old
 `self-host-stage0` implementation and its build scripts have been retired;
 their historical coverage does not count toward GSC-2.
 
-The project also requires [raw memory, unsafe library implementations, and a
-shared native/VM ABI](docs/unsafe-memory-and-native-abi.md). Safe-only guest
-bytecode must be able to use safe exports of trusted native libraries without
-marshalling compatible values. This prerequisite is being implemented; source
-raw pointers/unsafe and general zero-marshalling interop are not available yet.
-See the [delivery gates](compiler/spec/unsafe-memory-progress.md).
+The chosen [execution model](docs/unsafe-memory-and-native-abi.md) specializes the
+compiler and source libraries, including `Vec<T>` and unsafe memory operations,
+into bytecode over host-compatible storage. **Self-hosting comes before the
+Glorious LLVM backend**; native-precompiled std and native generic specialization
+are not prerequisites. Shared native/VM objects target zero marshalling. The
+unsafe-enabled profile is not a memory sandbox; safe-only guests may instead use
+safe exports of trusted native libraries. Source raw pointers/unsafe and general
+zero-marshalling interop are not available yet. See the
+[delivery gates](compiler/spec/unsafe-memory-progress.md).
 
 ## What makes the language different?
 

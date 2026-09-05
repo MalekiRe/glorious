@@ -7,9 +7,13 @@ Glorious Minimal Language revision 0.15.
 
 The September 5, 2026 [unsafe-memory and shared native/VM ABI amendment](docs/unsafe-memory-and-native-abi.md)
 adds programmer-established safety contracts and raw-memory support as project
-prerequisites. Safe-only guests may use trusted library implementations with
-unsafe internals. The ownership/control core remains the safe-language contract;
-new syntax and artifact support require the amendment's executable gates.
+prerequisites. Concrete generic library implementations and unsafe internals must
+be compilable to bytecode operating on host-compatible memory. Unsafe-enabled
+execution is not an in-process memory sandbox; safe-only guests may use safe
+exports of trusted native libraries. The ownership/control core remains the
+safe-language contract. The Glorious LLVM backend is deferred until after
+verified self-hosting; new syntax and artifact support require the amendment's
+executable gates and do not silently alter existing artifact contracts.
 
 **Intent:** Define the smallest coherent compiler core that preserves source-defined control flow, effect handlers, label-generic routing through intrinsic `Label<T>` evidence, linear ownership, conditional refinements, Rust-style lifetime reasoning, and arbitrary higher-order selection abstractions.
 

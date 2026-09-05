@@ -4,6 +4,14 @@ Historical proposal. The active replacement uses the format-aware Stage0/G1
 bootstrap in [GSC-2](../GSC-2-glorious-incremental-self-hosted-compiler-spec.md).
 The native workflow below is not an implemented replacement build dependency.
 
+The [September 5 execution-model decision](unsafe-memory-and-native-abi.md)
+explicitly defers the Glorious LLVM backend until after working, verified
+self-hosting. The compiler and source std, including generic specializations and
+unsafe internals, first execute as bytecode over host-compatible memory. Native
+host ABI fixtures and interpreter entry bridges do not require that backend.
+The native-first iteration strategy and commands below are historical, not
+instructions for the current GSC-2 implementation or prerequisites of its gates.
+
 ## Purpose
 
 During development and test iteration, run the self-host compiler as a

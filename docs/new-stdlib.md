@@ -8,7 +8,14 @@ surface.
 The [unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md) requires source
 collection, UTF-8, and hashing implementations over a small raw-memory layer.
 Private algorithmic leaves below describe the bootstrap, not the final boundary.
-Safe-only VM guests may call safe exports of trusted native library code.
+The chosen implementation path specializes generic source libraries to bytecode,
+including unsafe internals, over real host-compatible storage. Native-precompiled
+Glorious std and universally type-erased native collection algorithms are not
+required; the Glorious LLVM backend follows verified self-hosting. Safe-only VM
+guests may call safe exports of trusted native library code, while all-bytecode
+std runs under explicit unsafe-enabled policy without a memory-sandbox claim.
+Std inclusion is optional subject to dependencies and the minimal runtime
+contract; existing fixed source-bundle behavior changes only explicitly.
 
 ## 1. Approved scope
 

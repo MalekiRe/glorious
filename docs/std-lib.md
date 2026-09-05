@@ -6,6 +6,15 @@ Specialized collection/text/hash leaves below describe the compatibility
 bootstrap, not the final source-owned library boundary. Safe-only guests may
 use safe exports of explicitly trusted native library implementations.
 
+The primary self-hosting path compiles the selected std source closure, including
+concrete generic specializations and unsafe internals, to bytecode operating on
+host-compatible memory. This requires neither native-precompiled Glorious std
+nor a universally type-erased native implementation. The Glorious LLVM backend
+is deferred until after verified self-hosting. Unsafe-enabled execution is not
+an in-process memory sandbox. The amendment also permits opting out of std
+subject to dependencies and minimal runtime contracts; that future build choice
+does not silently change the fixed generation-1 bundle rules below.
+
 Status: normative design for the generation-1 standard library and source-bundle
 model. The standard library is Grandiose source built over the finite,
 manifest-bound machine-type, primitive, and host-import leaves specified here.

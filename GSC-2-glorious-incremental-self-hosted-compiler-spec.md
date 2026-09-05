@@ -14,9 +14,14 @@ This specification supersedes GSC-1. It rejects GSC-1's batch-core/optional-quer
 **September 5, 2026 amendment:** [Unsafe memory and the native/VM ABI](docs/unsafe-memory-and-native-abi.md)
 is an approved prerequisite. It supersedes the unsafe/raw-memory exclusion in
 section 13.2 and permanent algorithmic hashing/UTF-8/collection leaves in section
-13.4. Safe-only guest verification, trusted native library safe exports, and
-zero-marshalling compatible in-process values are targets. Existing artifact
-generations retain explicit compatibility; this is not an execution certificate.
+13.4. The chosen self-hosting path specializes the compiler and ordinary source
+libraries into bytecode, including unsafe raw-memory implementations, operating
+on host-compatible objects. Safe-only guest verification, trusted native library
+safe exports, and zero-marshalling compatible in-process values remain targets.
+The Glorious LLVM backend and native-precompiled Glorious std are deferred until
+after working, verified self-hosting; initial interop tests use native host ABI
+fixtures, not that backend. Existing artifact generations retain explicit
+compatibility; this is not an execution certificate.
 
 The required product is **a long-lived, demand-driven, incremental compiler database written from scratch in Glorious**. Command-line builds, inspection, IDE requests, tests, and self-compilation all use this database. Compactness comes from sharing algorithms, storage, and control—not from removing capabilities.
 
@@ -615,6 +620,14 @@ Preserve the source compiler's required candidate/verified API and execution hel
 
 The independent verifier checks bytes and runtime invariants, not source trait inference. Verification does not prove source semantics were compiled correctly; differential language tests remain necessary.
 
+Under the September 5 amendment, unsafe-enabled bytecode executes specialized
+source libraries over genuine host-compatible memory. The host selects this
+profile; structural verification does not turn unrestricted unsafe memory access
+into an in-process sandbox. Safe-only bytecode has separate fail-closed admission.
+The source compiler and library closure must run without a Glorious LLVM backend
+or native generic-specialization fallback. Runtime call bridges and native host
+ABI fixtures are permitted machine-boundary support, not compiler semantics.
+
 ### 12.3 G1 writer
 
 Collect canonical strings, nominal identities, structural types, constants, signatures, imports, protocols, handlers, functions, code, operands, cleanup tables, exports, and drop glue using the exact selected G1 version rules. Follow its ordering rules table by table; do not replace all of them with an arbitrary global sort. Compute the exact required feature bits.
@@ -652,7 +665,8 @@ Required substrate: growable vectors, immutable and unique slices, checked integ
 | Arrays/Vec/ByteBuf | All arenas and artifact construction | Measure growth, mutation, move semantics, per-element overhead |
 | Hashing and integer leaves | Stable identities, maps, codecs | Exact existing digest formulas and official test vectors |
 | Host transport/control | Argv, files, cancellation polling, diagnostics | Capability-bound bytes/handles only; source owns policy |
-| Arbitrary threads/unsafe/FFI/reflection/derive | Not required to implement this architecture | Do not add them merely for bootstrap convenience |
+| Raw memory, unsafe contracts, and native/VM ABI | Source-owned libraries and host-compatible specialized bytecode | Certify U0–U6; unsafe-enabled mode is not a memory sandbox; LLVM is deferred until after self-hosting |
+| Arbitrary threads/reflection/derive and broader foreign-language integrations | Not required to implement this architecture | Do not add them merely for bootstrap convenience |
 
 An unavailable authoring feature creates a **Stage0 capability issue** or a simpler source representation—not a reduced target-language feature and not permission to keep old compiler code.
 
@@ -791,6 +805,11 @@ Remove the old source implementation and active build references; keep history. 
 
 Build only the fresh storage/byte/collection tools and capability tests under C0. Exercise generic records, mutation, borrowed views, exact identity hashing, bounded readers, tail/state loops, and required host transport. Record physical VM costs.
 
+The approved U0–U6 prerequisite adds host-layout memory, independently admitted
+unsafe bytecode, and source library specialization/migration to this substrate.
+Actual VM/native interop uses explicit host fixtures. Do not require an LLVM
+backend, native Glorious std, or universally erased native generics to pass M1.
+
 **Exit:** every operation needed by the next milestone executes, not merely parses; no per-element unbounded allocation or copying surprise remains unmeasured; all Stage0 blockers have exact minimized cases. New lower-level support lives in the canonical library.
 
 ### M2 — Build the real incremental database first
@@ -829,6 +848,10 @@ Implement generic CFG construction, source storage, cleanup, checked mutation, a
 
 Implement the full Stage0 VM-facing source API and production G1 writer from versioned schemas. Exercise complete aggregate/reference/control/host paths through actual MIR rather than artifact templates.
 
+Include the selected versioned raw-memory and execution-profile contracts needed
+by source library bytecode; preserve older artifact meanings and fail closed on
+unknown features. The release path must not depend on native Glorious emission.
+
 **Exit:** both format-specific contract corpora pass their independent verifiers. Generic multi-function/multi-module programs execute with arrays, loops, labels, effects, diagnostics and capabilities. Emission is deterministic and schema-correct.
 
 ### M8 — Finish complete service and operational parity
@@ -840,6 +863,12 @@ Complete all modes, public query/inspection facades, persistent artifact cache, 
 ### M9 — Close the bootstrap loop
 
 Build the full new source closure using the format-aware bootstrap below. Require independent verification, predecessor evidence, full source-language and session-history conformance, and exact C2/C3 bytes.
+
+Run the compiler and selected std closure as bytecode, including specialized
+unsafe library implementations under explicit unsafe-enabled host policy. A
+native-precompiled Glorious std or LLVM backend is not a bootstrap prerequisite.
+After this working, verified self-hosting gate, LLVM may be implemented against
+the shared object/call ABI with separate native-versus-bytecode comparisons.
 
 **Exit:** the complete incremental compiler compiles itself. The artifact includes and tests the query/inspection/session APIs; convergence is not limited to a stripped batch-only tool.
 

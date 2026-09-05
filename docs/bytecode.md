@@ -4,6 +4,16 @@ The [unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md) defines futur
 versioned raw-memory, guest-safety, and shared-layout requirements. It does not
 reassign or weaken the existing G1 encodings and verifier contracts below.
 
+The selected extension must execute concrete source-library specializations,
+including unsafe memory operations, as bytecode over host-compatible storage.
+Host-selected unsafe-enabled execution is not an in-process memory sandbox;
+safe-only admission remains independently enforced. Shared native calls need
+target/layout and call/ownership contracts plus actual VM/host tests, not a
+Glorious LLVM backend. LLVM is deferred until after verified self-hosting.
+This decision allocates no opcode, feature bit, profile flag, or CLI switch.
+In particular, it does not reinterpret existing fixed-width `usize`/`isize`
+values or portable container fields as native pointer representations.
+
 Status: normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to
 be interpreted as requirements. Generation 1 is abbreviated G1.
 

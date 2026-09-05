@@ -1,24 +1,47 @@
-# Unsafe/native-library prerequisite
+# Host-compatible bytecode and unsafe-memory prerequisite
 
 Approved September 5, 2026. The binding direction is [unsafe memory and the
 native/VM ABI](../../docs/unsafe-memory-and-native-abi.md). This belongs to the
 whole compiler project, ahead of further specialized VM collection algorithms.
+The selected self-hosting path runs the compiler and source libraries, including
+specialized generics and unsafe internals, as bytecode over real host-compatible
+storage. The Glorious LLVM backend is deferred until after working, verified
+self-hosting; it is not needed to implement or certify the initial VM/host ABI.
 
 | Gate | Required result | Current state |
 |---|---|---|
-| U0 | Library ownership, unsafe obligations, guest/native trust boundary, shared representation requirements | Direction recorded; no execution claim |
+| U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Initial Rust substrate passes native and Miri tests; guest budget/admission integration remains |
 | U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Missing |
-| U3 | Versioned unsafe metadata/instructions; independent safe-only guest verification and authenticated native export admission | Missing |
-| U4 | Shared concrete layouts, allocator/drop/borrow ABI, actual VM/native roundtrips without marshalling | Missing |
-| U5 | Source `Vec`/slices over U1–U4; ownership, failure, performance, and backend comparisons | Missing |
-| U6 | Migrate strings/UTF-8/hashing and remaining collection algorithms out of specialized VM operations | Missing |
+| U3 | Versioned raw-memory bytecode and safety metadata; host-selected unsafe-enabled execution, independent safe-only verification, authenticated native export admission | Missing |
+| U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
+| U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
+| U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Missing |
 
 U1 alone does not expose pointers to Glorious programs. U2 without U3 cannot
 authorize unsafe bytecode or claim a safe-only sandbox. U4 must cross the actual
 runtime/native boundary, not only call a Rust helper with a pointer. Stage0
 programs and independent G1 artifacts have distinct contracts; implementation
 in one does not certify the other.
+
+Before self-hosting, U4 uses explicit ABI fixtures implemented by the native
+embedding host (for example Rust/C), not native-compiled Glorious std. Tests must
+run actual bytecode, preserve backing addresses and ownership, and exercise both
+call directions, including bytecode callbacks/drop glue. They cannot certify
+future LLVM output, which needs separate cross-backend tests after self-hosting.
+U5 must include application-defined noncopy and zero-size types; a type-erased
+native vector algorithm is not a substitute for specialized library bytecode.
+
+The unsafe-enabled profile permits genuine host-memory access and is not an
+in-process memory sandbox. The loader still checks structural validity, ABI
+compatibility, and host policy; it does not prove programmer-owned unsafe
+obligations or contain invalid raw writes. Safe-only admission remains a
+separate independently verified contract. No switch syntax is implemented yet.
+
+After U1–U6, complete the existing GSC-2 semantic/service and M9 self-host/C2/C3
+gates on the bytecode path. Only then implement the Glorious LLVM backend and
+compare native output against the shared ABI and bytecode execution. Recording
+this order does not close any outstanding M0–M10 compiler contract.
 
 ## U1: shared raw-storage substrate
 
