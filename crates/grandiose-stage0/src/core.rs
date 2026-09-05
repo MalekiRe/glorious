@@ -319,8 +319,8 @@ pub enum CallReferenceOrigin {
     Paths(Vec<CallReferencePath>),
     /// The result is an external/static reference with no caller loan.
     External,
-    /// A direct reference whose validity/lifetime is an unsafe callable
-    /// precondition, not a loan derived from a checked reference argument.
+    /// Reference validity/lifetimes (including nested/generic residents) are
+    /// unsafe callable preconditions, not checked input-loan derivations.
     Unsafe,
     /// Core could not prove a unique source region for a reference result.
     Opaque,
@@ -355,10 +355,15 @@ fn call_reference_shape(
     result: &Type,
     origin: &CallReferenceOrigin,
 ) -> CallReferenceShape {
+    // Unsafe reconstruction also covers references nested in records/enums or
+    // an abstract T returned by raw read. Validity of every such resident is
+    // the unsafe caller's obligation, not a fabricated checked input loan.
+    if matches!(origin, CallReferenceOrigin::Unsafe) {
+        return CallReferenceShape::Unsafe;
+    }
     let mut leaves = vec![];
     match reference_leaf_paths(signatures, result, &mut vec![], &mut leaves) {
         Ok(()) if leaves.is_empty() => CallReferenceShape::None,
-        Ok(()) if matches!(origin, CallReferenceOrigin::Unsafe) => CallReferenceShape::Unsafe,
         // A frozen generic contract still forwards its argument path when
         // that particular argument is static. Preserve the path contract
         // rather than pairing Paths provenance with an External-only shape.
@@ -2015,9 +2020,8 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
             return Some("only an unsafe callable can establish raw-reference provenance".into());
         };
         if !body.contains(*callee) { return None; }
-        if !matches!(body.expression(*callee).ty, Type::Callable { safety: crate::Safety::Unsafe, .. })
-            || !matches!(result, Type::Reference { .. }) {
-            return Some("raw-reference provenance requires an unsafe callable and a direct reference result".into());
+        if !matches!(body.expression(*callee).ty, Type::Callable { safety: crate::Safety::Unsafe, .. }) {
+            return Some("raw-reference provenance requires an unsafe callable".into());
         }
     }
     if let Some(contract) = callable_contract
@@ -10245,9 +10249,11 @@ impl Elaborator<'_> {
             callable_reference_origin_from_contract(self.signatures, &parameters, &result);
         let unsafe_reference_result = if safety == crate::Safety::Unsafe
             && matches!(reference_contract, CallReferenceOrigin::Opaque)
-            && matches!(result.as_ref(), Type::Reference { .. }) {
+        {
             reference_contract = CallReferenceOrigin::Unsafe;
-            Some(match expected { Some(Type::Reference { lifetime, .. }) => *lifetime, _ => Lifetime::Elided })
+            if matches!(result.as_ref(), Type::Reference { .. }) {
+                Some(match expected { Some(Type::Reference { lifetime, .. }) => *lifetime, _ => Lifetime::Elided })
+            } else { None }
         } else { None };
         let Ok((parameters, result, effects, lifetime_substitution)) =
             self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span, unsafe_reference_result)

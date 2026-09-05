@@ -2136,7 +2136,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// new unsafe facilities is deferred. Earlier payloads are not reinterpreted.
 /// Schema 95 adds raw-to-checked reference construction, retaining native
 /// storage identity across calls, reborrows, and checked dereferences.
-pub const STAGE0_VM_SCHEMA: u32 = 95;
+pub const STAGE0_VM_SCHEMA: u32 = 96;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -4142,7 +4142,7 @@ fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     }
 }
 fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-v24".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-v25".to_vec();
     encode_optional_digest(runtime_manifest, &mut bytes);
     encode_function(function, &mut bytes);
     Digest::of_bytes(&bytes)
@@ -4154,7 +4154,7 @@ fn program_fingerprint(
     functions: &BTreeMap<DefKey, VmFunction>,
     callable_environments: &BTreeMap<DefKey, VmCaptureEnvironment>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v25".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v26".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
     bytes.extend_from_slice(&(host_capabilities.len() as u64).to_le_bytes());

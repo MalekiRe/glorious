@@ -1098,6 +1098,7 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 })
             }))
             .chain(crate::MemoryPrimitive::ALL.into_iter().map(PrimitiveRole::Memory))
+            .chain([PrimitiveRole::Abort])
             .map(|role| PrimitiveSelector {
                 role,
                 module_path: "crate".into(),

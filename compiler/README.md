@@ -83,7 +83,7 @@ CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=8 \
   cargo test --workspace --all-targets
 ```
 
-The authoring artifact format is Stage0 program schema 95 (`G0VP`); release G1
+The authoring artifact format is Stage0 program schema 96 (`G0VP`); release G1
 bytes have a different schema and verifier. Development source tests cross the
 Stage0 encode/decode/verify boundary before execution. They do not certify G1.
 

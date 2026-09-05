@@ -26,10 +26,15 @@ pub enum MemoryPrimitive {
     CopyNonoverlapping,
     BorrowShared,
     BorrowUnique,
+    AsRawShared,
+    AsRawUnique,
+    CastConst,
+    StaticUtf8Address,
+    StaticBytesAddress,
 }
 
 impl MemoryPrimitive {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 23] = [
         Self::SizeOf,
         Self::AlignOf,
         Self::Null,
@@ -48,6 +53,11 @@ impl MemoryPrimitive {
         Self::CopyNonoverlapping,
         Self::BorrowShared,
         Self::BorrowUnique,
+        Self::AsRawShared,
+        Self::AsRawUnique,
+        Self::CastConst,
+        Self::StaticUtf8Address,
+        Self::StaticBytesAddress,
     ];
 
     pub const fn selector_name(self) -> &'static str {
@@ -70,6 +80,11 @@ impl MemoryPrimitive {
             Self::CopyNonoverlapping => "memory-copy-nonoverlapping",
             Self::BorrowShared => "memory-borrow-shared",
             Self::BorrowUnique => "memory-borrow-unique",
+            Self::AsRawShared => "memory-as-raw-shared",
+            Self::AsRawUnique => "memory-as-raw-unique",
+            Self::CastConst => "memory-cast-const",
+            Self::StaticUtf8Address => "memory-static-utf8-address",
+            Self::StaticBytesAddress => "memory-static-bytes-address",
         }
     }
 
@@ -112,6 +127,7 @@ impl MemoryPrimitive {
             Self::Offset => (1, vec![writable(t.clone()), count], writable(t)),
             Self::OffsetConst => (1, vec![readable(t.clone()), count], readable(t)),
             Self::Cast => (2, vec![writable(t)], writable(Type::Generic(1))),
+            Self::CastConst => (2, vec![readable(t)], readable(Type::Generic(1))),
             Self::AsConst => (1, vec![writable(t.clone())], readable(t)),
             Self::Read => (1, vec![readable(t.clone())], t),
             Self::Write => (1, vec![writable(t.clone()), t], Type::Unit),
@@ -138,6 +154,22 @@ impl MemoryPrimitive {
                         referent: Box::new(t),
                     },
                 )
+            }
+            Self::AsRawShared | Self::AsRawUnique => {
+                let unique = self == Self::AsRawUnique;
+                (1, vec![Type::Reference {
+                    mutability: if unique { Mutability::Unique } else { Mutability::Shared },
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(t.clone()),
+                }], if unique { writable(t) } else { readable(t) })
+            }
+            Self::StaticUtf8Address | Self::StaticBytesAddress => {
+                (0, vec![Type::StaticData {
+                    element: Box::new(Type::Scalar(ScalarType::U8)),
+                    tag: if self == Self::StaticUtf8Address { crate::STATIC_UTF8_DATA_TAG }
+                        else { crate::STATIC_RAW_U8_DATA_TAG },
+                    alignment: 1,
+                }], readable(Type::Scalar(ScalarType::U8)))
             }
         };
         CallableSignature {

@@ -4,6 +4,7 @@
 
 use super::{
     ExecutionBudget, MemoryPrimitive, Safety, VmArtifactError, VmFunction, VmType, VmValue,
+    VmNominalCopyDescriptor,
     expect_usize, value_matches_vm_type,
 };
 use grandiose_runtime::memory::{MemoryError, MemoryLayout, RawAllocation};
@@ -13,6 +14,11 @@ use std::{collections::BTreeMap, ptr, sync::Arc};
 pub(super) struct NativeMemory {
     allocations: BTreeMap<usize, RawAllocation>,
     live_bytes: usize,
+    descriptors: BTreeMap<super::DefKey, Arc<[VmNominalCopyDescriptor]>>,
+    /// Static-address leaves retain the original bytes, never an Array copy.
+    /// Source `'static` values live for this execution's module/data domain;
+    /// no public runner returns a reference beyond that domain.
+    static_data: BTreeMap<usize, Arc<[u8]>>,
 }
 
 fn memory_error(error: MemoryError) -> VmArtifactError {
@@ -131,6 +137,14 @@ struct NativeField {
 #[derive(Clone, Debug)]
 enum NativeShape {
     Scalar,
+    /// A checked reference is one genuine referent pointer in storage. Its
+    /// pointee layout is resolved lazily so indirection terminates recursive
+    /// layouts; the descriptor table is metadata, never resident bytes.
+    Reference {
+        referent: VmType,
+        unique: bool,
+        descriptors: Arc<[VmNominalCopyDescriptor]>,
+    },
     Product(Vec<NativeField>),
     Enum {
         payload_offset: usize,
@@ -222,13 +236,13 @@ impl NativeReference {
 
 fn product_layout(
     types: &[VmType],
-    function: &VmFunction,
+    descriptors: &Arc<[VmNominalCopyDescriptor]>,
     active: &mut Vec<VmType>,
 ) -> Result<(MemoryLayout, Vec<NativeField>), VmArtifactError> {
     let mut memory = MemoryLayout::of::<()>();
     let mut fields = Vec::with_capacity(types.len());
     for ty in types {
-        let layout = native_layout(ty, function, active)?;
+        let layout = native_layout(ty, descriptors, active)?;
         let (next, offset) = memory.extend(layout.memory).map_err(memory_error)?;
         memory = next;
         fields.push(NativeField { offset, layout });
@@ -238,7 +252,7 @@ fn product_layout(
 
 fn native_layout(
     ty: &VmType,
-    function: &VmFunction,
+    descriptors: &Arc<[VmNominalCopyDescriptor]>,
     active: &mut Vec<VmType>,
 ) -> Result<NativeLayout, VmArtifactError> {
     if active.len() >= 96 || active.contains(ty) {
@@ -261,9 +275,20 @@ fn native_layout(
         }
         VmType::U128 | VmType::I128 => MemoryLayout::of::<u128>(),
         VmType::RawPointer { .. } => MemoryLayout::of::<*mut u8>(),
+        VmType::Reference { unique, referent } => {
+            return Ok(NativeLayout {
+                ty: ty.clone(),
+                memory: MemoryLayout::of::<*mut u8>(),
+                shape: NativeShape::Reference {
+                    referent: (**referent).clone(),
+                    unique: *unique,
+                    descriptors: descriptors.clone(),
+                },
+            });
+        }
         VmType::Tuple(types) => {
             active.push(ty.clone());
-            let (memory, fields) = product_layout(types, function, active)?;
+            let (memory, fields) = product_layout(types, descriptors, active)?;
             active.pop();
             return Ok(NativeLayout {
                 ty: ty.clone(),
@@ -271,14 +296,16 @@ fn native_layout(
                 shape: NativeShape::Product(fields),
             });
         }
-        VmType::Nominal { .. } => {
-            let descriptor = super::nominal_layout_descriptor(function, ty)?;
+        VmType::Nominal { definition, arguments } => {
+            let descriptor = descriptors.iter().find(|descriptor| {
+                descriptor.definition == *definition && descriptor.arguments == *arguments
+            }).ok_or_else(|| error("native nominal has no frozen layout descriptor"))?;
             active.push(ty.clone());
             let shape_and_memory = if descriptor.is_enum {
                 let mut variants = Vec::with_capacity(descriptor.variants.len());
                 let (mut payload_size, mut payload_align) = (0, 1);
                 for variant in &descriptor.variants {
-                    let (layout, fields) = product_layout(variant, function, active)?;
+                    let (layout, fields) = product_layout(variant, descriptors, active)?;
                     payload_size = payload_size.max(layout.size());
                     payload_align = payload_align.max(layout.alignment());
                     variants.push(fields);
@@ -301,7 +328,7 @@ fn native_layout(
                         "record native layout must have exactly one field list",
                     ));
                 };
-                let (layout, fields) = product_layout(fields, function, active)?;
+                let (layout, fields) = product_layout(fields, descriptors, active)?;
                 (layout, NativeShape::Product(fields))
             };
             active.pop();
@@ -311,7 +338,7 @@ fn native_layout(
                 shape: shape_and_memory.1,
             });
         }
-        // Borrowed/callable/legacy collection values need the full stable
+        // Callable/legacy collection values need the full stable
         // address/call ABI. Never serialize their Rust/VM handles into memory
         // and misrepresent that as a host-compatible Glorious payload.
         _ => return Err(VmArtifactError::UnsupportedNativeLayout { ty: ty.clone() }),
@@ -339,6 +366,23 @@ impl NativeLayout {
             };
         }
         match &self.shape {
+            NativeShape::Reference { referent, unique, descriptors } => {
+                // SAFETY: an initialized reference resident stores a genuine
+                // pointer; reading it as a pointer retains its provenance.
+                let pointer = unsafe { source.cast::<*mut u8>().read() };
+                let layout = native_layout(referent, descriptors, &mut vec![])?;
+                if pointer.is_null() || pointer.addr() % layout.memory.alignment() != 0 {
+                    return Err(error("native reference resident is null or misaligned"));
+                }
+                Ok(VmValue::Reference {
+                    target: super::ReferenceTarget::Native(NativeReference {
+                        pointer, layout: Arc::new(layout),
+                    }),
+                    fields: Arc::from([]),
+                    unique: *unique,
+                    referent: referent.clone(),
+                })
+            }
             NativeShape::Product(fields) => {
                 budget.reserve_value("native resident fields", fields.len())?;
                 let values = fields
@@ -428,6 +472,21 @@ impl NativeLayout {
             return Err(error("native write value does not match concrete type"));
         }
         match (&self.shape, value) {
+            (
+                NativeShape::Reference { referent, .. },
+                VmValue::Reference { target: super::ReferenceTarget::Native(native), fields, .. },
+            ) => {
+                let native = native.project(&fields)?;
+                if native.ty() != referent {
+                    return Err(error("native reference resident has a different referent layout"));
+                }
+                // SAFETY: destination is an aligned reference slot and the
+                // checked source reference supplies the actual referent pointer.
+                unsafe { destination.cast::<*mut u8>().write(native.pointer); }
+            }
+            (NativeShape::Reference { .. }, VmValue::Reference { .. }) => {
+                return Err(error("frame reference must have native-addressable storage before raw residency"));
+            }
             (
                 NativeShape::Product(fields),
                 VmValue::Tuple(values) | VmValue::Record { fields: values, .. },
@@ -544,7 +603,9 @@ pub(super) fn execute_memory_intrinsic(
     let block_limit =
         usize::try_from(budget.limits.max_native_allocation_bytes).unwrap_or(usize::MAX);
     let total_limit = usize::try_from(budget.limits.max_native_bytes).unwrap_or(usize::MAX);
-    let layout = |index| native_layout(&types[index], function, &mut vec![]);
+    let descriptors = budget.native_memory.descriptors.entry(function.definition)
+        .or_insert_with(|| function.nominal_copy_descriptors.clone().into()).clone();
+    let layout = |index| native_layout(&types[index], &descriptors, &mut vec![]);
     let (_, signature) = super::memory_intrinsic_signature(primitive, types)?;
     let result_pointer = |pointer| VmValue::RawPointer {
         pointer,
@@ -601,7 +662,26 @@ pub(super) fn execute_memory_intrinsic(
                 unsafe { ptr_arg(0)?.add(bytes) }
             })
         }
-        Cast | AsConst => result_pointer(ptr_arg(0)?),
+        Cast | CastConst | AsConst => result_pointer(ptr_arg(0)?),
+        AsRawShared | AsRawUnique => {
+            let VmValue::Reference { target: super::ReferenceTarget::Native(native), fields, .. }
+                = arg(0)? else {
+                    return Err(error("reference needs native-addressable storage before exposing its pointer"));
+                };
+            result_pointer(native.project(fields)?.pointer)
+        }
+        StaticUtf8Address | StaticBytesAddress => {
+            let (bytes, offset, length) = super::expect_static_utf8(arg(0)?)?;
+            let end = offset.checked_add(length).ok_or_else(|| error("static byte window overflow"))?;
+            if bytes.get(offset..end).is_none() {
+                return Err(error("static byte window exceeds its backing storage"));
+            }
+            // SAFETY: the checked window is within the retained immutable byte
+            // allocation; a zero-length endpoint never dereferences its pointer.
+            let pointer = unsafe { bytes.as_ptr().add(offset) };
+            budget.native_memory.static_data.entry(bytes.as_ptr().addr()).or_insert(bytes);
+            result_pointer(pointer.cast_mut())
+        }
         BorrowShared | BorrowUnique => {
             let layout = layout(0)?;
             let pointer = ptr_arg(0)?;
@@ -665,6 +745,34 @@ pub(super) fn execute_memory_intrinsic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checked_reference_resident_is_one_actual_native_pointer() {
+        let descriptors = Arc::from([]);
+        let layout = native_layout(&VmType::Reference {
+            unique: true, referent: Box::new(VmType::I64),
+        }, &descriptors, &mut vec![]).unwrap();
+        assert_eq!(layout.memory, MemoryLayout::of::<*mut i64>());
+        let mut value = 40i64;
+        let pointer = &raw mut value;
+        let reference = VmValue::Reference {
+            target: super::super::ReferenceTarget::Native(NativeReference {
+                pointer: pointer.cast(),
+                layout: Arc::new(native_layout(&VmType::I64, &descriptors, &mut vec![]).unwrap()),
+            }),
+            fields: Arc::from([]), unique: true, referent: VmType::I64,
+        };
+        let mut resident = std::mem::MaybeUninit::<*mut i64>::uninit();
+        // SAFETY: one correctly aligned writable reference slot; its referent
+        // is the live local above, exclusively accessed through this pointer.
+        unsafe {
+            layout.write(resident.as_mut_ptr().cast(), reference).unwrap();
+            let stored = resident.assume_init();
+            assert_eq!(stored, pointer);
+            *stored += 2;
+        }
+        assert_eq!(value, 42);
+    }
 
     #[test]
     fn rejected_resizes_keep_the_registered_owner_and_initialized_prefix() {

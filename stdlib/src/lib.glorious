@@ -14,6 +14,7 @@ pub impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}
 // lifetimes. All pointer operations require explicit unsafe source scopes;
 // their exact signatures/identities are bound by the runtime manifest. A trailing
 // semicolon declares an externally supplied implementation, not a stub body.
+__g1_abort() -> !;
 __g1_memory_size_of<T>() -> usize;
 __g1_memory_align_of<T>() -> usize;
 unsafe fn __g1_memory_null<T>() -> *mut T;
@@ -32,6 +33,11 @@ unsafe fn __g1_memory_copy<T>(source: *const T, destination: *mut T, count: usiz
 unsafe fn __g1_memory_copy_nonoverlapping<T>(source: *const T, destination: *mut T, count: usize) -> ();
 unsafe fn __g1_memory_borrow_shared<'a, T>(pointer: *const T) -> &'a T;
 unsafe fn __g1_memory_borrow_unique<'a, T>(pointer: *mut T) -> &'a mut T;
+unsafe fn __g1_memory_as_raw_shared<T>(value: &T) -> *const T;
+unsafe fn __g1_memory_as_raw_unique<T>(value: &mut T) -> *mut T;
+unsafe fn __g1_memory_cast_const<T, U>(pointer: *const T) -> *const U;
+unsafe fn __g1_memory_static_utf8_address(value: __StaticData<Utf8Bytes>) -> *const u8;
+unsafe fn __g1_memory_static_bytes_address(value: __StaticData<u8>) -> *const u8;
 
 // Trusted array leaves. Their exact declaration identities are bound only
 // when the compiler supplies this package; copied source spellings have no VM

@@ -26,6 +26,53 @@ const DECLARATIONS: &str = r#"
     unsafe fn copy_nonoverlapping<T>(source: *const T, destination: *mut T, count: usize) -> ();
     unsafe fn borrow_shared<'a, T>(pointer: *const T) -> &'a T;
     unsafe fn borrow_unique<'a, T>(pointer: *mut T) -> &'a mut T;
+    unsafe fn as_raw_shared<T>(value: &T) -> *const T;
+    unsafe fn as_raw_unique<T>(value: &mut T) -> *mut T;
+    unsafe fn cast_const<T, U>(pointer: *const T) -> *const U;
+"#;
+
+const NATIVE_VIEWS: &str = r#"
+    enum Maybe<T> { None, Some(T) }
+    struct Owner<T> { pointer: *mut T, length: usize }
+    impl<T> Use<[0, 1]> for Owner<T> {}
+    // The zero-sized referent carries the owner loan; the reference's actual
+    // pointer is the data address. No extra pointer or phantom runtime field.
+    struct Window<'a, T> { storage: &'a (), length: usize }
+    struct WindowMut<'a, T> { storage: &'a mut (), length: usize }
+    fn window<'a, T>(owner: &'a Owner<T>) -> Window<'a, T> {
+        unsafe {
+            Window<'a, T> { storage: borrow_shared(cast_const<T, ()>(as_const(owner.pointer))), length: owner.length }
+        }
+    }
+    fn window_mut<'a, T>(owner: &'a mut Owner<T>) -> WindowMut<'a, T> {
+        unsafe {
+            WindowMut<'a, T> { storage: borrow_unique(cast<T, ()>(owner.pointer)), length: owner.length }
+        }
+    }
+    fn first<'a, T>(value: Window<'a, T>) -> Maybe<&'a T> {
+        handle value.length {
+            0 => Maybe::None,
+            _ => unsafe { Maybe::Some(borrow_shared(cast_const<(), T>(as_raw_shared(value.storage)))) },
+        }
+    }
+    fn first_mut<'a, T>(value: WindowMut<'a, T>) -> Maybe<&'a mut T> {
+        handle value.length {
+            0 => Maybe::None,
+            _ => unsafe { Maybe::Some(borrow_unique(cast<(), T>(as_raw_unique(value.storage)))) },
+        }
+    }
+    fn split<'a, T>(value: WindowMut<'a, T>, index: usize) -> Maybe<(WindowMut<'a, T>, WindowMut<'a, T>)> {
+        handle index <= value.length {
+            false => Maybe::None,
+            true => unsafe {
+                let pointer = cast<(), T>(as_raw_unique(value.storage));
+                Maybe::Some((
+                    WindowMut<'a, T> { storage: borrow_unique(cast<T, ()>(pointer)), length: index },
+                    WindowMut<'a, T> { storage: borrow_unique(cast<T, ()>(offset(pointer, index))), length: value.length - index },
+                ))
+            },
+        }
+    }
 "#;
 
 fn request(source: &str) -> CompilationRequest {
@@ -47,6 +94,9 @@ fn request(source: &str) -> CompilationRequest {
             standard_library: package,
             selectors: MemoryPrimitive::ALL
                 .into_iter()
+                // Static-data spellings are sealed to canonical std. Their
+                // address leaves are exercised by the standard-library suite.
+                .filter(|primitive| !matches!(primitive, MemoryPrimitive::StaticUtf8Address | MemoryPrimitive::StaticBytesAddress))
                 .map(|primitive| PrimitiveSelector {
                     role: PrimitiveRole::Memory(primitive),
                     module_path: "crate".into(),
@@ -102,6 +152,108 @@ fn source_defined_ownership_markers_have_zero_layout_and_preserve_owner_moves() 
         }}
     "#);
     let error = StageZeroCompiler::new().compile(request(&rejected)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code.starts_with("G50")), "{error:#?}");
+}
+
+#[test]
+fn native_reference_residents_store_actual_referent_pointers_and_write_through() {
+    let program = compile(r#"
+        struct Borrowed<'a> { value: &'a mut i64, suffix: u8 }
+        fn increment(value: &mut Borrowed<'_>) -> () {
+            *value.value = *value.value + 1;
+        }
+        pub fn main() -> i64 {
+            unsafe {
+                let bytes = allocate(size_of<i64>(), align_of<i64>());
+                let pointer = cast<u8, i64>(bytes);
+                write(pointer, 40);
+                let record_bytes = allocate(size_of<Borrowed<'_>>(), align_of<Borrowed<'_>>());
+                let record_pointer = cast<u8, Borrowed<'_>>(record_bytes);
+                write(record_pointer, Borrowed { value: borrow_unique(pointer), suffix: 1 });
+                increment(borrow_unique(record_pointer));
+                let moved = read(as_const(record_pointer));
+                let result = *moved.value + 1;
+                deallocate(record_bytes, size_of<Borrowed<'_>>(), align_of<Borrowed<'_>>());
+                deallocate(bytes, size_of<i64>(), align_of<i64>());
+                result
+            }
+        }
+    "#);
+    // SAFETY: the two exact allocations remain live throughout all references;
+    // the unique resident is moved once, its last access precedes both releases.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 42);
+}
+
+#[test]
+fn reference_indirection_terminates_recursive_native_layouts() {
+    let program = compile(r#"
+        enum Link<'a> { End, Next(&'a Node<'a>) }
+        struct Node<'a> { value: i64, next: Link<'a> }
+        pub fn main() -> i64 {
+            unsafe {
+                let first_bytes = allocate(size_of<Node<'_>>(), align_of<Node<'_>>());
+                let first = cast<u8, Node<'_>>(first_bytes);
+                write(first, Node { value: 40, next: Link::End });
+                let second_bytes = allocate(size_of<Node<'_>>(), align_of<Node<'_>>());
+                let second = cast<u8, Node<'_>>(second_bytes);
+                write(second, Node { value: 2, next: Link::Next(borrow_shared(as_const(first))) });
+                let node = read(as_const(second));
+                let result = handle node.next {
+                    Link::End => 0,
+                    Link::Next(previous) => previous.value + node.value,
+                };
+                deallocate(second_bytes, size_of<Node<'_>>(), align_of<Node<'_>>());
+                deallocate(first_bytes, size_of<Node<'_>>(), align_of<Node<'_>>());
+                result
+            }
+        }
+    "#);
+    // SAFETY: the linked nodes are fully initialized, their shared link stays
+    // live until its last read, and both exact owners are subsequently released.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 42);
+}
+
+#[test]
+fn source_native_views_keep_owner_loans_and_split_disjoint_mutable_windows() {
+    let source = format!(r#"{NATIVE_VIEWS}
+        pub fn main() -> i64 {{
+            unsafe {{
+                let bytes = allocate(2 * size_of<i64>(), align_of<i64>());
+                let pointer = cast<u8, i64>(bytes);
+                write(pointer, 40);
+                write(offset(pointer, 1), 0);
+                let owner = Owner {{ pointer: pointer, length: 2 }};
+                let result = handle split(window_mut(&mut owner), 1) {{
+                    Maybe::None => 0,
+                    Maybe::Some((left, right)) => handle first_mut(left) {{
+                        Maybe::None => 0,
+                        Maybe::Some(a) => handle first_mut(right) {{
+                            Maybe::None => 0,
+                            Maybe::Some(b) => {{ *a = *a + 1; *b = 1; *a + *b }},
+                        }},
+                    }},
+                }};
+                deallocate(bytes, 2 * size_of<i64>(), align_of<i64>());
+                handle size_of<Window<'_, i64>>() {{ 16 => result, _ => 0 }}
+            }}
+        }}
+    "#);
+    let program = compile(&source);
+    // SAFETY: both initialized elements stay allocated throughout the owner
+    // loan, and checked source splitting produces disjoint mutable windows.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 42);
+
+    let invalid = format!(r#"{NATIVE_VIEWS}
+        pub fn bad(owner: &mut Owner<i64>) -> () {{
+            let borrowed = window(&*owner);
+            window_mut(owner);
+            first(borrowed);
+        }}
+        pub fn main() -> i64 {{ 42 }}
+    "#);
+    let mut input = request(&invalid);
+    input.mode = CompilationMode::Check;
+    let error = StageZeroCompiler::new().compile(input).unwrap_err();
     assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code.starts_with("G50")), "{error:#?}");
 }
 

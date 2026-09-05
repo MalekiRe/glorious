@@ -7847,6 +7847,15 @@ impl MirFunction {
                         *expected = *lifetime;
                     }
                 }
+                if matches!(primitive, crate::MemoryPrimitive::AsRawShared | crate::MemoryPrimitive::AsRawUnique)
+                    && let ([parameter], [argument]) = (signature.parameters.as_mut_slice(), arguments.as_slice())
+                    && let (Type::Reference { lifetime: expected, .. }, Type::Reference { lifetime, .. }) =
+                        (parameter, &self.locals[argument.0 as usize].ty)
+                {
+                    // Address extraction does not rebind or extend this loan.
+                    // Its exact permission/referent remain checked below.
+                    *expected = *lifetime;
+                }
                 if arguments.len() != signature.parameters.len()
                     || self.locals[dst.0 as usize].ty != signature.result
                     || arguments.iter().zip(&signature.parameters)

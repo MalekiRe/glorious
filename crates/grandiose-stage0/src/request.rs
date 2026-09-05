@@ -87,12 +87,14 @@ pub struct CompilerBuildIdentity {
 /// origins and frame-neutral native references over raw storage.
 /// Cache eight instantiates conditional principal ownership and forwards
 /// bounded quantity binders for source-defined zero-sized ownership markers.
+/// Cache nine, bytecode 51 and verifier ten add native reference residents,
+/// unsafe aggregate-reference origins and native/static address leaves.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 2;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 2;
-pub const STAGE0_CACHE_GENERATION: u32 = 8;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 50;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 9;
+pub const STAGE0_CACHE_GENERATION: u32 = 9;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 51;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 10;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

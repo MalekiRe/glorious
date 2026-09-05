@@ -33,6 +33,36 @@ fn request(application: &str) -> CompilationRequest {
 }
 
 #[test]
+fn native_static_addresses_keep_exact_literal_bytes_after_the_leaf_returns() {
+    let mut input = request("use std::*; pub fn main() -> i64 { native_static_address_fixture() }");
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler.import_revision(input.clone(), None).unwrap();
+    // Augmented std intentionally does not receive automatic trusted bindings.
+    // This test explicitly carries forward the unmodified distribution's exact
+    // manifest; the added fixture itself receives no extra authority.
+    input.runtime_manifest = compiler.open_session(revision).unwrap()
+        .snapshot().world().runtime_manifest.clone();
+    let source = format!(r#"{}
+        fn native_literal_reference() -> &'static u8 {{
+            unsafe {{ __g1_memory_borrow_shared(__g1_memory_static_utf8_address("*")) }}
+        }}
+        pub fn native_static_address_fixture() -> i64 {{
+            let reference = native_literal_reference();
+            unsafe {{
+                let raw = __g1_memory_static_bytes_address(b"\x00\xff");
+                let last = __g1_memory_read(__g1_memory_offset_const(raw, 1));
+                handle last == 255 {{ true => as<i64>(*reference), false => 0 }}
+            }}
+        }}
+    "#, include_str!("../../../stdlib/src/lib.glorious"));
+    input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes());
+    let program = compiler.compile(input).unwrap().artifact.unwrap();
+    // SAFETY: the source fixture reads in-range immutable literal bytes only;
+    // native-address roots retain them for the entire execution domain.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits::default()) }.unwrap(), 42);
+}
+
+#[test]
 fn standard_prelude_and_source_defined_control_are_importable() {
     let outcome = StageZeroCompiler::new()
         .compile(request(

@@ -200,3 +200,8 @@ memory-copy	197
 memory-copy-nonoverlapping	198
 memory-borrow-shared	199
 memory-borrow-unique	200
+memory-as-raw-shared	201
+memory-as-raw-unique	202
+memory-cast-const	203
+memory-static-utf8-address	204
+memory-static-bytes-address	205

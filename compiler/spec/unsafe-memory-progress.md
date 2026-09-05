@@ -19,8 +19,8 @@ alone is not proof that unsafe code is sound.
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Rust substrate plus Stage0 per-run total/per-block memory accounting implemented; resident cleanup remains source-owned |
-| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 18 bodyless machine leaves, including unsafe construction of checked references, implemented |
-| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Initial Stage0 schema 95 executes raw memory and native references for scalar/pointer/product/enum residents; independent G1 extension remains; untrusted-bytecode admission deferred |
+| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 23 bodyless memory leaves, including reference construction/address extraction, implemented |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Initial Stage0 schema 96 executes raw memory for scalar/pointer/product/enum and native-reference residents, with native/static address leaves; independent G1 extension remains; untrusted-bytecode admission deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
 | U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Missing |
@@ -307,3 +307,39 @@ library, 22 request/revision and four conditional-Drop service tests. The new so
 fixture executes a zero-sized marker and rejects owner reuse after a move. Rust and
 source cache generation is eight; bytecode/verifier remain 50/nine. Vec migration,
 native representation of all resident types and VM/native calls are still open.
+
+## Native reference residents and two-word source views
+
+Stage0 schema 96 stores a native-backed checked reference as exactly one actual
+referent pointer. Typed loads recover its checked-reference metadata; fields,
+mutation and relocation keep accessing the original referent. Pointee layout is
+resolved lazily, so a reference terminates recursive value layout. Raw reads may
+establish unsafe provenance for nested references or abstract `T`, not only a
+direct reference result. Only an unsafe callable can establish this origin;
+safe calls still require their existing frozen caller-region evidence.
+
+Five additional bodyless leaves expose shared/unique native reference addresses,
+cast const pointees, and expose sealed UTF-8/raw-byte literal addresses (authority
+tags 201–205). Literal addresses retain their original immutable backing bytes
+for the execution's data domain. They do not copy bytes into legacy arrays. A
+legacy frame-backed reference still fails raw residency/address extraction until
+its referent has real native-addressable storage; no Rust handle is substituted
+for that address. Cross-execution reference retention is not exposed by these
+runner APIs and remains part of the full module/host ownership ABI work.
+
+A source fixture now implements two-word checked views using `&'a ()` or
+`&'a mut ()` plus a length. The zero-sized referent reference carries the owner
+loan and the actual data pointer. Unsafe source operations recover its typed
+data pointer; safe bounds/splitting policy stays in source. The fixture verifies
+16-byte layout, disjoint mutable splitting and write-through, and rejects owner
+mutation while a shared view is live. This is a tested source representation,
+not yet the canonical standard-library `Slice` migration. A Rust unit test
+independently checks that reference storage contains the original pointer.
+
+The canonical library also binds the existing catchless `abort() -> !` leaf
+with a bodyless declaration for allocation-policy failures. No new abort opcode
+or collection algorithm is introduced. Runtime authority inventory is 206 in
+Rust, source and the shared witness; cache/bytecode/verifier generations are
+nine/51/ten. Native register homes, callable residents, complete ownership/drop
+handoff and actual VM/native call fixtures remain open alongside the source
+collection migration.

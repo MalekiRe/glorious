@@ -4141,15 +4141,29 @@ mod tests {
 
     #[test]
     fn fresh_query_retains_its_frozen_interface_not_later_mutations() {
-        let key = DefKey(Digest::of_bytes(b"frozen-constant"));
+        let key = DefKey(Digest::of_bytes(b"frozen-nominal-layout"));
+        let layout = |ty| ElaboratedHeader::Nominal {
+            generics: 0, generic_kinds: vec![],
+            layout: ElaboratedNominalLayout::Struct(vec![crate::NominalField {
+                name: "field".into(), ty, private_authority: None,
+            }]),
+        };
+        let initial = layout(Type::Scalar(ScalarType::I64));
+        let changed = layout(Type::Reference {
+            lifetime: crate::Lifetime::Elided, mutability: crate::Mutability::Unique,
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        });
         let mut signatures = ElaboratedInterface::default();
-        signatures.definitions.insert(key, ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::I64))));
+        signatures.definitions.insert(key, initial.clone());
         let original = TraitSolver::new(&signatures);
-        signatures.definitions.insert(key, ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::F32))));
+        signatures.definitions.insert(key, changed.clone());
         let fresh = original.fresh_query();
-        assert_eq!(fresh.definitions.get(&key), Some(&ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::I64)))));
+        assert_eq!(fresh.definitions.get(&key), Some(&initial));
         let updated = TraitSolver::new(&signatures);
-        assert_eq!(updated.definitions.get(&key), Some(&ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::F32)))));
+        assert_eq!(updated.definitions.get(&key), Some(&changed));
+        let nominal = Type::Nominal { definition: key, arguments: vec![] };
+        assert_eq!(fresh.principal_use_with_assumptions(&nominal, &[]), Some(crate::Quantity::UNRESTRICTED));
+        assert_eq!(updated.principal_use_with_assumptions(&nominal, &[]), Some(crate::Quantity::AFFINE));
     }
 
     #[test]

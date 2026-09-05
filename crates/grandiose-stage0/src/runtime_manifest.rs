@@ -2587,15 +2587,15 @@ mod tests {
             }
         }
         roles.extend(MemoryPrimitive::ALL.into_iter().map(PrimitiveRole::Memory));
-        assert_eq!(roles.len(), 201);
-        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 201);
+        assert_eq!(roles.len(), 206);
+        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 206);
         let mut tags = BTreeMap::new();
         for role in roles {
             assert_eq!(PrimitiveRole::parse_selector_name(role.selector_name()), Some(role));
             let previous = tags.insert(role.stable_tag(), role);
             assert!(previous.is_none(), "runtime tag {} aliases {previous:?} and {role:?}", role.stable_tag());
         }
-        assert_eq!(tags.keys().copied().collect::<Vec<_>>(), (0..=200).collect::<Vec<u8>>());
+        assert_eq!(tags.keys().copied().collect::<Vec<_>>(), (0..=205).collect::<Vec<u8>>());
         // Shared immutable witnesses for the source-owned role comparator.
         // Check exact tags here, where the native private encoding is visible;
         // the source fixture separately executes its own metadata functions.
