@@ -24,11 +24,13 @@ two native embedding tests also pass Miri's strict-provenance checks. It provide
 aligned uninitialized allocations and explicit ownership handoff. U2 includes raw-pointer types,
 explicit unsafe scopes, unsafe callable/trait contracts, and source-independent
 Core/MIR checks, with 22 focused tests. Callable safety stays separate from the
-unsafe-execution requirement, including on lifted bodies. Stage0 schema 94 now
-executes 16 bodyless machine leaves over actual host memory, with per-run byte
-budgets and explicit unsafe Rust execution entry points. Nine source tests cover
+unsafe-execution requirement, including on lifted bodies. Stage0 schema 95 now
+executes 18 bodyless machine leaves over actual host memory, including native-backed
+checked references, with per-run byte budgets and explicit unsafe Rust execution
+entry points. Twelve source tests cover
 generic linear and zero-size residents, padded records/enums, movement, resizing,
-and pointer provenance. Full native references/calls, the independent G1 extension,
+pointer provenance, projected mutation and returned safe owner loans. Full shared
+addressable value storage/calls, the independent G1 extension,
 source Vec and U4–U6 remain open; this is not a complete native/VM ABI.
 The preceding unsafe-contract workspace checkpoint passes 2,491 tests (two existing ignored
 manual benchmarks), 122.429 seconds wall including build; all 48 source entries

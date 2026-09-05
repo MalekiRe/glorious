@@ -19,8 +19,8 @@ alone is not proof that unsafe code is sound.
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Rust substrate plus Stage0 per-run total/per-block memory accounting implemented; resident cleanup remains source-owned |
-| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 16 bodyless machine leaves implemented; raw-to-safe reference construction remains |
-| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Initial Stage0 schema 94 executes general raw memory for scalar/pointer/product/enum layouts; independent G1 extension remains; untrusted-bytecode admission deferred |
+| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 18 bodyless machine leaves, including unsafe construction of checked references, implemented |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Initial Stage0 schema 95 executes raw memory and native references for scalar/pointer/product/enum residents; independent G1 extension remains; untrusted-bytecode admission deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
 | U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Missing |
@@ -253,3 +253,32 @@ including all 48 source-compiler entries (69.78 seconds). The 13 allocator tests
 completed under strict-provenance Miri. The full source/interpreter Miri run was
 stopped at the user's request to prioritize implementation; it is not claimed
 as completed evidence. Further Miri runs are deferred unless needed for a bug.
+
+## Native-backed checked references
+
+Stage0 schema 95 adds two bodyless unsafe constructors, `memory-borrow-shared`
+and `memory-borrow-unique` (tags 199–200). They retain a real storage pointer and
+out-of-band layout metadata, not a snapshot of the resident. Checked projections,
+loads/stores, nested calls and returned references operate on the original
+allocation. A native reference does not need lexical register rebasing or
+capture-time value reconstruction. Null and misaligned construction fails;
+remaining validity, initialization, aliasing and selected-lifetime obligations
+belong to the unsafe caller.
+
+Core distinguishes unsafe-established reference provenance from both static
+references and ordinary caller-derived loans. Only an unsafe callable with a
+direct reference result can carry this provenance. Its otherwise-unbound output
+lifetime can be selected by the result context; ordinary argument-derived
+lifetimes still take precedence. Safe wrappers continue to expose the frozen
+borrow relation from their parameters. Nested calls now open the outer callee's
+parameter regions without treating them as rigid body lifetimes; the outer call
+still jointly checks its arguments. Cache/bytecode/verifier generations are
+seven/50/nine in Rust and source.
+
+The raw-memory integration group has 12 tests, adding projected mutation through
+nested calls, reference-return storage identity, and rejection of extended or
+overlapping safe owner loans. The 236 Core tests and 22 unsafe-contract tests
+pass with the lifetime change. No further Miri run was started. This is not yet
+native layout for every VM register value or a complete VM/native call bridge;
+storing legacy frame references, callable payloads, and old collection handles
+in raw residents still requires that work. Source Vec and cleanup remain next.

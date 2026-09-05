@@ -21,6 +21,7 @@ pub enum FloatPrimitive {
 pub enum MemoryPrimitive {
     SizeOf, AlignOf, Null, Dangling, Allocate, Reallocate, Deallocate, IsNull,
     Offset, OffsetConst, Cast, AsConst, Read, Write, Copy, CopyNonoverlapping,
+    BorrowShared, BorrowUnique,
 }
 fn memory_ordinal(value: MemoryPrimitive) -> usize {
     handle value {
@@ -32,6 +33,7 @@ fn memory_ordinal(value: MemoryPrimitive) -> usize {
         MemoryPrimitive::Cast => 10, MemoryPrimitive::AsConst => 11,
         MemoryPrimitive::Read => 12, MemoryPrimitive::Write => 13,
         MemoryPrimitive::Copy => 14, MemoryPrimitive::CopyNonoverlapping => 15,
+        MemoryPrimitive::BorrowShared => 16, MemoryPrimitive::BorrowUnique => 17,
     }
 }
 fn memory_name(value: MemoryPrimitive) -> Str<'static> {
@@ -44,6 +46,7 @@ fn memory_name(value: MemoryPrimitive) -> Str<'static> {
         MemoryPrimitive::Cast => "memory-cast", MemoryPrimitive::AsConst => "memory-as-const",
         MemoryPrimitive::Read => "memory-read", MemoryPrimitive::Write => "memory-write",
         MemoryPrimitive::Copy => "memory-copy", MemoryPrimitive::CopyNonoverlapping => "memory-copy-nonoverlapping",
+        MemoryPrimitive::BorrowShared => "memory-borrow-shared", MemoryPrimitive::BorrowUnique => "memory-borrow-unique",
     }
 }
 pub enum PrimitiveRole {

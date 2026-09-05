@@ -2457,7 +2457,7 @@ impl Analyzer<'_> {
     fn external_reference_path(&self, id: CoreId) -> bool {
         match &self.body.expression(id).kind {
             CoreKind::Call {
-                reference_origin: CallReferenceOrigin::External,
+                reference_origin: CallReferenceOrigin::External | CallReferenceOrigin::Unsafe,
                 ..
             }
             | CoreKind::Perform {

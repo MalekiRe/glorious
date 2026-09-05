@@ -7,7 +7,7 @@ use super::{
     expect_usize, value_matches_vm_type,
 };
 use grandiose_runtime::memory::{MemoryError, MemoryLayout, RawAllocation};
-use std::{collections::BTreeMap, ptr};
+use std::{collections::BTreeMap, ptr, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct NativeMemory {
@@ -122,13 +122,13 @@ impl NativeMemory {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct NativeField {
     offset: usize,
     layout: NativeLayout,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum NativeShape {
     Scalar,
     Product(Vec<NativeField>),
@@ -138,11 +138,86 @@ enum NativeShape {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct NativeLayout {
     ty: VmType,
     memory: MemoryLayout,
     shape: NativeShape,
+}
+
+/// Out-of-band layout metadata accompanies a real pointer; this never caches
+/// a resident or snapshots its contents. Native references are frame-neutral.
+#[derive(Clone, Debug)]
+pub(super) struct NativeReference {
+    pointer: *mut u8,
+    layout: Arc<NativeLayout>,
+}
+
+impl NativeReference {
+    pub(super) fn ty(&self) -> &VmType {
+        &self.layout.ty
+    }
+
+    pub(super) fn project(&self, path: &[u32]) -> Result<Self, VmArtifactError> {
+        let mut pointer = self.pointer;
+        let mut layout = self.layout.as_ref();
+        for &index in path {
+            let (offset, fields) = match &layout.shape {
+                NativeShape::Product(fields) => (0, fields),
+                NativeShape::Enum {
+                    payload_offset,
+                    variants,
+                } => {
+                    // SAFETY: construction promises a live, initialized resident;
+                    // ordinary source loan checks preserve it during projection.
+                    let tag = unsafe { pointer.cast::<u32>().read() };
+                    (
+                        *payload_offset,
+                        variants
+                            .get(tag as usize)
+                            .ok_or_else(|| error("invalid native enum discriminant"))?,
+                    )
+                }
+                _ => {
+                    return Err(error(
+                        "native reference projection has no structural fields",
+                    ));
+                }
+            };
+            let field = fields
+                .get(index as usize)
+                .ok_or_else(|| error("native reference field is out of range"))?;
+            // SAFETY: concrete field layout stays within the referenced resident.
+            pointer = unsafe { pointer.add(offset + field.offset) };
+            layout = &field.layout;
+        }
+        Ok(Self {
+            pointer,
+            layout: if path.is_empty() {
+                self.layout.clone()
+            } else {
+                Arc::new(layout.clone())
+            },
+        })
+    }
+
+    pub(super) fn read(
+        &self,
+        path: &[u32],
+        budget: &mut ExecutionBudget,
+    ) -> Result<VmValue, VmArtifactError> {
+        let field = self.project(path)?;
+        // SAFETY: native reference creation and the source borrow/use contract
+        // establish validity. DerefCopy/Move separately retain resident uses.
+        unsafe { field.layout.read(field.pointer, budget) }
+    }
+
+    pub(super) fn write(&self, path: &[u32], value: VmValue) -> Result<(), VmArtifactError> {
+        let field = self.project(path)?;
+        // SAFETY: only checked unique references reach this operation; source
+        // drops/moves the old resident before replacing it.
+        unsafe { field.layout.write(field.pointer, value) }
+    }
 }
 
 fn product_layout(
@@ -527,6 +602,24 @@ pub(super) fn execute_memory_intrinsic(
             })
         }
         Cast | AsConst => result_pointer(ptr_arg(0)?),
+        BorrowShared | BorrowUnique => {
+            let layout = layout(0)?;
+            let pointer = ptr_arg(0)?;
+            if pointer.is_null() || pointer.addr() % layout.memory.alignment() != 0 {
+                return Err(error(
+                    "native reference requires a non-null aligned pointer",
+                ));
+            }
+            VmValue::Reference {
+                target: super::ReferenceTarget::Native(NativeReference {
+                    pointer,
+                    layout: Arc::new(layout.clone()),
+                }),
+                fields: Arc::from([]),
+                unique: primitive == BorrowUnique,
+                referent: layout.ty,
+            }
+        }
         Read => {
             let (layout, source) = (layout(0)?, ptr_arg(0)?);
             // SAFETY: unsafe source promises an initialized, valid resident and

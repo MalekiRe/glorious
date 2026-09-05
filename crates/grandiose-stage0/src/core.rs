@@ -319,6 +319,9 @@ pub enum CallReferenceOrigin {
     Paths(Vec<CallReferencePath>),
     /// The result is an external/static reference with no caller loan.
     External,
+    /// A direct reference whose validity/lifetime is an unsafe callable
+    /// precondition, not a loan derived from a checked reference argument.
+    Unsafe,
     /// Core could not prove a unique source region for a reference result.
     Opaque,
 }
@@ -333,6 +336,8 @@ pub enum CallReferenceShape {
     None,
     /// Every reference component is static/external.
     External,
+    /// Validity comes from a checked unsafe call contract, not a static claim.
+    Unsafe,
     /// At least one component forwards a caller path (possibly alongside
     /// static components).
     CallerPaths,
@@ -353,6 +358,7 @@ fn call_reference_shape(
     let mut leaves = vec![];
     match reference_leaf_paths(signatures, result, &mut vec![], &mut leaves) {
         Ok(()) if leaves.is_empty() => CallReferenceShape::None,
+        Ok(()) if matches!(origin, CallReferenceOrigin::Unsafe) => CallReferenceShape::Unsafe,
         // A frozen generic contract still forwards its argument path when
         // that particular argument is static. Preserve the path contract
         // rather than pairing Paths provenance with an External-only shape.
@@ -1988,6 +1994,7 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
         CallReferenceOrigin::External => {
             matches!(reference_shape, CallReferenceShape::External)
         }
+        CallReferenceOrigin::Unsafe => matches!(reference_shape, CallReferenceShape::Unsafe),
         CallReferenceOrigin::Paths(_) => {
             matches!(reference_shape, CallReferenceShape::CallerPaths)
         }
@@ -2002,6 +2009,16 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
         return Some(format!(
             "reference-valued {boundary} does not match its frozen result shape"
         ));
+    }
+    if matches!(reference_origin, CallReferenceOrigin::Unsafe) {
+        let CoreKind::Call { callee, .. } = kind else {
+            return Some("only an unsafe callable can establish raw-reference provenance".into());
+        };
+        if !body.contains(*callee) { return None; }
+        if !matches!(body.expression(*callee).ty, Type::Callable { safety: crate::Safety::Unsafe, .. })
+            || !matches!(result, Type::Reference { .. }) {
+            return Some("raw-reference provenance requires an unsafe callable and a direct reference result".into());
+        }
     }
     if let Some(contract) = callable_contract
         && !matches!(contract, CallReferenceOrigin::Opaque)
@@ -2046,7 +2063,7 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
         // record such as `Slice<'static, u8>`.  Restricting this to a
         // top-level `&'static T` made sound library wrappers impossible and
         // incorrectly rejected their frozen external provenance.
-        CallReferenceOrigin::External => None,
+        CallReferenceOrigin::External | CallReferenceOrigin::Unsafe => None,
         // An unconstrained generic result may later instantiate to a scalar
         // or a reference. Its call-site Core has no direct path to validate;
         // ownership consumers reject it only when the frozen concrete use is
@@ -4515,6 +4532,10 @@ impl Elaborator<'_> {
         }
     }
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
+        self.expression_expected_with_open_lifetimes(id, expected, false)
+    }
+
+    fn expression_expected_with_open_lifetimes(&mut self, id: ExprId, expected: Option<Type>, open_call_lifetimes: bool) -> CoreId {
         let expression = self.body.expression(id).clone();
         match expression.kind {
             ExprKind::Literal(text) => self.literal_expected(text, expected, expression.span),
@@ -4627,12 +4648,20 @@ impl Elaborator<'_> {
                 let expected = expected.expect("guarded above");
                 let _ = self.inference.unify(*result, expected.clone());
                 let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
-                let call = self.call(callee, arguments, expression.span);
+                let call = self.call_with_expected(callee, arguments, expression.span,
+                    if open_call_lifetimes { None } else { Some(&expected) });
                 let actual = self.expressions[call.0 as usize].ty.clone();
-                if self
-                    .unify_rigid_lifetimes(expected, actual, expression.span)
-                    .is_err()
-                {
+                // An outer call's parameter regions are not rigid regions of
+                // this body. A nested call may supply the region that opens
+                // them; the outer invocation still jointly checks every
+                // argument and retains its frozen provenance relation.
+                let compatible = if open_call_lifetimes {
+                    let mut substitution = CallLifetimeSubstitution::default();
+                    align_lifetime_types(&expected, &actual, &mut substitution, LifetimeMode::Instantiate, 0)
+                        .map_err(|_| ())
+                        .and_then(|aligned| self.inference.unify(aligned, actual).map(|_| ()).map_err(|_| ()))
+                } else { self.unify_rigid_lifetimes(expected, actual, expression.span) };
+                if compatible.is_err() {
                     self.error(
                         expression.span,
                         "G4107",
@@ -8188,6 +8217,7 @@ impl Elaborator<'_> {
         effects: crate::types::EffectRow,
         arguments: &[CoreId],
         span: Span,
+        unsafe_reference_result: Option<Lifetime>,
     ) -> Result<(
         Vec<Type>,
         Type,
@@ -8223,6 +8253,16 @@ impl Elaborator<'_> {
                 }
             };
             aligned_parameters.push(aligned);
+        }
+        // Only an explicitly unsafe direct-reference result may choose a
+        // region independently of its arguments. Existing argument-derived
+        // bindings always win; this does not lengthen an ordinary caller loan.
+        if let (Some(selected), Type::Reference { lifetime, .. }) = (unsafe_reference_result, &result) {
+            match lifetime {
+                Lifetime::Generic(index) => { substitution.generics.entry(*index).or_insert(selected); }
+                Lifetime::Bound { depth: 0, index } => { substitution.bounds.entry(*index).or_insert(selected); }
+                _ => {}
+            }
         }
         let result = match substitute_call_lifetimes(result, &substitution, 0) {
             Ok(value) => value,
@@ -10160,6 +10200,10 @@ impl Elaborator<'_> {
     }
 
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
+        self.call_with_expected(callee, arguments, span, None)
+    }
+
+    fn call_with_expected(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span, expected: Option<&Type>) -> CoreId {
         let callable = self.expressions[callee.0 as usize].ty.clone();
         let callable = match callable {
             callable @ Type::Callable { .. } => callable,
@@ -10197,10 +10241,16 @@ impl Elaborator<'_> {
         // generic or higher-ranked regions can legitimately both become
         // `Elided` at this boundary; deriving provenance afterwards would
         // make a precise result look ambiguous or, worse, pick a wrong loan.
-        let reference_contract =
+        let mut reference_contract =
             callable_reference_origin_from_contract(self.signatures, &parameters, &result);
+        let unsafe_reference_result = if safety == crate::Safety::Unsafe
+            && matches!(reference_contract, CallReferenceOrigin::Opaque)
+            && matches!(result.as_ref(), Type::Reference { .. }) {
+            reference_contract = CallReferenceOrigin::Unsafe;
+            Some(match expected { Some(Type::Reference { lifetime, .. }) => *lifetime, _ => Lifetime::Elided })
+        } else { None };
         let Ok((parameters, result, effects, lifetime_substitution)) =
-            self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span)
+            self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span, unsafe_reference_result)
         else {
             return self.fail(
                 span,
@@ -10428,7 +10478,7 @@ impl Elaborator<'_> {
                 // retaining the unresolved parameter for contextual closures.
                 let expected = expected
                     .map(|expected| self.inference.zonk(expected.clone()).unwrap_or(expected));
-                let argument = self.expression_expected(value, expected.clone());
+                let argument = self.expression_expected_with_open_lifetimes(value, expected.clone(), true);
                 let argument = expected
                     .as_ref()
                     .and_then(|expected| {

@@ -425,6 +425,9 @@ impl Analyzer<'_> {
         match origin {
             CallReferenceOrigin::None => Value::None,
             CallReferenceOrigin::External => Value::ExternalBorrowed,
+            // The raw-reference contract supplies validity independently of
+            // local loans. Its selected lifetime is still checked by Core.
+            CallReferenceOrigin::Unsafe => Value::ExternalBorrowed,
             CallReferenceOrigin::Paths(paths) => {
                 let mut result = Value::None;
                 for path in paths {

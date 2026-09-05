@@ -24,6 +24,8 @@ const DECLARATIONS: &str = r#"
     unsafe fn write<T>(pointer: *mut T, value: T) -> ();
     unsafe fn copy<T>(source: *const T, destination: *mut T, count: usize) -> ();
     unsafe fn copy_nonoverlapping<T>(source: *const T, destination: *mut T, count: usize) -> ();
+    unsafe fn borrow_shared<'a, T>(pointer: *const T) -> &'a T;
+    unsafe fn borrow_unique<'a, T>(pointer: *mut T) -> &'a mut T;
 "#;
 
 fn request(source: &str) -> CompilationRequest {
@@ -301,4 +303,98 @@ fn pointers_stored_in_raw_residents_retain_provenance() {
         unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(),
         42
     );
+}
+
+#[test]
+fn native_references_write_through_nested_calls_and_project_real_fields() {
+    let program = compile(
+        r#"
+        struct Item { flag: u8, value: i64 }
+        fn bump(value: &mut i64) -> () { *value = *value + 2; }
+        fn nested(item: &mut Item) -> () { bump(&mut (*item).value); }
+        fn inspect(item: &Item) -> i64 { item.value }
+        pub fn main() -> i64 {
+            unsafe {
+                let bytes = allocate(size_of<Item>(), align_of<Item>());
+                let pointer = cast<u8, Item>(bytes);
+                write(pointer, Item { flag: 7, value: 40 });
+                nested(borrow_unique(pointer));
+                let observed = inspect(borrow_shared(as_const(pointer)));
+                let raw = read(as_const(cast<u8, i64>(offset(bytes, 8))));
+                deallocate(bytes, size_of<Item>(), align_of<Item>());
+                handle observed { 42 => raw, _ => 0 }
+            }
+        }
+    "#,
+    );
+    // SAFETY: each temporary reference ends before the next access; the same
+    // initialized Item remains in its allocation throughout both nested calls.
+    assert_eq!(
+        unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(),
+        42
+    );
+}
+
+#[test]
+fn native_reference_return_preserves_storage_and_does_not_freeze_a_snapshot() {
+    let program = compile(
+        r#"
+        struct Owner { pointer: *mut i64 }
+        fn get<'a>(owner: &'a Owner) -> &'a i64 {
+            unsafe { borrow_shared(as_const(owner.pointer)) }
+        }
+        fn get_mut<'a>(owner: &'a mut Owner) -> &'a mut i64 {
+            unsafe { borrow_unique(owner.pointer) }
+        }
+        fn relay<'a>(value: &'a mut i64) -> &'a mut i64 { value }
+        pub fn main() -> i64 {
+            unsafe {
+                let bytes = allocate(size_of<i64>(), align_of<i64>());
+                let owner = Owner { pointer: cast<u8, i64>(bytes) };
+                write(owner.pointer, 40);
+                *relay(get_mut(&mut owner)) = 42;
+                let result = *get(&owner);
+                deallocate(bytes, size_of<i64>(), align_of<i64>());
+                result
+            }
+        }
+    "#,
+    );
+    // SAFETY: Owner's safe methods tie each view to its borrow. The allocation
+    // outlives those views, including the returned and reborrowed unique view.
+    assert_eq!(
+        unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(),
+        42
+    );
+}
+
+#[test]
+fn safe_native_reference_facades_cannot_extend_or_overlap_their_owner_loan() {
+    let facade = r#"
+        struct Owner { pointer: *mut i64 }
+        fn get<'a>(owner: &'a Owner) -> &'a i64 {
+            unsafe { borrow_shared(as_const(owner.pointer)) }
+        }
+        fn get_mut<'a>(owner: &'a mut Owner) -> &'a mut i64 {
+            unsafe { borrow_unique(owner.pointer) }
+        }
+    "#;
+    for invalid in [
+        "pub fn bad<'a>(owner: &'a Owner) -> &'static i64 { get(owner) }",
+        "pub fn bad(owner: &mut Owner) -> i64 { let shared = get(&*owner); let unique = get_mut(&mut *owner); *unique = 7; *shared }",
+        "pub fn bad(pointer: *mut i64) -> () { borrow_unique(pointer); }",
+    ] {
+        let mut input = request(&format!(
+            "{facade}\n{invalid}\npub fn main() -> i64 {{ 0 }}"
+        ));
+        input.mode = CompilationMode::Check;
+        let error = StageZeroCompiler::new().compile(input).unwrap_err();
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("G50") || diagnostic.code == "G4201"),
+            "{error:#?}"
+        );
+    }
 }

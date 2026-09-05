@@ -30,7 +30,7 @@ use crate::{
 use crate::MemoryPrimitive;
 
 mod native_memory;
-use native_memory::{NativeMemory, execute_memory_intrinsic};
+use native_memory::{NativeMemory, NativeReference, execute_memory_intrinsic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmType {
@@ -2134,7 +2134,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// safety contracts and nominal kind, and adds host-memory types/operations.
 /// It is for locally compiled source; untrusted-bytecode certification of the
 /// new unsafe facilities is deferred. Earlier payloads are not reinterpreted.
-pub const STAGE0_VM_SCHEMA: u32 = 94;
+/// Schema 95 adds raw-to-checked reference construction, retaining native
+/// storage identity across calls, reborrows, and checked dereferences.
+pub const STAGE0_VM_SCHEMA: u32 = 95;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3640,11 +3642,12 @@ fn memory_intrinsic_signature(primitive: MemoryPrimitive, types: &[VmType])
     -> Result<(Vec<VmType>, VmType), VmArtifactError>
 {
     let signature = primitive.signature();
-    if signature.generics as usize != types.len() {
+    let indices = primitive.type_generic_indices();
+    if indices.len() != types.len() {
         return Err(VmArtifactError::MalformedEncoding { message: "memory operation has the wrong type arity" });
     }
     types.iter().try_for_each(validate_vm_type)?;
-    let bindings = types.iter().enumerate().map(|(index, ty)| (index as u32, ty.clone())).collect();
+    let bindings = indices.into_iter().zip(types.iter().cloned()).collect();
     let convert = |ty: &Type| vm_type(ty).map(|ty| instantiate_vm_type(&ty, &bindings))
         .map_err(|ty| VmArtifactError::UnsupportedType { local: 0, ty });
     Ok((signature.parameters.iter().map(convert).collect::<Result<_, _>>()?, convert(&signature.result)?))
@@ -11883,6 +11886,9 @@ enum VmValue {
 
 #[derive(Clone, Debug)]
 enum ReferenceTarget {
+    /// A checked language reference into real native storage. Its lifetime and
+    /// alias contract was established by an explicit unsafe source operation.
+    Native(NativeReference),
     Register(u32),
     /// A unique loan owned by an active caller frame. `caller_depth = 0`
     /// denotes the direct caller; larger values walk further outward. Unlike
@@ -12121,6 +12127,14 @@ fn borrow_value(
         }
         let mut path = parent_fields.to_vec();
         path.extend_from_slice(fields);
+        if let ReferenceTarget::Native(native) = target {
+            let projected = native.project(&path)?;
+            let referent = projected.ty().clone();
+            if referent != *declared_referent {
+                return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: referent });
+            }
+            return Ok(VmValue::Reference { target: ReferenceTarget::Native(projected), fields: Arc::from([]), unique, referent });
+        }
         let referent = if fields.is_empty() {
             parent_referent.clone()
         } else {
@@ -12154,6 +12168,7 @@ fn reference_target<'a>(
     target: &'a ReferenceTarget,
 ) -> Result<&'a VmValue, VmArtifactError> {
     match target {
+        ReferenceTarget::Native(_) => Err(VmArtifactError::NativeMemory { message: "native reference requires a typed memory access" }),
         ReferenceTarget::Register(target) => registers
             .get(*target as usize)
             .and_then(Option::as_ref)
@@ -12176,6 +12191,16 @@ fn reference_target<'a>(
     }
 }
 
+fn load_reference_target(
+    registers: &[Option<VmValue>], callers: &[RuntimeProgramCaller], target: &ReferenceTarget,
+    fields: &[u32], budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
+    match target {
+        ReferenceTarget::Native(native) => native.read(fields, budget),
+        _ => project_reference(reference_target(registers, callers, target)?, fields),
+    }
+}
+
 fn store_reference_target(
     registers: &mut [Option<VmValue>],
     callers: &mut [RuntimeProgramCaller],
@@ -12184,6 +12209,9 @@ fn store_reference_target(
     replacement: VmValue,
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
+    if let ReferenceTarget::Native(native) = target {
+        return native.write(fields, replacement);
+    }
     let value = reference_target_mut(registers, callers, target)?;
     *project_reference_mut(value, fields, budget)? = replacement;
     Ok(())
@@ -12195,6 +12223,7 @@ fn reference_target_mut<'a>(
     target: &ReferenceTarget,
 ) -> Result<&'a mut VmValue, VmArtifactError> {
     let register = match target {
+        ReferenceTarget::Native(_) => return Err(VmArtifactError::NativeMemory { message: "native reference requires a typed memory store" }),
         ReferenceTarget::Register(register) => {
             registers
                 .get_mut(*register as usize)
@@ -12940,6 +12969,7 @@ fn freeze_frame_value(
     callers: &[RuntimeProgramCaller],
 ) -> Result<VmValue, VmArtifactError> {
     match value {
+        VmValue::Reference { target: ReferenceTarget::Native(_), .. } => Ok(value.clone()),
         VmValue::Reference { unique: true, .. } => {
             Err(VmArtifactError::UnsupportedEscapingUniqueReference)
         }
@@ -12959,7 +12989,7 @@ fn freeze_frame_value(
                     (callers[index].registers.as_slice(), &callers[..index])
                 }
                 ReferenceTarget::Register(_) => (registers, callers),
-                ReferenceTarget::Captured(_) => (&[][..], &[][..]),
+                ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => (&[][..], &[][..]),
             };
             let projected = project_reference(reference_target(registers, callers, target)?, fields)?;
             Ok(VmValue::Reference {
@@ -13042,6 +13072,7 @@ fn rebase_caller_references(value: VmValue, caller_depth: u32) -> Result<VmValue
             referent,
         } => {
             let target = match target {
+                ReferenceTarget::Native(native) => ReferenceTarget::Native(native),
                 ReferenceTarget::Register(register) => ReferenceTarget::Caller {
                     caller_depth,
                     register,
@@ -13143,6 +13174,7 @@ fn transfer_call_frame_value(
             referent,
         } => {
             let target = match (transfer, target) {
+                (_, ReferenceTarget::Native(native)) => ReferenceTarget::Native(native.clone()),
                 (UniqueReferenceTransfer::IntoCallee, ReferenceTarget::Register(register)) => {
                     ReferenceTarget::Caller {
                         caller_depth: 0,
@@ -13374,6 +13406,7 @@ fn format_vm_value(value: &VmValue) -> String {
                     register,
                 } => format!("caller-{caller_depth}@{register}"),
                 ReferenceTarget::Captured(_) => "captured".into(),
+                ReferenceTarget::Native(_) => "native".into(),
             };
             format!("reference@{target}[fields={}]", fields.len())
         }
@@ -15967,10 +16000,7 @@ fn execute(
                         register: reference,
                     });
                 };
-                registers[dst as usize] = Some(project_reference(
-                    reference_target(&registers, &[], target)?,
-                    fields,
-                )?);
+                registers[dst as usize] = Some(load_reference_target(&registers, &[], target, fields, budget)?);
             }
             VmInstruction::DerefMove { dst, reference } => {
                 let VmValue::Reference { target, fields, .. } = registers[reference as usize]
@@ -15984,10 +16014,7 @@ fn execute(
                 // that interval because no verified instruction can observe
                 // it; cloning here is representation sharing, not language
                 // copying.
-                registers[dst as usize] = Some(project_reference(
-                    reference_target(&registers, &[], target)?,
-                    fields,
-                )?);
+                registers[dst as usize] = Some(load_reference_target(&registers, &[], target, fields, budget)?);
             }
             VmInstruction::DerefStore { reference, src } => {
                 let VmValue::Reference {
@@ -16003,21 +16030,12 @@ fn execute(
                         register: reference,
                     });
                 };
-                let ReferenceTarget::Register(target) = target else {
-                    return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
-                };
-                let (target, fields) = (*target, fields.clone());
+                let (target, fields) = (target.clone(), fields.clone());
                 let replacement = registers[src as usize]
                     .as_ref()
                     .expect("verified register")
                     .clone();
-                *project_reference_mut(
-                    registers[target as usize]
-                        .as_mut()
-                        .expect("live reference target"),
-                    &fields,
-                    budget,
-                )? = replacement;
+                store_reference_target(&mut registers, &mut [], &target, &fields, replacement, budget)?;
             }
             VmInstruction::NotBool { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Bool(!expect_bool(
@@ -19575,8 +19593,7 @@ fn execute_program_profiled(
                         register: *reference,
                     });
                 };
-                let value =
-                    project_reference(reference_target(&registers, &callers, target)?, fields)?;
+                let value = load_reference_target(&registers, &callers, target, fields, budget)?;
                 // Dereferencing a reference into a caller frame materializes
                 // a value whose nested references are still expressed in the
                 // caller's register coordinate system. Rebase those paths
@@ -19587,7 +19604,7 @@ fn execute_program_profiled(
                     ReferenceTarget::Caller { caller_depth, .. } => {
                         rebase_caller_references(value, *caller_depth)?
                     }
-                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) => value,
+                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => value,
                 };
                 registers[*dst as usize] = Some(value);
             }
@@ -19598,15 +19615,12 @@ fn execute_program_profiled(
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: *reference });
                 };
-                let value = project_reference(
-                    reference_target(&registers, &callers, target)?,
-                    fields,
-                )?;
+                let value = load_reference_target(&registers, &callers, target, fields, budget)?;
                 let value = match target {
                     ReferenceTarget::Caller { caller_depth, .. } => {
                         rebase_caller_references(value, *caller_depth)?
                     }
-                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) => value,
+                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => value,
                 };
                 registers[*dst as usize] = Some(value);
             }

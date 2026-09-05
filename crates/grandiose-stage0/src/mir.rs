@@ -7831,11 +7831,21 @@ impl MirFunction {
                 self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i128 input")?;
             }
             MirInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
-                let Some(signature) = primitive.instantiated_signature(types) else {
+                let Some(mut signature) = primitive.instantiated_signature(types) else {
                     return Err("MIR memory primitive has the wrong type arity".into());
                 };
                 if signature.safety == crate::Safety::Unsafe && !self.unsafe_execution {
                     return Err("MIR memory primitive requires an unsafe implementation scope".into());
+                }
+                // Creating a checked reference from raw storage explicitly
+                // delegates lifetime validity to the unsafe caller. Retain
+                // the selected source lifetime, while still checking the
+                // concrete pointee and shared/unique contract exactly.
+                if primitive.constructs_reference() {
+                    if let (Type::Reference { lifetime: expected, .. }, Type::Reference { lifetime, .. }) =
+                        (&mut signature.result, &self.locals[dst.0 as usize].ty) {
+                        *expected = *lifetime;
+                    }
                 }
                 if arguments.len() != signature.parameters.len()
                     || self.locals[dst.0 as usize].ty != signature.result
@@ -31655,12 +31665,9 @@ impl Lowerer<'_> {
                                 }
                             }
                             Some(PrimitiveRole::Memory(primitive)) => {
-                                let Some(types) = generic_arguments.iter().map(|argument| {
+                                let types = generic_arguments.iter().filter_map(|argument| {
                                     match argument { GenericArgument::Type(ty) => Some(ty.clone()), _ => None }
-                                }).collect::<Option<Vec<_>>>() else {
-                                    self.error("G6005", "memory primitive requires type-only arguments");
-                                    return None;
-                                };
+                                }).collect::<Vec<_>>();
                                 if primitive.instantiated_signature(&types).is_none() {
                                     self.error("G6005", "memory primitive has the wrong type arity");
                                     return None;

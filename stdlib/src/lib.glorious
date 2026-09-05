@@ -24,6 +24,8 @@ unsafe fn __g1_memory_read<T>(pointer: *const T) -> T;
 unsafe fn __g1_memory_write<T>(pointer: *mut T, value: T) -> ();
 unsafe fn __g1_memory_copy<T>(source: *const T, destination: *mut T, count: usize) -> ();
 unsafe fn __g1_memory_copy_nonoverlapping<T>(source: *const T, destination: *mut T, count: usize) -> ();
+unsafe fn __g1_memory_borrow_shared<'a, T>(pointer: *const T) -> &'a T;
+unsafe fn __g1_memory_borrow_unique<'a, T>(pointer: *mut T) -> &'a mut T;
 
 // Trusted array leaves. Their exact declaration identities are bound only
 // when the compiler supplies this package; copied source spellings have no VM

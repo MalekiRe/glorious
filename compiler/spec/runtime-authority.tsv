@@ -198,3 +198,5 @@ memory-read	195
 memory-write	196
 memory-copy	197
 memory-copy-nonoverlapping	198
+memory-borrow-shared	199
+memory-borrow-unique	200

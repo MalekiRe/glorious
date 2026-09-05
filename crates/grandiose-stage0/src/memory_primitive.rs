@@ -2,8 +2,8 @@
 //! bound by the host's runtime manifest; source spelling grants no authority.
 
 use crate::{
-    CallableSignature, EffectRow, GenericKind, PointerMutability, Quantity, Safety, ScalarType,
-    Type,
+    CallableSignature, EffectRow, GenericKind, Lifetime, Mutability, PointerMutability, Quantity,
+    Safety, ScalarType, Type,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -24,10 +24,12 @@ pub enum MemoryPrimitive {
     Write,
     Copy,
     CopyNonoverlapping,
+    BorrowShared,
+    BorrowUnique,
 }
 
 impl MemoryPrimitive {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::SizeOf,
         Self::AlignOf,
         Self::Null,
@@ -44,6 +46,8 @@ impl MemoryPrimitive {
         Self::Write,
         Self::Copy,
         Self::CopyNonoverlapping,
+        Self::BorrowShared,
+        Self::BorrowUnique,
     ];
 
     pub const fn selector_name(self) -> &'static str {
@@ -64,6 +68,8 @@ impl MemoryPrimitive {
             Self::Write => "memory-write",
             Self::Copy => "memory-copy",
             Self::CopyNonoverlapping => "memory-copy-nonoverlapping",
+            Self::BorrowShared => "memory-borrow-shared",
+            Self::BorrowUnique => "memory-borrow-unique",
         }
     }
 
@@ -112,11 +118,36 @@ impl MemoryPrimitive {
             Self::Copy | Self::CopyNonoverlapping => {
                 (1, vec![readable(t.clone()), writable(t), count], Type::Unit)
             }
+            Self::BorrowShared | Self::BorrowUnique => {
+                let unique = self == Self::BorrowUnique;
+                let t = Type::Generic(1);
+                (
+                    2,
+                    vec![if unique {
+                        writable(t.clone())
+                    } else {
+                        readable(t.clone())
+                    }],
+                    Type::Reference {
+                        mutability: if unique {
+                            Mutability::Unique
+                        } else {
+                            Mutability::Shared
+                        },
+                        lifetime: Lifetime::Generic(0),
+                        referent: Box::new(t),
+                    },
+                )
+            }
         };
         CallableSignature {
             safety: self.safety(),
             generics,
-            generic_kinds: vec![GenericKind::Type; generics as usize],
+            generic_kinds: if self.constructs_reference() {
+                vec![GenericKind::Lifetime, GenericKind::Type]
+            } else {
+                vec![GenericKind::Type; generics as usize]
+            },
             parameters,
             result,
             effects: EffectRow::empty(),
@@ -127,10 +158,23 @@ impl MemoryPrimitive {
         }
     }
 
+    pub(crate) fn constructs_reference(self) -> bool {
+        matches!(self, Self::BorrowShared | Self::BorrowUnique)
+    }
+
+    pub(crate) fn type_generic_indices(self) -> Vec<u32> {
+        self.signature()
+            .generic_kinds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kind)| (*kind == GenericKind::Type).then_some(index as u32))
+            .collect()
+    }
+
     pub(crate) fn instantiated_signature(self, types: &[Type]) -> Option<CallableSignature> {
-        fn substitute(ty: Type, types: &[Type]) -> Type {
+        fn substitute(ty: Type, types: &std::collections::BTreeMap<u32, Type>) -> Type {
             match ty {
-                Type::Generic(index) => types[index as usize].clone(),
+                Type::Generic(index) => types[&index].clone(),
                 Type::RawPointer {
                     mutability,
                     pointee,
@@ -138,21 +182,32 @@ impl MemoryPrimitive {
                     mutability,
                     pointee: Box::new(substitute(*pointee, types)),
                 },
+                Type::Reference {
+                    mutability,
+                    referent,
+                    ..
+                } => Type::Reference {
+                    mutability,
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(substitute(*referent, types)),
+                },
                 ty => ty,
             }
         }
         let mut signature = self.signature();
-        if signature.generics as usize != types.len() {
+        let indices = self.type_generic_indices();
+        if indices.len() != types.len() {
             return None;
         }
+        let types = indices.into_iter().zip(types.iter().cloned()).collect();
         signature.generics = 0;
         signature.generic_kinds.clear();
         signature.parameters = signature
             .parameters
             .into_iter()
-            .map(|ty| substitute(ty, types))
+            .map(|ty| substitute(ty, &types))
             .collect();
-        signature.result = substitute(signature.result, types);
+        signature.result = substitute(signature.result, &types);
         Some(signature)
     }
 }
@@ -166,8 +221,7 @@ mod tests {
         let concrete = Type::Scalar(ScalarType::I64);
         for (index, primitive) in MemoryPrimitive::ALL.into_iter().enumerate() {
             assert_eq!(primitive.ordinal() as usize, index);
-            let generic = primitive.signature();
-            let types = vec![concrete.clone(); generic.generics as usize];
+            let types = vec![concrete.clone(); primitive.type_generic_indices().len()];
             let instance = primitive.instantiated_signature(&types).unwrap();
             assert_eq!(instance.generics, 0);
             assert!(instance.generic_kinds.is_empty());
