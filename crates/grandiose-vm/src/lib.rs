@@ -11,6 +11,10 @@ pub mod value;
 pub mod verify;
 pub mod vm;
 
+/// Shared raw-storage mechanisms for trusted embedding code. This does not
+/// authorize raw pointers in guest bytecode or certify native import linkage.
+pub use grandiose_runtime as runtime;
+
 /// Version of the seed/toolchain identity negotiation protocol. The identity
 /// is intentionally derived from the frozen compiler/VM contract and exact G1
 /// artifact feature set rather than mutable executable paths or timestamps.

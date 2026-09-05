@@ -1,5 +1,11 @@
 # Grandiose Standard Library Contract
 
+The [September 5 unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md)
+supersedes this document's exclusion of raw pointers and unsafe library code.
+Specialized collection/text/hash leaves below describe the compatibility
+bootstrap, not the final source-owned library boundary. Safe-only guests may
+use safe exports of explicitly trusted native library implementations.
+
 Status: normative design for the generation-1 standard library and source-bundle
 model. The standard library is Grandiose source built over the finite,
 manifest-bound machine-type, primitive, and host-import leaves specified here.

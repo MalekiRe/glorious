@@ -50,6 +50,15 @@ def main():
                        "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs"]
     expected = {"schema": 1, "algorithm": "sha256", "files": closure(),
                 "authoring_overrides": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in authoring_paths}}
+    # Shared raw storage is a native/runtime prerequisite, not compiler source
+    # or a certificate that Glorious bytecode can use unsafe operations yet.
+    runtime_paths = [ROOT / "Cargo.toml", ROOT / "Cargo.lock",
+                     ROOT / "crates/grandiose-runtime/Cargo.toml",
+                     ROOT / "crates/grandiose-vm/Cargo.toml",
+                     ROOT / "crates/grandiose-vm/src/lib.rs"]
+    runtime_paths += sorted((ROOT / "crates/grandiose-runtime/src").rglob("*.rs"))
+    expected["runtime_support"] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()
+                                   for p in runtime_paths}
     test_paths = sorted((COMPILER / "tests").rglob("*.glorious")) + [
         ROOT / "crates/grandiose-stage0/tests/gsc2.rs",
         ROOT / "crates/grandiose-stage0/tests/conversions.rs",
@@ -66,6 +75,7 @@ def main():
         ROOT / "crates/grandiose-stage0/tests/runtime_storage.rs",
         ROOT / "crates/grandiose-stage0/tests/fixtures/hash_indexing_profile.glorious",
         ROOT / "crates/grandiose-stage0/tests/fixtures/array_update_profile.glorious",
+        ROOT / "crates/grandiose-vm/tests/native_memory.rs",
     ]
     expected["capability_tests"] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in test_paths}
     expected["inventories"] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()

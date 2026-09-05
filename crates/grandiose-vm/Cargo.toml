@@ -13,6 +13,7 @@ name = "grvm"
 path = "src/main.rs"
 
 [dependencies]
+grandiose-runtime = { path = "../grandiose-runtime" }
 rustix = { version = "1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 

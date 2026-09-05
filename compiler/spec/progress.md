@@ -13,6 +13,12 @@ guests may use safe APIs of trusted native implementations containing unsafe;
 shared-layout interop targets zero marshalling. Existing tests do not certify
 these new capabilities, and recording the decision closes no compiler milestone.
 
+The first shared raw-storage crate is now implemented and tested: 12 unit and
+two native embedding tests also pass Miri's strict-provenance checks. It provides
+aligned uninitialized allocations and explicit ownership handoff, not guest
+raw pointers or a complete native/VM ABI. The full workspace passes 2,469 tests
+in 126.214 seconds. U2–U6 remain open; see the prerequisite evidence above.
+
 ## Present
 
 - Fresh source closure with no old self-host imports; canonical standard

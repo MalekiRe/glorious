@@ -1,5 +1,10 @@
 # Remaining implementation work
 
+The [unsafe-memory/native-ABI prerequisite](../compiler/spec/unsafe-memory-progress.md)
+is now active compiler-project work. Its safe-only guest verification and trusted
+native-library boundary supersede the unsafe and VM-hardening exclusions below
+for this specific scope; they are not already-implemented capabilities.
+
 This is the open implementation backlog for the Rust Grandiose compiler and G1
 VM. Completed work is intentionally omitted. The eventual wholesale port into
 Grandiose and self-hosting convergence are excluded from current

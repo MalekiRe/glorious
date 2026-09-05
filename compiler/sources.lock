@@ -74,7 +74,8 @@
     "crates/grandiose-stage0/tests/signature.rs": "1849baef78745e7010bd5f9b5dcc87841a1bb8c0b0b5be508f0b3f15811f8fc3",
     "crates/grandiose-stage0/tests/standard_library.rs": "484bd65fd5024dc932c27e7dde0838d7ef9d94695da2400faf6953bb22cd86c1",
     "crates/grandiose-stage0/tests/trait_solver.rs": "6628ce34ee731dcb0866ceba38cc12920175544505ceaae4d25a8b009ac58762",
-    "crates/grandiose-stage0/tests/vm_backend.rs": "1a05c5f5ce95024c15947c04ee5a75c76b6d35ce6a35ec5b0e4f4914c3d7aa56"
+    "crates/grandiose-stage0/tests/vm_backend.rs": "1a05c5f5ce95024c15947c04ee5a75c76b6d35ce6a35ec5b0e4f4914c3d7aa56",
+    "crates/grandiose-vm/tests/native_memory.rs": "b7883b752cc869248c4798dc0391a620686116ff2d5584e4dc3f6cd4c8c998ec"
   },
   "files": {
     "compiler/src/kernel/database/database.glorious": "a750ff3200b0143543aa71e9feb012b6e14395a3fc515669b0945a1ea0483393",
@@ -113,6 +114,15 @@
     "compiler/spec/contracts.tsv": "223f60d3953a6206f7dd10dd7ad630f14f653b1b076004c635c271f756831b4e",
     "compiler/spec/oracle-tests.tsv": "3fd15a4cae426d65a739df792eda084142cf747ef754dc0b62e55e781e1226ca",
     "compiler/spec/runtime-authority.tsv": "032d79c19c5c283df96a3e04ebe54fb89cdfe4bde47fc7734271d588cf89138e"
+  },
+  "runtime_support": {
+    "Cargo.lock": "dea3fafebcc7e28bf45002d90dcc96217bb62d1f1763b083e795951c6abb5cac",
+    "Cargo.toml": "519f0f486466f0adfa58e19302cd1da0f4b40d9ad723d18d28a03581e3d2fa25",
+    "crates/grandiose-runtime/Cargo.toml": "8c20a427eb237d107246ba7e55e440806e2d8f4ca7ece2838285ca12206f259d",
+    "crates/grandiose-runtime/src/lib.rs": "d86b51167b5abdf6e7a12d566afb396dc6966afd06bd94c3307a295ed1e714fd",
+    "crates/grandiose-runtime/src/memory.rs": "aa6dd2e32c3a6a1f9a4bc4fc18361c1b1b4c83c190fd107e8485d0942934e9f0",
+    "crates/grandiose-vm/Cargo.toml": "eb24d764ff75b776dce99c8606b7e3a197dc6863de5955646f704f11a97ddb40",
+    "crates/grandiose-vm/src/lib.rs": "1fe8f50b98d6baf9e6610a2349f60ea20bb15581fdb238aabdcc33cf2f36ac7a"
   },
   "schema": 1
 }

@@ -58,9 +58,11 @@ after changing the source/test closure. `--release` remains fail-closed.
 For a focused run, use `tooling/compiler-check.sh --filter gsc2_registry`.
 Reports record the filters and mark this as selected-test evidence, never a
 complete-suite pass. A filter matching no executed fixtures fails closed.
-The latest full workspace run passes **2,455 tests in 84.670 seconds**, including
-all **48 source test entries in 73.71 seconds** and all retained batched scenario
-comparators. Source audit passes before/after; see [runtime costs](spec/runtime-costs.md).
+The latest full workspace run passes **2,469 tests in 126.214 seconds**, including
+all **48 source test entries in 72.97 seconds** and all retained batched scenario
+comparators. Source audit passes before/after; see [raw-storage evidence](spec/unsafe-memory-progress.md).
+The preceding array-write optimization passed 2,455 tests in 84.670 seconds;
+its measurements remain in [runtime costs](spec/runtime-costs.md).
 The prior standalone source run passed in 72.46 seconds (`run-3x54nfxx`). The
 earlier 590-second timeouts are historical; four native authoring optimizations
 removed repeated solver construction and fixed-identity hashing without
