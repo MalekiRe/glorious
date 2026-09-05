@@ -1634,7 +1634,7 @@ impl StageZeroCompiler {
             })
         {
             if !signatures
-                .principal_use_interval(&implementation.self_ty)
+                .principal_use_interval_with_bounds(&implementation.self_ty, &implementation.where_bounds)
                 .is_some_and(|quantity| quantity.contains(crate::Quantity::AFFINE))
             {
                 diagnostics.push(CompileDiagnostic::source(

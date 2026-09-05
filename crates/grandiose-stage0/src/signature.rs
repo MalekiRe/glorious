@@ -554,17 +554,6 @@ fn fallback_structural_const(kind: ConstKind) -> GenericArgument {
     }
 }
 
-/// Extract the interval carried by the language-owned `Use<Q>` relation.
-/// Its prelude identity has exactly one quantity const slot; malformed source
-/// is diagnosed by the principal-use validation pass instead of being treated
-/// as an arbitrary trait implementation.
-fn use_relation_quantity(reference: &ElaboratedTraitReference) -> Option<Quantity> {
-    match reference.arguments.as_slice() {
-        [GenericArgument::ConstQuantity(quantity)] => Some(*quantity),
-        _ => None,
-    }
-}
-
 /// Instantiate a nominal's own layout under rigid identity arguments. This
 /// preserves which generic field occurrences actually contribute to layout
 /// while avoiding body-local inference at the declaration boundary.
@@ -994,6 +983,7 @@ impl ElaboratedInterface {
     /// structural interval, but cannot add an alternative capability.
     pub fn validate_principal_use_rules(&self) -> Vec<SignatureDiagnostic> {
         let mut diagnostics = Vec::new();
+        let solver = crate::TraitSolver::new(self);
 
         for implementation in self.definitions.values().filter_map(|header| match header {
             ElaboratedHeader::Implementation(implementation)
@@ -1004,21 +994,18 @@ impl ElaboratedInterface {
             }
             _ => None,
         }) {
-            let Some(declared) = use_relation_quantity(&implementation.relation) else {
+            let Some(contracts) = solver.principal_use_rule_contracts(implementation) else {
                 diagnostics.push(SignatureDiagnostic {
                     code: "G4194",
-                    message: "a `Use` implementation must declare exactly one quantity interval"
+                    message: "a `Use` implementation must declare one quantity interval or forward a quantity binder constrained by a `Use` where-bound"
                         .into(),
                 });
                 continue;
             };
-            if !declared.is_public_principal_use() {
+            if implementation.negative {
                 diagnostics.push(SignatureDiagnostic {
                     code: "G4194",
-                    message: format!(
-                        "manual `Use` interval {:?} is not a public principal contract; use [0, *], [0, 1], or [1, 1]",
-                        declared
-                    ),
+                    message: "negative `Use` implementations cannot define a principal ownership interval".into(),
                 });
                 continue;
             }
@@ -1029,23 +1016,33 @@ impl ElaboratedInterface {
                 });
                 continue;
             }
-            let Some(structural) =
-                self.structural_principal_use(&implementation.self_ty, &mut vec![])
-            else {
-                // A type parameter without an ownership contract has no
-                // closed interval at an interface boundary.  Its concrete
-                // applications are checked when they become ownership
-                // relevant; do not invent an interval here.
-                continue;
-            };
-            if !structural.contains(declared) {
-                diagnostics.push(SignatureDiagnostic {
-                    code: "G4194",
-                    message: format!(
-                        "manual `Use` interval {:?} widens the structural principal interval {:?}",
-                        declared, structural
-                    ),
-                });
+            for (declared, structural) in contracts {
+                if !declared.is_public_principal_use() {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G4194",
+                        message: format!(
+                            "manual `Use` interval {:?} is not a public principal contract; use [0, *], [0, 1], or [1, 1]",
+                            declared
+                        ),
+                    });
+                    continue;
+                }
+                let Some(structural) = structural else {
+                    // A type parameter without an ownership contract has no
+                    // closed interval at an interface boundary. Its concrete
+                    // applications are checked when ownership-relevant; do
+                    // not invent an interval here.
+                    continue;
+                };
+                if !structural.contains(declared) {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G4194",
+                        message: format!(
+                            "manual `Use` interval {:?} widens the structural principal interval {:?}",
+                            declared, structural
+                        ),
+                    });
+                }
             }
         }
 
@@ -1088,22 +1085,38 @@ impl ElaboratedInterface {
         self.principal_use(ty, &mut vec![])
     }
 
-    fn principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {
-        self.manual_principal_use(ty)
-            .or_else(|| self.structural_principal_use(ty, active))
+    pub fn principal_use_interval_with_bounds(
+        &self, ty: &Type, bounds: &[(Type, ElaboratedTraitReference)],
+    ) -> Option<Quantity> {
+        let assumptions = bounds.iter().map(|(subject, relation)| crate::TraitGoal {
+            subject: subject.clone(), relation: relation.clone(),
+        }).collect::<Vec<_>>();
+        crate::TraitSolver::new(self).principal_use_with_assumptions(ty, &assumptions)
     }
 
-    fn manual_principal_use(&self, ty: &Type) -> Option<Quantity> {
-        self.definitions.values().find_map(|header| {
+    fn principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {
+        match self.manual_principal_use(ty) {
+            Some(result) => result,
+            None => self.structural_principal_use(ty, active),
+        }
+    }
+
+    // The outer option distinguishes absence of a manual rule from an
+    // unresolved conditional rule: the latter must not fall back to copying
+    // an otherwise fieldless/raw-pointer-backed nominal.
+    fn manual_principal_use(&self, ty: &Type) -> Option<Option<Quantity>> {
+        let Type::Nominal { definition, .. } = ty else { return None; };
+        let has_rule = self.definitions.values().any(|header| {
             let ElaboratedHeader::Implementation(implementation) = header else {
-                return None;
+                return false;
             };
-            (implementation.relation.definition
+            implementation.relation.definition
                 == crate::resolution::language_use_trait_definition()
-                && implementation.self_ty == *ty)
-                .then(|| use_relation_quantity(&implementation.relation))
-                .flatten()
-        })
+                && matches!(&implementation.self_ty, Type::Nominal { definition: owner, .. }
+                    if owner == definition)
+        });
+        has_rule.then(|| crate::TraitSolver::new(self)
+            .principal_use_with_assumptions(ty, &[]))
     }
 
     fn structural_principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {

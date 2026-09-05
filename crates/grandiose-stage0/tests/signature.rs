@@ -9,6 +9,95 @@ use grandiose_stage0::{
     Type, intrinsic_callable_trait_definition, intrinsic_label_trait_definition,
 };
 
+fn ownership_fixture(source: &str) -> (ElaboratedInterface, BTreeMap<String, DefKey>) {
+    let package = PackageKey("principal-use-fixture@0.1.0".into());
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    let names = interface.definitions.iter().filter_map(|definition|
+        definition.name.clone().map(|name| (name, definition.key))).collect();
+    (signatures, names)
+}
+
+#[test]
+fn principal_use_instantiates_generic_manual_rules_and_conditional_bounds() {
+    let (signatures, names) = ownership_fixture(r#"
+        trait Mark: Use<[0, 1]> {}
+        struct Ticket {}
+        impl Use<[1, 1]> for Ticket {}
+        struct Marker {}
+        impl Mark for Marker {}
+        struct Owner<T> { pointer: *mut T }
+        impl<T> Use<[0, 1]> for Owner<T> where T: Mark {}
+        struct Linear<T> { pointer: *mut T }
+        impl<T> Use<[1, 1]> for Linear<T> {}
+    "#);
+    let nominal = |name: &str, arguments| Type::Nominal { definition: names[name], arguments };
+    let owner = |element| nominal("Owner", vec![GenericArgument::Type(element)]);
+    assert_eq!(signatures.principal_use_interval(&owner(nominal("Marker", vec![]))), Some(Quantity::AFFINE));
+    assert_eq!(signatures.principal_use_interval(&owner(Type::Scalar(ScalarType::I64))), Some(Quantity::UNRESTRICTED));
+    assert_eq!(signatures.principal_use_interval(&owner(Type::Generic(0))), None);
+    assert_eq!(signatures.principal_use_interval(&nominal("Linear", vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))])), Some(Quantity::ONCE));
+}
+
+#[test]
+fn principal_use_checks_structural_bounds_inside_conditional_rules() {
+    let (signatures, names) = ownership_fixture(r#"
+        struct Ticket {}
+        impl Use<[1, 1]> for Ticket {}
+        struct Owner<T> { pointer: *mut T }
+        impl<T> Use<[0, 1]> for Owner<T> where T: Use<[0, 1]> {}
+    "#);
+    let owner = |element| Type::Nominal { definition: names["Owner"], arguments: vec![GenericArgument::Type(element)] };
+    assert_eq!(signatures.principal_use_interval(&owner(Type::Scalar(ScalarType::I64))), Some(Quantity::AFFINE));
+    assert_eq!(signatures.principal_use_interval(&owner(Type::Nominal { definition: names["Ticket"], arguments: vec![] })), Some(Quantity::UNRESTRICTED));
+    let generic = owner(Type::Generic(0));
+    assert_eq!(signatures.principal_use_interval(&generic), None);
+    let bound = signatures.definitions.values().find_map(|header| match header {
+        ElaboratedHeader::Implementation(implementation) if !implementation.where_bounds.is_empty() => Some(implementation.where_bounds.clone()), _ => None,
+    }).unwrap();
+    assert_eq!(signatures.principal_use_interval_with_bounds(&generic, &bound), Some(Quantity::AFFINE));
+}
+
+#[test]
+fn principal_use_forwards_quantity_to_a_source_defined_zero_sized_owner() {
+    let (signatures, names) = ownership_fixture(r#"
+        struct PhantomData<T> {}
+        impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}
+        struct NoCopy {}
+        impl Use<[0, 1]> for NoCopy {}
+        struct Owner<T> { pointer: *mut T, ownership: PhantomData<T>, unique: NoCopy }
+        struct Ticket {}
+        impl Use<[1, 1]> for Ticket {}
+        fn affine<T>() where T: Use<[0, 1]> {}
+    "#);
+    assert!(signatures.validate_principal_use_rules().is_empty(), "{:?}", signatures.validate_principal_use_rules());
+    let nominal = |name: &str, arguments| Type::Nominal { definition: names[name], arguments };
+    let owner = |element| nominal("Owner", vec![GenericArgument::Type(element)]);
+    let marker = |element| nominal("PhantomData", vec![GenericArgument::Type(element)]);
+    assert_eq!(signatures.principal_use_interval(&marker(Type::Scalar(ScalarType::I64))), Some(Quantity::UNRESTRICTED));
+    assert_eq!(signatures.principal_use_interval(&owner(Type::Scalar(ScalarType::I64))), Some(Quantity::AFFINE));
+    assert_eq!(signatures.principal_use_interval(&owner(nominal("Ticket", vec![]))), Some(Quantity::ONCE));
+    assert_eq!(signatures.principal_use_interval(&owner(Type::Generic(0))), None);
+    let ElaboratedHeader::Callable(affine) = &signatures.definitions[&names["affine"]] else { panic!() };
+    assert_eq!(signatures.principal_use_interval_with_bounds(&owner(Type::Generic(0)), &affine.where_bounds), Some(Quantity::AFFINE));
+}
+
+#[test]
+fn principal_use_rejects_unconstrained_forwarding_and_cyclic_evidence() {
+    let (signatures, names) = ownership_fixture(r#"
+        struct Unconstrained<T> {}
+        impl<T, q: Quantity> Use<q> for Unconstrained<T> {}
+        struct Cycle {}
+        impl Use<[0, 1]> for Cycle where Cycle: Use<[0, 1]> {}
+    "#);
+    assert!(signatures.validate_principal_use_rules().iter().any(|diagnostic| diagnostic.code == "G4194"));
+    assert_eq!(signatures.principal_use_interval(&Type::Nominal { definition: names["Cycle"], arguments: vec![] }), None);
+}
+
 #[test]
 fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
     let package = PackageKey("signature-const-generics@0.1.0".into());

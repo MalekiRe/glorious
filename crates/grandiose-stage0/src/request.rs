@@ -85,10 +85,12 @@ pub struct CompilerBuildIdentity {
 /// scopes and callable/implementation requirements through Core and MIR.
 /// Cache seven, bytecode 50 and verifier nine add explicit unsafe reference
 /// origins and frame-neutral native references over raw storage.
+/// Cache eight instantiates conditional principal ownership and forwards
+/// bounded quantity binders for source-defined zero-sized ownership markers.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 2;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 2;
-pub const STAGE0_CACHE_GENERATION: u32 = 7;
+pub const STAGE0_CACHE_GENERATION: u32 = 8;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 50;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 9;
 

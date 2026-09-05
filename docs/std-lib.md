@@ -613,6 +613,12 @@ the stable `<unknown>:0:0` location rather than trapping.
 
 ## 9. Collections and algorithms
 
+`PhantomData<T>` is an ordinary zero-field source type. Its bounded generic
+`Use<q>` implementation forwards `T`'s principal ownership interval without
+adding a resident `T` or changing the target layout. It is an ownership-quantity
+marker; an unsafe pointer owner must still establish its storage, reference
+lifetimes, initialization and destruction invariants separately.
+
 ### 9.1 `Vec`, slices, and queues
 
 `Vec<T>` is the standard dense interface over the VM's growable `Array<T>`.

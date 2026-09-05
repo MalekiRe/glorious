@@ -332,6 +332,9 @@ pub struct TraitSolver {
     /// rule selection.
     definitions: Arc<BTreeMap<DefKey, ElaboratedHeader>>,
     tables: BTreeMap<Digest, TableState>,
+    /// Principal ownership queries share the trait query's budget and lexical
+    /// environment. This stack also cuts mixed `Use`/ordinary-trait cycles.
+    principal_active: Vec<Type>,
     limits: TraitSolverLimits,
     steps: u32,
 }
@@ -448,8 +451,14 @@ impl TraitSolver {
         Self {
             rules: Arc::new(rules),
             traits: Arc::new(traits),
-            definitions: Arc::new(signatures.definitions.clone()),
+            // Queries need nominal field layouts, not source callable/value
+            // headers. Rules and trait declarations are already frozen above.
+            definitions: Arc::new(signatures.definitions.iter().filter_map(|(key, header)| {
+                matches!(header, ElaboratedHeader::Nominal { .. })
+                    .then(|| (*key, header.clone()))
+            }).collect()),
             tables: BTreeMap::new(),
+            principal_active: vec![],
             limits,
             steps: 0,
         }
@@ -464,6 +473,7 @@ impl TraitSolver {
             traits: Arc::clone(&self.traits),
             definitions: Arc::clone(&self.definitions),
             tables: BTreeMap::new(),
+            principal_active: vec![],
             limits: self.limits.clone(),
             steps: 0,
         }
@@ -498,7 +508,179 @@ impl TraitSolver {
     /// full semantic world.
     pub fn reset_query(&mut self) {
         self.tables.clear();
+        self.principal_active.clear();
         self.steps = 0;
+    }
+
+    /// The one ownership interval, with implementation binders instantiated
+    /// and conditional bounds checked in the same query as ordinary traits.
+    pub fn principal_use_with_assumptions(
+        &self,
+        ty: &Type,
+        assumptions: &[TraitGoal],
+    ) -> Option<crate::Quantity> {
+        self.fresh_query().principal_use_at(ty, 0, assumptions)
+    }
+
+    fn principal_use_at(
+        &mut self,
+        ty: &Type,
+        depth: u32,
+        assumptions: &[TraitGoal],
+    ) -> Option<crate::Quantity> {
+        if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps
+            || self.principal_active.contains(ty)
+        {
+            return None;
+        }
+        self.steps += 1;
+        self.principal_active.push(ty.clone());
+        let result = self.principal_use_inner(ty, depth, assumptions);
+        self.principal_active.pop();
+        result
+    }
+
+    fn principal_use_inner(
+        &mut self,
+        ty: &Type,
+        depth: u32,
+        assumptions: &[TraitGoal],
+    ) -> Option<crate::Quantity> {
+        use crate::Quantity;
+        let relation = |quantity| ElaboratedTraitReference {
+            definition: crate::resolution::language_use_trait_definition(),
+            arguments: vec![GenericArgument::ConstQuantity(quantity)],
+        };
+        // Assumptions are guaranteed capabilities, not an assertion that the
+        // caller's principal interval is exactly the written bound.
+        for quantity in [Quantity::UNRESTRICTED, Quantity::AFFINE, Quantity::ONCE] {
+            if self.assumption_proves(&TraitGoal {
+                subject: ty.clone(), relation: relation(quantity),
+            }, assumptions) {
+                return Some(quantity);
+            }
+        }
+        let rules = Arc::clone(&self.rules);
+        let mut declared = None;
+        let mut unresolved = false;
+        for rule in rules.iter().filter(|rule| rule.implementation.relation.definition
+            == crate::resolution::language_use_trait_definition())
+        {
+            let implementation = &rule.implementation;
+            let mut head = ImplementationSubstitution::default();
+            if match_type(&implementation.self_ty, ty, &mut head).is_none() {
+                continue;
+            }
+            if implementation.negative { return None; }
+            let mut selected = None;
+            let mut rule_unresolved = false;
+            // A forwarded quantity is determined by the widest capability
+            // its bounds prove. Fixed intervals still select only themselves.
+            for quantity in [Quantity::UNRESTRICTED, Quantity::AFFINE, Quantity::ONCE] {
+                let Some(substitution) = match_rule(implementation, &TraitGoal {
+                    subject: ty.clone(), relation: relation(quantity),
+                }) else { continue; };
+                let mut viable = true;
+                for (subject, bound) in &implementation.where_bounds {
+                    let obligation = TraitGoal {
+                        subject: substitute_type(subject, &substitution),
+                        relation: substitute_relation(bound, &substitution),
+                    };
+                    match self.solve_at_with_assumptions(
+                        obligation.clone(), depth + 1, false, assumptions, true,
+                    ) {
+                        TraitAnswerIndex::Proven(_) => {},
+                        TraitAnswerIndex::Ambiguous | TraitAnswerIndex::Overflow => {
+                            rule_unresolved = true;
+                            viable = false;
+                        },
+                        _ => {
+                            rule_unresolved |= principal_goal_is_open(&obligation);
+                            viable = false;
+                        },
+                    }
+                    if !viable { break; }
+                }
+                if viable { selected = Some(quantity); break; }
+            }
+            if let Some(quantity) = selected {
+                if declared.is_some_and(|previous| previous != quantity) {
+                    return None;
+                }
+                declared = Some(quantity);
+            } else {
+                unresolved |= rule_unresolved;
+            }
+        }
+        if unresolved { return None; }
+        let structural = self.structural_principal_use_at(ty, depth + 1, assumptions);
+        match (declared, structural) {
+            (Some(manual), Some(structural)) => structural.contains(manual).then_some(manual),
+            // Header validation checks generic restrictions against the
+            // implementation's own assumptions. Concrete queries recheck the
+            // actual field contract above whenever it is known.
+            (Some(manual), None) => Some(manual),
+            (None, structural) => structural,
+        }
+    }
+
+    pub(crate) fn structural_principal_use_with_assumptions(
+        &self, ty: &Type, assumptions: &[TraitGoal],
+    ) -> Option<crate::Quantity> {
+        self.fresh_query().structural_principal_use_at(ty, 0, assumptions)
+    }
+
+    pub(crate) fn principal_use_rule_contracts(
+        &self, implementation: &ElaboratedImplementation,
+    ) -> Option<Vec<(crate::Quantity, Option<crate::Quantity>)>> {
+        use crate::Quantity;
+        let candidates = match implementation.relation.arguments.as_slice() {
+            [GenericArgument::ConstQuantity(quantity)] => vec![(*quantity, None)],
+            [GenericArgument::ConstGeneric { index, kind: crate::ConstKind::Quantity }]
+                if implementation.generic_kinds.get(*index as usize)
+                    == Some(&crate::GenericKind::Const(crate::ConstKind::Quantity))
+                    && implementation.where_bounds.iter().any(|(_, relation)| {
+                        relation.definition == crate::resolution::language_use_trait_definition()
+                            && relation.arguments == implementation.relation.arguments
+                    }) => [Quantity::UNRESTRICTED, Quantity::AFFINE, Quantity::ONCE]
+                        .into_iter().map(|quantity| (quantity, Some(*index))).collect(),
+            _ => return None,
+        };
+        Some(candidates.into_iter().map(|(quantity, index)| {
+            let mut substitution = ImplementationSubstitution::default();
+            if let Some(index) = index {
+                substitution.generic_arguments.insert(index, GenericArgument::ConstQuantity(quantity));
+            }
+            let subject = substitute_type(&implementation.self_ty, &substitution);
+            let assumptions = implementation.where_bounds.iter().map(|(subject, relation)| TraitGoal {
+                subject: substitute_type(subject, &substitution),
+                relation: substitute_relation(relation, &substitution),
+            }).collect::<Vec<_>>();
+            (quantity, self.structural_principal_use_with_assumptions(&subject, &assumptions))
+        }).collect())
+    }
+
+    fn structural_principal_use_at(
+        &mut self, ty: &Type, depth: u32, assumptions: &[TraitGoal],
+    ) -> Option<crate::Quantity> {
+        use crate::Quantity;
+        let fields = match ty {
+            Type::Unit | Type::Never | Type::Scalar(_) | Type::StaticData { .. }
+            | Type::RawPointer { .. } => return Some(Quantity::UNRESTRICTED),
+            Type::Reference { mutability, .. } => return Some(match mutability {
+                crate::Mutability::Shared => Quantity::UNRESTRICTED,
+                crate::Mutability::Unique => Quantity::AFFINE,
+            }),
+            Type::Callable { invocation, .. } => return Some(*invocation),
+            Type::Tuple(fields) => fields.clone(),
+            Type::Array(element) => vec![(**element).clone()],
+            Type::Nominal { definition, arguments } =>
+                self.nominal_structural_fields(*definition, arguments)?,
+            _ => return None,
+        };
+        fields.iter().try_fold(Quantity::UNRESTRICTED, |quantity, field| {
+            quantity.intersection(self.principal_use_at(field, depth + 1, assumptions)?).ok()
+        })
     }
 
     /// Solve a trait goal under declaration-owned assumptions.
@@ -733,6 +915,7 @@ impl TraitSolver {
             traits: self.traits.clone(),
             definitions: self.definitions.clone(),
             tables: BTreeMap::new(),
+            principal_active: vec![],
             limits: self.limits.clone(),
             steps: 0,
         };
@@ -2009,6 +2192,22 @@ impl TraitSolver {
         }
         if accept_direct_assumption && self.assumption_proves(&goal, assumptions) {
             return TraitAnswerIndex::Proven(assumption_evidence(&goal));
+        }
+        if accept_direct_assumption
+            && goal.relation.definition == crate::resolution::language_use_trait_definition()
+        {
+            let [GenericArgument::ConstQuantity(required)] = goal.relation.arguments.as_slice()
+                else { return TraitAnswerIndex::NoSolution; };
+            if self.principal_active.contains(&goal.subject) {
+                return TraitAnswerIndex::Ambiguous;
+            }
+            return if self.principal_use_at(&goal.subject, depth + 1, assumptions)
+                .is_some_and(|principal| principal.contains(*required))
+            {
+                TraitAnswerIndex::Proven(assumption_evidence(&goal))
+            } else {
+                TraitAnswerIndex::NoSolution
+            };
         }
         if is_intrinsic_callable_trait(&goal.relation) {
             return self.solve_intrinsic_callable_goal(&goal);
@@ -3811,6 +4010,11 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
+}
+
+fn principal_goal_is_open(goal: &TraitGoal) -> bool {
+    !projection_is_concrete(&goal.subject)
+        || !goal.relation.arguments.iter().all(generic_argument_is_concrete)
 }
 
 fn generic_argument_is_concrete_in_hrtb_scope(

@@ -32449,11 +32449,20 @@ impl Lowerer<'_> {
         if matches!(ty, Type::Callable { .. } | Type::Reference { .. }) {
             return mir_type_is_duplicable(ty, &self.nominal_copy_descriptors);
         }
-        if let Some(principal) = self
-            .signatures
-            .and_then(|signatures| signatures.principal_use_interval(ty))
-        {
-            return principal == crate::quantity::Quantity::UNRESTRICTED;
+        if let Some(signatures) = self.signatures {
+            if let Some(principal) = signatures.principal_use_interval(ty) {
+                return principal == crate::quantity::Quantity::UNRESTRICTED;
+            }
+            let bounds = match signatures.definitions.get(&self.owner) {
+                Some(ElaboratedHeader::Callable(signature)
+                    | ElaboratedHeader::ValueAlias { signature, .. }) => signature.where_bounds.as_slice(),
+                _ => &[],
+            };
+            // A bounded element does not make an owning pointer-backed
+            // aggregate duplicable. Recompute the aggregate's whole contract
+            // under the lexical bounds, including zero-sized restrictions.
+            return signatures.principal_use_interval_with_bounds(ty, bounds)
+                == Some(crate::quantity::Quantity::UNRESTRICTED);
         }
         if !self.generic_components_have_unrestricted_use(ty) {
             return false;

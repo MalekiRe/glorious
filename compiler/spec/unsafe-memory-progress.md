@@ -282,3 +282,28 @@ pass with the lifetime change. No further Miri run was started. This is not yet
 native layout for every VM register value or a complete VM/native call bridge;
 storing legacy frame references, callable payloads, and old collection handles
 in raw residents still requires that work. Source Vec and cleanup remain next.
+
+## Source ownership markers
+
+Generic manual `Use` rules now instantiate their head and prove their where-bounds
+for the selected type. Unresolved conditional rules do not fall back to the
+unrestricted field layout. Ordinary trait bounds and principal `Use` obligations
+share one bounded query, including lexical supertrait evidence and mixed-cycle
+rejection. Generic custom `Drop` declarations are checked under their own bounds;
+MIR likewise checks the whole aggregate under those bounds before copying it.
+
+The standard library declares `PhantomData<T> {}` in ordinary source, with
+`impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}`. A forwarded
+quantity selects the widest public interval its bounds prove, not independent
+overlapping ownership permissions. Unconstrained quantity forwarding is rejected.
+The marker has zero native size and follows the logical element's quantity. An
+additional source-defined affine marker can make a raw pointer owner affine for
+discardable elements and exact-linear for exact-linear elements, without a dummy
+element or runtime collection special case. This is an ownership-quantity
+building block, not a complete pointer-owner lifetime/drop implementation.
+
+Focused validation passes: 13 raw-memory, 80 signature, 65 trait-solver, 128 standard
+library, 22 request/revision and four conditional-Drop service tests. The new source
+fixture executes a zero-sized marker and rejects owner reuse after a move. Rust and
+source cache generation is eight; bytecode/verifier remain 50/nine. Vec migration,
+native representation of all resident types and VM/native calls are still open.

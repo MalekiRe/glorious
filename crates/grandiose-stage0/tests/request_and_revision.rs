@@ -96,8 +96,8 @@ fn authority_tag_changes_cannot_deduplicate_distinct_revision_worlds() {
 fn authority_tag_correction_invalidates_the_previous_canonical_cache_generation() {
     let (mut current, _) = authority_tag_requests();
     current.build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-test"));
-    assert_eq!(current.build.cache_generation, 7);
-    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 7);
+    assert_eq!(current.build.cache_generation, 8);
+    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 8);
     let mut stale = current.clone();
     stale.build.cache_generation = 2;
     assert_ne!(

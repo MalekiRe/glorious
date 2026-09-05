@@ -399,6 +399,16 @@ This allows a type with unrestricted fields to impose linear, affine, relevant, 
 
 `Use` does not use negative implementations. A single principal interval already gives complete positive and negative information.
 
+Generic nominal implementations instantiate their heads and prove their bounds
+before contributing a restriction. A quantity binder may be forwarded when a
+`Use` where-bound constrains that same binder: for example,
+`impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}` gives a
+zero-field source marker the widest public interval supported by `T`. This
+defines one principal interval, not a family of independently selectable
+ownership permissions. Unresolved conditional evidence cannot silently restore
+the unrestricted structural default. Structural restrictions are still checked
+under the implementation's assumptions and at concrete use sites.
+
 ### 3.6 Usage composition
 
 The checker computes an actual use interval for every binding and environment authority.

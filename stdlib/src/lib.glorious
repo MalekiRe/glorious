@@ -4,6 +4,12 @@
 // ordinary source-defined UTF-8 view; its private byte window works equally
 // for compiler-emitted static data and for a future owned `String` buffer.
 
+// An ownership-only marker has no resident payload or machine representation.
+// Its sole principal interval follows T; pointer owners can therefore account
+// for their logical residents without pretending that pointer copies own T.
+pub struct PhantomData<T> {}
+pub impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}
+
 // General machine memory leaves. These do not own collection policy or element
 // lifetimes. All pointer operations require explicit unsafe source scopes;
 // their exact signatures/identities are bound by the runtime manifest. A trailing

@@ -69,6 +69,43 @@ fn compile(source: &str) -> VerifiedVmProgram {
 }
 
 #[test]
+fn source_defined_ownership_markers_have_zero_layout_and_preserve_owner_moves() {
+    let declarations = r#"
+        struct PhantomData<T> {}
+        impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}
+        struct NoCopy {}
+        impl Use<[0, 1]> for NoCopy {}
+        struct Owner<T> { pointer: *mut T, ownership: PhantomData<T>, unique: NoCopy }
+        fn inspect<T>(value: &Owner<T>) -> usize { size_of<PhantomData<T>>() }
+        fn take<T>(value: Owner<T>) -> usize { inspect(&value) }
+    "#;
+    let program = compile(&format!(r#"{declarations}
+        pub fn main() -> i64 {{
+            unsafe {{
+                let owner = Owner<i64> {{ pointer: dangling(), ownership: PhantomData {{}}, unique: NoCopy {{}} }};
+                let consumed = take(owner);
+                handle consumed {{ 0 => 42, _ => 0 }}
+            }}
+        }}
+    "#));
+    // SAFETY: only an aligned dangling pointer is constructed; it is never
+    // dereferenced, and both source ownership marker fields are zero-sized.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 42);
+    let rejected = format!(r#"{declarations}
+        pub fn main() -> i64 {{
+            unsafe {{
+                let owner = Owner<i64> {{ pointer: dangling(), ownership: PhantomData {{}}, unique: NoCopy {{}} }};
+                take(owner);
+                inspect(&owner);
+                42
+            }}
+        }}
+    "#);
+    let error = StageZeroCompiler::new().compile(request(&rejected)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code.starts_with("G50")), "{error:#?}");
+}
+
+#[test]
 fn bodyless_memory_declarations_bind_and_execute_without_stub_bodies() {
     let program = compile(
         r#"
