@@ -9,8 +9,9 @@ The September 5, 2026 [unsafe-memory and shared native/VM ABI amendment](docs/un
 adds programmer-established safety contracts and raw-memory support as project
 prerequisites. Concrete generic library implementations and unsafe internals must
 be compilable to bytecode operating on host-compatible memory. Unsafe-enabled
-execution is not an in-process memory sandbox; safe-only guests may use safe
-exports of trusted native libraries. The ownership/control core remains the
+execution is not an in-process memory sandbox. Current distribution ships source
+for trusted local compilation; independently verified untrusted bytecode and
+native-export admission are deferred. The ownership/control core remains the
 safe-language contract. The Glorious LLVM backend is deferred until after
 verified self-hosting; new syntax and artifact support require the amendment's
 executable gates and do not silently alter existing artifact contracts.

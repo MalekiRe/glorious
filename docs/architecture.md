@@ -15,8 +15,10 @@ to bytecode, including unsafe internals, over actual host-layout memory. The
 Glorious LLVM backend follows working, verified self-hosting; native-precompiled
 std is not required. Initial ABI tests cross the VM/native boundary using host
 fixtures, with the same objects/allocations and explicit call bridges. This
-unsafe-enabled profile is not an in-process memory sandbox. Safe-only admission
-and trusted native safe exports remain a separate execution policy.
+unsafe-enabled profile is not an in-process memory sandbox. Current distribution
+ships source compiled locally; independent admission of untrusted bytecode and
+authenticated native safe exports are deferred, not implementation prerequisites.
+Existing G1 verification remains intact as a compatibility contract.
 
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by

@@ -8,12 +8,19 @@ specialized generics and unsafe internals, as bytecode over real host-compatible
 storage. The Glorious LLVM backend is deferred until after working, verified
 self-hosting; it is not needed to implement or certify the initial VM/host ABI.
 
+Current distribution is source-only, compiled on each user's machine. Independent
+validation/admission of untrusted distributed bytecode is deferred, not a U3 or
+self-hosting blocker. Source safety checks, existing bytecode consistency checks,
+host capabilities, and version/budget bounds remain. Trust includes the local
+compiler/runtime and any unsafe library implementations; source distribution
+alone is not proof that unsafe code is sound.
+
 | Gate | Required result | Current state |
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
-| U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Initial Rust substrate passes native and Miri tests; guest budget/admission integration remains |
+| U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Initial Rust substrate passes native and Miri tests; guest budget integration remains |
 | U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Pointer types and lexical/callable/trait contracts implemented and tested; raw operations remain |
-| U3 | Versioned raw-memory bytecode and safety metadata; host-selected unsafe-enabled execution, independent safe-only verification, authenticated native export admission | Missing |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Missing; untrusted-bytecode admission and native-export certification deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
 | U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Missing |
@@ -32,11 +39,11 @@ future LLVM output, which needs separate cross-backend tests after self-hosting.
 U5 must include application-defined noncopy and zero-size types; a type-erased
 native vector algorithm is not a substitute for specialized library bytecode.
 
-The unsafe-enabled profile permits genuine host-memory access and is not an
-in-process memory sandbox. The loader still checks structural validity, ABI
-compatibility, and host policy; it does not prove programmer-owned unsafe
-obligations or contain invalid raw writes. Safe-only admission remains a
-separate independently verified contract. No switch syntax is implemented yet.
+The unsafe execution path permits genuine host-memory access and is not an
+in-process memory sandbox. Existing checks and ABI compatibility remain; they
+do not prove programmer-owned unsafe obligations or contain invalid raw writes.
+Independent safe-only admission belongs to the later untrusted-bytecode project,
+not the current source-distribution path. No new admission API is implemented.
 
 After U1–U6, complete the existing GSC-2 semantic/service and M9 self-host/C2/C3
 gates on the bytecode path. Only then implement the Glorious LLVM backend and

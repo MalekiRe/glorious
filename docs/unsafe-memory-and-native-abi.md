@@ -84,7 +84,36 @@ evidence, callable identities, host capabilities, or execution brands. Any
 future unsafe assertion mechanism for those needs its own explicit contract;
 a guessed layout or integer is not authority.
 
-## 3. Execution profiles and trust
+## 3. Source distribution now; untrusted bytecode later
+
+The current distribution model ships source code. Each user's computer compiles
+the application and its dependency closure locally using a trusted compiler and
+runtime. Independently validating arbitrary externally supplied bytecode is a
+valuable future project, but is not a prerequisite of raw memory, source-owned
+libraries, or initial self-hosting. The unfinished two-phase bytecode admission
+API is deferred with it; implementation proceeds with raw-memory execution.
+
+The source compiler enforces types, ownership, lifetimes, unsafe scopes and
+callable/implementation contracts. A fully checked source closure without unsafe
+operations or assertions relies on the soundness of those checks and the trusted
+compiler/runtime. Absence of unsafe opcodes in arbitrary bytes, or absence of
+`unsafe` in only the application's text, is not such a proof. Unsafe std internals
+and native imports remain trusted code; their safe exports retain source contracts.
+
+Keep existing decoder bounds, compiler/structural consistency checks, execution
+budgets, version checks, and host capabilities. Do not expand them into a complete
+hostile-bytecode certification project now, or delete them as a shortcut. Only
+locally compiler-produced output belongs on the new trusted execution path;
+downloaded artifacts, altered caches, and guest-set flags do not establish that
+provenance. Arbitrary raw-memory bytecode must not become safely executable through
+a public Rust API. Source distribution does not prove unsafe programmer obligations
+or make unrestricted execution an in-process sandbox.
+
+### Deferred distribution profiles
+
+The following independent admission and native-export authentication requirements
+apply when untrusted bytecode distribution is implemented. They remain future
+targets, not blockers for the current source-distribution workflow.
 
 Whether guest code may execute unsafe operations is independent of which
 library implementations the host trusts.
@@ -223,7 +252,8 @@ them. Zero marshalling is not zero call overhead or permission to retain borrows
 The implementation order is:
 
 1. Provide source unsafe contracts and raw-memory bytecode over the host-compatible
-   storage substrate, with independent admission for the execution profiles.
+   storage substrate for locally compiled source. Independent admission of
+   untrusted distributed bytecode is deferred, not on this critical path.
 2. Specialize and run ordinary source libraries as bytecode. Prove actual
    VM/native storage and call interoperability using explicit host ABI fixtures.
 3. Complete the full GSC-2 incremental compiler and its Stage0/G1 compatibility,
@@ -243,15 +273,16 @@ comparisons are not pre-self-hosting requirements.
 ## 7. Delivery and evidence
 
 Order: contracts and raw-storage foundation; compiler safety propagation;
-independent verifier/linker admission; shared ABI; source collection migration.
+trusted locally compiled raw-memory execution; shared ABI; source collection
+migration. Independent untrusted-bytecode admission is a later project.
 The compiler kernel stays intact, not replaced by a smaller compiler prototype.
 
 Tests cover overflow/alignment, allocation failure, empty/zero-size values,
 initialized/moved-out residents, drop accounting, shared/unique views, generic
-and indirect calls, callbacks, and exceptional cleanup. Hostile artifacts must
-not self-authorize unsafe execution or trusted imports. Safe-only execution must
-reject unsafe operations across direct/indirect calls and the dependency closure;
-the same well-formed unsafe program may execute under host-selected unsafe policy.
+and indirect calls, callbacks, and exceptional cleanup using locally compiled
+source. Deferred hostile-bytecode tests must additionally prove artifacts cannot
+self-authorize unsafe execution or trusted imports, and safe-only admission checks
+the entire dependency closure. Those future tests do not block this work.
 
 All-bytecode evidence must include source library specializations for newly
 defined noncopy and zero-size element types, their trait/cleanup behavior, and

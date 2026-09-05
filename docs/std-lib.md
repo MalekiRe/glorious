@@ -3,8 +3,9 @@
 The [September 5 unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md)
 supersedes this document's exclusion of raw pointers and unsafe library code.
 Specialized collection/text/hash leaves below describe the compatibility
-bootstrap, not the final source-owned library boundary. Safe-only guests may
-use safe exports of explicitly trusted native library implementations.
+bootstrap, not the final source-owned library boundary. Current distribution
+ships source for local compilation. Independently verified safe-only guests and
+authenticated native library exports are deferred, not std implementation gates.
 
 The primary self-hosting path compiles the selected std source closure, including
 concrete generic specializations and unsafe internals, to bytecode operating on

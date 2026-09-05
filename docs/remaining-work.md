@@ -5,8 +5,9 @@ is now active compiler-project work. It requires source libraries specialized
 to bytecode, unsafe-enabled execution over host-compatible memory, and actual
 VM/native ABI tests using host fixtures. The Glorious LLVM backend is deferred
 until after working, verified self-hosting; native Glorious std is not a build
-prerequisite. Safe-only verification and the trusted native-library boundary
-remain required, while unsafe-enabled execution is not a memory sandbox. These
+prerequisite. Current distribution ships source for local compilation. Independent
+untrusted-bytecode admission and native-export authentication are deferred, while
+unsafe-enabled execution is not a memory sandbox. These
 requirements supersede the unsafe and VM-hardening exclusions below for this
 specific scope; they are not already-implemented capabilities.
 

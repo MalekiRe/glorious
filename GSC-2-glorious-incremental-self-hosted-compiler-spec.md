@@ -7,7 +7,7 @@
 **Replacement source root:** `compiler/`.  
 **Implementation language:** Glorious, using a certified Stage0-compilable authoring profile.  
 **Compatibility:** The full frozen Stage0 compiler surface, including its incremental database and VM-facing APIs.  
-**Distribution target:** Independently verified G1 compiler bytecode, with the existing Stage0 wire format retained wherever compatibility requires it.
+**Distribution target:** Source compiled locally on each user's machine. Untrusted bytecode distribution and independent admission of the new unsafe format are deferred; existing Stage0/G1 compatibility contracts remain explicit.
 
 This specification supersedes GSC-1. It rejects GSC-1's batch-core/optional-query-wrapper architecture, its reduced classification of Rust-facing functionality, and its proposal to preserve adapters to the current self-host implementation.
 
@@ -22,6 +22,15 @@ The Glorious LLVM backend and native-precompiled Glorious std are deferred until
 after working, verified self-hosting; initial interop tests use native host ABI
 fixtures, not that backend. Existing artifact generations retain explicit
 compatibility; this is not an execution certificate.
+
+**Source-distribution follow-up:** Independently certifying arbitrary untrusted
+bytecode is a later project, not a prerequisite of U0–U6 or initial self-hosting.
+Use trusted local compilation of the selected source closure. Keep existing
+source safety rules, bytecode checks, host capabilities, and compatibility tests;
+do not add the unfinished two-phase unsafe admission API to this critical path.
+Earlier requirements for new unsafe-format admission/native-export certificates
+below are deferred by this follow-up. Existing G1 verification is not removed,
+and unsafe source/library obligations are not proven by local compilation.
 
 The required product is **a long-lived, demand-driven, incremental compiler database written from scratch in Glorious**. Command-line builds, inspection, IDE requests, tests, and self-compilation all use this database. Compactness comes from sharing algorithms, storage, and control—not from removing capabilities.
 
@@ -623,7 +632,8 @@ The independent verifier checks bytes and runtime invariants, not source trait i
 Under the September 5 amendment, unsafe-enabled bytecode executes specialized
 source libraries over genuine host-compatible memory. The host selects this
 profile; structural verification does not turn unrestricted unsafe memory access
-into an in-process sandbox. Safe-only bytecode has separate fail-closed admission.
+into an in-process sandbox. Independent safe-only admission for distributed
+bytecode is deferred; locally compiled source is the current execution boundary.
 The source compiler and library closure must run without a Glorious LLVM backend
 or native generic-specialization fallback. Runtime call bridges and native host
 ABI fixtures are permitted machine-boundary support, not compiler semantics.

@@ -11,9 +11,10 @@ Private algorithmic leaves below describe the bootstrap, not the final boundary.
 The chosen implementation path specializes generic source libraries to bytecode,
 including unsafe internals, over real host-compatible storage. Native-precompiled
 Glorious std and universally type-erased native collection algorithms are not
-required; the Glorious LLVM backend follows verified self-hosting. Safe-only VM
-guests may call safe exports of trusted native library code, while all-bytecode
-std runs under explicit unsafe-enabled policy without a memory-sandbox claim.
+required; the Glorious LLVM backend follows verified self-hosting. Current
+distribution ships source for local compilation, including unsafe std internals,
+without a memory-sandbox claim. Independent untrusted-bytecode admission and
+authenticated native safe exports are deferred, not std implementation gates.
 Std inclusion is optional subject to dependencies and the minimal runtime
 contract; existing fixed source-bundle behavior changes only explicitly.
 

@@ -21,8 +21,9 @@ compiler and source libraries, including `Vec<T>` and unsafe memory operations,
 into bytecode over host-compatible storage. **Self-hosting comes before the
 Glorious LLVM backend**; native-precompiled std and native generic specialization
 are not prerequisites. Shared native/VM objects target zero marshalling. The
-unsafe-enabled profile is not a memory sandbox; safe-only guests may instead use
-safe exports of trusted native libraries. Source raw-pointer types, explicit
+unsafe-enabled profile is not a memory sandbox. Current distribution ships source
+for local compilation; independent admission of untrusted distributed bytecode
+and trusted-native safe exports are deferred. Source raw-pointer types, explicit
 unsafe scopes, and unsafe callable/trait contracts now propagate through the
 compiler; pointer execution and general zero-marshalling interop are not
 available yet. The current bytecode format rejects unsafe requirements. See the

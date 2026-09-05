@@ -13,8 +13,9 @@ collection/UTF-8/hashing internals, must run as bytecode over a small raw-memory
 layer. Shared-layout interop targets zero marshalling; initial VM/native tests
 use host ABI fixtures. The Glorious LLVM backend and native Glorious std are
 deferred until after working, verified self-hosting, not prerequisites of it.
-Unsafe-enabled execution is not an in-process memory sandbox. Safe-only guests
-may use safe APIs of trusted native implementations containing unsafe. Existing
+Unsafe-enabled execution is not an in-process memory sandbox. Current distribution
+ships source for local compilation. Independent admission of untrusted bytecode
+and authenticated native safe exports are deferred, not prerequisite gates. Existing
 tests do not certify these new capabilities, and recording the decision closes
 no compiler milestone.
 

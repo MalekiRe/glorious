@@ -37,8 +37,9 @@ See [progress and next gates](spec/progress.md).
 
 The self-hosting path compiles the compiler and source libraries, including
 concrete generic specializations and unsafe internals, to bytecode operating on
-host-compatible memory. Raw memory, independent safe-only/unsafe-enabled
-admission, and a shared native/VM ABI are prerequisites. Collections must become
+host-compatible memory. Raw memory and a shared native/VM ABI are prerequisites.
+Current distribution ships source for local compilation; independently admitting
+untrusted distributed bytecode is deferred, not a prerequisite. Collections must become
 source implementations, not wrappers around specialized VM algorithms. The
 Glorious LLVM backend is deferred until after working, verified self-hosting;
 initial VM/native tests use host ABI fixtures and do not need native Glorious

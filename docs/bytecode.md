@@ -6,8 +6,9 @@ reassign or weaken the existing G1 encodings and verifier contracts below.
 
 The selected extension must execute concrete source-library specializations,
 including unsafe memory operations, as bytecode over host-compatible storage.
-Host-selected unsafe-enabled execution is not an in-process memory sandbox;
-safe-only admission remains independently enforced. Shared native calls need
+Unsafe-enabled execution is not an in-process memory sandbox. Current distribution
+ships source for local compilation; independent admission of untrusted new-format
+bytecode is deferred. Existing G1 checks below remain intact. Shared native calls need
 target/layout and call/ownership contracts plus actual VM/host tests, not a
 Glorious LLVM backend. LLVM is deferred until after verified self-hosting.
 This decision allocates no opcode, feature bit, profile flag, or CLI switch.
