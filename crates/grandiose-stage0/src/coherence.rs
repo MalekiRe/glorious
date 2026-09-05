@@ -136,10 +136,13 @@ impl CoherenceSet {
             result.implementations.insert(definition, head);
         }
         let heads = result.implementations.values().cloned().collect::<Vec<_>>();
+        // Every pair sees the same frozen interface. Share its immutable
+        // solver data; overlap probes still own separate tables and budgets.
+        let solver = TraitSolver::new(signatures);
         for (offset, left) in heads.iter().enumerate() {
             for right in &heads[offset + 1..] {
                 if left.trait_definition != right.trait_definition
-                    || !implementations_may_overlap(left, right, signatures)
+                    || !implementations_may_overlap(left, right, signatures, &solver)
                 {
                     continue;
                 }
@@ -447,6 +450,7 @@ fn implementations_may_overlap(
     left_head: &ImplHead,
     right_head: &ImplHead,
     signatures: &ElaboratedInterface,
+    snapshot: &TraitSolver,
 ) -> bool {
     let Some(ElaboratedHeader::Implementation(left)) =
         signatures.definitions.get(&left_head.definition)
@@ -463,7 +467,7 @@ fn implementations_may_overlap(
     };
     let right_offset = left.generics;
     let right = rebase_implementation_generics(right, right_offset);
-    let mut solver = TraitSolver::new(signatures);
+    let mut solver = snapshot.fresh_query();
     let left = normalize_overlap_implementation(left, &mut solver);
     let right = normalize_overlap_implementation(&right, &mut solver);
     if left.relation.definition != right.relation.definition

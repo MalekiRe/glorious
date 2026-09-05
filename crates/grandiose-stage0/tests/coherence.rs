@@ -237,6 +237,34 @@ fn coherence_treats_refuted_bounds_as_disjoint_from_positive_heads() {
 }
 
 #[test]
+fn coherence_pair_queries_remain_independent_across_mixed_bound_domains() {
+    let declarations = "trait Left {} trait Right {} trait Render {} impl Left for i64 {} impl Right for i64 {} impl Left for Text {} impl !Right for Text {} ";
+    let heads = [
+        "impl<T> Render for T where T: Left {}",
+        "impl Render for i64 where i64: Right {}",
+        "impl Render for i64 {}",
+        "impl Render for Text where Text: Right {}",
+        "impl Render for Text {}",
+    ];
+    // Four overlapping pairs and six disjoint pairs, including explicitly
+    // refuted bounds. Each shared witness is concrete. Reordering declarations
+    // changes their identities/probe order; no preceding answer may leak into
+    // another pair's solver table or exhaust its fresh work budget.
+    for offset in 0..heads.len() {
+        let mut source = declarations.to_owned();
+        for index in 0..heads.len() {
+            source.push_str(heads[(index + offset) % heads.len()]);
+        }
+        let result = collect(&source);
+        assert_eq!(result.diagnostics.len(), 4, "{result:#?}");
+        assert!(
+            result.diagnostics.iter().all(|diagnostic| diagnostic.code == "G3404"),
+            "{result:#?}"
+        );
+    }
+}
+
+#[test]
 fn coherence_enforces_package_orphans_but_accepts_either_local_anchor() {
     let provider = interface(
         "provider@0.1.0",

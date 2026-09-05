@@ -12,13 +12,14 @@ shared workstation, not a controlled benchmark distribution.
 | Before these changes | 178.52 s |
 | Shared solver snapshots | 172.61 s |
 | Shared snapshots plus projection-free layout fast path | 37.25 s |
+| Also share solver snapshots across coherence pairs | 17.71 s |
 
-The combined observed reduction is about 79%, or 4.8 times faster. A separate
+The combined observed reduction is about 90%, or 10.1 times faster. A separate
 baseline sampled with `perf` took 186.72 seconds; that instrumented time is not
 used for the comparison. Sampling showed repeated type cloning, allocation,
 deallocation, and hashing in the native authoring compiler.
 
-Two sources of repeated work were removed:
+Three sources of repeated work were removed:
 
 1. Body elaboration and trait-method contract comparison share immutable
    implementation rules, trait declarations, and definition tables. Each
@@ -31,9 +32,14 @@ Two sources of repeated work were removed:
    boundaries. Nested type and associated-const projections still take the
    full path. Exhaustive enum matching forces new type/argument variants to
    receive an explicit decision.
+3. Coherence checks share one frozen solver snapshot across implementation
+   pairs, instead of cloning the entire interface for each overlap probe.
+   Each pair retains independent answer tables and a fresh work budget.
+   Phase-timed runs reduced time through header processing from 21.12 seconds
+   to 0.83 seconds; the final lifecycle timing above has no phase instrumentation.
 
 The lifecycle fixture retained exactly the same serialized artifact and every
-recorded execution counter in all three runs:
+recorded execution counter in all four runs:
 
 - Artifact BLAKE3: `0f3738c2eb4716b751fed377a84c6460cc5cc36033abdd50058bcdb8a4664430`
 - Artifact bytes: 2,877,630
@@ -49,10 +55,14 @@ resource ceilings, or trusted runtime operations were removed or changed.
 The new solver tests check shared snapshot identity, independent budgets,
 isolation from later interface mutation, identity-path equivalence, and
 nested projections that must not use the fast path.
+The coherence regression mixes overlapping, disjoint, and explicitly refuted
+bound domains across five declaration orders.
 
 The selected native regression run passes 1,585 tests across the library,
 coherence, conversions, Core, service, signature, standard library, trait
-solver, and VM backend suites. The full source-suite run was deliberately
+solver, and VM backend suites before the coherence optimization. After that
+change, 1,069 library/coherence/conversion/service/signature/trait-solver tests
+and the lifecycle fixture pass. The full source-suite run was deliberately
 stopped at the user's request to pursue another optimization first; it is
 not a passing full-suite result.
 
