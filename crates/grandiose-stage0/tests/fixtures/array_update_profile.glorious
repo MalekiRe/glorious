@@ -1,0 +1,22 @@
+use std::*;
+fn write(values: &mut Vec<usize>) -> i64 {
+    handle Vec::get_mut(values, 0) {
+        Result::Err(_) => 0, Result::Ok(slot) => { *slot = as<usize>(42); 1 },
+    }
+}
+fn four(values: &mut Vec<usize>) -> i64 {
+    write(&mut *values) + write(&mut *values) + write(&mut *values) + write(values)
+}
+fn sixteen(values: &mut Vec<usize>) -> i64 {
+    four(&mut *values) + four(&mut *values) + four(&mut *values) + four(values)
+}
+pub fn main() -> i64 {
+    let values = Vec<usize>::new();
+    Vec::resize(&mut values, @SIZE@, 0);
+    handle @UPDATE@ == 0 {
+        true => 42,
+        false => handle sixteen(&mut values) == 16 {
+            false => 0, true => as<i64>(*Vec::get_unchecked(&values, 0)),
+        },
+    }
+}

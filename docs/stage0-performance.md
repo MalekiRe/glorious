@@ -77,8 +77,17 @@ below supersedes that interrupted attempt.
 
 ## Full Rust suite and ten-minute budget
 
-Latest follow-up: after the nested-completion fix and source-provider
-dependency publication, the same guarded workspace command passes **2,450
+Latest follow-up: after copy-on-write projected/fixed-size array updates, the
+same guarded workspace command passes **2,455 tests, zero failures, two existing
+ignored manual VM benchmarks**, in **84.670 seconds**, including a 2.42-second
+incremental build. All 48 source entries pass in that run (73.71 seconds).
+This is still comfortably below ten minutes locally, not a clean-checkout CI
+guarantee or a controlled timing comparison. The improvement is established by
+physical allocation measurements: sixteen writes at 512 elements request about
+92% fewer bytes; see [runtime costs](../compiler/spec/runtime-costs.md).
+
+The earlier follow-up after the nested-completion fix and source-provider
+dependency publication passed **2,450
 tests, zero failures, two existing ignored manual VM benchmarks**, in
 **78.520 seconds** on a local incremental build. The expanded standalone
 source suite passes all 48 entries in 72.46 seconds (`run-3x54nfxx`).

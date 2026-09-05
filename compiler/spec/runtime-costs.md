@@ -54,9 +54,60 @@ Added VM work remains 5,123 ticks and all results/depths remain unchanged.
 The regression now checks equal added physical requests as well as equal
 logical lookup work across these two sizes; absolute costs may improve.
 
-Construction remains expensive: its bytes barely changed. The array-update
-and whole-owner inspection costs below are still open. Two small table sizes
-are not a compiler-scale performance certificate.
+Construction remained expensive after A09: its bytes barely changed. The
+following copy-on-write improvement addresses fixed-size updates separately.
+Neither these small tables nor the array measurements below establish a
+compiler-scale performance certificate.
+
+## Copy-on-write projected and fixed-size array updates
+
+Measured September 5, 2026 against `e478904a`, using the optimized authoring
+test profile and the same thread-local meter. Mutable reference projection
+now uses `Arc::make_mut` along the existing owner path: unique tuples, records,
+enums, and arrays retain their backing, while shared aggregates detach before
+mutation. Fixed-size array set, move-out, and reverse use that path directly
+instead of rebuilding a vector and its backing slice. Register and caller
+references still write into their actual owner; captured and shared loans
+cannot gain mutation authority.
+
+The new fixture `tests/fixtures/array_update_profile.glorious` constructs one
+vector, then optionally performs sixteen element writes through ordinary
+`Vec::get_mut`. Construction is subtracted from the write batch:
+
+| Elements | Before: added requested bytes | After: added requested bytes |
+| ---: | ---: | ---: |
+| 8 | 224,330 | 185,930 |
+| 64 | 453,706 | 185,930 |
+| 512 | 2,288,714 | 185,930 |
+
+The 512-element batch requests about 92% fewer bytes. The remaining constant
+cost includes call/control and reference bookkeeping; this does not claim
+allocation-free source execution. The previous runtime fails the new
+size-independence assertion; the improved runtime passes it. All six programs
+return 42 with identical serialized artifact digests and all identical logical
+VM counters before/after. In particular, existing size/allocation ceilings and
+charges are not relaxed to reflect the lower physical cost.
+
+The existing 64-entry hash-table construction drops from 34,054,600 to
+29,000,456 requested bytes (about 15%), with identical 125,839 work ticks and
+138,458 charged allocation elements. Sixteen lookups still add exactly
+1,061,366 requested bytes at both 8 and 64 entries.
+
+Four native regressions verify unique backing-pointer reuse, one-time shared
+detachment, unchanged retained snapshots, exact logical charges, failed
+projection/budget preservation, caller write-back, move holes, reversal, and
+shared/captured-authority rejection. The selected library/runtime-storage/
+service/standard-library/backend run passes 1,194 tests. Baseline, intermediate,
+and final physical measurements are in `/tmp/grandiose-array-cow-diHVJ0/`.
+
+The full Rust workspace subsequently passes 2,455 tests with zero failures
+and two existing ignored manual VM benchmarks in 84.670 seconds, including a
+2.42-second incremental build. Its 48 source-suite entries pass in 73.71
+seconds. Cargo output and source-execution TSVs are in the `workspace/`
+subdirectory above. The source audit passes before and after, with lock SHA-256
+`a0d79c7e8c9e1054d53394726ef9cd66efbd3b77ebbfd3efdd32e68486bc8e2b`.
+This is a local run, not a clean-checkout CI timing or an assertion of a
+wall-clock speedup relative to earlier noisy workspace measurements.
 
 ## Measurement scope and remaining work
 
@@ -74,8 +125,9 @@ Source inspection identifies concrete remaining work in
   transfer and `rebase_caller_references` can still rebuild backing objects.
   `freeze_frame_value` remains necessary at independently retained capture
   boundaries and can recursively copy aggregates there.
-- Array mutation uses `to_vec()` and reconstructs backing arrays, including
-  projected-owner updates in `store_reference`.
+- Length-changing array operations still use `to_vec()` and reconstruct
+  backing arrays. Fixed-size mutation and projected-owner updates now detach
+  only when shared; retained aliases still require copy-on-write detachment.
 - Tail-call eligibility traverses entire surviving owners. The construction
   runs inspected 1,237 and 69,711 argument/owner elements respectively. This
   conservatively protects nested loans and frame-branded values, but its cost

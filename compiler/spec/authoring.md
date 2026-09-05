@@ -600,6 +600,29 @@ existing ignored manual VM benchmarks in 78.340 seconds, including a
 4.17-second incremental build. These timings are not clean-checkout CI timings.
 All command, memory, and VM execution guards are unchanged.
 
+## A25: copy-on-write authoring-runtime updates
+
+Mutable reference stores previously rebuilt every aggregate along their owner
+path. Fixed-size array set, move-out, and reverse additionally copied the
+complete element vector. The runtime now resolves the same checked register
+or caller owner, charges the same logical fields, and uses copy-on-write
+projection. Unique backing is updated directly; shared tuples/records/enums/
+arrays detach before mutation, preserving captured snapshots and other owners.
+No bytecode instruction, runtime role, verifier rule, layout, or ceiling changes.
+
+Four native tests cover retained-pointer reuse, shared detachment, budget/path
+failure, caller write-back, move holes/reversal, and shared/captured authority.
+A new real source fixture performs ordinary vector element writes at 8, 64,
+and 512 elements. The previous runtime fails its physical size-independence
+assertion; the new runtime passes with identical artifact digests and logical
+counters in all six before/after cases. Sixteen 512-element writes request
+185,930 additional bytes instead of 2,288,714. The selected native run passes
+1,194 tests. See [runtime costs](runtime-costs.md) for the measured scope and
+the remaining resizing, transfer, tail-scan, and physical-certification work.
+The complete workspace passes 2,455 tests with zero failures and two existing
+ignored manual VM benchmarks in 84.670 seconds; all 48 source entries pass
+within that run. The source-lock audit is unchanged before/after execution.
+
 ## Source profile established during initial probes
 
 The timings below are historical. The latest complete-current-suite evidence

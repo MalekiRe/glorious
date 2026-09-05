@@ -65,6 +65,7 @@ def main():
         ROOT / "crates/grandiose-stage0/tests/runtime_manifest.rs",
         ROOT / "crates/grandiose-stage0/tests/runtime_storage.rs",
         ROOT / "crates/grandiose-stage0/tests/fixtures/hash_indexing_profile.glorious",
+        ROOT / "crates/grandiose-stage0/tests/fixtures/array_update_profile.glorious",
     ]
     expected["capability_tests"] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in test_paths}
     expected["inventories"] = {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest()

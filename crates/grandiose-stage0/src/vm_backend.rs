@@ -11788,79 +11788,32 @@ fn project_reference(value: &VmValue, fields: &[u32]) -> Result<VmValue, VmArtif
     project_reference(value, rest)
 }
 
-fn store_reference(
-    value: &VmValue,
+// Mutable projections retain uniquely owned backing and detach only shared
+// aggregates. Reserve the same logical fields as the previous rebuilding
+// implementation before entering each level; physical reuse is not a budget
+// discount and no reference/snapshot can observe another owner's mutation.
+fn project_reference_mut<'a>(
+    value: &'a mut VmValue,
     fields: &[u32],
-    replacement: VmValue,
     budget: &mut ExecutionBudget,
-) -> Result<VmValue, VmArtifactError> {
+) -> Result<&'a mut VmValue, VmArtifactError> {
     let Some((field, rest)) = fields.split_first() else {
-        return Ok(replacement);
+        return Ok(value);
     };
-    match value {
-        VmValue::Tuple(values) => {
-            budget.reserve_value("reference update fields", values.len())?;
-            let mut values = values.to_vec();
-            let slot = values
-                .get_mut(*field as usize)
-                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement, budget)?;
-            Ok(VmValue::Tuple(values.into()))
-        }
-        VmValue::Array { values, capacity } => {
-            budget.reserve_value("reference update fields", values.len())?;
-            let mut values = values.to_vec();
-            let slot = values
-                .get_mut(*field as usize)
-                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement, budget)?;
-            Ok(VmValue::Array {
-                values: values.into(),
-                capacity: *capacity,
-            })
-        }
+    let values = match value {
+        VmValue::Tuple(values) | VmValue::Array { values, .. }
+        | VmValue::Record { fields: values, .. } | VmValue::Enum { fields: values, .. } => values,
         VmValue::StaticArray { .. } => return Err(VmArtifactError::UnsupportedEscapingUniqueReference),
-        VmValue::Record {
-            definition,
-            fields: old,
-            signature,
-        } => {
-            budget.reserve_value("reference update fields", old.len())?;
-            let mut fields = old.to_vec();
-            let slot = fields
-                .get_mut(*field as usize)
-                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement, budget)?;
-            Ok(VmValue::Record {
-                definition: *definition,
-                fields: fields.into(),
-                signature: signature.clone(),
-            })
-        }
-        VmValue::Enum {
-            definition,
-            variant,
-            fields: old,
-            signature,
-        } => {
-            budget.reserve_value("reference update fields", old.len())?;
-            let mut fields = old.to_vec();
-            let slot = fields
-                .get_mut(*field as usize)
-                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement, budget)?;
-            Ok(VmValue::Enum {
-                definition: *definition,
-                variant: *variant,
-                fields: fields.into(),
-                signature: signature.clone(),
-            })
-        }
-        value => Err(VmArtifactError::ResultType {
+        value => return Err(VmArtifactError::ResultType {
             expected: VmType::Tuple(Vec::new()),
             found: value.ty(),
         }),
-    }
+    };
+    budget.reserve_value("reference update fields", values.len())?;
+    let slot = Arc::make_mut(values)
+        .get_mut(*field as usize)
+        .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+    project_reference_mut(slot, rest, budget)
 }
 
 // Empty dynamic arrays have no resident from which `VmValue::ty` can infer
@@ -11970,6 +11923,16 @@ fn store_reference_target(
     replacement: VmValue,
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
+    let value = reference_target_mut(registers, callers, target)?;
+    *project_reference_mut(value, fields, budget)? = replacement;
+    Ok(())
+}
+
+fn reference_target_mut<'a>(
+    registers: &'a mut [Option<VmValue>],
+    callers: &'a mut [RuntimeProgramCaller],
+    target: &ReferenceTarget,
+) -> Result<&'a mut VmValue, VmArtifactError> {
     let register = match target {
         ReferenceTarget::Register(register) => {
             registers
@@ -11993,11 +11956,7 @@ fn store_reference_target(
             return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
         }
     };
-    let value = register
-        .as_ref()
-        .ok_or(VmArtifactError::InvalidRegister { register: 0 })?;
-    *register = Some(store_reference(value, fields, replacement, budget)?);
-    Ok(())
+    register.as_mut().ok_or(VmArtifactError::InvalidRegister { register: 0 })
 }
 
 fn referenced_array(
@@ -12035,6 +11994,31 @@ fn referenced_array_len(registers: &[Option<VmValue>], callers: &[RuntimeProgram
         VmValue::Array { values, .. } => Ok(values.len()),
         VmValue::StaticArray { length, .. } => Ok(length),
         found => Err(VmArtifactError::ResultType { expected: VmType::Array(Box::new(VmType::Unit)), found: found.ty() }),
+    }
+}
+
+fn referenced_array_mut<'a>(
+    registers: &'a mut [Option<VmValue>],
+    callers: &'a mut [RuntimeProgramCaller],
+    reference: &VmValue,
+    budget: &mut ExecutionBudget,
+) -> Result<&'a mut [VmValue], VmArtifactError> {
+    let VmValue::Reference { target, fields, unique: true, referent } = reference else {
+        return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
+    };
+    if !matches!(referent, VmType::Array(_)) {
+        return Err(VmArtifactError::ResultType {
+            expected: VmType::Array(Box::new(VmType::Unit)),
+            found: referent.clone(),
+        });
+    }
+    let owner = reference_target_mut(registers, callers, target)?;
+    match project_reference_mut(owner, fields, budget)? {
+        VmValue::Array { values, .. } => Ok(Arc::make_mut(values)),
+        found => Err(VmArtifactError::ResultType {
+            expected: referent.clone(),
+            found: found.ty(),
+        }),
     }
 }
 
@@ -12256,15 +12240,17 @@ fn execute_array_primitive(
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            let length = referenced_array(registers, callers, &reference)?.len();
             let position = index(*position, registers)?;
-            let moved = values
+            if position >= length {
+                return Err(VmArtifactError::InvalidRegister { register: position as u32 });
+            }
+            let moved = referenced_array_mut(registers, callers, &reference, budget)?
                 .get_mut(position)
                 .ok_or(VmArtifactError::InvalidRegister {
                     register: position as u32,
                 })?;
             let moved = std::mem::replace(moved, VmValue::Unit);
-            replace_referenced_array(registers, callers, &reference, values, budget)?;
             registers[*dst as usize] = Some(moved);
         }
         VmInstruction::ArrayGetBorrow {
@@ -12302,16 +12288,15 @@ fn execute_array_primitive(
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            let length = referenced_array(registers, callers, &reference)?.len();
             let position = index(*position, registers)?;
-            *values
-                .get_mut(position)
-                .ok_or(VmArtifactError::InvalidRegister {
-                    register: position as u32,
-                })? = registers[*item as usize]
+            if position >= length {
+                return Err(VmArtifactError::InvalidRegister { register: position as u32 });
+            }
+            let item = registers[*item as usize]
                 .take()
                 .ok_or(VmArtifactError::InvalidRegister { register: *item })?;
-            replace_referenced_array(registers, callers, &reference, values, budget)?;
+            referenced_array_mut(registers, callers, &reference, budget)?[position] = item;
         }
         VmInstruction::ArrayPushMove { value, item, .. } => {
             let reference = registers[*value as usize]
@@ -12533,9 +12518,7 @@ fn execute_array_primitive(
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
-            values.reverse();
-            replace_referenced_array(registers, callers, &reference, values, budget)?;
+            referenced_array_mut(registers, callers, &reference, budget)?.reverse();
         }
         VmInstruction::ArraySplitOffMove { dst, value, index: position, .. } => {
             let reference = registers[*value as usize]
@@ -15756,15 +15739,13 @@ fn execute(
                     .as_ref()
                     .expect("verified register")
                     .clone();
-                let updated = store_reference(
+                *project_reference_mut(
                     registers[target as usize]
-                        .as_ref()
+                        .as_mut()
                         .expect("live reference target"),
                     &fields,
-                    replacement,
                     budget,
-                )?;
-                registers[target as usize] = Some(updated);
+                )? = replacement;
             }
             VmInstruction::NotBool { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Bool(!expect_bool(
@@ -20369,6 +20350,129 @@ impl ExecutionBudget {
 mod tests {
     use super::*;
     use crate::{MirBlock, MirScopeId, PrimitiveRole};
+
+    fn cow_budget() -> ExecutionBudget {
+        ExecutionBudget { limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    fn cow_owner() -> VmValue {
+        VmValue::Tuple(Arc::from([VmValue::Array {
+            values: (0..128).map(VmValue::I64).collect::<Vec<_>>().into(), capacity: 256,
+        }]))
+    }
+
+    fn cow_backing(owner: &VmValue) -> (*const VmValue, *const VmValue) {
+        let VmValue::Tuple(fields) = owner else { panic!("tuple owner") };
+        let VmValue::Array { values, capacity } = &fields[0] else { panic!("array field") };
+        assert_eq!(*capacity, 256);
+        (fields.as_ptr(), values.as_ptr())
+    }
+
+    #[test]
+    fn projected_cow_updates_reuse_unique_backing_and_preserve_shared_snapshots() {
+        let mut owner = cow_owner();
+        let original = cow_backing(&owner);
+        let mut budget = cow_budget();
+        *project_reference_mut(&mut owner, &[0, 64], &mut budget).unwrap() = VmValue::I64(42);
+        assert_eq!(cow_backing(&owner), original);
+        assert_eq!(budget.allocated_elements, 129, "logical charges are not discounted by physical reuse");
+        assert!(matches!(project_reference(&owner, &[0, 64]).unwrap(), VmValue::I64(42)));
+
+        let snapshot = owner.clone();
+        *project_reference_mut(&mut owner, &[0, 64], &mut budget).unwrap() = VmValue::I64(43);
+        let changed = cow_backing(&owner);
+        assert_ne!(changed.0, original.0);
+        assert_ne!(changed.1, original.1);
+        assert_eq!(cow_backing(&snapshot), original);
+        assert!(matches!(project_reference(&snapshot, &[0, 64]).unwrap(), VmValue::I64(42)));
+        assert!(matches!(project_reference(&owner, &[0, 64]).unwrap(), VmValue::I64(43)));
+        assert_eq!(budget.allocated_elements, 258);
+        *project_reference_mut(&mut owner, &[0, 65], &mut budget).unwrap() = VmValue::I64(99);
+        assert_eq!(cow_backing(&owner), changed, "detaching once makes subsequent updates unique");
+        assert!(matches!(project_reference(&snapshot, &[0, 65]).unwrap(), VmValue::I64(65)));
+    }
+
+    #[test]
+    fn projected_cow_rejects_invalid_paths_and_budgets_without_partial_value_updates() {
+        let mut owner = cow_owner();
+        let snapshot = owner.clone();
+        let mut budget = cow_budget();
+        budget.limits.max_allocation_elements = 1;
+        assert!(matches!(project_reference_mut(&mut owner, &[0, 64], &mut budget),
+            Err(VmArtifactError::AllocationLimit { limit: 1 })));
+        assert_eq!(budget.allocated_elements, 1);
+        assert!(matches!(project_reference(&owner, &[0, 64]).unwrap(), VmValue::I64(64)));
+        assert!(matches!(project_reference(&snapshot, &[0, 64]).unwrap(), VmValue::I64(64)));
+        let mut budget = cow_budget();
+        assert!(matches!(project_reference_mut(&mut owner, &[0, 128], &mut budget),
+            Err(VmArtifactError::InvalidRegister { register: 128 })));
+        assert_eq!(budget.allocated_elements, 129);
+        let mut budget = cow_budget();
+        budget.limits.max_value_elements = 127;
+        assert!(matches!(project_reference_mut(&mut owner, &[0, 1], &mut budget),
+            Err(VmArtifactError::ValueSizeLimit { kind: "reference update fields", limit: 127, found: 128 })));
+        assert!(matches!(project_reference(&owner, &[0, 1]).unwrap(), VmValue::I64(1)));
+        let captured = ReferenceTarget::Captured(Arc::new(snapshot));
+        assert!(matches!(store_reference_target(&mut [], &mut [], &captured, &[0, 1], VmValue::I64(0), &mut cow_budget()),
+            Err(VmArtifactError::UnsupportedEscapingUniqueReference)));
+    }
+
+    #[test]
+    fn array_cow_primitives_preserve_caller_writeback_move_holes_and_snapshots() {
+        for caller in [false, true] {
+            let owner = cow_owner();
+            let mut callers = Vec::new();
+            let mut registers = vec![None, None, Some(VmValue::Usize(64)), Some(VmValue::I64(42)), None];
+            let target = if caller {
+                callers.push(tail_caller(owner));
+                ReferenceTarget::Caller { caller_depth: 0, register: 1 }
+            } else {
+                registers[0] = Some(owner);
+                ReferenceTarget::Register(0)
+            };
+            let reference = VmValue::Reference { target: target.clone(), fields: Arc::from([0]),
+                unique: true, referent: VmType::Array(Box::new(VmType::I64)) };
+            registers[1] = Some(reference.clone());
+            let original = cow_backing(reference_target(&registers, &callers, &target).unwrap());
+            let mut budget = cow_budget();
+            execute_array_primitive(&mut registers, &mut callers, &VmInstruction::ArraySetMove {
+                value: 1, index: 2, item: 3, element_type: VmType::I64,
+            }, &mut budget).unwrap();
+            assert!(registers[3].is_none());
+            assert_eq!(budget.allocated_elements, 1);
+            assert_eq!(cow_backing(reference_target(&registers, &callers, &target).unwrap()), original);
+            let snapshot = reference_target(&registers, &callers, &target).unwrap().clone();
+            execute_array_primitive(&mut registers, &mut callers, &VmInstruction::ArrayGetMove {
+                dst: 4, value: 1, index: 2, element_type: VmType::I64,
+            }, &mut budget).unwrap();
+            assert!(matches!(&registers[4], Some(VmValue::I64(42))));
+            assert!(matches!(referenced_array_get(&registers, &callers, &reference, 64).unwrap(), VmValue::Unit));
+            assert!(matches!(project_reference(&snapshot, &[0, 64]).unwrap(), VmValue::I64(42)));
+            assert_eq!(budget.allocated_elements, 2);
+            let current = cow_backing(reference_target(&registers, &callers, &target).unwrap());
+            execute_array_primitive(&mut registers, &mut callers, &VmInstruction::ArrayReverseMove {
+                value: 1, element_type: VmType::I64,
+            }, &mut budget).unwrap();
+            assert_eq!(cow_backing(reference_target(&registers, &callers, &target).unwrap()), current);
+            assert!(matches!(referenced_array_get(&registers, &callers, &reference, 63).unwrap(), VmValue::Unit));
+            assert!(matches!(project_reference(&snapshot, &[0, 63]).unwrap(), VmValue::I64(63)));
+            assert_eq!(budget.allocated_elements, 3);
+        }
+    }
+
+    #[test]
+    fn array_cow_never_upgrades_shared_or_captured_borrow_authority() {
+        let mut registers = vec![Some(cow_owner())];
+        for reference in [
+            VmValue::Reference { target: ReferenceTarget::Register(0), fields: Arc::from([0]),
+                unique: false, referent: VmType::Array(Box::new(VmType::I64)) },
+            VmValue::Reference { target: ReferenceTarget::Captured(Arc::new(cow_owner())), fields: Arc::from([0]),
+                unique: true, referent: VmType::Array(Box::new(VmType::I64)) },
+        ] {
+            assert!(matches!(referenced_array_mut(&mut registers, &mut [], &reference, &mut cow_budget()),
+                Err(VmArtifactError::UnsupportedEscapingUniqueReference)));
+        }
+    }
 
     #[test]
     fn borrowing_empty_projected_arrays_preserves_verified_element_types() {

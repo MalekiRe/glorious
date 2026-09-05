@@ -156,6 +156,12 @@ and initial source products, not a complete compilation pipeline.
   requests from logical VM charges. Initial map measurements confirm indexed
   lookup work but expose substantial size-dependent copying; see
   [runtime-costs.md](runtime-costs.md).
+- Mutable aggregate projections and fixed-size array updates now reuse unique
+  backing and detach shared snapshots before writing. At 512 elements,
+  sixteen writes request about 92% fewer bytes and no longer scale in physical
+  allocation cost with the array size. Hash-table construction requests about
+  15% fewer bytes at 64 entries. Artifact bytes, logical charges, and ownership
+  rules are unchanged; resizing and whole-owner scans remain scaling work.
 - Ordinary calls retain surviving shared owners and reuse frozen captures.
   Cross-call effect payloads, forwarding, and resumption results translate
   reference coordinates at their frame boundaries. Focused source histories
@@ -211,6 +217,12 @@ and initial source products, not a complete compilation pipeline.
   failures and the two existing ignored manual VM benchmarks.
 
 ## Gates still open
+
+Latest verification after the copy-on-write runtime change: 2,455 workspace
+tests pass, zero failures, two existing ignored manual VM benchmarks, in
+84.670 seconds including an incremental build. All 48 source entries pass in
+that run (73.71 seconds), with unchanged source audit. Earlier timings above
+are historical checkpoints, not results for subsequent changes.
 
 M0: complete the diagnostic/CLI/format inventories and executable per-export
 comparison assignments. Public inventory entries are plans, not passed tests.

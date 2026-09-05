@@ -12,7 +12,7 @@
     "crates/grandiose-stage0/src/service.rs": "1cd9f9d5f871a53f52d1c373766f030b3f20c8f52e6932425a89a25ef9da931a",
     "crates/grandiose-stage0/src/signature.rs": "b490adff17cf26d38b62daea17dd62dbb40a8a34f0a85aa050a26fb6ca64856d",
     "crates/grandiose-stage0/src/trait_solver.rs": "9970afa66a79fedd42c411814f379d06fd9d1daafb1d033f45c649a53a639799",
-    "crates/grandiose-stage0/src/vm_backend.rs": "c0fa9d82322bd1237745efc820c0134d9a4355e31a379adaa485e3726fb99a3b"
+    "crates/grandiose-stage0/src/vm_backend.rs": "e97810712412d9f273706bdadb71c1eaea086aac0e83a86b57ee5eca8da8ad07"
   },
   "capability_tests": {
     "compiler/tests/engine/branch.glorious": "3ef1fa15035f08d988f85a3517785b071f5c99e599b3a87c0b20952ce710a5c6",
@@ -63,12 +63,13 @@
     "crates/grandiose-stage0/tests/coherence.rs": "d213a429c92df5e0bd781dc20d68e93c44f2e15a2c77852ce6779de2bc5c38ad",
     "crates/grandiose-stage0/tests/conversions.rs": "1bab164a20edcb974a142c0890acdf159afc58dcff022310a3c6cd1fea196cd2",
     "crates/grandiose-stage0/tests/core.rs": "603ab121358d38ba93442aff192a29476914ca5ca3971215b3649a58f0296e03",
+    "crates/grandiose-stage0/tests/fixtures/array_update_profile.glorious": "29bc5b2d30e9d67e344475cce8b4f0818605dd67fa2ef23f626b30c45e931266",
     "crates/grandiose-stage0/tests/fixtures/hash_indexing_profile.glorious": "8c2d17813e5e1da666fa56caccc33c4ffc9375d27d50e70cd6bd20483017ccfa",
     "crates/grandiose-stage0/tests/gsc2.rs": "085ea20d39287e06735d852238ad1dd3e2f656a8fff766c56f94d028a1cbb088",
     "crates/grandiose-stage0/tests/request_and_revision.rs": "00798e0b5bf53d89eb5f6093c1ec19a1df34da2c6ec3bcffe0902628373f56b7",
     "crates/grandiose-stage0/tests/resolution.rs": "e40fcde5a3b80530a03607485c0d606414ba0d4085fe062a88e3d3bd33dced1e",
     "crates/grandiose-stage0/tests/runtime_manifest.rs": "20648ac79b9d09ca6ff54e51ab2a929013d00c5c08b5867d17ed6c7cf7ea2c6d",
-    "crates/grandiose-stage0/tests/runtime_storage.rs": "a2fb520ed794ab278c64fe642e78a365aed0d6e1e4cae5ee2b07938b5bab3dad",
+    "crates/grandiose-stage0/tests/runtime_storage.rs": "5dff8ef915641573a9b9ef4b4f09652e0936cec1cd4f1e2063c481ba119e64fc",
     "crates/grandiose-stage0/tests/service.rs": "c63b3e9f9affba02139e804efacbccd315c0fc7bf859772bc6857e25d608407d",
     "crates/grandiose-stage0/tests/signature.rs": "1849baef78745e7010bd5f9b5dcc87841a1bb8c0b0b5be508f0b3f15811f8fc3",
     "crates/grandiose-stage0/tests/standard_library.rs": "484bd65fd5024dc932c27e7dde0838d7ef9d94695da2400faf6953bb22cd86c1",

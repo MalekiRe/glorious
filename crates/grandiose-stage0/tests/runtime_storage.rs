@@ -97,6 +97,10 @@ fn program(size: usize, read: bool) -> VerifiedVmProgram {
     let source = include_str!("fixtures/hash_indexing_profile.glorious")
         .replace("@SIZE@", &size.to_string())
         .replace("@READ@", if read { "1" } else { "0" });
+    compile_source(&source)
+}
+
+fn compile_source(source: &str) -> VerifiedVmProgram {
     let app = PackageKey("app@0.1.0".into());
     let standard = PackageKey("std@0.1.0".into());
     let request = CompilationRequest {
@@ -124,6 +128,34 @@ fn program(size: usize, read: bool) -> VerifiedVmProgram {
     let outcome = StageZeroCompiler::new().compile(request).unwrap();
     let bytes = outcome.artifact.unwrap().canonical_bytes();
     grandiose_stage0::decode_and_verify_program(&bytes).unwrap()
+}
+
+#[test]
+fn projected_array_updates_do_not_copy_unique_backing_as_arrays_grow() {
+    let mut added_bytes = Vec::new();
+    for size in [8, 64, 512] {
+        let mut runs = Vec::new();
+        for update in [false, true] {
+            let source = include_str!("fixtures/array_update_profile.glorious")
+                .replace("@SIZE@", &size.to_string())
+                .replace("@UPDATE@", if update { "1" } else { "0" });
+            let program = compile_source(&source);
+            let digest = Digest::of_bytes(&program.canonical_bytes());
+            let (result, allocation) = measured(|| program.run_i64_for_authoring(VmExecutionLimits {
+                max_call_depth: 64, ..Default::default()
+            }));
+            let (value, profile) = result.unwrap();
+            assert_eq!(value, 42);
+            eprintln!("physical array size={size}, update={update}, artifact={digest:?}: {allocation:?}; {profile:?}");
+            runs.push((allocation, profile));
+        }
+        let bytes = i128::from(runs[1].0.requested_bytes) - i128::from(runs[0].0.requested_bytes);
+        eprintln!("array size={size}, sixteen writes: additional allocator-request bytes={bytes}");
+        added_bytes.push(bytes);
+    }
+    assert!(added_bytes[0] > 0);
+    assert!(added_bytes.windows(2).all(|pair| pair[0] == pair[1]),
+        "updating one element must not copy the array backing: {added_bytes:?}");
 }
 
 #[test]
