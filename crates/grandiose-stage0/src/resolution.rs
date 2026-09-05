@@ -5,6 +5,7 @@
 //! and rename on one resolution product rather than independent approximations.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use crate::{
     header::{GenericParameters, HeaderStructuralConst, HeaderStructuralU32Expr, ParsedHeader},
@@ -20,16 +21,23 @@ use crate::{
 /// contracts are part of the language generation, just like scalar types.
 /// A source declaration with either name still wins normal resolution, which
 /// keeps the prelude from silently changing a package's declared interface.
+/// Only the fixed language identity is cached, never a resolution decision.
 pub(crate) fn language_use_trait_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-language-prelude-use-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-language-prelude-use-v1",
+        ))
+    })
 }
 
 pub(crate) fn language_drop_trait_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-language-prelude-drop-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-language-prelude-drop-v1",
+        ))
+    })
 }
 
 fn language_prelude_trait(path: &[String]) -> Option<DefKey> {
@@ -47,6 +55,60 @@ fn language_prelude_trait_kinds(definition: DefKey) -> Option<&'static [GenericK
         }
         value if value == language_drop_trait_definition() => Some(&[]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod fixed_identity_tests {
+    use super::*;
+    use crate::signature::{
+        intrinsic_available_type_definition, intrinsic_callable_trait_definition,
+        intrinsic_environment_trait_definition, intrinsic_label_trait_definition,
+        intrinsic_runs_in_trait_definition,
+    };
+
+    #[test]
+    fn cached_language_identities_preserve_their_original_digest_domains() {
+        let identities: [(&[u8], fn() -> DefKey); 7] = [
+            (
+                b"grandiose-stage0-language-prelude-use-v1",
+                language_use_trait_definition,
+            ),
+            (
+                b"grandiose-stage0-language-prelude-drop-v1",
+                language_drop_trait_definition,
+            ),
+            (
+                b"grandiose-stage0-intrinsic-callable-trait-v1",
+                intrinsic_callable_trait_definition,
+            ),
+            (
+                b"grandiose-stage0-intrinsic-label-trait-v1",
+                intrinsic_label_trait_definition,
+            ),
+            (
+                b"grandiose-stage0-intrinsic-runs-in-trait-v1",
+                intrinsic_runs_in_trait_definition,
+            ),
+            (
+                b"grandiose-stage0-intrinsic-environment-trait-v1",
+                intrinsic_environment_trait_definition,
+            ),
+            (
+                b"grandiose-stage0-intrinsic-available-type-v1",
+                intrinsic_available_type_definition,
+            ),
+        ];
+        let mut unique = BTreeSet::new();
+        for (domain, identity) in identities {
+            let expected = DefKey(crate::Digest::of_bytes(domain));
+            assert_eq!(identity(), expected);
+            assert_eq!(identity(), expected);
+            assert!(
+                unique.insert(identity()),
+                "language identities must remain distinct"
+            );
+        }
     }
 }
 

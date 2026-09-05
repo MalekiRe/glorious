@@ -13,13 +13,14 @@ shared workstation, not a controlled benchmark distribution.
 | Shared solver snapshots | 172.61 s |
 | Shared snapshots plus projection-free layout fast path | 37.25 s |
 | Also share solver snapshots across coherence pairs | 17.71 s |
+| Also compute fixed language identities only once | 10.76 s |
 
-The combined observed reduction is about 90%, or 10.1 times faster. A separate
+The combined observed reduction is about 94%, or 16.6 times faster. A separate
 baseline sampled with `perf` took 186.72 seconds; that instrumented time is not
 used for the comparison. Sampling showed repeated type cloning, allocation,
 deallocation, and hashing in the native authoring compiler.
 
-Three sources of repeated work were removed:
+Four sources of repeated work were removed:
 
 1. Body elaboration and trait-method contract comparison share immutable
    implementation rules, trait declarations, and definition tables. Each
@@ -37,9 +38,13 @@ Three sources of repeated work were removed:
    Each pair retains independent answer tables and a fresh work budget.
    Phase-timed runs reduced time through header processing from 21.12 seconds
    to 0.83 seconds; the final lifecycle timing above has no phase instrumentation.
+4. The seven fixed language/prelude identities are initialized once with
+   `OnceLock`, avoiding repeated hashing during resolution, ownership checks,
+   and trait solving. Their original digest domains are unchanged. No
+   source lookup, evidence, or mutable interface state is cached globally.
 
 The lifecycle fixture retained exactly the same serialized artifact and every
-recorded execution counter in all four runs:
+recorded execution counter in all five runs:
 
 - Artifact BLAKE3: `0f3738c2eb4716b751fed377a84c6460cc5cc36033abdd50058bcdb8a4664430`
 - Artifact bytes: 2,877,630
@@ -57,12 +62,16 @@ isolation from later interface mutation, identity-path equivalence, and
 nested projections that must not use the fast path.
 The coherence regression mixes overlapping, disjoint, and explicitly refuted
 bound domains across five declaration orders.
+The fixed-identity regression checks all seven original digest formulas and
+their distinct identities; existing source-shadowing tests still pass.
 
 The selected native regression run passes 1,585 tests across the library,
 coherence, conversions, Core, service, signature, standard library, trait
 solver, and VM backend suites before the coherence optimization. After that
 change, 1,069 library/coherence/conversion/service/signature/trait-solver tests
-and the lifecycle fixture pass. The full source-suite run was deliberately
+and the lifecycle fixture pass. After the fixed-identity optimization, those
+suites plus resolution pass 1,097 tests, as does the lifecycle fixture.
+The full source-suite run was deliberately
 stopped at the user's request to pursue another optimization first; it is
 not a passing full-suite result.
 

@@ -1,6 +1,7 @@
 //! Header elaboration into canonical, body-independent semantic signatures.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::OnceLock;
 
 use crate::{
     header::{
@@ -28,10 +29,14 @@ pub(crate) const TRAIT_SELF_GENERIC: u32 = u32::MAX;
 /// a prelude spelling: source resolution may bind a user trait named `Fn`,
 /// but only an unresolved unqualified `Fn` is elaborated to this identity.
 /// Solver-side callable evidence keys exclusively on this value.
+/// Cache the fixed identity, not any source-dependent evidence or lookup.
 pub fn intrinsic_callable_trait_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-intrinsic-callable-trait-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-intrinsic-callable-trait-v1",
+        ))
+    })
 }
 
 pub fn is_intrinsic_callable_trait(reference: &ElaboratedTraitReference) -> bool {
@@ -42,9 +47,12 @@ pub fn is_intrinsic_callable_trait(reference: &ElaboratedTraitReference) -> bool
 /// this never relies on a prelude name during solving: a resolved source trait
 /// named `Label` is an ordinary trait with no escape authority.
 pub fn intrinsic_label_trait_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-intrinsic-label-trait-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-intrinsic-label-trait-v1",
+        ))
+    })
 }
 
 pub fn is_intrinsic_label_trait(reference: &ElaboratedTraitReference) -> bool {
@@ -55,9 +63,12 @@ pub fn is_intrinsic_label_trait(reference: &ElaboratedTraitReference) -> bool {
 /// `Fn` and `Label`, it deliberately has no source spelling fallback: source
 /// cannot manufacture an environment brand by writing `RunsIn`.
 pub fn intrinsic_runs_in_trait_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-intrinsic-runs-in-trait-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-intrinsic-runs-in-trait-v1",
+        ))
+    })
 }
 
 pub fn is_intrinsic_runs_in_trait(reference: &ElaboratedTraitReference) -> bool {
@@ -68,9 +79,12 @@ pub fn is_intrinsic_runs_in_trait(reference: &ElaboratedTraitReference) -> bool 
 /// Source may name the trait in bounds, but implementations are sealed and
 /// only the canonical empty environment has compiler-provided evidence.
 pub fn intrinsic_environment_trait_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-intrinsic-environment-trait-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-intrinsic-environment-trait-v1",
+        ))
+    })
 }
 
 pub fn is_intrinsic_environment_trait(reference: &ElaboratedTraitReference) -> bool {
@@ -80,9 +94,12 @@ pub fn is_intrinsic_environment_trait(reference: &ElaboratedTraitReference) -> b
 /// Stable nominal identity for the erased incremental-alternative witness.
 /// It deliberately has no source declaration or runtime layout.
 pub fn intrinsic_available_type_definition() -> DefKey {
-    DefKey(crate::Digest::of_bytes(
-        b"grandiose-stage0-intrinsic-available-type-v1",
-    ))
+    static DEFINITION: OnceLock<DefKey> = OnceLock::new();
+    *DEFINITION.get_or_init(|| {
+        DefKey(crate::Digest::of_bytes(
+            b"grandiose-stage0-intrinsic-available-type-v1",
+        ))
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
