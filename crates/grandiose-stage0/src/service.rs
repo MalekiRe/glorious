@@ -1739,6 +1739,10 @@ impl StageZeroCompiler {
         }
         let entry = entry.key;
         let mut lowering = LoweringContext::default();
+        // Value-initializer types and runtime contracts are now frozen. Share
+        // their immutable rule/layout snapshot across bodies, while every
+        // body retains fresh tables and its original independent work limit.
+        let body_trait_solver = TraitSolver::new(&signatures);
         // Bodies are elaborated before any MIR lowering. This keeps every
         // lowering request rooted in one immutable package world and gives
         // static handler specialization read-only access to direct callee
@@ -1984,31 +1988,34 @@ impl StageZeroCompiler {
                     ));
                 }
                 let core = if declaration.kind == crate::DeclarationKind::Constant {
-                    TypedBody::elaborate_constant(
+                    TypedBody::elaborate_constant_with_trait_solver(
                         declaration,
                         &body,
                         &index,
                         &signatures,
                         &fixities,
+                        body_trait_solver.fresh_query(),
                     )
                 } else if matches!(
                     declaration.syntax.header,
                     ParsedHeader::ValueInitializer { .. }
                 ) {
-                    TypedBody::elaborate_value_initializer(
+                    TypedBody::elaborate_value_initializer_with_trait_solver(
                         declaration,
                         &body,
                         &index,
                         &signatures,
                         &fixities,
+                        body_trait_solver.fresh_query(),
                     )
                 } else {
-                    TypedBody::elaborate_with_fixities(
+                    TypedBody::elaborate_with_trait_solver(
                         declaration,
                         &body,
                         &index,
                         &signatures,
                         &fixities,
+                        body_trait_solver.fresh_query(),
                     )
                 };
                 diagnostics.extend(core.diagnostics.iter().map(|diagnostic| {
@@ -2167,6 +2174,7 @@ impl StageZeroCompiler {
                         &index,
                         &signatures,
                         &fixities,
+                        body_trait_solver.fresh_query(),
                     );
                     diagnostics.extend(core.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(

@@ -428,6 +428,20 @@ impl TraitSolver {
         }
     }
 
+    /// Start independent body/query scratch over the same immutable interface.
+    /// Unlike `Clone`, this never carries answers or spent work into the new
+    /// solver. The snapshot must be created after interface mutation ends.
+    pub(crate) fn fresh_query(&self) -> Self {
+        Self {
+            rules: Arc::clone(&self.rules),
+            traits: Arc::clone(&self.traits),
+            definitions: Arc::clone(&self.definitions),
+            tables: BTreeMap::new(),
+            limits: self.limits.clone(),
+            steps: 0,
+        }
+    }
+
     pub fn solve(&mut self, goal: TraitGoal) -> TraitAnswer {
         // A solver goal has no ambient callable binder.  A raw `Bound`
         // lifetime can only be admitted when it is closed by a nested HRTB
@@ -3750,6 +3764,47 @@ fn generic_argument_is_concrete_in_hrtb_scope(
 mod tests {
     use super::*;
     use crate::ScalarType;
+
+    #[test]
+    fn fresh_query_shares_only_immutable_state_and_restores_its_own_budget() {
+        let signatures = ElaboratedInterface::default();
+        let goal = TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: DefKey(Digest::of_bytes(b"missing-trait")),
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        };
+        let mut original = TraitSolver::with_limits(
+            &signatures,
+            TraitSolverLimits { max_depth: DEFAULT_MAX_TRAIT_DEPTH, max_steps: 1 },
+        );
+        assert_eq!(original.solve(goal.clone()), TraitAnswer::NoSolution);
+        assert!(!original.tables.is_empty());
+        let mut fresh = original.fresh_query();
+        assert!(Arc::ptr_eq(&original.rules, &fresh.rules));
+        assert!(Arc::ptr_eq(&original.traits, &fresh.traits));
+        assert!(Arc::ptr_eq(&original.definitions, &fresh.definitions));
+        assert_eq!(fresh.limits, original.limits);
+        assert!(fresh.tables.is_empty());
+        assert_eq!(fresh.steps, 0);
+        assert_eq!(fresh.solve(goal.clone()), TraitAnswer::NoSolution);
+        assert_eq!(fresh.solve(goal.clone()), TraitAnswer::Overflow);
+        assert_eq!(original.solve(goal), TraitAnswer::Overflow);
+    }
+
+    #[test]
+    fn fresh_query_retains_its_frozen_interface_not_later_mutations() {
+        let key = DefKey(Digest::of_bytes(b"frozen-constant"));
+        let mut signatures = ElaboratedInterface::default();
+        signatures.definitions.insert(key, ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::I64))));
+        let original = TraitSolver::new(&signatures);
+        signatures.definitions.insert(key, ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::F32))));
+        let fresh = original.fresh_query();
+        assert_eq!(fresh.definitions.get(&key), Some(&ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::I64)))));
+        let updated = TraitSolver::new(&signatures);
+        assert_eq!(updated.definitions.get(&key), Some(&ElaboratedHeader::Constant(Some(Type::Scalar(ScalarType::F32)))));
+    }
 
     #[test]
     fn reset_query_restores_the_independent_step_budget() {

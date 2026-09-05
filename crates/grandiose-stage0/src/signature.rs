@@ -1321,11 +1321,7 @@ impl ElaboratedInterface {
         // assembled.  Keep an immutable snapshot for selected associated-item
         // normalization so this validation never depends on later body work
         // or on diagnostics accumulated during this pass.
-        let normalization_interface = ElaboratedInterface {
-            definitions: self.definitions.clone(),
-            host_imports: self.host_imports.clone(),
-            diagnostics: vec![],
-        };
+        let normalization_solver = crate::TraitSolver::new(self);
         let mut diagnostics = Vec::new();
         for implementation in self.definitions.values().filter_map(|header| match header {
             ElaboratedHeader::Implementation(implementation) => Some(implementation),
@@ -1479,11 +1475,11 @@ impl ElaboratedInterface {
                     {
                         let required = normalize_instantiated_trait_method_contract(
                             instantiate_trait_method_contract(expected, implementation),
-                            &normalization_interface,
+                            normalization_solver.fresh_query(),
                         );
                         let provided = normalize_instantiated_trait_method_contract(
                             method.clone(),
-                            &normalization_interface,
+                            normalization_solver.fresh_query(),
                         );
                         if required != provided {
                             diagnostics.push(SignatureDiagnostic {
@@ -3269,9 +3265,8 @@ fn instantiate_trait_method_contract(
 /// rule is already fixed, so reduce it before comparing signatures.
 fn normalize_instantiated_trait_method_contract(
     mut signature: CallableSignature,
-    interface: &ElaboratedInterface,
+    mut solver: crate::TraitSolver,
 ) -> CallableSignature {
-    let mut solver = crate::TraitSolver::new(interface);
     signature.parameters = signature
         .parameters
         .into_iter()

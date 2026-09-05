@@ -2945,6 +2945,19 @@ impl TypedBody {
         signatures: &ElaboratedInterface,
         fixities: &FixityTable,
     ) -> Self {
+        Self::elaborate_with_trait_solver(
+            definition, body, index, signatures, fixities, TraitSolver::new(signatures),
+        )
+    }
+
+    pub(crate) fn elaborate_with_trait_solver(
+        definition: &Definition,
+        body: &BodySyntax,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
+        fixities: &FixityTable,
+        trait_solver: TraitSolver,
+    ) -> Self {
         let generic_parameters = definition
             .callable_header()
             .map(|header| {
@@ -2965,7 +2978,7 @@ impl TypedBody {
             body,
             index,
             signatures,
-            trait_solver: TraitSolver::new(signatures),
+            trait_solver,
             fixities,
             definition: definition.key,
             module: &definition.module,
@@ -3204,6 +3217,7 @@ impl TypedBody {
         index: &DefinitionIndex,
         signatures: &ElaboratedInterface,
         fixities: &FixityTable,
+        trait_solver: TraitSolver,
     ) -> Self {
         let mut generic_parameters = std::collections::BTreeMap::new();
         for (index, name) in context.implementation_header.generics.iter().enumerate() {
@@ -3231,7 +3245,7 @@ impl TypedBody {
             body,
             index,
             signatures,
-            trait_solver: TraitSolver::new(signatures),
+            trait_solver,
             fixities,
             definition: DefKey(Digest::of_parts([
                 b"grandiose-stage0-implementation-method".as_slice(),
@@ -3390,11 +3404,24 @@ impl TypedBody {
         signatures: &ElaboratedInterface,
         fixities: &FixityTable,
     ) -> Self {
+        Self::elaborate_constant_with_trait_solver(
+            definition, body, index, signatures, fixities, TraitSolver::new(signatures),
+        )
+    }
+
+    pub(crate) fn elaborate_constant_with_trait_solver(
+        definition: &Definition,
+        body: &BodySyntax,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
+        fixities: &FixityTable,
+        trait_solver: TraitSolver,
+    ) -> Self {
         let mut elaborator = Elaborator {
             body,
             index,
             signatures,
-            trait_solver: TraitSolver::new(signatures),
+            trait_solver,
             fixities,
             definition: definition.key,
             module: &definition.module,
@@ -3488,11 +3515,24 @@ impl TypedBody {
         signatures: &ElaboratedInterface,
         fixities: &FixityTable,
     ) -> Self {
+        Self::elaborate_value_initializer_with_trait_solver(
+            definition, body, index, signatures, fixities, TraitSolver::new(signatures),
+        )
+    }
+
+    pub(crate) fn elaborate_value_initializer_with_trait_solver(
+        definition: &Definition,
+        body: &BodySyntax,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
+        fixities: &FixityTable,
+        trait_solver: TraitSolver,
+    ) -> Self {
         let mut elaborator = Elaborator {
             body,
             index,
             signatures,
-            trait_solver: TraitSolver::new(signatures),
+            trait_solver,
             fixities,
             definition: definition.key,
             module: &definition.module,
