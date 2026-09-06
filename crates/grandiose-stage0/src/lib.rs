@@ -14,6 +14,7 @@ pub mod core;
 pub mod dependency;
 pub mod diagnostic;
 mod destruction;
+mod ownership;
 pub mod escape;
 pub mod fixity;
 pub mod header;
@@ -94,7 +95,7 @@ pub use memory_primitive::MemoryPrimitive;
 pub use mir::{
     MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
     MirCleanupAction, MirCleanupDropFlag, MirCleanupPlan, MirContinuationPolicy,
-    MirControlTables, MirDiagnostic, MirDropFlagId, MirEdge, MirEditor,
+    MirControlTables, MirDiagnostic, MirDropFlagId, MirEdge, MirEditor, MirFrameDrop,
     MirFunction, MirHandlerSiteData, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData,
     MirLabelId, MirLocal, MirLocalDecl, MirLowering, MirMovePathData, MirMovePathId,
     MirMovePathTables, MirNominalCopyDescriptor, MirOperationArena, MirOperationData,
@@ -188,9 +189,11 @@ pub use vm_backend::{
     STAGE0_MAX_DECODE_INSTRUCTIONS, STAGE0_MAX_DECODE_REGISTERS, STAGE0_MAX_DECODE_TEXT_BYTES,
     STAGE0_VM_SCHEMA, SystemVmHost, VerifiedVmArtifact, VerifiedVmProgram, VmArtifactError,
     VmCapture, VmHost,
+    VmNativeAbi, VmNativeCall, VmNativeCallback, VmNativeImport, VmNativeImports,
+    VmNativeLayout, VmNativeLayoutField, VmNativeLayoutShape, VmNativeResident, VmNativeResidentContract, VmNativeStatus,
     VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmCompare,
     VmContinuationPolicy, VmEffectInstance, VmEffectRow, VmEffectRowProjection, VmExecutionLimits,
-    VmFunction, VmGenericArgument, VmInstruction, VmNominalCopyDescriptor, VmPattern,
+    VmFrameDrop, VmFunction, VmGenericArgument, VmInstruction, VmNominalCopyDescriptor, VmPattern,
     VmPatternField, VmStorageErasureAction, VmStorageErasureStorage, VmStorageErasureWitness,
     VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact,
     decode_program, emit as emit_vm, emit_program as emit_vm_program, encode_artifact,

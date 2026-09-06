@@ -21,6 +21,16 @@ pub trait PackageWorld { contains_package(world: &Self, package: &PackageKey) ->
 pub trait DiagnosticWorld { source_length(world: &Self, file: &identity::FileKey) -> Option<u32>; }
 
 pub enum Failure { Engine(engine::Failure), Revision(revision::RevisionError), Collecting, Invariant }
+pub impl Clone for Failure {
+    clone(value: &Failure) -> Failure {
+        handle *value {
+            Failure::Engine(_) => Failure::Engine(Clone::clone(&value.0)),
+            Failure::Revision(error) => Failure::Revision(error),
+            Failure::Collecting => Failure::Collecting,
+            Failure::Invariant => Failure::Invariant,
+        }
+    }
+}
 pub struct Session { private core: engine::Session, private snapshot: revision::Snapshot }
 pub struct Staged<T> { private session: Session, private revision: RevisionId, private value: T }
 pub impl<T> Use<[0, 1]> for Staged<T> where T: Use<[0, 1]> {}
@@ -285,20 +295,20 @@ pub fn package_action<W, V>(database: &mut Database<W, V>, session: Session, act
 fn package_admission<W, V>(database: &Database<W, V>, session: Session, action: &package::Action)
     -> Result<(), Failure> where W: PackageWorld {
     handle *action {
-        package::Action::Open(key) => handle engine::check(&database.engine, session.core) {
+        package::Action::Open(_) => handle engine::check(&database.engine, session.core) {
             Result::Err(error) => Result::Err(Failure::Engine(error)),
-            Result::Ok(_) => package_in_world(database, session, key),
+            Result::Ok(_) => package_in_world(database, session, &action.0),
         },
         _ => Result::Ok(()),
     }
 }
-fn package_in_world<W, V>(database: &Database<W, V>, session: Session, key: PackageKey)
+fn package_in_world<W, V>(database: &Database<W, V>, session: Session, key: &PackageKey)
     -> Result<(), Failure> where W: PackageWorld {
     handle revision::world(&database.history, session.snapshot) {
         Result::Err(error) => Result::Err(Failure::Revision(error)),
-        Result::Ok(world) => handle PackageWorld::contains_package(world, &key) {
+        Result::Ok(world) => handle PackageWorld::contains_package(world, key) {
             true => Result::Ok(()),
-            false => Result::Err(Failure::Engine(engine::Failure::Package(package::Failure::PackageNotInRequest(key)))),
+            false => Result::Err(Failure::Engine(engine::Failure::Package(package::Failure::PackageNotInRequest(Clone::clone(key))))),
         },
     }
 }

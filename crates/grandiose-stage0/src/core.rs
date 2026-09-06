@@ -1808,6 +1808,9 @@ fn completion_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<Stri
                 .into(),
         );
     }
+    for (_, ty) in &mut expected_bindings {
+        *ty = refinement_binding_type(ty.clone());
+    }
     for clause in clauses {
         let Some(branch) = &clause.refinement else {
             continue;
@@ -1842,7 +1845,7 @@ fn completion_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<Stri
 /// instantiated tuple, array, and nominal field types that MIR will project.
 /// Returning `None` delegates malformed layout reporting to the existing
 /// structural validator, keeping diagnostics deterministic.
-fn collect_pattern_binding_types(
+pub(crate) fn collect_pattern_binding_types(
     pattern: &CorePattern,
     subject: &Type,
     bindings: &mut Vec<(String, Type)>,
@@ -1910,6 +1913,22 @@ fn collect_pattern_binding_types(
             Some(())
         }
         CorePattern::Error => None,
+    }
+}
+
+/// Refinements observe their subject. The representation-independent scalar
+/// cases may copy; all other bindings retain a shared view of the selected
+/// place. In particular an affine aggregate or unique reference is never
+/// transferred merely because its structural test succeeded.
+pub(crate) fn refinement_binding_type(ty: Type) -> Type {
+    match ty {
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::RawPointer { .. }
+        | Type::Reference { mutability: Mutability::Shared, .. } => ty,
+        _ => Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Elided,
+            referent: Box::new(ty),
+        },
     }
 }
 
@@ -4513,6 +4532,10 @@ impl Elaborator<'_> {
             } => self.operators(operands, operators, expression.span),
             ExprKind::Borrow { unique, value } => {
                 let value = self.expression(value);
+                if unique && self.place_uses_shared_reference(value) {
+                    return self.fail(expression.span, "G4141",
+                        "a unique borrow cannot be derived through a shared reference");
+                }
                 let ty = self.expressions[value.0 as usize].ty.clone();
                 if matches!(&ty, Type::Never) {
                     return self.alloc(
@@ -4634,6 +4657,16 @@ impl Elaborator<'_> {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    fn place_uses_shared_reference(&self, value: CoreId) -> bool {
+        match self.expressions[value.0 as usize].kind {
+            CoreKind::Deref(reference) => matches!(self.expressions[reference.0 as usize].ty,
+                Type::Reference { mutability: Mutability::Shared, .. })
+                || self.place_uses_shared_reference(reference),
+            CoreKind::Field { base, .. } => self.place_uses_shared_reference(base),
+            _ => false,
         }
     }
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
@@ -7530,7 +7563,8 @@ impl Elaborator<'_> {
             brand,
             subject,
             bindings,
-            binding_types,
+            binding_types: binding_types.into_iter()
+                .map(|(name, ty)| (name, refinement_binding_type(ty))).collect(),
             sealed: true,
         }
     }
@@ -7550,7 +7584,7 @@ impl Elaborator<'_> {
     fn owned_capture_mode(&self, ty: &Type) -> CaptureMode {
         if self
             .signatures
-            .principal_use_interval(ty)
+            .principal_use_interval_with_solver(ty, &self.trait_solver)
             .is_some_and(|quantity| quantity == crate::quantity::Quantity::UNRESTRICTED)
         {
             CaptureMode::Copy
@@ -9335,7 +9369,7 @@ impl Elaborator<'_> {
                     self.recovered = true;
                     return CorePlace::Error;
                 };
-                if !matches!(mutability, Mutability::Unique) {
+                if !matches!(mutability, Mutability::Unique) || self.place_uses_shared_reference(reference) {
                     self.error(
                         span,
                         "G4141",
@@ -12410,6 +12444,10 @@ impl Elaborator<'_> {
                 "completion arms do not cover every value; add a fallback or cover every finite constructor",
             );
         }
+        let result = if core_clauses.iter().all(|clause|
+            matches!(self.expressions[clause.body.0 as usize].ty, Type::Never)) {
+            Type::Never
+        } else { result };
         self.alloc(
             CoreKind::Completion {
                 computation: subject,
@@ -13867,7 +13905,7 @@ impl Elaborator<'_> {
                 && let [GenericArgument::ConstQuantity(required)] = goal.relation.arguments.as_slice()
                 && self
                     .signatures
-                    .principal_use_interval(&goal.subject)
+                    .principal_use_interval_with_solver(&goal.subject, &self.trait_solver)
                     .is_some_and(|principal| principal.contains(*required))
             {
                 continue;
@@ -16246,10 +16284,26 @@ fn call_reference_origin(
     CallReferenceOrigin::Paths(paths)
 }
 
+/// Reinstantiate a sealed call's effect regions from its actual operands.
+/// The callee type keeps declaration/HRTB regions for provenance analysis;
+/// handler dispatch instead compares the opened protocol at this call site.
+pub(crate) fn instantiated_call_effects(
+    body: &TypedBody, callee: CoreId, arguments: &[CoreId],
+) -> Option<EffectRow> {
+    let Type::Callable { parameters, effects, .. } = &body.expression(callee).ty else { return None; };
+    if parameters.len() != arguments.len() { return None; }
+    let mut substitution = CallLifetimeSubstitution::default();
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        align_lifetime_types(parameter, &body.expression(*argument).ty,
+            &mut substitution, LifetimeMode::Instantiate, 0).ok()?;
+    }
+    substitute_call_effects(effects.clone(), &substitution, 0).ok()
+}
+
 /// Recover the reference-result relation directly from the interface-aware
 /// callable contract, before call instantiation turns distinct declaration or
 /// higher-ranked regions into caller-local `Elided` lifetimes.
-fn callable_reference_origin_from_contract(
+pub(crate) fn callable_reference_origin_from_contract(
     signatures: &ElaboratedInterface,
     parameters: &[Type],
     result: &Type,

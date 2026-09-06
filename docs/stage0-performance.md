@@ -1,5 +1,90 @@
 # Stage0 authoring performance
 
+## September 6 test-throughput inspection
+
+The A36 workspace run excluding GSC-2 passes 2,652 tests (two existing ignored
+benchmarks), with 27.73 seconds summed test-binary execution and a 0.70-second
+incremental Rust build. Standard-library tests account for 15.53 seconds of that
+sum. Its separately audited 48-entry source replay takes 188.40 seconds; a
+15-second `perf` sample was collected during that replay, so this is not a
+controlled timing comparison. All 50 source results match A35.
+
+CI previously executed GSC-2 in both the workspace job and the dedicated
+compiler-audit job. The workspace job now skips only `gsc2`; the compiler job
+still runs every source test with its before/after closure audits and execution
+evidence. This removes duplicate test execution without removing coverage.
+Because those jobs run concurrently, saved runner work is not necessarily the
+same as saved pipeline wall time.
+
+The current local host has 12 physical cores/24 logical CPUs. During that replay,
+eight workers used about eight CPUs, with a sampled peak resident set below
+2 GiB. The test gate, source runner and CI now default to 12 test workers;
+`RUST_TEST_THREADS` still overrides this on smaller machines. The cargo-test
+virtual-memory ceiling is now 24 GiB (previously 16 GiB); the direct-command
+8 GiB ceiling, four admission slots and 590-second command guard are unchanged.
+These configuration changes alone are not a demonstrated speedup.
+
+### Local test-selection policy
+
+Full local test runs are exceptional, not the default after each implementation
+checkpoint. Select checks from the changed behavior and its actual callers:
+
+- Start with the regression being added or changed, using a test-name filter
+  and an explicit test target. Batch related edits before invoking tests.
+- Expand to the affected subsystem and relevant downstream consumers only
+  when the change crosses those boundaries. Do not automatically run every
+  ownership, MIR, runtime and source test for a local correction.
+- Use a selected source fixture through `compiler-check.sh --filter ...` when
+  source compilation/execution needs verification. For performance work, reuse
+  one representative fixture and compare its execution evidence.
+- Documentation-only changes need no runtime tests. Tooling changes need their
+  syntax checks and focused behavior checks, not a complete compiler replay.
+- Reserve the full workspace plus audited source suite for major integration
+  or release milestones, or an explicit user request. A green full run remains
+  useful evidence; do not repeat it merely to close a work session or update
+  checkpoint documentation.
+
+State which checks ran and what remains untested. If focused checks expose an
+unexpected interaction, widen coverage deliberately. Keep normal assertions,
+VM limits and command guards in every selected run. CI and final acceptance
+retain complete coverage; selected runs must never be described as full-suite
+certification.
+
+## Indexed ownership-query inputs
+
+The September 6 CPU sample identified repeated `principal_use` queries,
+definition-table scans and allocation of solver inputs. The frozen solver now
+indexes nominal heads with manual `Use` implementations. Core, PlaceFlow and
+MIR ownership queries reuse immutable solver inputs while keeping each query's
+answer tables, cycle state and default work limits independent. A conditional
+manual rule that cannot be resolved still prevents structural-copy fallback.
+
+The same lifecycle fixture, with
+`CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=8`, took **26.30 seconds before
+and 10.48 seconds after** this change: an observed 60.2% reduction, or 2.51x
+speedup. These are single uninstrumented local runs excluding Rust compilation,
+not a controlled distribution. Artifact size and digest, returned tuple, and
+every recorded VM work/allocation/call counter match exactly. The before/after
+reports are `target/compiler-check/run-g9mzyxjo/report.json` and
+`target/compiler-check/run-vtxjaevd/report.json`; both are intentionally marked
+selected-test evidence, not complete-suite or self-hosting certification.
+
+Focused validation passes 332 tests, including new differential checks against
+uncached ownership queries, snapshot isolation, and zero-budget parent solvers
+that must not alter a fresh query's original budget.
+
+The completed 12-worker checkpoint passes **2,702 tests**: 2,654 workspace tests
+(two existing ignored benchmarks, only the 48 GSC-2 tests skipped) and all 48
+separately audited source entries in **50.03 seconds**. All 50 complete execution
+records match A36 exactly, including artifact digests and counters. The report
+is `target/compiler-check/run-2ibhuzod/report.json`, bound to source lock
+`e2941e18fd203f88c97d84c115aadeb56cec3f0c9ee5caba72b301e21896a06b`.
+The workspace reports 21.81 seconds summed test execution and an 18.68-second
+incremental build. Its live cargo process confirmed `RUST_TEST_THREADS=12` and
+the 25,769,803,776-byte address-space ceiling. The source-suite timing combines
+compiler and worker changes; A36 was sampled with `perf`, so those complete-run
+times do not isolate either improvement. VM budgets and assertions are unchanged.
+
 ## Frozen solver snapshots and projection-free layouts
 
 Measured on September 5, 2026, using the same GSC2 lifecycle fixture and
@@ -106,7 +191,8 @@ across 48 test binaries/targets. No additional tests were ignored or filtered.
 - All 128 standard-library tests: 4.16 seconds.
 
 This is a local incremental-build measurement, not a clean-checkout CI build
-benchmark. CI now uses the same test optimization level and eight test threads.
+benchmark. At that checkpoint, CI used the same test optimization level and
+eight test threads; the current worker default is recorded above.
 The ten-minute CI limit and the command guard (590 seconds plus ten seconds
 of termination grace) remain unchanged, as do debug assertions and VM budgets.
 

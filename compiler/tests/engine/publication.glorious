@@ -75,15 +75,15 @@ fn row(db: &Db, session: Session, fingerprint: Digest, green: Bool) -> i64 {
     handle database::request_traces(db, session) {
         Result::Ok(Result::Ok(values)) => handle Slice::get(values, 0) {
             Result::Err(_) => 0,
-            Result::Ok(trace) => yes(identity::equal(trace.fingerprint, fingerprint)) + row_status(trace.status, green),
+            Result::Ok(trace) => yes(identity::equal(trace.fingerprint, fingerprint)) + row_status(&trace.status, green),
         },
         _ => 0,
     }
 }
-fn row_status(status: dependency::Status, green: Bool) -> i64 {
+fn row_status(status: &dependency::Status, green: Bool) -> i64 {
     handle green {
-        true => handle status { dependency::Status::Green { parent: _ } => 1, _ => 0 },
-        false => handle status { dependency::Status::Cold => 1, _ => 0 },
+        true => handle *status { dependency::Status::Green { parent: _ } => 1, _ => 0 },
+        false => handle *status { dependency::Status::Cold => 1, _ => 0 },
     }
 }
 fn absent(db: &Db, session: Session) -> i64 {

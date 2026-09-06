@@ -25,7 +25,7 @@ also passed Miri's strict-provenance checks; no new Miri run is claimed here.
 U2 includes raw-pointer types, explicit unsafe scopes, unsafe callable/trait
 contracts, and source-independent Core/MIR checks. Callable safety stays separate
 from the unsafe-execution requirement, including on lifted bodies. Stage0 schema
-99 executes machine leaves over actual host memory, including native-backed
+106 executes machine leaves over actual host memory, including native-backed
 checked references, with per-run byte budgets and explicit unsafe Rust execution
 entry points. Source Vec, slices and UTF-8/collection consumers now use that
 storage, with ordinary inherent functions and explicit Clone implementations.
@@ -34,11 +34,139 @@ explicit independent cloning and buffer transfer. Concrete destruction now
 specializes generic owned parameters and traverses records, tuples and active
 enum payloads, with initialized-field guards and ordinary source Drop calls.
 Replacement, shadowed owners, destructor-held loans, constructor lifetime
-inference and multi-origin reference returns have focused regressions. This
-does not complete array/pattern/capture cleanup, source Vec destruction, native
-homes for ordinary frame residents and callables, actual VM/native calls,
-the independent G1 extension, or U4–U6.
-The source-cost checkpoint now passes all 48 source entries, including the two
+inference and multi-origin reference returns have focused regressions. Owned
+patterns now transfer their selected payloads and destroy residual fields;
+ordinary source Vec destruction visits residents before freeing storage.
+Handler resumptions have an explicit completion delimiter and synchronize
+surviving source allocations across restored frames. See
+[the resident-cleanup checkpoint](unsafe-memory-progress.md#source-owned-resident-destruction-and-handler-cleanup).
+That historical frozen validation passes 2,577 workspace/all-targets tests and all 48
+separately audited source entries: 2,625 total, zero failures, two existing
+ignored manual benchmarks. The 172.79-second source run keeps its complete
+batches and default budgets; no diagnostic budget increase is counted.
+The subsequent [native bridge checkpoint](unsafe-memory-progress.md#native-calls-and-bytecode-callback-checkpoint)
+adds actual capability-bound native calls and synchronous bytecode callbacks
+over existing native homes, with full source contract matching and shared
+execution budgets. Source-specialized Vec growth and resident Drop now execute
+during native re-entry. Its historical frozen validation passes **2,640 tests**:
+2,592 workspace/all-targets tests (including 15 native-bridge regressions) and
+all 48 separately audited source entries in 171.55 seconds, with zero failures
+and two existing ignored manual benchmarks.
+The subsequent [native source-storage checkpoint](unsafe-memory-progress.md#native-source-storage-checkpoint)
+establishes native homes for ordinary addressable locals with supported concrete
+layouts, tracks partial initialization and source lifetime, and preserves their
+addresses across native callbacks. Source Vec fixtures no longer construct a
+second metadata home manually. Adjacent single-consumer field reads avoid
+materializing unused aggregate fields, keeping the original source budgets.
+This does not complete private Array/callable layouts and capture cleanup,
+all control-flow cleanup, general owned/callable ABI, the independent G1
+extension, or U4–U6.
+Its frozen validation passes **2,646 tests**: 2,598 workspace/all-targets tests
+(including 18 native-bridge regressions) and all 48 separately audited source
+entries in 176.98 seconds, with zero failures and two existing ignored manual
+benchmarks. The source report contains 50 execution records, no filters and
+`release_ready: false`; every original batch, assertion and VM limit remains.
+The [synchronous owned ABI checkpoint](unsafe-memory-progress.md#synchronous-owned-native-abi-checkpoint)
+adds producer-established aggregate argument homes, preallocated caller result
+slots and native-caller callback parameter storage. Owned source Vec values
+cross both directions with bytecode growth and exactly-once resident cleanup.
+This does not establish durable external ownership, general callable ABI,
+selected drop-code identity, complete exceptional cleanup or U4 completion.
+Its frozen validation passes **2,651 tests**: 2,603 workspace/all-targets tests
+and all 48 source entries in 168.02 seconds, with zero failures and two existing
+ignored benchmarks. All original batches and limits remain; the 50-record
+source report is unfiltered and still records `release_ready: false`.
+
+The [native destructor contract checkpoint](unsafe-memory-progress.md#native-destructor-contract-checkpoint)
+retains the source-selected destruction entry and its emitted transitive code
+identity for every native-reachable concrete resident, including return-only
+referents. Native code can invoke that entry synchronously without a separate
+source callback parameter, and bindings check the allocation-domain protocol.
+This still does not bind every selected copy/use/quantity operation, provide
+durable external owners or establish the complete shared ABI. Root lowering now
+preserves lexical cleanup when a short-circuit probe declines, and releases
+prefix owners on normal short-circuit exits. The authoring runtime reuses empty
+returned call-register buffers; native-to-native ordinary argument copies avoid
+intermediate aggregate boxing while preserving distinct callee storage.
+Its frozen validation passes **2,658 tests**: 2,610 workspace/all-targets tests
+and all 48 audited source entries in 174.90 seconds, with zero failures and two
+existing ignored benchmarks. The original bootstrap result `[145, 80, 13]`
+uses 7,699,624 charged elements, below its unchanged 16,777,216-element ceiling.
+The unfiltered source report contains 50 executions and still records
+`release_ready: false`.
+
+The [source BLAKE3 checkpoint](unsafe-memory-progress.md#source-blake3-checkpoint)
+replaces the public library's opaque hash bridge with source-defined compression,
+chunk processing and tree reduction over borrowed bytes. All 32 output bytes
+are reference-checked across empty, block/chunk boundary, large-tree and mutated
+owned-window inputs; internal chaining values also retain high counter bits.
+Compiler identities now execute this source algorithm. The legacy artifact
+opcodes retain their meanings but are absent from emitted source hash programs;
+this is not a completed shared ABI, semantic compiler or bootstrap loop.
+Its frozen validation passes **2,661 tests**: 2,613 workspace/all-targets tests
+and all 48 audited source entries in 178.29 seconds, with zero failures and two
+existing ignored benchmarks. All 50 recorded results match the preceding
+checkpoint. Bootstrap retains `[145, 80, 13]` with 38,550,344 work ticks and
+5,880,146 charged elements under its unchanged limits; release readiness is false.
+
+The subsequent [nested Boolean value checkpoint](authoring.md#a32-nested-lazy-boolean-values)
+fixes an authoring-lowering defect exposed by the hash comparator. Nested lazy
+Booleans now use typed CFG joins in strict expression positions and lifted
+closures, with exact evaluation-order and selected-branch destruction tests.
+Its frozen validation passes **2,664 tests**: 2,616 workspace/all-targets tests
+and all 48 audited source entries in 180.46 seconds, with zero failures and two
+existing ignored benchmarks. All 50 recorded results match the source BLAKE3
+checkpoint. No opcode, budget or release-readiness contract changes.
+
+The [owned capture checkpoint](authoring.md#a33-owned-callable-environment-destruction)
+adds concrete environment destruction, normal invocation residual-state
+restoration, independent source copies and borrowed native-home write-back.
+The source loop's tail-call regression is fixed without skipping registered
+source destructors. Its frozen validation passes **2,670 tests**: 2,622
+workspace/all-targets tests and all 48 audited source entries in 177.89 seconds,
+with zero failures and two existing ignored benchmarks. All 50 results match
+A32, including the complete bootstrap and registry batches. Exceptional capture
+cleanup, complete U4–U6, the source semantic compiler and C2/C3 remain open.
+
+The [shared frame ownership checkpoint](authoring.md#a34-shared-frame-ownership-and-cancellation-cleanup)
+adds compiler-selected cancellation cleanup using the same owner inventory as
+normal returns. Capture loans transfer residual slots back when an invocation
+ends, and abandoned-frame destructors retain checked caller write-back. Schema
+106 seals frame plans and their executable/native reachability. Frozen validation
+passes **2,685 tests**: 2,637 workspace/all-targets tests and all 48 audited source
+entries in 175.59 seconds, with zero failures and two existing ignored benchmarks.
+All 50 recorded results match A33 with original budgets unchanged. Other nonlocal
+transfers, replay histories, complete temporary ownership and the broader U4–U6,
+source semantic compiler and C2/C3 requirements remain open.
+
+The [nonlocal label checkpoint](authoring.md#a35-nonlocal-label-frame-cleanup)
+extends the shared destruction plan to abandoned ordinary frames, including
+invocation capture handoff and outgoing owned payloads. Runtime label ownership
+now identifies the executing specialization. Frozen validation passes **2,692
+tests**: 2,644 workspace/all-targets tests and all 48 source entries in 185.92
+seconds, with zero failures and two existing ignored benchmarks. All 50 results
+match A34. Retained replay cleanup, general
+temporary ownership and the other recorded source/compiler gaps remain open.
+
+The [terminal value-CFG checkpoint](authoring.md#a36-terminal-strict-value-control-flow)
+represents paths without a normal continuation explicitly, preserves bottom-first
+completion inference, and evaluates computed callees before their arguments.
+First-class tail-label helpers may also return normally. Frozen validation passes
+**2,700 tests**: 2,652 workspace/all-targets tests and all 48 source entries in
+188.40 seconds, with zero failures and two existing ignored benchmarks. All 50
+results match A35. The source run includes a 15-second CPU sample, not a new
+performance baseline. The remaining ownership and self-hosting gaps are open.
+
+The [ownership-query performance checkpoint](authoring.md#a37-indexed-ownership-query-inputs)
+indexes manual `Use` rules and shares frozen query inputs without sharing
+answers or spent budgets. The isolated lifecycle test improves from 26.30 to
+10.48 seconds with identical execution evidence. With 12 test workers and a
+24 GiB cargo-test ceiling, validation passes **2,702 tests**: 2,654 workspace
+tests and all 48 source entries in 50.03 seconds. All 50 complete execution
+records match A36 exactly; VM limits and assertions are unchanged. This is an
+authoring-throughput improvement, not additional source/compiler coverage.
+
+The preceding source-cost checkpoint passed all 48 source entries, including the two
 previously allocation-limited batches, after reducing source call-frame work.
 The complete production closure, comparator batches and VM budgets are unchanged.
 This does not certify full self-hosting or bounded physical work; current and
@@ -52,7 +180,7 @@ prerequisite evidence above for the exact checkpoint and generation changes.
 ## Present
 
 - Fresh source closure with no old self-host imports; canonical standard
-  library byte buffers, bounded cursors, and BLAKE3 bindings.
+  library byte buffers, bounded cursors, and source-defined BLAKE3 hashing.
 - Owner/database/generation-qualified storage, slot reuse, and capacity checks.
 - Exact 256-bit file identity checked against the Rust formula.
 - Cancellation and checked work/memory counters with explicit cleanup.
@@ -263,8 +391,8 @@ prerequisite evidence above for the exact checkpoint and generation changes.
 
 ## Gates still open
 
-Latest verification after the copy-on-write runtime change: 2,455 workspace
-tests pass, zero failures, two existing ignored manual VM benchmarks, in
+Historical verification after the copy-on-write runtime change: 2,455 workspace
+tests passed, zero failures, two existing ignored manual VM benchmarks, in
 84.670 seconds including an incremental build. All 48 source entries pass in
 that run (73.71 seconds), with unchanged source audit. Earlier timings above
 are historical checkpoints, not results for subsequent changes.

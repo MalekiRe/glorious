@@ -205,6 +205,16 @@ pub struct MirControlTables {
     /// `StorageLive`/`StorageDead` lifecycle events. This is deliberately
     /// distinct from the control scope tree above.
     pub source_storage: MirSourceStorageTables,
+    /// Concrete destruction obligations for abandoning this invocation.
+    /// Constructed by the same ownership/destruction pass as normal returns;
+    /// captures remain owned by their callable environment.
+    pub frame_cleanup: Vec<MirFrameDrop>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirFrameDrop {
+    pub owner: MirLocal,
+    pub destructor: DefKey,
 }
 
 /// One lexical frame while the raw CFG is frozen.  These markers are only a
@@ -234,6 +244,7 @@ impl Default for MirControlTables {
             move_paths: MirMovePathTables::default(),
             tombstoned_blocks: BTreeSet::new(),
             source_storage: MirSourceStorageTables::default(),
+            frame_cleanup: vec![],
         }
     }
 }
@@ -1044,6 +1055,12 @@ pub enum MirInstruction {
         base: MirLocal,
         fields: Vec<u32>,
     },
+    /// Consume a callable's residual environment through its compiler-selected
+    /// bytecode destructor. The invocation signature is not its capture layout.
+    DestroyCallable {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     /// An owned-value destruction boundary retained through generic MIR.
     /// Concrete instance materialization expands this into ordinary guarded
     /// calls to compiler-generated glue before executable MIR is emitted.
@@ -1113,6 +1130,10 @@ pub enum MirInstruction {
         target: MirBlockId,
     },
     UninstallHandler,
+    /// End the protected computation of the innermost handler. A pending
+    /// callable resumption receives this value before the lexical suffix;
+    /// ordinary completion falls through to handler removal and that suffix.
+    CompleteHandler { value: MirLocal },
     /// Materialize the identity of the innermost suspended continuation as a
     /// first-class, frame-safe callable snapshot.  The verifier binds this to
     /// an active handler frame; runtime aliases carry the same token rather
@@ -1528,8 +1549,13 @@ pub enum MirInstruction {
         dst: MirLocal,
         capability: String,
         symbol: String,
+        source_contract: crate::Digest,
         parameters: Vec<Type>,
         result: Type,
+        /// Source-selected destruction operations for native-visible resident
+        /// types. Filled after concrete instance discovery, never guessed from
+        /// a runtime layout or synthesized by the native linker.
+        resident_operations: Vec<(Type, Option<DefKey>)>,
         arguments: Vec<MirLocal>,
     },
     /// A trusted non-fallthrough terminal selected only through the runtime
@@ -1578,6 +1604,7 @@ pub enum MirInstruction {
 pub struct MirCaptureEnvironment {
     pub brand: EnvironmentBrand,
     pub captures: Vec<MirCapture>,
+    pub destructor: Option<DefKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1586,10 +1613,16 @@ pub struct MirCapture {
     pub ty: Type,
 }
 
+/// Bind executable capture cleanup to exactly one lifted callable.
+pub(crate) fn callable_environment_destructor_definition(callee: DefKey) -> DefKey {
+    DefKey(Digest::of_parts([
+        b"grandiose-callable-environment-destruction-v1".as_slice(),
+        callee.0.as_bytes().as_slice(),
+    ]))
+}
+
 /// Canonical executable identity of one source-owned anonymous callable.
-/// Keeping this single derivation shared by lowering and validation prevents
-/// a nested environment brand from being silently associated with a sibling
-/// lifted body.
+/// Sharing this derivation prevents a nested brand from naming a sibling.
 pub(crate) fn lifted_callable_definition(brand: EnvironmentBrand) -> DefKey {
     let callable = brand.callable.0.to_le_bytes();
     DefKey(Digest::of_parts([
@@ -3085,6 +3118,7 @@ fn instruction_has_persistent_identity(instruction: &MirInstruction) -> bool {
             | MirInstruction::CaptureResumption { .. }
             | MirInstruction::Resume { .. }
             | MirInstruction::ResumeReturn { .. }
+            | MirInstruction::CompleteHandler { .. }
             | MirInstruction::ResumeSnapshot { .. }
             | MirInstruction::Forward { .. }
             | MirInstruction::Cancel { .. }
@@ -3168,6 +3202,7 @@ fn operation_input_mut(
         | MirInstruction::Call { arguments, .. }
         | MirInstruction::HostCall { arguments, .. } => operation_input_slot(input, arguments),
         MirInstruction::TextByteLen { value, .. }
+        | MirInstruction::DestroyCallable { value, .. }
         | MirInstruction::StaticLen { value, .. }
         | MirInstruction::TextFromUtf8Checked { value, .. }
         | MirInstruction::TextAsBytes { value, .. }
@@ -3213,6 +3248,7 @@ fn operation_input_mut(
             reference: value, ..
         }
         | MirInstruction::Resume { value, .. }
+        | MirInstruction::CompleteHandler { value }
         | MirInstruction::ResumeReturn { value, .. }
         | MirInstruction::Copy { src: value, .. }
         | MirInstruction::Store { src: value, .. }
@@ -3367,12 +3403,14 @@ fn operation_is_effectful(instruction: &MirInstruction) -> bool {
         | MirInstruction::ArrayPushMove { .. }
         | MirInstruction::Call { .. }
         | MirInstruction::CallIndirect { .. }
+        | MirInstruction::DestroyCallable { .. }
         | MirInstruction::HostCall { .. }
         | MirInstruction::Perform { .. }
         | MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::CaptureResumption { .. }
         | MirInstruction::Resume { .. }
+        | MirInstruction::CompleteHandler { .. }
         | MirInstruction::ResumeReturn { .. }
         | MirInstruction::ResumeSnapshot { .. }
         | MirInstruction::Forward { .. }
@@ -4081,7 +4119,8 @@ fn fold_block(
 fn invalidates_alias_visible_constants(instruction: &MirInstruction) -> bool {
     matches!(
         instruction,
-        MirInstruction::MemoryIntrinsic { .. }
+        MirInstruction::CompleteHandler { .. }
+        | MirInstruction::MemoryIntrinsic { .. }
         | MirInstruction::Store { .. }
         | MirInstruction::DerefStore { .. }
         | MirInstruction::ArrayPushMove { .. }
@@ -4251,6 +4290,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ProjectRecord { dst, .. }
         | MirInstruction::TakeProjection { dst, .. }
         | MirInstruction::IsInitialized { dst, .. }
+        | MirInstruction::DestroyCallable { dst, .. }
         | MirInstruction::ProjectTuple { dst, .. }
         | MirInstruction::ProjectArray { dst, .. }
         | MirInstruction::UpdateRecord { dst, .. }
@@ -4391,7 +4431,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::StorageDead { .. }
         | MirInstruction::DestroyIf { .. } => None,
         MirInstruction::Drop { .. } => None,
-        MirInstruction::ArrayPushMove { .. } => None,
+        MirInstruction::ArrayPushMove { .. }
+        | MirInstruction::CompleteHandler { .. } => None,
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4406,6 +4447,8 @@ pub struct MirLocalDecl {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirNominalCopyDescriptor {
     pub definition: DefKey,
+    /// Uninstantiated source field contract, including lifetime relationships.
+    pub source_contract: crate::Digest,
     /// A one-variant enum still needs a discriminant in the native layout.
     pub is_enum: bool,
     pub arguments: Vec<GenericArgument>,
@@ -4471,10 +4514,10 @@ pub struct MirLowering {
 }
 
 impl MirLowering {
-    fn freeze(function: MirFunction, flow: &PlaceFlow) -> MirFunction {
+    fn freeze(function: MirFunction, flow: &PlaceFlow, bindings: &BTreeMap<PlaceBindingOrigin, MirLocal>) -> MirFunction {
         function
             .with_frozen_move_paths(flow)
-            .with_frozen_source_storage(flow)
+            .with_frozen_source_storage_bindings(flow, bindings)
             .with_frozen_control_tables()
     }
     pub fn lower(definition: DefKey, body: &TypedBody, flow: &PlaceFlow) -> Self {
@@ -4575,6 +4618,8 @@ impl MirLowering {
             body,
             bodies,
             signatures,
+            lexical_bounds: flow.lexical_bounds.clone(),
+            ownership_solver: std::cell::OnceCell::new(),
             runtime_primitives,
             // Core environments are branded by the source callable that
             // owns the whole body.  A lifted child has a synthetic VM key,
@@ -4590,6 +4635,13 @@ impl MirLowering {
             values: BTreeMap::new(),
             named: BTreeMap::new(),
             shadowed_bindings: BTreeMap::new(),
+            source_bindings: BTreeMap::new(),
+            pattern_origins: pattern_binding_origins(body),
+            pattern_subjects: pattern_subjects(body),
+            observed_pattern_places: BTreeMap::new(),
+            refinement_binding_types: BTreeMap::new(),
+            arm_cleanup: BTreeMap::new(),
+            block_entry_bindings: BTreeMap::new(),
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
@@ -4608,8 +4660,8 @@ impl MirLowering {
             label_values: BTreeMap::new(),
             direct_resumption: None,
             immediate_resumption_closures: BTreeMap::new(),
-            suspend_completion: false,
-            deferred_completion: None,
+            suspend_value_control: false,
+            deferred_value_control: None,
         };
         let parameters = body
             .parameters
@@ -4627,7 +4679,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4645,7 +4697,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4664,7 +4716,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4685,7 +4737,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4701,7 +4753,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4712,16 +4764,16 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
-        // The same lexical leave can occur after a one-shot continuation
-        // resumes an operation performed by an ordinary callee.  This needs
+        // The same lexical leave can discard a continuation or follow its
+        // resumption after an operation performed by an ordinary callee. This needs
         // a real dynamic frame rather than the direct-perform specializer
         // above, because the suspended continuation crosses the call frame.
         if let Some(function) = lowerer
-            .lower_root_label_interprocedural_one_shot_handler_leave(body.root, parameters.clone())
+            .lower_root_label_interprocedural_handler_leave(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4738,7 +4790,7 @@ impl MirLowering {
         ) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4754,7 +4806,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4774,7 +4826,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4794,7 +4846,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4814,7 +4866,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4835,7 +4887,7 @@ impl MirLowering {
         ) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4852,7 +4904,7 @@ impl MirLowering {
         ) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4871,7 +4923,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4887,7 +4939,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4902,7 +4954,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4918,7 +4970,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4937,7 +4989,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4953,7 +5005,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4969,7 +5021,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -4985,7 +5037,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5011,7 +5063,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5040,7 +5092,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5070,7 +5122,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5099,7 +5151,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5125,7 +5177,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5151,7 +5203,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5177,7 +5229,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5206,7 +5258,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5238,7 +5290,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5270,7 +5322,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5302,7 +5354,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5328,7 +5380,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5353,7 +5405,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: lowerer.diagnostics,
                 };
@@ -5379,7 +5431,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5410,7 +5462,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5436,7 +5488,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5462,7 +5514,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5488,7 +5540,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5514,7 +5566,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5540,7 +5592,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5571,7 +5623,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5604,7 +5656,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5630,7 +5682,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5654,7 +5706,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5683,7 +5735,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5709,7 +5761,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5735,7 +5787,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5767,7 +5819,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5793,7 +5845,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5819,7 +5871,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5845,7 +5897,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5871,7 +5923,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5896,7 +5948,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5907,12 +5959,12 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
-        // A normal completion is an expression, not merely a tail return.
+        // Normal completions and lazy Booleans are expression values.
         // Root completion lowering above owns the direct tail form; this
         // continuation CFG path owns occurrences in operands, initializers,
         // and other strict expression positions.
         if let Some(function) =
-            lowerer.lower_root_non_tail_completion(body.root, parameters.clone())
+            lowerer.lower_root_value_control(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
                 if let Err(message) = validate_lowered_handler_contracts(body, &function) {
@@ -5926,7 +5978,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5954,7 +6006,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -5983,7 +6035,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -6012,7 +6064,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -6036,7 +6088,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -6050,7 +6102,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(Self::freeze(function, flow)),
+                    function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -6102,7 +6154,7 @@ impl MirLowering {
                 };
             }
             Self {
-                function: Some(Self::freeze(function, flow)),
+                function: Some(Self::freeze(function, flow, &lowerer.source_bindings)),
                 lifted: lowerer.lifted,
                 diagnostics: vec![],
             }
@@ -6200,6 +6252,11 @@ impl MirFunction {
     /// product as move paths.  Consumers therefore obtain a typed lifetime
     /// graph rather than reconstructing lexical scope from local spellings.
     pub fn with_frozen_source_storage(mut self, flow: &PlaceFlow) -> Self {
+        self = self.with_frozen_source_storage_bindings(flow, &BTreeMap::new());
+        self
+    }
+
+    fn with_frozen_source_storage_bindings(mut self, flow: &PlaceFlow, bindings: &BTreeMap<PlaceBindingOrigin, MirLocal>) -> Self {
         let mut storage = MirSourceStorageTables::from_placeflow(flow);
         for (index, binding) in self.control.move_paths.bindings.iter().enumerate() {
             let local = match binding.origin {
@@ -6213,17 +6270,14 @@ impl MirFunction {
                     .map(|index| MirLocal(index as u32)),
                 PlaceBindingOrigin::HandlerBinder { .. }
                 | PlaceBindingOrigin::HandlerResumption { .. }
-                | PlaceBindingOrigin::CompletionBinder { .. } => None,
+                | PlaceBindingOrigin::CompletionBinder { .. } => bindings.get(&binding.origin).copied(),
             };
             storage.binding_locals[index] = local;
         }
-        // Handler payloads, continuation binders, and completion binders do
-        // not have a pre-freeze `named` entry in compact Stage-0 MIR. They
-        // must nevertheless receive a concrete, body-local slot: leaving a
-        // `None` here would turn their lexical lifetime back into implicit
-        // register state. Their payload transport remains represented by the
-        // existing handler/block parameter instructions; this companion slot
-        // is the exact lifecycle owner consumed by cleanup and VM checking.
+        // Lowered payload/completion binders map to their real owning slots.
+        // Statically eliminated binders and resumptions still receive a Unit
+        // lifecycle marker, so the source-storage graph remains total without
+        // pretending that such a marker owns an executable payload.
         for local in &mut storage.binding_locals {
             if local.is_some() {
                 continue;
@@ -6494,6 +6548,7 @@ impl MirFunction {
             move_paths: self.control.move_paths.clone(),
             tombstoned_blocks: self.control.tombstoned_blocks.clone(),
             source_storage: self.control.source_storage.clone(),
+            frame_cleanup: self.control.frame_cleanup.clone(),
             ..MirControlTables::default()
         };
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
@@ -6677,6 +6732,14 @@ impl MirFunction {
         self.control
             .source_storage
             .validate_local_mapping(&self.control.move_paths, self.locals.len())?;
+        let owners = crate::ownership::FrameOwnership::for_function(self);
+        let mut remaining = owners.exiting(None);
+        for action in &self.control.frame_cleanup {
+            self.local_type(action.owner)?;
+            if !remaining.any(|owner| owner == action.owner) {
+                return Err("frame cleanup is not an ordered subset of its owning bindings".into());
+            }
+        }
         validate_mir_type(&self.result, &mut vec![])?;
         for local in &self.locals {
             validate_mir_type(&local.ty, &mut vec![])?;
@@ -6868,7 +6931,7 @@ impl MirFunction {
                     MirInstruction::DestroyIf { local, .. } => {
                         live[local.0 as usize] = false;
                     }
-                    MirInstruction::Move { src, .. } => {
+                    MirInstruction::Move { src, .. } | MirInstruction::DestroyCallable { value: src, .. } => {
                         live[src.0 as usize] = false;
                     }
                     _ => {}
@@ -7604,6 +7667,13 @@ impl MirFunction {
             | MirInstruction::I64ToI128Wrapping { dst, value } => {
                 self.require_scalar_locals(&[*dst], ScalarType::I128, "i64-to-i128 result")?;
                 self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i128 input")?;
+            }
+            MirInstruction::DestroyCallable { dst, value } => {
+                if self.locals[dst.0 as usize].ty != Type::Unit
+                    || !matches!(self.locals[value.0 as usize].ty, Type::Callable { .. })
+                {
+                    return Err("MIR callable destruction requires a callable and unit result".into());
+                }
             }
             MirInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
                 let Some(mut signature) = primitive.instantiated_signature(types) else {
@@ -8809,6 +8879,81 @@ fn validate_nominal_copy_descriptors(
     Ok(())
 }
 
+/// Native contracts need referent layouts even when no value of that type
+/// ever occupies a source register. Keep this traversal separate from inline
+/// copyability: following pointers must not make pointee ownership inline.
+pub(crate) fn native_contract_nominals(
+    roots: &[Type],
+    signatures: &ElaboratedInterface,
+) -> Result<Vec<Type>, String> {
+    Ok(native_contract_residents(roots, signatures)?.into_iter()
+        .filter(|ty| matches!(ty, Type::Nominal { .. })).collect())
+}
+
+pub(crate) fn native_contract_residents(
+    roots: &[Type],
+    signatures: &ElaboratedInterface,
+) -> Result<Vec<Type>, String> {
+    let mut pending = roots
+        .iter()
+        .cloned()
+        .map(|ty| (ty, 0usize))
+        .collect::<Vec<_>>();
+    let mut seen = BTreeSet::new();
+    let mut nominals = vec![];
+    while let Some((ty, depth)) = pending.pop() {
+        if !seen.insert(crate::types::canonical_type_encoding(&ty)) {
+            continue;
+        }
+        // Recursive pointers to the same concrete type terminate via `seen`.
+        // Expanding generic recursion must fail finitely instead of building
+        // an unbounded contract (e.g. Node<T> -> *Node<(T,)> -> ...).
+        if depth > 128 || seen.len() > 4096 {
+            return Err("native source contract exceeds its finite layout closure limit".into());
+        }
+        let mut children = vec![];
+        match &ty {
+            Type::Nominal {
+                definition,
+                arguments,
+            } => {
+                nominals.push(ty.clone());
+                children.extend(arguments.iter().filter_map(|argument| match argument {
+                    GenericArgument::Type(ty) => Some(ty.clone()),
+                    _ => None,
+                }));
+                if let Some(ElaboratedHeader::Nominal { layout, .. }) =
+                    signatures.definitions.get(definition)
+                    && let Some(variants) = instantiate_nominal_copy_layout(layout, arguments)
+                {
+                    children.extend(variants.into_iter().flatten());
+                }
+            }
+            Type::Tuple(fields) => {
+                nominals.push(ty.clone());
+                children.extend(fields.iter().cloned());
+            }
+            Type::Array(element)
+            | Type::StaticData { element, .. }
+            | Type::RawPointer {
+                pointee: element, ..
+            }
+            | Type::Reference {
+                referent: element, ..
+            } => children.push((**element).clone()),
+            Type::Callable {
+                parameters, result, ..
+            } => {
+                children.extend(parameters.iter().cloned());
+                children.push((**result).clone());
+            }
+            _ => {}
+        }
+        pending.extend(children.into_iter().map(|ty| (ty, depth + 1)));
+    }
+    Ok(nominals)
+}
+
 /// Instantiate a declaration-owned layout using the entire nominal argument
 /// vector. `ElaboratedInterface`'s executable-field query intentionally
 /// focuses on type arguments; copyability also needs empty and scalar-only
@@ -9328,6 +9473,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::SetDropFlag { .. }
         | MirInstruction::DestroyIf { .. }
         | MirInstruction::Drop { .. }
+        | MirInstruction::DestroyCallable { .. }
         | MirInstruction::Copy { .. }
         | MirInstruction::TakeProjection { .. }
         | MirInstruction::IsInitialized { .. }
@@ -9390,7 +9536,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::GtChar { .. }
         | MirInstruction::GeChar { .. }
         | MirInstruction::MakeLabel { .. }
-        | MirInstruction::CallIndirect { .. } => Ok(()),
+        | MirInstruction::CallIndirect { .. }
+        | MirInstruction::CompleteHandler { .. } => Ok(()),
     }
 }
 
@@ -9590,7 +9737,7 @@ fn validate_lowered_handler_contracts(
         let exits = handler_region_exits(function, *target);
         match &clause.resumption {
             CoreHandlerResumption::Discard { .. } => {
-                if declared_quantity.requires_positive_use() || !exits.cancel {
+                if declared_quantity.requires_positive_use() || (!exits.cancel && !exits.terminal_transfer) {
                     return Err(
                         "MIR cancellation does not implement the frozen discarded-continuation contract"
                             .into(),
@@ -9705,6 +9852,7 @@ struct HandlerRegionExits {
     resume_return: bool,
     forward: bool,
     cancel: bool,
+    terminal_transfer: bool,
 }
 
 /// The normal CFG does not encode `Perform`'s dynamic jump to a handler
@@ -9729,6 +9877,15 @@ fn handler_region_exits(function: &MirFunction, start: MirBlockId) -> HandlerReg
                 MirInstruction::ResumeReturn { .. } => exits.resume_return = true,
                 MirInstruction::Forward { .. } => exits.forward = true,
                 MirInstruction::Cancel { .. } => exits.cancel = true,
+                MirInstruction::Call { dst, .. } | MirInstruction::CallIndirect { dst, .. }
+                | MirInstruction::Perform { dst, .. }
+                    if matches!(block.terminator, MirTerminator::Unreachable)
+                        && function.local_type(*dst).is_ok_and(|ty| *ty == Type::Never) => {
+                    // A typed terminal transfer abandons the handler through
+                    // the runtime's retained-frame cleanup. An arbitrary
+                    // unreachable/trapping block is not cancellation evidence.
+                    exits.terminal_transfer = true;
+                }
                 _ => {}
             }
         }
@@ -9838,6 +9995,16 @@ impl MirProgram {
                     {
                         return Err(format!("MIR call targets missing function {callee:?}"));
                     }
+                    if let MirInstruction::HostCall { resident_operations, .. } = instruction {
+                        for (ty, destructor) in resident_operations {
+                            let Some(destructor) = destructor else { continue; };
+                            let target = self.functions.get(destructor).ok_or_else(|| format!("MIR native destruction targets missing function {destructor:?}"))?;
+                            if target.parameters.len() != 1 || target.captures != 0 || target.local_type(target.parameters[0])? != ty
+                                || target.result != Type::Unit || target.safety != crate::Safety::Safe {
+                                return Err("MIR native destruction has an incompatible resident ABI".into());
+                            }
+                        }
+                    }
                     match instruction {
                         MirInstruction::Call { callee, .. } if self.functions[callee].safety == crate::Safety::Unsafe && !function.unsafe_execution => {
                             return Err("MIR unsafe call omitted its unsafe implementation requirement".into());
@@ -9869,6 +10036,20 @@ impl MirProgram {
                                     "MIR callable target capture type does not match sealed environment"
                                         .into(),
                                 );
+                            }
+                        }
+                        if let Some(destructor) = environment.destructor {
+                            if destructor != callable_environment_destructor_definition(*callee) {
+                                return Err("MIR capture destruction does not belong to its callable".into());
+                            }
+                            let cleanup = self.functions.get(&destructor)
+                                .ok_or("MIR capture destruction target is missing")?;
+                            if cleanup.captures != 0 || cleanup.parameters.len() != environment.captures.len()
+                                || cleanup.result != Type::Unit || cleanup.safety != crate::Safety::Safe
+                                || environment.captures.iter().enumerate().any(|(index, capture)|
+                                    cleanup.locals[cleanup.parameters[index].0 as usize].ty != capture.ty)
+                            {
+                                return Err("MIR capture destruction has an incompatible environment ABI".into());
                             }
                         }
                     }
@@ -10224,6 +10405,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::I64ToU128Wrapping { dst, value }
         | MirInstruction::I64ToI128Checked { dst, value }
         | MirInstruction::I64ToI128Wrapping { dst, value } => vec![*dst, *value],
+        MirInstruction::DestroyCallable { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -10253,7 +10435,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::Abort => Vec::new(),
         MirInstruction::UninstallHandler => Vec::new(),
         MirInstruction::CaptureResumption { dst, .. } => vec![*dst],
-        MirInstruction::Resume { value, .. } => vec![*value],
+        MirInstruction::Resume { value, .. }
+        | MirInstruction::CompleteHandler { value } => vec![*value],
         MirInstruction::ResumeReturn { dst, value, .. } => vec![*dst, *value],
         MirInstruction::ResumeSnapshot {
             snapshot, value, ..
@@ -10347,12 +10530,22 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             .collect(),
     }
 }
+/// A strict value segment may terminate without producing a value. Keeping
+/// that fact separate from its source type prevents an enclosing coercion
+/// from manufacturing a join or return edge for a bottom-typed call.
+struct MirValueSegment {
+    entry: MirBlockId,
+    continuation: Option<(MirBlockId, MirLocal)>,
+}
+
 struct Lowerer<'a> {
     safety: crate::Safety,
     unsafe_execution: bool,
     body: &'a TypedBody,
     bodies: &'a BTreeMap<DefKey, TypedBody>,
     signatures: Option<&'a ElaboratedInterface>,
+    lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+    ownership_solver: std::cell::OnceCell<crate::TraitSolver>,
     runtime_primitives: Option<&'a BTreeMap<DefKey, PrimitiveRole>>,
     /// The source callable whose body-local `CallableId`s and environment
     /// brands this lowering session consumes.  This remains unchanged while
@@ -10372,6 +10565,13 @@ struct Lowerer<'a> {
     /// Stable lexical owner chain, independent of which spelling is visible.
     /// Shadowing hides a binding; it does not destroy or forget its value.
     shadowed_bindings: BTreeMap<MirLocal, MirLocal>,
+    source_bindings: BTreeMap<crate::placeflow::PlaceBindingOrigin, MirLocal>,
+    pattern_origins: BTreeMap<CoreId, BTreeMap<String, crate::placeflow::PlaceBindingOrigin>>,
+    pattern_subjects: BTreeSet<CoreId>,
+    observed_pattern_places: BTreeMap<MirLocal, (MirLocal, Vec<u32>, bool)>,
+    refinement_binding_types: BTreeMap<String, Type>,
+    arm_cleanup: BTreeMap<CoreId, Vec<MirLocal>>,
+    block_entry_bindings: BTreeMap<CoreId, BTreeMap<String, MirLocal>>,
     lifted: BTreeMap<DefKey, MirFunction>,
     instructions: Vec<MirInstruction>,
     diagnostics: Vec<MirDiagnostic>,
@@ -10402,15 +10602,15 @@ struct Lowerer<'a> {
     /// emitting a first-class callable would unnecessarily require a dynamic
     /// handler frame for an otherwise identity-resumptive clause.
     immediate_resumption_closures: BTreeMap<String, ImmediateResumptionClosure>,
-    /// While lowering a root expression with a non-tail normal completion,
-    /// stop at the first completion in source evaluation order.  The CFG
+    /// While lowering an expression with normal completion or lazy Boolean
+    /// control, stop at the first such value in source evaluation order. The CFG
     /// continuation lowerer records that boundary, selects an arm, and then
     /// resumes ordinary value lowering with the selected result cached under
     /// this Core identity.  Keeping the boundary in the lowerer (rather than
-    /// treating completion as a pseudo-value instruction) preserves pattern
+    /// treating control as a pseudo-value instruction) preserves pattern
     /// binding scope and does not speculate later operands.
-    suspend_completion: bool,
-    deferred_completion: Option<CoreId>,
+    suspend_value_control: bool,
+    deferred_value_control: Option<CoreId>,
 }
 
 #[derive(Clone, Debug)]
@@ -10692,7 +10892,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
+        self.bind_handler_patterns(&operation_clause.patterns, &payloads, operation_clause.body)?;
         let resumed = self.direct_handler_clause_value(operation_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -10968,6 +11168,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(
             std::slice::from_ref(&completion_clause.pattern),
             &[completion_subject],
+            completion_clause.body,
         )?;
         let completed = self.lower_label_transfer_path(completion_clause.body, brand)?;
         let completion_instructions = std::mem::take(&mut self.instructions);
@@ -10989,7 +11190,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
+        self.bind_handler_patterns(&operation_clause.patterns, &payloads, operation_clause.body)?;
         let resumed = self.direct_handler_clause_value(operation_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -11277,7 +11478,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
             if self.contains_label_transfer(clause.body, brand) {
                 let value = self.lower_label_transfer_path(clause.body, brand)?;
                 bodies.push((std::mem::take(&mut self.instructions), value, true));
@@ -11533,7 +11734,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values;
-        self.bind_handler_patterns(&handler_clause.patterns, &payloads)?;
+        self.bind_handler_patterns(&handler_clause.patterns, &payloads, handler_clause.body)?;
         let previous = self.direct_resumption.replace(DirectResumptionState {
             name: name.clone(),
             quantity: *quantity,
@@ -11685,8 +11886,8 @@ impl Lowerer<'_> {
         self.label_values.clear();
         self.direct_resumption = None;
         self.immediate_resumption_closures.clear();
-        self.suspend_completion = false;
-        self.deferred_completion = None;
+        self.suspend_value_control = false;
+        self.deferred_value_control = None;
         for ((name, _), local) in self.body.parameters.iter().zip(parameters) {
             self.named.insert(name.clone(), *local);
         }
@@ -11783,7 +11984,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
         let transferred = self.lower_label_transfer_path(clause.body, brand)?;
         let clause_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
@@ -11844,7 +12045,7 @@ impl Lowerer<'_> {
     /// then abandons both the restored handler frame and the lexical label
     /// body.  Treating this as the direct-perform identity case would return
     /// `v` instead of the residual result.
-    fn lower_root_label_interprocedural_one_shot_handler_leave(
+    fn lower_root_label_interprocedural_handler_leave(
         &mut self,
         root: CoreId,
         parameters: Vec<MirLocal>,
@@ -11882,13 +12083,14 @@ impl Lowerer<'_> {
         let [clause] = matching.as_slice() else {
             return None;
         };
-        let CoreHandlerResumption::Explicit { name, quantity } = &clause.resumption else {
-            return None;
-        };
-        let replay_uses = if *quantity == crate::quantity::Quantity::ONCE {
-            None
-        } else {
-            Some(exact_replay_uses(&clause.resumption)?)
+        let (resumption, replay_uses) = match &clause.resumption {
+            CoreHandlerResumption::Explicit { name, quantity } => {
+                let replay = if *quantity == crate::quantity::Quantity::ONCE { None }
+                    else { Some(exact_replay_uses(&clause.resumption)?) };
+                (Some((name.clone(), *quantity)), replay)
+            }
+            CoreHandlerResumption::Discard { quantity } if !quantity.requires_positive_use() => (None, None),
+            _ => return None,
         };
         if clause.patterns.len() != clause.payload_types.len()
             || !clause.patterns.iter().all(pattern_is_irrefutable)
@@ -11975,10 +12177,11 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&clause.patterns, &payloads)?;
-        let previous = self.direct_resumption.replace(DirectResumptionState {
-            name: name.clone(),
-            quantity: *quantity,
+        self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
+        let previous = self.direct_resumption.take();
+        self.direct_resumption = resumption.map(|(name, quantity)| DirectResumptionState {
+            name,
+            quantity,
             calls: 0,
             plan: if replay_uses.is_some() {
                 DirectResumptionPlan::RuntimeReplay
@@ -11987,19 +12190,18 @@ impl Lowerer<'_> {
             },
         });
         let transferred = self.lower_label_transfer_path(clause.body, brand);
-        let state = self
-            .direct_resumption
-            .take()
-            .expect("dynamic direct resumption state must outlive its clause body");
+        let state = self.direct_resumption.take();
         self.direct_resumption = previous;
         let transferred = transferred?;
-        let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
-        if !state.quantity.contains(actual) {
-            self.error(
-                "G6005",
-                "interprocedural resumptive handler calls do not satisfy its declared quantity",
-            );
-            return None;
+        if let Some(state) = state {
+            let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+            if !state.quantity.contains(actual) {
+                self.error(
+                    "G6005",
+                    "interprocedural resumptive handler calls do not satisfy its declared quantity",
+                );
+                return None;
+            }
         }
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = boundary_named;
@@ -12208,7 +12410,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, &payloads[index])?;
+            self.bind_handler_patterns(&clause.patterns, &payloads[index], clause.body)?;
             if index == resume_index {
                 let value = self.direct_handler_clause_value(clause)?;
                 self.instructions.push(MirInstruction::Resume {
@@ -12459,7 +12661,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer.patterns, &outer_payloads, outer.body)?;
         let transferred = self.lower_label_transfer_path(outer.body, brand)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -12469,7 +12671,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
+        self.bind_handler_patterns(&inner.patterns, &inner_payloads, inner.body)?;
         let inner_value = self.direct_handler_clause_value(inner)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -12918,14 +13120,14 @@ impl Lowerer<'_> {
         // common strict prefix in the label body. This is what makes a form
         // such as `1 + handle value { ... }` evaluate `1` once rather than in
         // every arm.
-        self.suspend_completion = true;
-        self.deferred_completion = None;
+        self.suspend_value_control = true;
+        self.deferred_value_control = None;
         let finished = self.value(body);
-        self.suspend_completion = false;
-        if finished.is_some() || self.deferred_completion != Some(completion) {
+        self.suspend_value_control = false;
+        if finished.is_some() || self.deferred_value_control != Some(completion) {
             return None;
         }
-        self.deferred_completion = None;
+        self.deferred_value_control = None;
         let subject = self.value(computation)?;
         let entry_instructions = std::mem::take(&mut self.instructions);
         let boundary_values = self.values.clone();
@@ -13708,7 +13910,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer.patterns, &outer_payloads, outer.body)?;
         let outer_resumed = self.direct_handler_clause_value(outer)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -13719,7 +13921,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
+        self.bind_handler_patterns(&inner.patterns, &inner_payloads, inner.body)?;
         let inner_resumed = self.direct_handler_clause_value(inner)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -13732,7 +13934,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&facade.patterns, &facade_payloads)?;
+            self.bind_handler_patterns(&facade.patterns, &facade_payloads, facade.body)?;
             let facade_resumed = self.direct_handler_clause_value(facade)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -13976,7 +14178,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let resumed = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -14042,11 +14244,31 @@ impl Lowerer<'_> {
             return None;
         }
         let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+        let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Unreachable,
+        }, MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![join],
+            instructions: vec![],
+            terminator: MirTerminator::Return { value: join },
+        }];
         self.label_values.insert(brand, (MirBlockId(1), join));
-        let lowered = self.value(body);
+        let lowered = self.lower_value_segment(body, &mut blocks);
         self.label_values.remove(&brand);
-        lowered?;
-        let entry_instructions = std::mem::take(&mut self.instructions);
+        let segment = lowered?;
+        blocks[0].terminator = MirTerminator::Goto {
+            target: segment.entry, arguments: vec![],
+        };
+        if let Some((exit, value)) = segment.continuation {
+            // Passing a label to a helper does not prove the helper invokes
+            // it. Its ordinary result reaches the same lexical destination.
+            blocks[exit.0 as usize].terminator = MirTerminator::Goto {
+                target: MirBlockId(1), arguments: vec![value],
+            };
+        }
         Some(MirFunction {
             safety: self.safety,
             unsafe_execution: self.unsafe_execution,
@@ -14058,20 +14280,7 @@ impl Lowerer<'_> {
             result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
-            blocks: vec![
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: entry_instructions,
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![join],
-                    instructions: vec![],
-                    terminator: MirTerminator::Return { value: join },
-                },
-            ],
+            blocks,
         })
     }
 
@@ -14335,7 +14544,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer.patterns, &outer_payloads, outer.body)?;
         if let Some((outer_name, outer_quantity, outer_replay_uses)) = outer_resumption {
             let previous = self.direct_resumption.replace(DirectResumptionState {
                 name: outer_name,
@@ -14369,7 +14578,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
+        self.bind_handler_patterns(&inner.patterns, &inner_payloads, inner.body)?;
         let resumed = self.direct_handler_clause_value(inner)?;
         // A matched finite-replay arm can itself invoke the lexical label.
         // That `Never` path has already consumed its exact resumes and exits
@@ -14617,7 +14826,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
         self.value(clause.body)?;
         let arm = std::mem::take(&mut self.instructions);
         self.label_values.remove(&brand);
@@ -14953,6 +15162,21 @@ impl Lowerer<'_> {
                 None
             }
             CoreKind::Label { body, .. } => self.lower_label_transfer_path(body, target),
+            CoreKind::Completion { computation, clauses }
+                if clauses.len() == 1 && pattern_is_irrefutable(&clauses[0].pattern) =>
+            {
+                if self.contains_label_transfer(computation, target) {
+                    return self.lower_label_transfer_path(computation, target);
+                }
+                let outer_named = self.named.clone();
+                let subject = self.value(computation)?;
+                let clause = &clauses[0];
+                self.bind_completion_clause(clause, subject)?;
+                let payload = self.lower_label_transfer_path(clause.body, target)?;
+                self.cleanup_arm_bindings(clause.body, payload);
+                self.named = outer_named;
+                Some(payload)
+            }
             // These are strict, left-to-right expression forms.  A transfer
             // in one of them abandons the enclosing form, but work in every
             // preceding operand remains observable and must therefore be
@@ -15149,6 +15373,13 @@ impl Lowerer<'_> {
     /// that prevents an operand-position label transfer from dropping or
     /// replaying a preceding computation.
     fn prepare_label_path(&mut self, id: CoreId, target: CoreId) -> bool {
+        // This is a lowering probe, not an exhaustive traversal. A label
+        // below a completion belongs to that continuation's CFG builder.
+        // Establish eligibility without evaluating preceding expressions:
+        // a failed probe must not emit code or diagnostics for another path.
+        if !self.label_on_preparable_path(id, target) {
+            return false;
+        }
         if id == target {
             return true;
         }
@@ -15256,6 +15487,30 @@ impl Lowerer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
             | CoreKind::Error => false,
+        }
+    }
+
+    fn label_on_preparable_path(&self, id: CoreId, target: CoreId) -> bool {
+        if id == target { return true; }
+        let on_path = |child| self.label_on_preparable_path(child, target);
+        match &self.body.expression(id).kind {
+            CoreKind::Label { body, .. } => on_path(*body),
+            CoreKind::Block(values) | CoreKind::Tuple(values) | CoreKind::Array(values)
+            | CoreKind::Record { fields: values, .. } | CoreKind::Enum { fields: values, .. }
+            | CoreKind::IntrinsicCall { arguments: values, .. }
+            | CoreKind::Perform { arguments: values, .. } => values.iter().copied().any(on_path),
+            CoreKind::Call { callee, arguments, .. } =>
+                on_path(*callee) || arguments.iter().copied().any(on_path),
+            CoreKind::Handle { computation, .. } => on_path(*computation),
+            CoreKind::Field { base, .. } | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. } | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base) | CoreKind::Move(base)
+            | CoreKind::Transfer { value: base, .. }
+            | CoreKind::Assign { value: base, .. } => on_path(*base),
+            CoreKind::Completion { .. } | CoreKind::Closure { .. }
+            | CoreKind::Literal(_) | CoreKind::Local(_) | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. } | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. } | CoreKind::Constant { .. } | CoreKind::Error => false,
         }
     }
 
@@ -15461,6 +15716,11 @@ impl Lowerer<'_> {
             // and is an ordinary lexical transfer through the handler frame.
             CoreKind::Handle { computation, .. } => {
                 self.contains_label_transfer(*computation, target)
+            }
+            CoreKind::Completion { computation, clauses } => {
+                self.contains_label_transfer(*computation, target)
+                    || (clauses.len() == 1 && pattern_is_irrefutable(&clauses[0].pattern)
+                        && self.contains_label_transfer(clauses[0].body, target))
             }
             CoreKind::Assign { value, .. } => self.contains_label_transfer(*value, target),
             _ => false,
@@ -15826,7 +16086,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let outer_named = self.named.clone();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations, outer_clause.body)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -15841,7 +16101,7 @@ impl Lowerer<'_> {
             for (clause, _) in &dispatch.clauses {
                 self.instructions = Vec::new();
                 let named = self.named.clone();
-                self.bind_handler_patterns(&clause.patterns, &dispatch.payload_destinations)?;
+                self.bind_handler_patterns(&clause.patterns, &dispatch.payload_destinations, clause.body)?;
                 let resumed = self.direct_handler_clause_value(clause)?;
                 self.instructions.push(MirInstruction::Resume {
                     site: MirResumptionSiteId::UNASSIGNED,
@@ -15856,7 +16116,7 @@ impl Lowerer<'_> {
         for (clause, _) in &direct_dispatch.clauses {
             self.instructions = Vec::new();
             let named = self.named.clone();
-            self.bind_handler_patterns(&clause.patterns, &direct_payload_destinations)?;
+            self.bind_handler_patterns(&clause.patterns, &direct_payload_destinations, clause.body)?;
             let resumed = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -16049,12 +16309,9 @@ impl Lowerer<'_> {
             CoreKind::IntrinsicCall {
                 operator,
                 arguments,
-            } if arguments.len() == 2 => Some((operator, arguments[0], arguments[1])),
+            } if arguments.len() == 2 => Some((operator, arguments[0], arguments[1], Vec::new())),
             CoreKind::Block(values) => {
                 let (last, prefix) = values.split_last()?;
-                for value in prefix {
-                    self.statement(*value)?;
-                }
                 let CoreKind::IntrinsicCall {
                     operator,
                     arguments,
@@ -16065,13 +16322,19 @@ impl Lowerer<'_> {
                 let [left, right] = arguments.as_slice() else {
                     return None;
                 };
-                Some((operator, *left, *right))
+                Some((operator, *left, *right, prefix.to_vec()))
             }
             _ => None,
         };
-        let (operator, left, right) = binary?;
+        let (operator, left, right, prefix) = binary?;
         if !matches!(operator.as_str(), "and" | "or") {
             return None;
+        }
+        if prefix.iter().any(|value| self.contains_evaluated_value_control(*value))
+            || self.contains_evaluated_value_control(left)
+            || self.contains_evaluated_value_control(right)
+        {
+            return self.lower_root_value_control(root, parameters);
         }
         let bool_ty = Type::Scalar(crate::types::ScalarType::Bool);
         if self.body.expression(root).ty != bool_ty
@@ -16081,6 +16344,11 @@ impl Lowerer<'_> {
             self.error("G6005", "short-circuit operator lost its boolean type");
             return Some(self.invalid_function(parameters));
         }
+        // A declined probe must not introduce lexical bindings. Otherwise
+        // ordinary block lowering mistakes those owners for outer bindings
+        // and omits their scope-exit destruction.
+        let return_scope = self.named.clone();
+        for value in prefix { self.statement(value)?; }
         // A statically skipped lazy branch is semantically unreachable. In
         // particular, it must not demand MIR lowering for a handler or other
         // control form nested in that branch; source evaluation ends at the
@@ -16089,6 +16357,7 @@ impl Lowerer<'_> {
             if (operator == "and" && value == "false") || (operator == "or" && value == "true"))
         {
             let result = self.value(left)?;
+            self.cleanup_scope_bindings(&return_scope, None)?;
             return Some(MirFunction {
                 safety: self.safety,
                 unsafe_execution: self.unsafe_execution,
@@ -16117,7 +16386,14 @@ impl Lowerer<'_> {
             if (operator == "and" && value == "true") || (operator == "or" && value == "false"))
             && matches!(self.body.expression(right).kind, CoreKind::Handle { .. })
         {
-            return self.lower_root_interprocedural_one_shot_handler(right, parameters);
+            let cleanup = self.scope_cleanup_locals(&return_scope, None);
+            let mut function = self.lower_root_interprocedural_one_shot_handler(right, parameters)?;
+            for block in &mut function.blocks {
+                if matches!(block.terminator, MirTerminator::Return { .. }) {
+                    block.instructions.extend(cleanup.iter().map(|local| MirInstruction::Drop { local: *local }));
+                }
+            }
+            return Some(function);
         }
         let condition = self.value(left)?;
         let skipped = self.alloc(bool_ty.clone(), root);
@@ -16135,6 +16411,8 @@ impl Lowerer<'_> {
         let right = self.value(right)?;
         let right_instructions = std::mem::take(&mut self.instructions);
         let joined = self.alloc(bool_ty, root);
+        self.cleanup_scope_bindings(&return_scope, None)?;
+        let cleanup_instructions = std::mem::take(&mut self.instructions);
         let (then_target, then_arguments, else_target, else_arguments) = if operator == "and" {
             (MirBlockId(1), vec![], MirBlockId(2), vec![skipped])
         } else {
@@ -16176,7 +16454,7 @@ impl Lowerer<'_> {
                 MirBlock {
                     scope: MirScopeId::ROOT,
                     parameters: vec![joined],
-                    instructions: vec![],
+                    instructions: cleanup_instructions,
                     terminator: MirTerminator::Return { value: joined },
                 },
             ],
@@ -16800,6 +17078,7 @@ impl Lowerer<'_> {
                 terminal_payloads
                     .as_ref()
                     .expect("terminal payloads were allocated"),
+                terminal_clause.body,
             )?;
             let result = self.value(terminal_clause.body)?;
             self.instructions.push(MirInstruction::Cancel {
@@ -16814,7 +17093,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named;
             self.values = boundary_values;
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
             let consume_returning = matches!(
                 clause.resumption,
                 CoreHandlerResumption::Explicit {
@@ -17136,6 +17415,7 @@ impl Lowerer<'_> {
                 terminal_payloads
                     .as_ref()
                     .expect("terminal payloads were allocated"),
+                terminal_clause.body,
             )?;
             let result = self.value(terminal_clause.body)?;
             self.instructions.push(MirInstruction::Cancel {
@@ -17149,7 +17429,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named;
             self.values = boundary_values;
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
             let consume_returning = matches!(
                 clause.resumption,
                 CoreHandlerResumption::Explicit {
@@ -17395,7 +17675,7 @@ impl Lowerer<'_> {
                 // Core-value memo reuse a local produced for an earlier site.
                 let before_values = self.values.clone();
                 if self
-                    .bind_handler_patterns(&clause.patterns, &arguments)
+                    .bind_handler_patterns(&clause.patterns, &arguments, clause.body)
                     .is_none()
                 {
                     self.named = before_clause;
@@ -17749,7 +18029,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let outer_named = self.named.clone();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations, outer_clause.body)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -17764,7 +18044,7 @@ impl Lowerer<'_> {
         {
             self.instructions = Vec::new();
             let named = self.named.clone();
-            self.bind_handler_patterns(&clause.patterns, payload_destinations)?;
+            self.bind_handler_patterns(&clause.patterns, payload_destinations, clause.body)?;
             let resumed = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -17775,7 +18055,7 @@ impl Lowerer<'_> {
         }
         self.instructions = Vec::new();
         let direct_named = self.named.clone();
-        self.bind_handler_patterns(&direct_clause.patterns, &direct_payload_destinations)?;
+        self.bind_handler_patterns(&direct_clause.patterns, &direct_payload_destinations, direct_clause.body)?;
         let direct_resumed = self.direct_handler_clause_value(direct_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -18129,7 +18409,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let outer_named = self.named.clone();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations, outer_clause.body)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -18142,7 +18422,7 @@ impl Lowerer<'_> {
         for (clause, _) in &dispatch {
             self.instructions = Vec::new();
             let named = self.named.clone();
-            self.bind_handler_patterns(&clause.patterns, &inner_payload_destinations)?;
+            self.bind_handler_patterns(&clause.patterns, &inner_payload_destinations, clause.body)?;
             let resumed = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -18160,6 +18440,7 @@ impl Lowerer<'_> {
                 sibling_payload_destinations
                     .as_ref()
                     .expect("sibling clause payload destinations exist"),
+                clause.body,
             )?;
             let resumed = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
@@ -18532,7 +18813,7 @@ impl Lowerer<'_> {
                 self.instructions = Vec::new();
                 self.named = base_named.clone();
                 self.values = base_values.clone();
-                self.bind_handler_patterns(&clause.patterns, payloads)?;
+                self.bind_handler_patterns(&clause.patterns, payloads, clause.body)?;
                 let resumed = self.direct_handler_clause_value(clause)?;
                 self.instructions.push(MirInstruction::Resume {
                     site: MirResumptionSiteId::UNASSIGNED,
@@ -18801,7 +19082,7 @@ impl Lowerer<'_> {
                 self.instructions = Vec::new();
                 self.named = base_named.clone();
                 self.values = base_values.clone();
-                self.bind_handler_patterns(&clause.patterns, payloads)?;
+                self.bind_handler_patterns(&clause.patterns, payloads, clause.body)?;
                 let value = self.direct_handler_clause_value(clause)?;
                 if policy.is_replay() {
                     // Every `ResumeReturn` in the clause has already cloned
@@ -19166,7 +19447,7 @@ impl Lowerer<'_> {
         let base_named = self.named.clone();
         let base_values = self.values.clone();
         self.instructions = Vec::new();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads, outer_clause.body)?;
         let outer_value = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -19177,7 +19458,7 @@ impl Lowerer<'_> {
         self.named = base_named.clone();
         self.values = base_values.clone();
         self.instructions = Vec::new();
-        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads, inner_clause.body)?;
         let inner_value = self.direct_handler_clause_value(inner_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -19420,7 +19701,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let outer_named = self.named.clone();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations, outer_clause.body)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         if outer_policy == MirContinuationPolicy::Consume {
             self.instructions.push(MirInstruction::Resume {
@@ -19437,7 +19718,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let inner_named = self.named.clone();
-        self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations)?;
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations, inner_clause.body)?;
         let inner_resumed = self.direct_handler_clause_value(inner_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -19700,7 +19981,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.values = entry_values.clone();
             self.named = entry_named.clone();
-            self.bind_handler_patterns(&clause.patterns, &arguments)?;
+            self.bind_handler_patterns(&clause.patterns, &arguments, clause.body)?;
             // A generated continuation shadows an outer local with the same
             // spelling. Remove the binding during clause lowering so the call
             // recognition in `value` cannot accidentally select the outer
@@ -19975,7 +20256,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let resumed = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -20194,7 +20475,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let handler_value = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -20354,7 +20635,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
             let value = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -20620,7 +20901,7 @@ impl Lowerer<'_> {
         self.named = protected_named.clone();
         self.values = protected_values.clone();
         self.instructions = Vec::new();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads, outer_clause.body)?;
         let outer_value = self.value(outer_clause.body)?;
         if let Some(result) = handler_result {
             self.instructions.push(MirInstruction::Store {
@@ -20644,7 +20925,7 @@ impl Lowerer<'_> {
             subject: *inner_payloads.first()?,
             pattern,
         }];
-        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads, inner_clause.body)?;
         let inner_value = self.value(inner_clause.body)?;
         if let Some(result) = handler_result {
             self.instructions.push(MirInstruction::Store {
@@ -20859,7 +21140,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
         let _ = self.value(clause.body)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -21305,7 +21586,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let inner_named = self.named.clone();
-        self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations)?;
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations, inner_clause.body)?;
         for expression in inner_prefix {
             self.statement(*expression)?;
         }
@@ -21499,7 +21780,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let handler_named = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let handler_result = self.direct_handler_clause_value(clause)?;
         self.instructions.push(if cancellation || replay {
             MirInstruction::Cancel {
@@ -21690,7 +21971,7 @@ impl Lowerer<'_> {
         for clause in &matching {
             self.instructions = vec![];
             let before_clause = self.named.clone();
-            self.bind_handler_patterns(&clause.patterns, &arguments)?;
+            self.bind_handler_patterns(&clause.patterns, &arguments, clause.body)?;
             let Some(resumed) = self.direct_handler_clause_value(clause) else {
                 self.named = before_clause;
                 return Some(self.invalid_function(parameters));
@@ -21939,7 +22220,7 @@ impl Lowerer<'_> {
         let callee_kind = self.body.expression(callee).kind.clone();
         let indirect = match callee_kind {
             CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
-            _ => Some(self.value(callee)?),
+            _ => Some(self.place_value(callee)?),
         };
         let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
         let payload_destinations = active
@@ -22009,30 +22290,40 @@ impl Lowerer<'_> {
         for _ in &active {
             entry.push(MirInstruction::UninstallHandler);
         }
-
         let mut blocks = vec![MirBlock {
             scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: performed },
         }];
-        let previous_named = self.named.clone();
-        for (clause, payloads) in active.iter().zip(payload_destinations) {
-            self.instructions = Vec::new();
-            self.named = previous_named.clone();
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
-            let result = self.value(clause.body)?;
-            self.instructions.push(MirInstruction::Cancel {
-                site: MirResumptionSiteId::UNASSIGNED,
-            });
+        // Reserve stable dispatch entries, then lower every clause through
+        // the shared value CFG. A terminal clause has no Cancel/Return suffix.
+        for _ in &active {
             blocks.push(MirBlock {
-                scope: MirScopeId::ROOT,
-                parameters: vec![],
-                instructions: std::mem::take(&mut self.instructions),
-                terminator: MirTerminator::Return { value: result },
+                scope: MirScopeId::ROOT, parameters: vec![], instructions: vec![],
+                terminator: MirTerminator::Unreachable,
             });
         }
+        let previous_named = self.named.clone();
+        let previous_values = self.values.clone();
+        for (index, (clause, payloads)) in active.iter().zip(payload_destinations).enumerate() {
+            self.instructions = Vec::new();
+            self.named = previous_named.clone();
+            self.values = previous_values.clone();
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
+            let segment = self.lower_value_segment(clause.body, &mut blocks)?;
+            blocks[index + 1].terminator = MirTerminator::Goto {
+                target: segment.entry, arguments: vec![],
+            };
+            if let Some((exit, result)) = segment.continuation {
+                blocks[exit.0 as usize].instructions.push(MirInstruction::Cancel {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                });
+                blocks[exit.0 as usize].terminator = MirTerminator::Return { value: result };
+            }
+        }
         self.named = previous_named;
+        self.values = previous_values;
         Some(MirFunction {
             safety: self.safety,
             unsafe_execution: self.unsafe_execution,
@@ -22232,7 +22523,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, payloads)?;
+            self.bind_handler_patterns(&clause.patterns, payloads, clause.body)?;
             let discarded = cancellation(clause);
             let replayed = replay(clause);
             let value = if discarded {
@@ -22422,7 +22713,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let handler_named = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let result = self.value(clause.body)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -22644,7 +22935,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, payloads)?;
+            self.bind_handler_patterns(&clause.patterns, payloads, clause.body)?;
             let handler_result = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Cancel {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -22874,7 +23165,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let handler_named = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let handler_result = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -23185,7 +23476,7 @@ impl Lowerer<'_> {
                 self.instructions = Vec::new();
                 self.named = boundary_named.clone();
                 self.values = boundary_values.clone();
-                self.bind_handler_patterns(&clause.patterns, payloads)?;
+                self.bind_handler_patterns(&clause.patterns, payloads, clause.body)?;
                 let value = self.direct_handler_clause_value(clause)?;
                 self.instructions.push(if replay {
                     MirInstruction::Cancel {
@@ -23504,7 +23795,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
             let value = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -23972,7 +24263,7 @@ impl Lowerer<'_> {
             lowerer.instructions = Vec::new();
             lowerer.named = boundary_named.clone();
             lowerer.values = boundary_values.clone();
-            lowerer.bind_handler_patterns(&clause.patterns, payloads)?;
+            lowerer.bind_handler_patterns(&clause.patterns, payloads, clause.body)?;
             let value = lowerer.direct_handler_clause_value(clause)?;
             // `direct_handler_clause_value` lowers each finite continuation
             // invocation to `ResumeReturn`.  A replay frame must then be
@@ -24002,6 +24293,7 @@ impl Lowerer<'_> {
             self.bind_handler_patterns(
                 &clause.patterns,
                 audit_payloads.as_deref().expect("audit payloads allocated"),
+                clause.body,
             )?;
             let value = self.lower_label_transfer_path(clause.body, *brand)?;
             self.instructions.push(MirInstruction::Cancel {
@@ -24037,6 +24329,7 @@ impl Lowerer<'_> {
                 completion_effect_payloads
                     .as_deref()
                     .expect("completion effect payloads allocated"),
+                clause.body,
             )?;
             let value = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Cancel {
@@ -24566,7 +24859,7 @@ impl Lowerer<'_> {
             self.instructions = Vec::new();
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
-            self.bind_handler_patterns(&clause.patterns, &completion_effect_payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &completion_effect_payloads, clause.body)?;
             let value = self.direct_handler_clause_value(clause)?;
             self.instructions.push(MirInstruction::Resume {
                 site: MirResumptionSiteId::UNASSIGNED,
@@ -24579,7 +24872,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&outer_replay.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer_replay.patterns, &outer_payloads, outer_replay.body)?;
         let outer_value = self.direct_handler_clause_value(outer_replay)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -24597,6 +24890,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(
             &inner_cancellation.patterns,
             &inner_cancellation_payloads,
+                inner_cancellation.body,
         )?;
         let cancellation_value = self.value(inner_cancellation.body)?;
         self.instructions.push(MirInstruction::Cancel {
@@ -24619,7 +24913,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&middle_replay.patterns, &middle_payloads)?;
+        self.bind_handler_patterns(&middle_replay.patterns, &middle_payloads, middle_replay.body)?;
         let middle_value = self.direct_handler_clause_value(middle_replay)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -24630,7 +24924,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&inner_replay.patterns, &inner_replay_payloads)?;
+        self.bind_handler_patterns(&inner_replay.patterns, &inner_replay_payloads, inner_replay.body)?;
         let inner_value = self.direct_handler_clause_value(inner_replay)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -24939,7 +25233,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&outer_replay.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer_replay.patterns, &outer_payloads, outer_replay.body)?;
         let outer_value = self.direct_handler_clause_value(outer_replay)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -24952,6 +25246,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(
             &inner_cancellation.patterns,
             &inner_cancellation_payloads,
+                inner_cancellation.body,
         )?;
         let cancellation_value = self.value(inner_cancellation.body)?;
         self.instructions.push(MirInstruction::Cancel {
@@ -24967,7 +25262,7 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        self.bind_handler_patterns(&inner_replay.patterns, &inner_replay_payloads)?;
+        self.bind_handler_patterns(&inner_replay.patterns, &inner_replay_payloads, inner_replay.body)?;
         let inner_value = self.direct_handler_clause_value(inner_replay)?;
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -25173,7 +25468,7 @@ impl Lowerer<'_> {
         entry.push(MirInstruction::UninstallHandler);
         entry.push(MirInstruction::UninstallHandler);
         let saved_named = self.named.clone();
-        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads, outer_clause.body)?;
         let outer_value = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -25188,7 +25483,7 @@ impl Lowerer<'_> {
             subject: *inner_payloads.first()?,
             pattern,
         }];
-        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads, inner_clause.body)?;
         let inner_value = self.direct_handler_clause_value(inner_clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -25499,9 +25794,7 @@ impl Lowerer<'_> {
         else {
             return None;
         };
-        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
-            return None;
-        };
+        let effects = crate::core::instantiated_call_effects(self.body, callee, &arguments)?;
         // A nonempty closed row is the only summary this lowering may trust.
         // An open row can contain arbitrary protocols; an associated
         // projection requires the source solver's evidence and must not be
@@ -25552,6 +25845,14 @@ impl Lowerer<'_> {
         // Terminal frames sit below resumptive frames so a resumed operation
         // can subsequently dispatch its terminal sibling without retaining
         // an already-consumed continuation above the cancellation point.
+        let consume_returning_clause = active.len() == 1
+            && matches!(
+                active[0].resumption,
+                CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            );
         let mut frames = terminal;
         frames.extend(active.iter().cloned());
         if strict_path
@@ -25645,6 +25946,9 @@ impl Lowerer<'_> {
                 arguments,
             }),
         }
+        if consume_returning_clause {
+            entry.push(MirInstruction::CompleteHandler { value: call_result });
+        }
         for _ in &frames {
             entry.push(MirInstruction::UninstallHandler);
         }
@@ -25689,19 +25993,11 @@ impl Lowerer<'_> {
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
         }];
-        let consume_returning_clause = active.len() == 1
-            && matches!(
-                active[0].resumption,
-                CoreHandlerResumption::Explicit {
-                    quantity: crate::quantity::Quantity::ONCE,
-                    ..
-                }
-            );
         for (clause, payloads) in frames.iter().zip(payloads) {
             self.instructions = Vec::new();
             self.named = previous_named.clone();
             self.values = previous_values.clone();
-            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            self.bind_handler_patterns(&clause.patterns, &payloads, clause.body)?;
             if clause.terminal {
                 let handler_result = self.value(clause.body)?;
                 self.instructions.push(MirInstruction::Cancel {
@@ -25740,22 +26036,47 @@ impl Lowerer<'_> {
                 self.direct_handler_clause_value(clause)?
             };
             if consume_returning_clause {
-                // `ResumeReturn` restores an inactive copy of this frame
-                // after the protected callee finishes.  Close that lexical
-                // frame before publishing the clause result.
-                self.instructions.push(MirInstruction::UninstallHandler);
+                // Complete an enclosing invocation of this same continuation
+                // before leaving the handler (the callee can perform again).
+                self.instructions.push(MirInstruction::CompleteHandler { value: resumed });
+                for _ in &frames {
+                    self.instructions.push(MirInstruction::UninstallHandler);
+                }
             } else {
                 self.instructions.push(MirInstruction::Resume {
                     site: MirResumptionSiteId::UNASSIGNED,
                     value: resumed,
                 });
             }
+            let result = if consume_returning_clause {
+                if let (Some((name, _)), Some(handler_value)) = (&result_binding, handler_value) {
+                    self.instructions.push(MirInstruction::Store {
+                        dst: handler_value,
+                        src: resumed,
+                    });
+                    self.named.insert(name.clone(), handler_value);
+                }
+                if let Some(handler) = strict_operand {
+                    self.values.insert(handler, resumed);
+                    self.value(root)?
+                } else if suffix.is_empty() {
+                    resumed
+                } else {
+                    let (last, statements) = suffix.split_last()?;
+                    for statement in statements {
+                        self.statement(*statement)?;
+                    }
+                    self.value(*last)?
+                }
+            } else {
+                resumed
+            };
             blocks.push(MirBlock {
                 scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator: if consume_returning_clause {
-                    MirTerminator::Return { value: resumed }
+                    MirTerminator::Return { value: result }
                 } else {
                     MirTerminator::Unreachable
                 },
@@ -25870,7 +26191,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let previous_named = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let resumed = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -26001,7 +26322,7 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         let previous_named = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations, clause.body)?;
         let resumed = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Resume {
             site: MirResumptionSiteId::UNASSIGNED,
@@ -26049,6 +26370,7 @@ impl Lowerer<'_> {
         if self.completion_requires_value_cfg(root) {
             return None;
         }
+        let return_scope = self.named.clone();
         let (computation, clauses) = match self.body.expression(root).kind.clone() {
             CoreKind::Completion {
                 computation,
@@ -26070,7 +26392,7 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        if self.contains_evaluated_completion(computation) {
+        if self.contains_evaluated_value_control(computation) {
             return None;
         }
         let subject = if let CoreKind::Handle {
@@ -26133,7 +26455,8 @@ impl Lowerer<'_> {
                 for statement in prefix {
                     self.statement(statement)?;
                 }
-                let Some(id) = self.lower_completion_return(completion, root, &mut blocks) else {
+                let pending_cleanup = self.arm_cleanup.remove(&clause.body).unwrap_or_default();
+                let Some(id) = self.lower_completion_return(completion, root, &mut blocks, &return_scope, &pending_cleanup) else {
                     self.named = previous_named;
                     return Some(self.invalid_function(parameters));
                 };
@@ -26161,6 +26484,7 @@ impl Lowerer<'_> {
                     self.named = previous_named;
                     return Some(self.invalid_function(parameters));
                 };
+                self.cleanup_scope_bindings(&return_scope, Some(body))?;
                 let instructions = std::mem::take(&mut self.instructions);
                 self.named = previous_named;
                 blocks.push(MirBlock {
@@ -26251,6 +26575,8 @@ impl Lowerer<'_> {
         completion: CoreId,
         root: CoreId,
         blocks: &mut Vec<MirBlock>,
+        return_scope: &BTreeMap<String, MirLocal>,
+        pending_cleanup: &[MirLocal],
     ) -> Option<MirBlockId> {
         let CoreKind::Completion {
             computation,
@@ -26287,7 +26613,9 @@ impl Lowerer<'_> {
                 for statement in prefix {
                     self.statement(statement)?;
                 }
-                self.lower_completion_return(completion, root, blocks)?
+                let mut pending = pending_cleanup.to_vec();
+                pending.extend(self.arm_cleanup.remove(&clause.body).unwrap_or_default());
+                self.lower_completion_return(completion, root, blocks, return_scope, &pending)?
             } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
                 // Bottom-typed arms are control exits, not values of the
                 // enclosing completion result.  Emitting a normal `Return`
@@ -26307,6 +26635,10 @@ impl Lowerer<'_> {
                 id
             } else {
                 let body = self.value(clause.body)?;
+                for local in pending_cleanup.iter().rev() {
+                    if *local != body { self.emit_custom_drop(*local)?; }
+                }
+                self.cleanup_scope_bindings(return_scope, Some(body))?;
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
                     scope: MirScopeId::ROOT,
@@ -26376,23 +26708,23 @@ impl Lowerer<'_> {
         Some(entry)
     }
 
-    /// Lower normal-completion expressions which occur below the root return
-    /// boundary.  MIR has no expression-level branch instruction: the
-    /// selected arm therefore continues by re-lowering the enclosing root
-    /// with this completion Core id mapped to the arm's typed result local.
-    /// The cache contains every value evaluated before the completion, so the
+    /// Lower completion and lazy Boolean values through explicit CFG joins.
+    /// MIR has no expression-level branch instruction: the selected branch
+    /// continues by re-lowering the enclosing root with this control Core id
+    /// mapped to its typed result local.
+    /// The cache contains every value evaluated before that boundary, so the
     /// continuation neither duplicates a strict prefix nor observes a binder
     /// outside the arm where that binder was introduced.
-    fn lower_root_non_tail_completion(
+    fn lower_root_value_control(
         &mut self,
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        if !self.contains_evaluated_completion(root) {
+        if !self.contains_evaluated_value_control(root) {
             return None;
         }
         let mut blocks = Vec::new();
-        let entry = self.lower_completion_continuation_segment(root, &mut blocks)?;
+        let entry = self.lower_value_continuation_segment(root, &mut blocks)?;
         Some(MirFunction {
             safety: self.safety,
             unsafe_execution: self.unsafe_execution,
@@ -26408,33 +26740,35 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Finish a value CFG with one function return. Nested completions use
+    /// Finish a value CFG with one function return. Nested control values use
     /// typed joins, rather than duplicating the strict suffix in every arm.
-    fn lower_completion_continuation_segment(
+    fn lower_value_continuation_segment(
         &mut self,
         root: CoreId,
         blocks: &mut Vec<MirBlock>,
     ) -> Option<MirBlockId> {
-        let (entry, exit, value) = self.lower_completion_value_segment(root, blocks)?;
-        blocks[exit.0 as usize].terminator = MirTerminator::Return { value };
-        Some(entry)
+        let segment = self.lower_value_segment(root, blocks)?;
+        if let Some((exit, value)) = segment.continuation {
+            blocks[exit.0 as usize].terminator = MirTerminator::Return { value };
+        }
+        Some(segment.entry)
     }
 
-    /// Lower strict evaluation up to an open exit block. Completion subjects
-    /// and selected arms use this same operation recursively, so a completion
-    /// in an operand, initializer, or another subject is never sent to the
+    /// Lower strict evaluation up to an open exit block. Completion subjects,
+    /// selected arms, and lazy Boolean operands use this operation recursively,
+    /// so control in an operand or initializer is never sent to the
     /// straight-line value emitter. A typed join parameter carries the chosen
     /// result; only boundary bindings survive into the original continuation.
-    fn lower_completion_value_segment(
+    fn lower_value_segment(
         &mut self,
         root: CoreId,
         blocks: &mut Vec<MirBlock>,
-    ) -> Option<(MirBlockId, MirBlockId, MirLocal)> {
-        debug_assert!(!self.suspend_completion);
-        self.suspend_completion = true;
-        self.deferred_completion = None;
+    ) -> Option<MirValueSegment> {
+        debug_assert!(!self.suspend_value_control);
+        self.suspend_value_control = true;
+        self.deferred_value_control = None;
         let finished = self.value(root);
-        self.suspend_completion = false;
+        self.suspend_value_control = false;
 
         if let Some(value) = finished {
             let block = MirBlockId(blocks.len() as u32);
@@ -26444,9 +26778,88 @@ impl Lowerer<'_> {
                 instructions: std::mem::take(&mut self.instructions),
                 terminator: MirTerminator::Unreachable,
             });
-            return Some((block, block, value));
+            return Some(MirValueSegment { entry: block, continuation: Some((block, value)) });
         }
-        let completion = self.deferred_completion.take()?;
+        let completion = self.deferred_value_control.take()?;
+        if self.terminates_value_segment(completion) {
+            // The call and its strict operands have already been emitted.
+            // value_inner stopped before its enclosing expression could
+            // materialize a result, cleanup suffix, or another operand.
+            let entry = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator: MirTerminator::Unreachable,
+            });
+            return Some(MirValueSegment { entry, continuation: None });
+        }
+        if let CoreKind::IntrinsicCall { operator, arguments } =
+            self.body.expression(completion).kind.clone()
+            && matches!(operator.as_str(), "and" | "or")
+            && let [left, right] = arguments.as_slice()
+        {
+            let left_segment = self.lower_value_segment(*left, blocks)?;
+            let Some((left_exit, condition)) = left_segment.continuation else {
+                return Some(left_segment);
+            };
+            let entry = left_segment.entry;
+            // Literal short-circuiting does not even require lowering the
+            // unreachable operand (which may contain other control forms).
+            if matches!(self.body.expression(*left).kind, CoreKind::Literal(ref value)
+                if (operator == "and" && value == "false")
+                    || (operator == "or" && value == "true"))
+            {
+                self.values.insert(completion, condition);
+                let continuation = self.lower_value_segment(root, blocks)?;
+                blocks[left_exit.0 as usize].terminator = MirTerminator::Goto {
+                    target: continuation.entry,
+                    arguments: vec![],
+                };
+                return Some(MirValueSegment { entry, continuation: continuation.continuation });
+            }
+            let boundary_values = self.values.clone();
+            let boundary_named = self.named.clone();
+            let result = self.alloc(self.body.expression(completion).ty.clone(), completion);
+            let join = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![result],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            let right_segment = self.lower_value_segment(*right, blocks)?;
+            if let Some((right_exit, right_value)) = right_segment.continuation {
+                blocks[right_exit.0 as usize].terminator = MirTerminator::Goto {
+                    target: join,
+                    arguments: vec![right_value],
+                };
+            }
+            let (then_target, then_arguments, else_target, else_arguments) =
+                if operator == "and" {
+                    (right_segment.entry, vec![], join, vec![condition])
+                } else {
+                    (join, vec![condition], right_segment.entry, vec![])
+                };
+            blocks[left_exit.0 as usize].terminator = MirTerminator::SwitchBool {
+                condition,
+                then_target,
+                then_arguments,
+                else_target,
+                else_arguments,
+            };
+            // A skipped RHS cannot define values or bindings visible in the
+            // shared continuation. Only its Boolean result crosses the join.
+            self.values = boundary_values;
+            self.named = boundary_named;
+            self.values.insert(completion, result);
+            let continuation = self.lower_value_segment(root, blocks)?;
+            blocks[join.0 as usize].terminator = MirTerminator::Goto {
+                target: continuation.entry,
+                arguments: vec![],
+            };
+            return Some(MirValueSegment { entry, continuation: continuation.continuation });
+        }
         let CoreKind::Completion { computation, clauses } =
             self.body.expression(completion).kind.clone()
         else {
@@ -26456,8 +26869,11 @@ impl Lowerer<'_> {
         // The partial prefix in instructions/values is retained. Recursively
         // finish the subject before emitting any arm; completed strict operands
         // cannot be evaluated twice when the original expression is resumed.
-        let (entry, subject_exit, subject) =
-            self.lower_completion_value_segment(computation, blocks)?;
+        let subject_segment = self.lower_value_segment(computation, blocks)?;
+        let Some((subject_exit, subject)) = subject_segment.continuation else {
+            return Some(subject_segment);
+        };
+        let entry = subject_segment.entry;
         let boundary_values = self.values.clone();
         let boundary_named = self.named.clone();
         let result = self.alloc(self.body.expression(completion).ty.clone(), completion);
@@ -26476,21 +26892,23 @@ impl Lowerer<'_> {
             .unwrap_or(clauses);
         let has_fallback = fallback_index.is_some();
         let mut arms = Vec::with_capacity(selected.len());
+        let mut has_continuation = false;
         for clause in &selected {
             self.instructions = Vec::new();
             self.values = boundary_values.clone();
             self.named = boundary_named.clone();
             self.bind_completion_clause(clause, subject)?;
-            let (arm, exit, value) = self.lower_completion_value_segment(clause.body, blocks)?;
+            let arm = self.lower_value_segment(clause.body, blocks)?;
             // A terminal arm evaluates its body but has no normal result to
             // pass to the join. It must never run the enclosing strict suffix.
-            if !matches!(self.body.expression(clause.body).ty, Type::Never) {
+            if let Some((exit, value)) = arm.continuation {
+                has_continuation = true;
                 blocks[exit.0 as usize].terminator = MirTerminator::Goto {
                     target: join,
                     arguments: vec![value],
                 };
             }
-            arms.push(arm);
+            arms.push(arm.entry);
         }
 
         let mut next = if has_fallback {
@@ -26539,54 +26957,60 @@ impl Lowerer<'_> {
 
         self.instructions = Vec::new();
         self.values = boundary_values;
-        self.values.insert(completion, result);
         self.named = boundary_named;
-        let (continuation, exit, value) = self.lower_completion_value_segment(root, blocks)?;
+        if !has_continuation {
+            return Some(MirValueSegment { entry, continuation: None });
+        }
+        self.values.insert(completion, result);
+        let continuation = self.lower_value_segment(root, blocks)?;
         blocks[join.0 as usize].terminator = MirTerminator::Goto {
-            target: continuation,
+            target: continuation.entry,
             arguments: vec![],
         };
-        Some((entry, exit, value))
+        Some(MirValueSegment { entry, continuation: continuation.continuation })
     }
 
     /// Search only expressions evaluated in the current lexical execution
     /// path.  Handler clauses and closure bodies get their own lowering
     /// boundaries, so looking through them here would manufacture a branch in
     /// code that has not been invoked.
-    fn contains_evaluated_completion(&self, id: CoreId) -> bool {
+    fn contains_evaluated_value_control(&self, id: CoreId) -> bool {
+        if self.terminates_value_segment(id) { return true; }
         match self.body.expression(id).kind.clone() {
             CoreKind::Completion { .. } => true,
+            CoreKind::IntrinsicCall { ref operator, ref arguments }
+                if matches!(operator.as_str(), "and" | "or") && arguments.len() == 2 => true,
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
                 .into_iter()
-                .any(|value| self.contains_evaluated_completion(value)),
+                .any(|value| self.contains_evaluated_value_control(value)),
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
                 .into_iter()
-                .any(|field| self.contains_evaluated_completion(field)),
+                .any(|field| self.contains_evaluated_value_control(field)),
             CoreKind::Field { base, .. }
             | CoreKind::PatternTest { subject: base, .. }
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
             | CoreKind::Label { body: base, .. }
-            | CoreKind::Transfer { value: base, .. } => self.contains_evaluated_completion(base),
+            | CoreKind::Transfer { value: base, .. } => self.contains_evaluated_value_control(base),
             CoreKind::Let { value, .. } | CoreKind::Assign { value, .. } => {
-                self.contains_evaluated_completion(value)
+                self.contains_evaluated_value_control(value)
             }
             CoreKind::IntrinsicCall { arguments, .. } => arguments
                 .into_iter()
-                .any(|argument| self.contains_evaluated_completion(argument)),
+                .any(|argument| self.contains_evaluated_value_control(argument)),
             CoreKind::Call {
                 callee, arguments, ..
             } => {
-                self.contains_evaluated_completion(callee)
+                self.contains_evaluated_value_control(callee)
                     || arguments
                         .into_iter()
-                        .any(|argument| self.contains_evaluated_completion(argument))
+                        .any(|argument| self.contains_evaluated_value_control(argument))
             }
             CoreKind::Perform { arguments, .. } => arguments
                 .into_iter()
-                .any(|argument| self.contains_evaluated_completion(argument)),
-            CoreKind::Handle { computation, .. } => self.contains_evaluated_completion(computation),
+                .any(|argument| self.contains_evaluated_value_control(argument)),
+            CoreKind::Handle { computation, .. } => self.contains_evaluated_value_control(computation),
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
@@ -26604,15 +27028,15 @@ impl Lowerer<'_> {
     /// a tail block's prefix or in the subject of a nested completion.
     fn completion_requires_value_cfg(&self, id: CoreId) -> bool {
         let Some((prefix, completion)) = self.tail_completion(id) else {
-            return self.contains_evaluated_completion(id);
+            return self.contains_evaluated_value_control(id);
         };
         let CoreKind::Completion { computation, clauses } =
             &self.body.expression(completion).kind
         else {
             return false;
         };
-        prefix.into_iter().any(|value| self.contains_evaluated_completion(value))
-            || self.contains_evaluated_completion(*computation)
+        prefix.into_iter().any(|value| self.contains_evaluated_value_control(value))
+            || self.contains_evaluated_value_control(*computation)
             || clauses.iter().any(|clause| self.completion_requires_value_cfg(clause.body))
     }
 
@@ -26699,7 +27123,7 @@ impl Lowerer<'_> {
             self.instructions = vec![];
             self.values = entry_values.clone();
             let previous_named = self.named.clone();
-            self.bind_handler_patterns(&clause.patterns, &arguments)?;
+            self.bind_handler_patterns(&clause.patterns, &arguments, clause.body)?;
             let result = self.direct_root_handler_clause_value(clause)?;
             let instructions = std::mem::take(&mut self.instructions);
             self.named = previous_named;
@@ -26942,7 +27366,7 @@ impl Lowerer<'_> {
         for clause in &selected {
             let previous_named = self.named.clone();
             if self
-                .bind_handler_patterns(&clause.patterns, &arguments)
+                .bind_handler_patterns(&clause.patterns, &arguments, clause.body)
                 .is_none()
             {
                 self.named = previous_named;
@@ -27244,7 +27668,7 @@ impl Lowerer<'_> {
         clause: &CoreCompletionClause,
         subject: MirLocal,
     ) -> Option<()> {
-        self.bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[subject])?;
+        self.bind_handler_patterns(std::slice::from_ref(&clause.pattern), &[subject], clause.body)?;
         if let Some(refinement) = &clause.refinement {
             // The completion pattern proved the boolean result true. Recover
             // the cached structural subject that produced that bit and bind
@@ -27252,10 +27676,15 @@ impl Lowerer<'_> {
             // once-evaluation guarantee and the boundary that keeps positive
             // binders out of false/wildcard completion arms.
             let refinement_subject = self.value(refinement.subject)?;
-            self.bind_handler_patterns(
+            let previous = std::mem::replace(&mut self.refinement_binding_types,
+                refinement.environment.binding_types.iter().cloned().collect());
+            let bound = self.bind_handler_patterns(
                 std::slice::from_ref(&refinement.pattern),
                 &[refinement_subject],
-            )?;
+                clause.body,
+            );
+            self.refinement_binding_types = previous;
+            bound?;
         }
         Some(())
     }
@@ -27264,6 +27693,7 @@ impl Lowerer<'_> {
         &mut self,
         patterns: &[CorePattern],
         arguments: &[MirLocal],
+        body: CoreId,
     ) -> Option<()> {
         if patterns.len() != arguments.len() {
             self.error(
@@ -27273,19 +27703,58 @@ impl Lowerer<'_> {
             return None;
         }
         for (pattern, argument) in patterns.iter().zip(arguments) {
-            self.bind_handler_pattern(pattern, *argument)?;
+            let place = self.observed_pattern_places.get(argument).cloned()
+                .unwrap_or((*argument, vec![], false));
+            if !self.observed_pattern_places.contains_key(argument) {
+                self.arm_cleanup.entry(body).or_default().push(*argument);
+            }
+            self.bind_handler_pattern(pattern, *argument, &place, body)?;
         }
         Some(())
     }
-    fn bind_handler_pattern(&mut self, pattern: &CorePattern, value: MirLocal) -> Option<()> {
+    fn bind_handler_pattern(
+        &mut self, pattern: &CorePattern, value: MirLocal,
+        place: &(MirLocal, Vec<u32>, bool), body: CoreId,
+    ) -> Option<()> {
         match pattern {
             CorePattern::Any | CorePattern::Literal(_) => Some(()),
             CorePattern::Bind { name } => {
-                self.named.insert(name.clone(), value);
+                let origin = self.pattern_origins.get(&body)?.get(name)?.clone();
+                let source_ty = self.locals[value.0 as usize].ty.clone();
+                let ty = self.refinement_binding_types.get(name).cloned().unwrap_or(source_ty.clone());
+                let borrowed = ty != source_ty;
+                let dst = if let Some(dst) = self.source_bindings.get(&origin) {
+                    *dst
+                } else {
+                    let dst = self.alloc(ty.clone(), CoreId(u32::MAX));
+                    self.source_bindings.insert(origin, dst);
+                    dst
+                };
+                if borrowed {
+                    self.instructions.push(MirInstruction::Borrow {
+                        dst, src: place.0, fields: place.1.clone(), unique: false, reborrow: place.2,
+                    });
+                } else if self.type_is_duplicable(&ty) {
+                    self.instructions.push(MirInstruction::Copy { dst, src: value });
+                } else if place.2 {
+                    self.error("G6005", "an owning pattern cannot move a non-Copy field through a borrow");
+                    return None;
+                } else if place.1.is_empty() {
+                    self.instructions.push(MirInstruction::Move { dst, src: place.0 });
+                } else {
+                    self.instructions.push(MirInstruction::TakeProjection {
+                        dst, base: place.0, fields: place.1.clone(),
+                    });
+                }
+                if let Some(previous) = self.named.insert(name.clone(), dst) {
+                    if previous != dst { self.shadowed_bindings.insert(dst, previous); }
+                }
+                self.arm_cleanup.entry(body).or_default().push(dst);
                 Some(())
             }
             CorePattern::Array { element, elements } => {
                 for (index, pattern) in elements.iter().enumerate() {
+                    if !pattern_has_binding(pattern) { continue; }
                     let projected = self.alloc(element.clone(), CoreId(u32::MAX));
                     self.instructions.push(MirInstruction::ProjectArray {
                         dst: projected,
@@ -27294,7 +27763,9 @@ impl Lowerer<'_> {
                         field_count: elements.len() as u32,
                         element_type: element.clone(),
                     });
-                    self.bind_handler_pattern(pattern, projected)?;
+                    let mut nested = place.clone();
+                    nested.1.push(index as u32);
+                    self.bind_handler_pattern(pattern, projected, &nested, body)?;
                 }
                 Some(())
             }
@@ -27309,6 +27780,7 @@ impl Lowerer<'_> {
                 ..
             } => {
                 for field in fields {
+                    if !pattern_has_binding(&field.pattern) { continue; }
                     let projected = self.alloc(field.ty.clone(), CoreId(u32::MAX));
                     self.instructions.push(MirInstruction::ProjectRecord {
                         dst: projected,
@@ -27317,7 +27789,9 @@ impl Lowerer<'_> {
                         field_count: *field_count,
                         field_type: field.ty.clone(),
                     });
-                    self.bind_handler_pattern(&field.pattern, projected)?;
+                    let mut nested = place.clone();
+                    nested.1.push(field.index);
+                    self.bind_handler_pattern(&field.pattern, projected, &nested, body)?;
                 }
                 Some(())
             }
@@ -27334,6 +27808,7 @@ impl Lowerer<'_> {
                     return None;
                 }
                 for (index, (pattern, ty)) in fields.iter().zip(types).enumerate() {
+                    if !pattern_has_binding(pattern) { continue; }
                     let projected = self.alloc(ty.clone(), CoreId(u32::MAX));
                     self.instructions.push(MirInstruction::ProjectTuple {
                         dst: projected,
@@ -27342,7 +27817,9 @@ impl Lowerer<'_> {
                         field_count: fields.len() as u32,
                         field_type: ty,
                     });
-                    self.bind_handler_pattern(pattern, projected)?;
+                    let mut nested = place.clone();
+                    nested.1.push(index as u32);
+                    self.bind_handler_pattern(pattern, projected, &nested, body)?;
                 }
                 Some(())
             }
@@ -27353,17 +27830,53 @@ impl Lowerer<'_> {
         }
     }
     fn value(&mut self, id: CoreId) -> Option<MirLocal> {
+        let result = self.value_inner(id)?;
+        self.cleanup_arm_bindings(id, result);
+        Some(result)
+    }
+    fn cleanup_arm_bindings(&mut self, id: CoreId, result: MirLocal) {
+        if let Some(locals) = self.arm_cleanup.remove(&id) {
+            let mut dropped = BTreeSet::new();
+            for local in locals.into_iter().rev() {
+                if local != result && dropped.insert(local) && self.signatures.is_some()
+                    && !matches!(self.locals[local.0 as usize].ty,
+                        Type::Unit | Type::Never | Type::Scalar(_) | Type::Reference { .. } | Type::RawPointer { .. }) {
+                    self.instructions.push(MirInstruction::Drop { local });
+                }
+            }
+        }
+    }
+    fn value_inner(&mut self, id: CoreId) -> Option<MirLocal> {
         if let Some(rejoin) = self.label_rejoins.get(&id) {
             return Some(*rejoin);
         }
         if let Some(v) = self.values.get(&id) {
             return Some(*v);
         };
-        if self.suspend_completion
-            && matches!(self.body.expression(id).kind, CoreKind::Completion { .. })
+        if self.pattern_subjects.contains(&id)
+            && let Some(place) = self.reference_place(id)
         {
-            debug_assert!(self.deferred_completion.is_none());
-            self.deferred_completion = Some(id);
+            let value = match self.body.expression(id).kind {
+                CoreKind::Local(_) | CoreKind::Field { .. } => self.place_value(id)?,
+                CoreKind::Deref(_) => {
+                    let dst = self.alloc(self.body.expression(id).ty.clone(), id);
+                    self.instructions.push(MirInstruction::DerefCopy { dst, reference: place.0 });
+                    dst
+                }
+                _ => return None,
+            };
+            self.observed_pattern_places.insert(value, place);
+            self.values.insert(id, value);
+            return Some(value);
+        }
+        if self.suspend_value_control
+            && (matches!(self.body.expression(id).kind, CoreKind::Completion { .. })
+                || matches!(&self.body.expression(id).kind,
+                    CoreKind::IntrinsicCall { operator, arguments }
+                        if matches!(operator.as_str(), "and" | "or") && arguments.len() == 2))
+        {
+            debug_assert!(self.deferred_value_control.is_none());
+            self.deferred_value_control = Some(id);
             return None;
         }
         let e = self.body.expression(id).clone();
@@ -27433,7 +27946,10 @@ impl Lowerer<'_> {
             }
             let src = self.capability_value(*value)?;
             let local = self.alloc(self.body.expression(*value).ty.clone(), id);
-            if self.type_is_duplicable(&self.body.expression(*value).ty) {
+            // Evaluating a callable value already performs any source copy.
+            // Installing that temporary in its binding transfers ownership.
+            if !matches!(self.body.expression(*value).ty, Type::Callable { .. })
+                && self.type_is_duplicable(&self.body.expression(*value).ty) {
                 self.instructions
                     .push(MirInstruction::Copy { dst: local, src });
             } else {
@@ -27466,7 +27982,7 @@ impl Lowerer<'_> {
         // would forge a resumable `Perform` result at the VM boundary.
         let destination_ty = match &e.kind {
             CoreKind::Perform { terminal: true, .. } => Type::Never,
-            CoreKind::Call { callee, .. } if self.direct_callee_is_terminal(*callee) => Type::Never,
+            CoreKind::Call { .. } if self.call_is_terminal(id) => Type::Never,
             _ => ty.clone(),
         };
         let dst = self.alloc(destination_ty, id);
@@ -28641,6 +29157,14 @@ impl Lowerer<'_> {
                     self.values.insert(id, dst);
                     return Some(dst);
                 }
+                // A computed callee is the first strict operand of a call.
+                // In particular, it may transfer control before any argument
+                // is evaluated. Named declarations have no runtime callee
+                // expression; ordinary callable places retain their borrow.
+                let indirect_callee = if matches!(self.body.expression(callee).kind,
+                    CoreKind::Function { .. } | CoreKind::TraitMethod { .. }) {
+                    None
+                } else { Some(self.place_value(callee)?) };
                 let arguments = arguments
                     .into_iter()
                     .map(|argument| self.value(argument))
@@ -30340,17 +30864,29 @@ impl Lowerer<'_> {
                                 });
                             }
                             None => match host_import {
-                                Some(import) => self.instructions.push(MirInstruction::HostCall {
-                                    dst,
-                                    capability: import.capability,
-                                    symbol: import.symbol,
-                                    parameters: arguments
-                                        .iter()
-                                        .map(|argument| self.locals[argument.0 as usize].ty.clone())
-                                        .collect(),
-                                    result: self.body.expression(id).ty.clone(),
-                                    arguments,
-                                }),
+                                Some(import) => {
+                                    let Some(crate::ElaboratedHeader::Callable(signature)) = self.signatures
+                                        .and_then(|signatures| signatures.definitions.get(&callee)) else {
+                                        self.error("G6005", "host call lacks its frozen source declaration contract");
+                                        return None;
+                                    };
+                                    let source_contract = crate::signature::host_contract_fingerprint(callee, signature);
+                                    let parameters = arguments.iter()
+                                        .map(|argument| self.locals[argument.0 as usize].ty.clone()).collect::<Vec<_>>();
+                                    let result = self.body.expression(id).ty.clone();
+                                    let roots = parameters.iter().chain(std::iter::once(&result)).cloned().collect::<Vec<_>>();
+                                    let native_nominals = match native_contract_nominals(&roots, self.signatures.expect("host declaration checked above")) {
+                                        Ok(nominals) => nominals,
+                                        Err(message) => { self.error("G6005", &message); return None; }
+                                    };
+                                    for ty in roots.iter().chain(&native_nominals) {
+                                        self.register_nominal_copy_descriptors(ty);
+                                    }
+                                    self.instructions.push(MirInstruction::HostCall {
+                                        dst, capability: import.capability, symbol: import.symbol,
+                                        source_contract, parameters, result, resident_operations: vec![], arguments,
+                                    });
+                                }
                                 None => self.instructions.push(MirInstruction::Call {
                                     dst,
                                     callee,
@@ -30380,7 +30916,7 @@ impl Lowerer<'_> {
                         arguments,
                     }),
                     _ => {
-                        let callee = self.value(callee)?;
+                        let callee = indirect_callee.expect("indirect callee evaluated before arguments");
                         self.instructions.push(MirInstruction::CallIndirect {
                             dst,
                             callee,
@@ -30412,6 +30948,7 @@ impl Lowerer<'_> {
                     trait_instance: None,
                     environment: Some(MirCaptureEnvironment {
                         brand: environment.brand,
+                        destructor: None,
                         captures: environment
                             .captures
                             .iter()
@@ -30432,7 +30969,8 @@ impl Lowerer<'_> {
                 // The final expression is evaluated first, then its value is
                 // moved/copied across the boundary before cleanup so a
                 // returned affine value is not accidentally destroyed.
-                let outer_named = self.named.clone();
+                let outer_named = self.block_entry_bindings.entry(id)
+                    .or_insert_with(|| self.named.clone()).clone();
                 let outer_immediate_resumption_closures =
                     self.immediate_resumption_closures.clone();
                 let Some(last) = values.last().copied() else {
@@ -30451,6 +30989,7 @@ impl Lowerer<'_> {
                 self.copy_or_move(dst, src);
                 let result_local = self.source_local(last);
                 self.cleanup_scope_bindings(&outer_named, result_local)?;
+                self.block_entry_bindings.remove(&id);
                 self.named = outer_named;
                 self.immediate_resumption_closures = outer_immediate_resumption_closures;
             }
@@ -30474,7 +31013,26 @@ impl Lowerer<'_> {
             }
         };
         self.values.insert(id, dst);
+        if self.suspend_value_control && self.terminates_value_segment(id) {
+            debug_assert!(self.deferred_value_control.is_none());
+            self.deferred_value_control = Some(id);
+            return None;
+        }
         Some(dst)
+    }
+    fn terminates_value_segment(&self, id: CoreId) -> bool {
+        matches!(self.body.expression(id).kind, CoreKind::Perform { terminal: true, .. })
+            || self.call_is_terminal(id)
+    }
+    fn call_is_terminal(&self, id: CoreId) -> bool {
+        let expression = self.body.expression(id);
+        let CoreKind::Call { callee, .. } = expression.kind else { return false; };
+        matches!(expression.ty, Type::Never)
+            || matches!(&self.body.expression(callee).ty,
+                Type::Callable { result, .. } if matches!(result.as_ref(), Type::Never))
+            || self.lexical_bounds.iter().any(|(subject, relation)|
+                subject == &self.body.expression(callee).ty && crate::is_intrinsic_label_trait(relation))
+            || self.direct_callee_is_terminal(callee)
     }
     /// Calls into a known terminal body have no ordinary result edge. The
     /// source checker may have coerced such a call through its enclosing
@@ -30574,7 +31132,7 @@ impl Lowerer<'_> {
             .map(|argument| self.value(argument))
             .collect::<Option<Vec<_>>>()?;
         let previous = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &arguments)?;
+        self.bind_handler_patterns(&clause.patterns, &arguments, clause.body)?;
         let body = self.value(clause.body)?;
         self.named = previous;
         self.copy_or_move(dst, body);
@@ -31032,6 +31590,10 @@ impl Lowerer<'_> {
                 let Some(variants) = variants else {
                     return;
                 };
+                let Some(source_contract) = signatures.definitions.get(definition)
+                    .and_then(|header| crate::signature::nominal_contract_fingerprint(*definition, header)) else {
+                    return;
+                };
                 self.building_nominal_copy_descriptors.push(key);
                 for variant in &variants {
                     for field in variant {
@@ -31042,6 +31604,7 @@ impl Lowerer<'_> {
                 self.nominal_copy_descriptors
                     .push(MirNominalCopyDescriptor {
                         definition: *definition,
+                        source_contract,
                         is_enum: matches!(signatures.definitions.get(definition),
                             Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(_), .. })),
                         arguments: arguments.clone(),
@@ -31059,9 +31622,9 @@ impl Lowerer<'_> {
     /// reborrows its capability. Materializing an ordinary `Copy` first would
     /// defeat the sealed duplicability proof.
     fn capability_value(&mut self, id: CoreId) -> Option<MirLocal> {
-        if !self.type_is_duplicable(&self.body.expression(id).ty)
-            && let CoreKind::Local(name) = &self.body.expression(id).kind
+        if let CoreKind::Local(name) = &self.body.expression(id).kind
             && let Some(local) = self.named.get(name)
+            && !self.local_is_duplicable(*local)
         {
             return Some(*local);
         }
@@ -31100,11 +31663,33 @@ impl Lowerer<'_> {
         self.value(id)
     }
     fn copy_or_move(&mut self, dst: MirLocal, src: MirLocal) {
-        if self.type_is_duplicable(&self.locals[src.0 as usize].ty) {
+        if self.local_is_duplicable(src) {
             self.instructions.push(MirInstruction::Copy { dst, src });
         } else {
             self.instructions.push(MirInstruction::Move { dst, src });
         }
+    }
+
+    fn local_is_duplicable(&self, mut local: MirLocal) -> bool {
+        if !matches!(self.locals[local.0 as usize].ty, Type::Callable { .. }) {
+            return self.type_is_duplicable(&self.locals[local.0 as usize].ty);
+        }
+        // Invocation quantity is not environment copyability: a reusable
+        // receiver may still own an affine capture. Follow register transfers
+        // to the sealed environment when the producer is available locally.
+        for instruction in self.instructions.iter().rev() {
+            match instruction {
+                MirInstruction::Copy { dst, src } | MirInstruction::Move { dst, src }
+                | MirInstruction::Store { dst, src }
+                    if *dst == local => local = *src,
+                MirInstruction::MakeCallable { dst, environment, .. } if *dst == local => {
+                    return environment.as_ref().is_none_or(|environment| environment.captures.iter()
+                        .all(|capture| matches!(capture.mode, CaptureMode::Copy | CaptureMode::SharedBorrow)));
+                }
+                _ => {}
+            }
+        }
+        self.type_is_duplicable(&self.locals[local.0 as usize].ty)
     }
 
     /// The source `Use` contract, when concrete, is the authority for an
@@ -31113,26 +31698,24 @@ impl Lowerer<'_> {
     /// fieldless nominal. Generic bodies keep the structural fallback until
     /// their instance is concrete.
     fn type_is_duplicable(&self, ty: &Type) -> bool {
-        // Callable invocation counts and reference loan regions are checked
-        // by UseFlow and PlaceFlow respectively. Their register transfers
-        // remain copyable at MIR construction so those analyses, rather than
-        // an early register move, own the diagnostic and liveness decision.
-        if matches!(ty, Type::Callable { .. } | Type::Reference { .. }) {
+        // Known callable environments refine this fallback in
+        // local_is_duplicable. Reference transfers retain PlaceFlow's loan
+        // authority; copying a register is not duplicating a unique loan.
+        if let Type::Callable { invocation, .. } = ty {
+            return *invocation == crate::quantity::Quantity::UNRESTRICTED;
+        }
+        if matches!(ty, Type::Reference { .. }) {
             return mir_type_is_duplicable(ty, &self.nominal_copy_descriptors);
         }
         if let Some(signatures) = self.signatures {
-            if let Some(principal) = signatures.principal_use_interval(ty) {
+            let solver = self.ownership_solver.get_or_init(|| crate::TraitSolver::new(signatures));
+            if let Some(principal) = signatures.principal_use_interval_with_solver(ty, solver) {
                 return principal == crate::quantity::Quantity::UNRESTRICTED;
             }
-            let bounds = match signatures.definitions.get(&self.owner) {
-                Some(ElaboratedHeader::Callable(signature)
-                    | ElaboratedHeader::ValueAlias { signature, .. }) => signature.where_bounds.as_slice(),
-                _ => &[],
-            };
             // A bounded element does not make an owning pointer-backed
             // aggregate duplicable. Recompute the aggregate's whole contract
             // under the lexical bounds, including zero-sized restrictions.
-            return signatures.principal_use_interval_with_bounds(ty, bounds)
+            return signatures.principal_use_interval_with_bounds_and_solver(ty, &self.lexical_bounds, solver)
                 == Some(crate::quantity::Quantity::UNRESTRICTED);
         }
         if !self.generic_components_have_unrestricted_use(ty) {
@@ -31235,6 +31818,13 @@ impl Lowerer<'_> {
         outer_named: &BTreeMap<String, MirLocal>,
         transferred: Option<MirLocal>,
     ) -> Option<()> {
+        for local in self.scope_cleanup_locals(outer_named, transferred) {
+            self.emit_custom_drop(local)?;
+        }
+        Some(())
+    }
+
+    fn scope_cleanup_locals(&self, outer_named: &BTreeMap<String, MirLocal>, transferred: Option<MirLocal>) -> Vec<MirLocal> {
         let mut cleanup = Vec::new();
         for (name, local) in &self.named {
             let mut cursor = Some(*local);
@@ -31246,10 +31836,7 @@ impl Lowerer<'_> {
         }
         cleanup.sort_unstable_by_key(|local| std::cmp::Reverse(local.0));
         cleanup.dedup();
-        for local in cleanup {
-            self.emit_custom_drop(local)?;
-        }
-        Some(())
+        cleanup
     }
 
     /// Retain the ownership boundary until the concrete instance is known.
@@ -31486,6 +32073,9 @@ impl Lowerer<'_> {
             body: self.body,
             bodies: self.bodies,
             signatures: self.signatures,
+            lexical_bounds: self.lexical_bounds.clone(),
+            ownership_solver: self.ownership_solver.get().map_or_else(std::cell::OnceCell::new,
+                |solver| std::cell::OnceCell::from(solver.fresh_query())),
             runtime_primitives: self.runtime_primitives,
             owner: self.owner,
             definition,
@@ -31496,6 +32086,13 @@ impl Lowerer<'_> {
             values: BTreeMap::new(),
             named: BTreeMap::new(),
             shadowed_bindings: BTreeMap::new(),
+            source_bindings: BTreeMap::new(),
+            pattern_origins: self.pattern_origins.clone(),
+            pattern_subjects: self.pattern_subjects.clone(),
+            observed_pattern_places: BTreeMap::new(),
+            refinement_binding_types: BTreeMap::new(),
+            arm_cleanup: BTreeMap::new(),
+            block_entry_bindings: BTreeMap::new(),
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
@@ -31514,8 +32111,8 @@ impl Lowerer<'_> {
             label_values: BTreeMap::new(),
             direct_resumption: None,
             immediate_resumption_closures: BTreeMap::new(),
-            suspend_completion: false,
-            deferred_completion: None,
+            suspend_value_control: false,
+            deferred_value_control: None,
         };
         let mut lifted_parameters = Vec::with_capacity(captures.len() + parameters.len());
         for capture in &captures {
@@ -31541,11 +32138,12 @@ impl Lowerer<'_> {
         let child_flow = self.signatures.map_or_else(
             || PlaceFlow::analyze_lifted(self.body, body, &lifted_abi),
             |signatures| {
-                PlaceFlow::analyze_lifted_with_interface(
+                PlaceFlow::analyze_lifted_with_interface_and_bounds(
                     self.body,
                     body,
                     &lifted_abi,
                     signatures,
+                    &self.lexical_bounds,
                 )
             },
         );
@@ -31557,24 +32155,20 @@ impl Lowerer<'_> {
             return None;
         }
         // A closure body is an independently executable function. It must
-        // therefore receive the same normal-completion lowering as a package
+        // therefore receive the same value-control lowering as a package
         // root: source `Bool` conversion, `match` helpers, and other
         // completion expressions are control-flow graphs, not ordinary MIR
         // values. Previously lifted bodies bypassed that dispatcher and
         // failed when a typed predicate returned the source Bool carrier.
-        let has_tail_completion = match &child.body.expression(body).kind {
-            CoreKind::Completion { .. } => true,
-            CoreKind::Block(values) => values.last().is_some_and(|tail| {
-                matches!(child.body.expression(*tail).kind, CoreKind::Completion { .. })
-            }),
-            _ => false,
-        };
-        if has_tail_completion {
-            let Some(mut function) =
+        if child.contains_evaluated_value_control(body) {
+            let lowered = if child.completion_requires_value_cfg(body) {
+                child.lower_root_value_control(body, lifted_parameters.clone())
+            } else {
                 child.lower_root_completion_handler(body, lifted_parameters.clone())
-            else {
+            };
+            let Some(mut function) = lowered else {
                 self.diagnostics.extend(child.diagnostics);
-                self.error("G6002", "lifted completion body did not lower to a decision CFG");
+                self.error("G6002", "lifted control value did not lower to a decision CFG");
                 return None;
             };
             if !child.diagnostics.is_empty() {
@@ -31582,7 +32176,7 @@ impl Lowerer<'_> {
                 return None;
             }
             function.captures = captures.len() as u32;
-            let function = MirLowering::freeze(function, &child_flow);
+            let function = MirLowering::freeze(function, &child_flow, &child.source_bindings);
             if let Err(message) = function.validate() {
                 self.error("G6002", &message);
                 return None;
@@ -31620,7 +32214,7 @@ impl Lowerer<'_> {
                 terminator: MirTerminator::Return { value: root },
             }],
         };
-        let function = MirLowering::freeze(function, &child_flow);
+        let function = MirLowering::freeze(function, &child_flow, &child.source_bindings);
         if let Err(message) = function.validate() {
             self.error("G6002", &message);
             return None;
@@ -31641,6 +32235,53 @@ impl Lowerer<'_> {
             code,
             message: message.into(),
         })
+    }
+}
+
+fn pattern_binding_origins(body: &TypedBody) -> BTreeMap<CoreId, BTreeMap<String, crate::placeflow::PlaceBindingOrigin>> {
+    use crate::placeflow::PlaceBindingOrigin;
+    let mut origins = BTreeMap::new();
+    for (index, expression) in body.expressions.iter().enumerate() {
+        let id = CoreId(index as u32);
+        match &expression.kind {
+            CoreKind::Completion { clauses, .. } => {
+                for (clause, arm) in clauses.iter().enumerate() {
+                    origins.insert(arm.body, arm.bindings.iter().enumerate().map(|(binder, (name, _))| {
+                        (name.clone(), PlaceBindingOrigin::CompletionBinder {
+                            completion: id, clause: clause as u32, binder: binder as u32,
+                        })
+                    }).collect());
+                }
+            }
+            CoreKind::Handle { clauses, .. } => {
+                for (clause, arm) in clauses.iter().enumerate() {
+                    origins.insert(arm.body, arm.bindings.iter().enumerate().map(|(binder, (name, _))| {
+                        (name.clone(), PlaceBindingOrigin::HandlerBinder {
+                            handle: id, clause: clause as u32, binder: binder as u32,
+                        })
+                    }).collect());
+                }
+            }
+            _ => {}
+        }
+    }
+    origins
+}
+
+fn pattern_subjects(body: &TypedBody) -> BTreeSet<CoreId> {
+    body.expressions.iter().filter_map(|expression| match &expression.kind {
+        CoreKind::Completion { computation, .. } => Some(*computation),
+        CoreKind::PatternTest { subject, .. } => Some(*subject),
+        _ => None,
+    }).collect()
+}
+
+fn pattern_has_binding(pattern: &CorePattern) -> bool {
+    match pattern {
+        CorePattern::Bind { .. } => true,
+        CorePattern::Tuple(fields) | CorePattern::Array { elements: fields, .. } => fields.iter().any(pattern_has_binding),
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => fields.iter().any(|field| pattern_has_binding(&field.pattern)),
+        _ => false,
     }
 }
 

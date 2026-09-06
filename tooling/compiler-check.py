@@ -24,10 +24,9 @@ def main():
     evidence = Path(tempfile.mkdtemp(prefix="run-", dir=output))
     environment = os.environ.copy()
     environment["GSC2_EVIDENCE_DIR"] = str(evidence)
-    # These independent C0 compilations otherwise exceed the command budget
-    # when ram-gate's general-purpose single-thread default is used. Keep the
-    # memory/time guards in place and allow callers to choose fewer workers.
-    environment.setdefault("RUST_TEST_THREADS", "8")
+    # Match the test gate's default while recording the actual worker count
+    # in the evidence. Callers can choose fewer workers on smaller machines.
+    environment.setdefault("RUST_TEST_THREADS", "12")
     # Optimize the native authoring compiler, not the emitted source program.
     # Keep test/debug assertions and the same time, VM, and memory guards. The
     # expanded source closure otherwise outgrows the unoptimized test budget.

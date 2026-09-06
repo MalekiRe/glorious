@@ -27,6 +27,7 @@ struct Field {
 #[derive(Clone)]
 enum Shape {
     Leaf,
+    Callable,
     Tuple(Vec<Field>),
     Nominal {
         definition: DefKey,
@@ -154,9 +155,9 @@ impl<'a> Planner<'a> {
                 },
                 None => Shape::Leaf,
             },
+            Type::Callable { .. } => Shape::Callable,
             // References/raw pointers do not own their referents. Callable
-            // environments require their separate sealed capture descriptor,
-            // never traversal of the callable's argument or result types.
+            // capture traversal is selected by its separate sealed descriptor.
             _ => Shape::Leaf,
         };
         let has_fields = match &shape {
@@ -164,7 +165,7 @@ impl<'a> Planner<'a> {
             Shape::Nominal { variants, .. } => {
                 variants.iter().flatten().any(|field| field.glue.is_some())
             }
-            Shape::Array { .. } => true,
+            Shape::Array { .. } | Shape::Callable => true,
             Shape::Leaf => false,
         };
         self.active.remove(&key);
@@ -195,6 +196,77 @@ impl<'a> Planner<'a> {
             .collect()
     }
 
+    /// Preserve the compiler's concrete selection on each native boundary,
+    /// including referent/pointee residents that are not owned by this frame.
+    pub(crate) fn seal_native_operations(&mut self, function: &mut MirFunction) -> Result<(), String> {
+        for instruction in function.blocks.iter_mut().flat_map(|block| &mut block.instructions) {
+            let MirInstruction::HostCall { parameters, result, resident_operations, .. } = instruction else { continue; };
+            let roots = parameters.iter().chain(std::iter::once(&*result)).cloned().collect::<Vec<_>>();
+            let mut residents = crate::mir::native_contract_residents(&roots, self.signatures)?;
+            residents.sort_by_key(crate::types::canonical_type_encoding);
+            *resident_operations = residents.into_iter().map(|ty| {
+                let glue = self.discover(&ty)?.map(|key| DefKey(key.fingerprint()));
+                Ok((ty, glue))
+            }).collect::<Result<_, String>>()?;
+        }
+        Ok(())
+    }
+
+    /// Give each concrete, branded environment ordinary executable cleanup
+    /// glue. Borrowed captures are not owners, and invocation arguments/results
+    /// never participate in the environment's structural layout.
+    pub(crate) fn seal_callable_environments(
+        &mut self,
+        functions: &mut BTreeMap<DefKey, MirFunction>,
+    ) -> Result<BTreeSet<DefKey>, String> {
+        let mut generated = BTreeMap::new();
+        for function in functions.values_mut() {
+            for instruction in function.blocks.iter_mut().flat_map(|block| &mut block.instructions) {
+                let MirInstruction::MakeCallable { callee, environment: Some(environment), .. } = instruction else { continue; };
+                let types = environment.captures.iter().map(|capture| capture.ty.clone()).collect::<Vec<_>>();
+                // Open templates are retained for diagnostics. Their concrete
+                // materialized producers receive distinct executable glue.
+                if InstanceKey::new(glue_definition(), &[GenericKind::Type],
+                    vec![GenericArgument::Type(Type::Tuple(types.clone()))]).is_err() {
+                    continue;
+                }
+                let mut owned = Vec::new();
+                for (index, capture) in environment.captures.iter().enumerate() {
+                    if matches!(capture.mode, crate::CaptureMode::Copy | crate::CaptureMode::Move)
+                        && self.discover(&capture.ty)?.is_some()
+                    {
+                        owned.push(index);
+                    }
+                }
+                if owned.is_empty() { continue; }
+                let target = crate::mir::callable_environment_destructor_definition(*callee);
+                environment.destructor = Some(target);
+                let mut glue = Builder::function(target, Type::Unit);
+                glue.locals = types.into_iter().map(|ty| MirLocalDecl { ty, source: CoreId(u32::MAX) }).collect();
+                glue.parameters = (0..glue.locals.len()).map(|index| MirLocal(index as u32)).collect();
+                glue.blocks[0].instructions = owned.into_iter().rev()
+                    .map(|index| MirInstruction::Drop { local: MirLocal(index as u32) }).collect();
+                let result = MirLocal(glue.locals.len() as u32);
+                glue.locals.push(MirLocalDecl { ty: Type::Unit, source: CoreId(u32::MAX) });
+                glue.blocks[0].instructions.push(MirInstruction::ConstUnit { dst: result });
+                glue.blocks[0].terminator = MirTerminator::Return { value: result };
+                crate::service::register_specialized_nominal_copy_descriptors(&mut glue, self.signatures)?;
+                self.elaborate_with_frame_cleanup(&mut glue, false)?;
+                if let Some(previous) = generated.insert(target, glue.clone())
+                    && previous != glue {
+                    return Err("callable producers disagree on environment destruction".into());
+                }
+            }
+        }
+        let keys = generated.keys().copied().collect();
+        for (key, function) in generated {
+            if functions.insert(key, function).is_some() {
+                return Err("callable environment destructor identity collision".into());
+            }
+        }
+        Ok(keys)
+    }
+
     pub(crate) fn callees(&self, key: &InstanceKey) -> Result<Vec<InstanceKey>, String> {
         let plan = self
             .plans
@@ -212,7 +284,7 @@ impl<'a> Planner<'a> {
                     .filter_map(|field| field.glue.clone()),
             ),
             Shape::Array { glue, .. } => callees.push(glue.clone()),
-            Shape::Leaf => {}
+            Shape::Leaf | Shape::Callable => {}
         }
         Ok(callees)
     }
@@ -222,7 +294,11 @@ impl<'a> Planner<'a> {
             .plans
             .get(key)
             .ok_or("missing materialized destruction plan")?;
-        let mut builder = Builder::new(DefKey(key.fingerprint()), plan.ty.clone());
+        let mut function = Builder::function(DefKey(key.fingerprint()), plan.ty.clone());
+        let mut builder = Builder {
+            function: &mut function,
+            current: MirBlockId(0),
+        };
         if let Some(hook) = &plan.hook {
             let reference = builder.local(Type::Reference {
                 mutability: Mutability::Unique,
@@ -238,85 +314,42 @@ impl<'a> Planner<'a> {
             });
             builder.call(hook, reference);
         }
-        match &plan.shape {
-            Shape::Tuple(fields) => builder.fields(fields),
-            Shape::Nominal {
-                definition,
-                is_enum: false,
-                variants,
-            } => {
-                let _ = definition;
-                builder.fields(&variants[0]);
-            }
-            Shape::Nominal {
-                definition,
-                is_enum: true,
-                variants,
-            } => {
-                let finish = builder.block();
-                for (variant, fields) in variants.iter().enumerate() {
-                    if !fields.iter().any(|field| field.glue.is_some()) {
-                        continue;
-                    }
-                    let matched = builder.local(Type::Scalar(ScalarType::Bool));
-                    builder.emit(MirInstruction::PatternTest {
-                        dst: matched,
-                        subject: MirLocal(0),
-                        pattern: MirPattern::Enum {
-                            definition: *definition,
-                            variant: variant as u32,
-                            field_count: fields.len() as u32,
-                            field_types: fields.iter().map(|field| field.ty.clone()).collect(),
-                            fields: vec![],
-                        },
-                    });
-                    let selected = builder.block();
-                    let next = builder.block();
-                    builder.branch(matched, selected, next);
-                    builder.current = selected;
-                    builder.fields(fields);
-                    builder.goto(finish);
-                    builder.current = next;
-                }
-                builder.goto(finish);
-                builder.current = finish;
-            }
-            Shape::Array { element, .. } => {
-                return Err(format!(
-                    "dynamic array destruction is not yet lowered for {element:?}"
-                ));
-            }
-            Shape::Leaf => {}
-        }
+        builder.structural_fields(MirLocal(0), &plan.shape)?;
         let result = builder.local(Type::Unit);
         builder.emit(MirInstruction::ConstUnit { dst: result });
         builder.function.blocks[builder.current.0 as usize].terminator =
             MirTerminator::Return { value: result };
         crate::service::register_specialized_nominal_copy_descriptors(
-            &mut builder.function,
+            builder.function,
             self.signatures,
-        );
-        Ok(builder.function.with_frozen_control_tables())
+        )?;
+        Ok(function.with_frozen_control_tables())
     }
 
     /// Expand lexical, replacement, parameter, and nonlocal boundaries only
     /// after concrete instance discovery. Every cleanup call must already be
     /// in the demand graph; this phase cannot smuggle in an undiscovered hook.
     pub(crate) fn elaborate(&mut self, function: &mut MirFunction) -> Result<(), String> {
+        self.elaborate_with_frame_cleanup(function, true)
+    }
+
+    fn elaborate_with_frame_cleanup(&mut self, function: &mut MirFunction, frame_cleanup: bool) -> Result<(), String> {
         let original_blocks = function.blocks.len();
+        let ownership = crate::ownership::FrameOwnership::for_function(function);
+        function.control.frame_cleanup.clear();
+        if frame_cleanup {
+            for owner in ownership.exiting(None) {
+                if let Some(key) = self.discover(&function.locals[owner.0 as usize].ty)? {
+                    function.control.frame_cleanup.push(crate::mir::MirFrameDrop {
+                        owner, destructor: DefKey(key.fingerprint()),
+                    });
+                }
+            }
+        }
         for block in &mut function.blocks {
-            if let MirTerminator::Return { value } = block.terminator {
-                for parameter in function
-                    .parameters
-                    .iter()
-                    .skip(function.captures as usize)
-                    .rev()
-                {
-                    if *parameter != value {
-                        block
-                            .instructions
-                            .push(MirInstruction::Drop { local: *parameter });
-                    }
+            if frame_cleanup && let MirTerminator::Return { value } = block.terminator {
+                for local in ownership.exiting(Some(value)) {
+                    block.instructions.push(MirInstruction::Drop { local });
                 }
             }
             if let MirTerminator::Leave { cleanup, .. } = &block.terminator {
@@ -378,16 +411,6 @@ impl<'a> Planner<'a> {
                     ty: Type::Scalar(ScalarType::Bool),
                     source: CoreId(u32::MAX),
                 });
-                let owned = MirLocal(function.locals.len() as u32);
-                function.locals.push(MirLocalDecl {
-                    ty,
-                    source: CoreId(u32::MAX),
-                });
-                let result = MirLocal(function.locals.len() as u32);
-                function.locals.push(MirLocalDecl {
-                    ty: Type::Unit,
-                    source: CoreId(u32::MAX),
-                });
                 let selected = MirBlockId(function.blocks.len() as u32);
                 let next = MirBlockId(selected.0 + 1);
                 function.blocks[current].instructions.push(if indirect {
@@ -413,30 +436,8 @@ impl<'a> Planner<'a> {
                 function.blocks.push(MirBlock {
                     scope,
                     parameters: vec![],
-                    instructions: vec![
-                        if indirect {
-                            MirInstruction::DerefMove {
-                                dst: owned,
-                                reference: local,
-                            }
-                        } else {
-                            MirInstruction::Move {
-                                dst: owned,
-                                src: local,
-                            }
-                        },
-                        MirInstruction::Call {
-                            dst: result,
-                            callee: target,
-                            generic_arguments: vec![],
-                            trait_instance: None,
-                            arguments: vec![owned],
-                        },
-                    ],
-                    terminator: MirTerminator::Goto {
-                        target: next,
-                        arguments: vec![],
-                    },
+                    instructions: vec![],
+                    terminator: MirTerminator::Unreachable,
                 });
                 function.blocks.push(MirBlock {
                     scope,
@@ -444,6 +445,50 @@ impl<'a> Planner<'a> {
                     instructions: vec![],
                     terminator: MirTerminator::Unreachable,
                 });
+                let plan = self
+                    .plans
+                    .get(&key)
+                    .ok_or("missing elaborated destruction plan")?;
+                let mut builder = Builder {
+                    function,
+                    current: selected,
+                };
+                let owned = builder.local(ty);
+                if !indirect && plan.hook.is_none() {
+                    // A structural wrapper has no root hook. Inspect its
+                    // actual residual fields here instead of allocating a
+                    // call frame merely to discover an already-moved payload.
+                    // Child glue remains an ordinary demanded call, in field
+                    // order, and active hooks are never elided.
+                    builder.structural_fields(local, &plan.shape)?;
+                    if !matches!(plan.shape, Shape::Callable) {
+                        builder.emit(MirInstruction::Move {
+                            dst: owned,
+                            src: local,
+                        });
+                    }
+                } else {
+                    builder.emit(if indirect {
+                        MirInstruction::DerefMove {
+                            dst: owned,
+                            reference: local,
+                        }
+                    } else {
+                        MirInstruction::Move {
+                            dst: owned,
+                            src: local,
+                        }
+                    });
+                    let result = builder.local(Type::Unit);
+                    builder.emit(MirInstruction::Call {
+                        dst: result,
+                        callee: target,
+                        generic_arguments: vec![],
+                        trait_instance: None,
+                        arguments: vec![owned],
+                    });
+                }
+                builder.goto(next);
                 current = next.0 as usize;
                 if indirect {
                     function.blocks[current].instructions.push(instruction);
@@ -467,36 +512,33 @@ impl<'a> Planner<'a> {
     }
 }
 
-struct Builder {
-    function: MirFunction,
+struct Builder<'a> {
+    function: &'a mut MirFunction,
     current: MirBlockId,
 }
 
-impl Builder {
-    fn new(definition: DefKey, ty: Type) -> Self {
-        Self {
-            function: MirFunction {
-                safety: Safety::Safe,
-                unsafe_execution: false,
-                definition,
-                nominal_copy_descriptors: vec![],
-                captures: 0,
-                parameters: vec![MirLocal(0)],
-                locals: vec![MirLocalDecl {
-                    ty,
-                    source: CoreId(u32::MAX),
-                }],
-                result: Type::Unit,
-                control: MirControlTables::default(),
-                entry: MirBlockId(0),
-                blocks: vec![MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: vec![],
-                    terminator: MirTerminator::Unreachable,
-                }],
-            },
-            current: MirBlockId(0),
+impl Builder<'_> {
+    fn function(definition: DefKey, ty: Type) -> MirFunction {
+        MirFunction {
+            safety: Safety::Safe,
+            unsafe_execution: false,
+            definition,
+            nominal_copy_descriptors: vec![],
+            captures: 0,
+            parameters: vec![MirLocal(0)],
+            locals: vec![MirLocalDecl {
+                ty,
+                source: CoreId(u32::MAX),
+            }],
+            result: Type::Unit,
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            }],
         }
     }
     fn local(&mut self, ty: Type) -> MirLocal {
@@ -509,8 +551,9 @@ impl Builder {
     }
     fn block(&mut self) -> MirBlockId {
         let block = MirBlockId(self.function.blocks.len() as u32);
+        let scope = self.function.blocks[self.current.0 as usize].scope;
         self.function.blocks.push(MirBlock {
-            scope: MirScopeId::ROOT,
+            scope,
             parameters: vec![],
             instructions: vec![],
             terminator: MirTerminator::Unreachable,
@@ -547,7 +590,61 @@ impl Builder {
             arguments: vec![argument],
         });
     }
-    fn fields(&mut self, fields: &[Field]) {
+    fn structural_fields(&mut self, local: MirLocal, shape: &Shape) -> Result<(), String> {
+        match shape {
+            Shape::Callable => {
+                let dst = self.local(Type::Unit);
+                self.emit(MirInstruction::DestroyCallable { dst, value: local });
+            }
+            Shape::Tuple(fields) => self.fields(local, fields),
+            Shape::Nominal {
+                is_enum: false,
+                variants,
+                ..
+            } => self.fields(local, &variants[0]),
+            Shape::Nominal {
+                definition,
+                is_enum: true,
+                variants,
+            } => {
+                let finish = self.block();
+                for (variant, fields) in variants.iter().enumerate() {
+                    if !fields.iter().any(|field| field.glue.is_some()) {
+                        continue;
+                    }
+                    let matched = self.local(Type::Scalar(ScalarType::Bool));
+                    self.emit(MirInstruction::PatternTest {
+                        dst: matched,
+                        subject: local,
+                        pattern: MirPattern::Enum {
+                            definition: *definition,
+                            variant: variant as u32,
+                            field_count: fields.len() as u32,
+                            field_types: fields.iter().map(|field| field.ty.clone()).collect(),
+                            fields: vec![],
+                        },
+                    });
+                    let selected = self.block();
+                    let next = self.block();
+                    self.branch(matched, selected, next);
+                    self.current = selected;
+                    self.fields(local, fields);
+                    self.goto(finish);
+                    self.current = next;
+                }
+                self.goto(finish);
+                self.current = finish;
+            }
+            Shape::Array { element, .. } => {
+                return Err(format!(
+                    "dynamic array destruction is not yet lowered for {element:?}"
+                ));
+            }
+            Shape::Leaf => {}
+        }
+        Ok(())
+    }
+    fn fields(&mut self, local: MirLocal, fields: &[Field]) {
         for (index, field) in fields.iter().enumerate() {
             let Some(key) = &field.glue else {
                 continue;
@@ -555,7 +652,7 @@ impl Builder {
             let condition = self.local(Type::Scalar(ScalarType::Bool));
             self.emit(MirInstruction::IsInitialized {
                 dst: condition,
-                base: MirLocal(0),
+                base: local,
                 fields: vec![index as u32],
             });
             let selected = self.block();
@@ -565,7 +662,7 @@ impl Builder {
             let owned = self.local(field.ty.clone());
             self.emit(MirInstruction::TakeProjection {
                 dst: owned,
-                base: MirLocal(0),
+                base: local,
                 fields: vec![index as u32],
             });
             self.call(key, owned);

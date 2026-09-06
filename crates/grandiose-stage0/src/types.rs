@@ -765,15 +765,15 @@ impl InferContext {
         let left = self.resolve(left);
         let right = self.resolve(right);
         match (left, right) {
-            (Type::Infer(variable), value) | (value, Type::Infer(variable)) => {
-                self.bind(variable, value.clone())?;
-                Ok(value)
-            }
             // A terminal computation has no normal value, so it is valid in
             // every expected result position without forcing that position to
             // become `Never`. This is the bottom-type rule used by terminal
             // effects, handlers, and source-defined nonlocal control.
             (Type::Never, value) | (value, Type::Never) => Ok(value),
+            (Type::Infer(variable), value) | (value, Type::Infer(variable)) => {
+                self.bind(variable, value.clone())?;
+                Ok(value)
+            }
             (Type::Unit, Type::Unit) => Ok(Type::Unit),
             (Type::Scalar(left), Type::Scalar(right)) if left == right => Ok(Type::Scalar(left)),
             (Type::ConstU32(left), Type::ConstU32(right)) if left == right => {

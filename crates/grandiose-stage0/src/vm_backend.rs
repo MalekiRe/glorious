@@ -7,6 +7,7 @@
 
 use std::{
     borrow::Borrow,
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -30,6 +31,12 @@ use crate::{
 use crate::MemoryPrimitive;
 
 mod native_memory;
+mod native_bridge;
+mod native_storage;
+pub use native_bridge::{
+    VmNativeAbi, VmNativeCall, VmNativeCallback, VmNativeImport, VmNativeImports,
+    VmNativeLayout, VmNativeLayoutField, VmNativeLayoutShape, VmNativeResidentContract, VmNativeStatus,
+};
 use native_memory::{NativeMemory, NativeReference, execute_memory_intrinsic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -134,6 +141,8 @@ pub struct VmCaptureEnvironment {
     /// than allowing an ABI-compatible sibling body to be substituted.
     pub instance: Option<Digest>,
     pub captures: Vec<VmCapture>,
+    /// Exact emitted glue for this environment's owned captures, if any.
+    pub destructor: Option<DefKey>,
 }
 
 /// A generic argument in a VM effect protocol identity.
@@ -271,6 +280,11 @@ pub struct VmPatternField {
     pub pattern: VmPattern,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmFrameDrop {
+    pub owner: u32,
+    pub destructor: DefKey,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmInstruction {
     /// Function-owned ABI declaration emitted before its executable body.
     /// `returns` distinguishes an ordinary result contract from a body whose
@@ -280,6 +294,11 @@ pub enum VmInstruction {
     DeclareResult {
         result: VmType,
         returns: bool,
+    },
+    /// Immutable whole-frame cleanup plan. When present, this is the unique
+    /// second header instruction, never an executable control-flow choice.
+    DeclareFrameCleanup {
+        actions: Vec<VmFrameDrop>,
     },
     ConstUnit {
         dst: u32,
@@ -690,6 +709,10 @@ pub enum VmInstruction {
         base: u32,
         fields: Vec<u32>,
     },
+    DestroyCallable {
+        dst: u32,
+        value: u32,
+    },
     ProjectTuple {
         dst: u32,
         base: u32,
@@ -739,6 +762,9 @@ pub enum VmInstruction {
     /// Leave the current lexical handler after its protected computation has
     /// completed. A suspended handler cannot be removed.
     UninstallHandler,
+    /// Return the protected value to a pending resumption of this exact
+    /// handler activation, or fall through on ordinary completion.
+    CompleteHandler { value: u32 },
     /// Consume the innermost suspended continuation and continue its protected
     /// computation. The handler is thereby reactivated (deep semantics).
     Resume {
@@ -1047,8 +1073,12 @@ pub enum VmInstruction {
         dst: u32,
         capability: String,
         symbol: String,
+        /// Declaration-owned safety/lifetime/use/evidence identity retained
+        /// before lowering source types to their runtime representation.
+        source_contract: Digest,
         parameters: Vec<VmType>,
         result: VmType,
+        resident_operations: Vec<VmNativeResident>,
         arguments: Vec<u32>,
     },
     MakeCallable {
@@ -1593,8 +1623,19 @@ impl VmStorageErasureWitness {
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmNativeResident {
+    pub ty: VmType,
+    /// Concrete source identity before lifetime erasure. Several source
+    /// residents may have the same physical layout without the same contract.
+    pub source_type: Digest,
+    pub destructor: Option<DefKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmNominalCopyDescriptor {
     pub definition: DefKey,
+    /// Source declaration identity retained across VM region erasure.
+    pub source_contract: Digest,
     pub is_enum: bool,
     pub arguments: Vec<VmType>,
     pub variants: Vec<Vec<VmType>>,
@@ -1642,6 +1683,9 @@ pub enum VmArtifactError {
     /// programmer-owned unsafe obligations. This is not bytecode admission.
     UnsafeExecutionRequiresUnsafeApi,
     NativeMemory {
+        message: &'static str,
+    },
+    NativeAbi {
         message: &'static str,
     },
     UnsupportedNativeLayout {
@@ -1879,7 +1923,8 @@ pub struct VmExecutionLimits {
 
 /// Authoring-runtime measurements, not compiler semantic counters. Allocation
 /// charges are logical VM-budget counts, not a Rust allocator census.
-/// The opt-in authoring runner can recycle caller-preserving self-tail calls;
+/// The opt-in authoring runner can recycle caller-preserving self-tail calls
+/// and reuse cleared register buffers from normally returned callees;
 /// ordinary execution retains its existing call-depth behavior.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VmAuthoringProfile {
@@ -1887,6 +1932,7 @@ pub struct VmAuthoringProfile {
     pub charged_allocation_elements: u64,
     pub peak_call_depth: u32,
     pub recycled_tail_calls: u64,
+    pub reused_call_register_buffers: u64,
     pub inspected_tail_argument_elements: u64,
 }
 impl Default for VmExecutionLimits {
@@ -2018,7 +2064,22 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 99 adds explicit projection moves and storage-initialization tests
 /// for compiler-generated destruction; earlier projection opcodes retain
 /// their observational semantics.
-pub const STAGE0_VM_SCHEMA: u32 = 99;
+/// Schema 100 adds the explicit CompleteHandler boundary. Callable resumption
+/// results are checked against their destination ABI, not the enclosing
+/// function result; source-allocation identities survive frame restoration.
+/// Schema 101 retains full source contract digests on host calls and nominal
+/// descriptors for exact native linking after runtime type/region erasure.
+/// Schema 102 establishes native homes when addressable source locals are
+/// initialized. Their bytes share the native-memory budget; borrowing and
+/// crossing an engine boundary do not create a second resident.
+/// Schema 103 establishes owned native argument/result placement, including
+/// native-caller callback parameters and resident callback return producers.
+/// Schema 104 retains selected native resident destruction operations and
+/// their executable reachability; native ABI 3 binds the emitted code closure.
+/// Schema 105 retains environment destruction targets and executes callable
+/// cleanup through ordinary bytecode over residual captured storage.
+/// Schema 106 seals whole-frame destruction plans for abandoned execution.
+pub const STAGE0_VM_SCHEMA: u32 = 106;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2324,7 +2385,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
             limits, instructions: 0, allocated_elements: 0 };
         let value = execute_with_arguments_with_host(&self.program, self.program.entry, &[], 0, &mut budget, &mut host)?;
-        Ok(format_vm_value(&value))
+        format_vm_value(&value, &mut budget)
     }
 
     pub fn fingerprint(&self) -> Digest {
@@ -2347,13 +2408,14 @@ impl VerifiedVmProgram {
             instructions: 0,
             allocated_elements: 0,
         };
-        Ok(format_vm_value(&execute_with_arguments(
+        let value = execute_with_arguments(
             &self.program,
             self.program.entry,
             &[],
             0,
             &mut budget,
-        )?))
+        )?;
+        format_vm_value(&value, &mut budget)
     }
 
     /// Execute a verified program with an explicit, capability-bound host.
@@ -2371,14 +2433,15 @@ impl VerifiedVmProgram {
             allocated_elements: 0,
         };
         let mut host = Some(host);
-        Ok(format_vm_value(&execute_with_arguments_with_host(
+        let value = execute_with_arguments_with_host(
             &self.program,
             self.program.entry,
             &[],
             0,
             &mut budget,
             &mut host,
-        )?))
+        )?;
+        format_vm_value(&value, &mut budget)
     }
     pub fn runtime_manifest(&self) -> Option<Digest> {
         self.program.runtime_manifest
@@ -2449,6 +2512,9 @@ impl VerifiedVmProgram {
             &mut budget,
             &mut None,
             Some(&mut profile),
+            false,
+            None,
+            None,
         )?;
         profile.work_ticks = budget.instructions;
         profile.charged_allocation_elements = budget.allocated_elements;
@@ -2918,7 +2984,7 @@ fn emit_with_specialized_lifted_targets(
     let order = emission_block_order(function)?;
     let mut starts = vec![0; function.blocks.len()];
     // Every emitted body starts with its sealed result/control declaration.
-    let mut next = 1u32;
+    let mut next = 1u32 + u32::from(!function.control.frame_cleanup.is_empty());
     for block_index in &order {
         let block = &function.blocks[*block_index];
         starts[*block_index] = next;
@@ -2952,6 +3018,13 @@ fn emit_with_specialized_lifted_targets(
         })?,
         returns: false,
     });
+    if !function.control.frame_cleanup.is_empty() {
+        instructions.push(VmInstruction::DeclareFrameCleanup {
+            actions: function.control.frame_cleanup.iter().map(|action| VmFrameDrop {
+                owner: action.owner.0, destructor: action.destructor,
+            }).collect(),
+        });
+    }
     for block_index in order {
         let block = &function.blocks[block_index];
         instructions.extend(
@@ -3400,6 +3473,7 @@ fn vm_nominal_copy_descriptor(
     Ok(VmNominalCopyDescriptor {
         is_enum: descriptor.is_enum,
         definition: descriptor.definition,
+        source_contract: descriptor.source_contract,
         arguments: descriptor
             .arguments
             .iter()
@@ -3957,6 +4031,7 @@ fn encode_capture_environment(value: Option<&VmCaptureEnvironment>, output: &mut
             output.extend_from_slice(&value.owner.0.as_bytes());
             output.extend_from_slice(&value.callable.to_le_bytes());
             encode_optional_digest(value.instance, output);
+            encode_optional_digest(value.destructor.map(|key| key.0), output);
             output.extend_from_slice(&(value.captures.len() as u64).to_le_bytes());
             for capture in &value.captures {
                 output.push(match capture.mode {
@@ -4135,6 +4210,7 @@ fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
     output.extend_from_slice(&(function.nominal_copy_descriptors.len() as u64).to_le_bytes());
     for descriptor in &function.nominal_copy_descriptors {
         output.extend_from_slice(&descriptor.definition.0.as_bytes());
+        output.extend_from_slice(&descriptor.source_contract.as_bytes());
         output.push(u8::from(descriptor.is_enum));
         output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
         for argument in &descriptor.arguments {
@@ -4256,6 +4332,7 @@ impl<'a> Decoder<'a> {
                 let owner = self.def_key()?;
                 let callable = self.u32()?;
                 let instance = self.optional_digest()?;
+                let destructor = self.optional_digest()?.map(DefKey);
                 let count = self.count("callable environment captures", MAX_DECODE_REGISTERS)?;
                 let mut captures = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -4280,6 +4357,7 @@ impl<'a> Decoder<'a> {
                     callable,
                     instance,
                     captures,
+                    destructor,
                 }))
             }
             _ => Err(VmArtifactError::MalformedEncoding {
@@ -4829,6 +4907,7 @@ impl<'a> Decoder<'a> {
         let mut nominal_copy_descriptors = Vec::with_capacity(descriptor_count);
         for _ in 0..descriptor_count {
             let definition = self.def_key()?;
+            let source_contract = Digest::from_bytes(self.array()?);
             let is_enum = self.boolean()?;
             let argument_count =
                 self.count("nominal copy descriptor arguments", MAX_DECODE_REGISTERS)?;
@@ -4851,6 +4930,7 @@ impl<'a> Decoder<'a> {
             nominal_copy_descriptors.push(VmNominalCopyDescriptor {
                 is_enum,
                 definition,
+                source_contract,
                 arguments,
                 variants,
             });
@@ -5093,6 +5173,16 @@ impl<'a> Decoder<'a> {
                 })
             }
             45 => Ok(VmInstruction::UninstallHandler),
+            198 => Ok(VmInstruction::CompleteHandler { value: self.u32()? }),
+            199 => Ok(VmInstruction::DestroyCallable { dst: self.u32()?, value: self.u32()? }),
+            200 => {
+                let count = self.count("frame cleanup actions", MAX_DECODE_REGISTERS)?;
+                let mut actions = Vec::with_capacity(count);
+                for _ in 0..count {
+                    actions.push(VmFrameDrop { owner: self.u32()?, destructor: self.def_key()? });
+                }
+                Ok(VmInstruction::DeclareFrameCleanup { actions })
+            }
             46 => Ok(VmInstruction::Resume { value: self.u32()? }),
             51 => Ok(VmInstruction::ResumeReturn {
                 dst: self.u32()?,
@@ -5139,12 +5229,26 @@ impl<'a> Decoder<'a> {
                 let dst = self.u32()?;
                 let capability = self.text()?;
                 let symbol = self.text()?;
+                let source_contract = Digest::from_bytes(self.array()?);
                 let parameter_count = self.count("host call parameters", MAX_DECODE_REGISTERS)?;
                 let mut parameters = Vec::with_capacity(parameter_count);
                 for _ in 0..parameter_count {
                     parameters.push(self.vm_type()?);
                 }
                 let result = self.vm_type()?;
+                let resident_count = self.count("native resident operations", MAX_DECODE_REGISTERS)?;
+                let mut resident_operations = Vec::with_capacity(resident_count);
+                for _ in 0..resident_count {
+                    resident_operations.push(VmNativeResident {
+                        ty: self.vm_type()?,
+                        source_type: Digest::from_bytes(self.array()?),
+                        destructor: match self.byte()? {
+                            0 => None,
+                            1 => Some(self.def_key()?),
+                            _ => return Err(VmArtifactError::MalformedEncoding { message: "invalid native destructor option" }),
+                        },
+                    });
+                }
                 let count = self.count("host call arguments", MAX_DECODE_REGISTERS)?;
                 let mut arguments = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -5154,8 +5258,10 @@ impl<'a> Decoder<'a> {
                     dst,
                     capability,
                     symbol,
+                    source_contract,
                     parameters,
                     result,
+                    resident_operations,
                     arguments,
                 })
             }
@@ -5970,10 +6076,41 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                 });
             }
         }
+        if let Some(destructor) = environment.destructor {
+            if destructor != crate::mir::callable_environment_destructor_definition(*callee) {
+                return Err(VmArtifactError::InvalidCallableEnvironment {
+                    message: "capture destruction does not belong to its callable",
+                });
+            }
+            let cleanup = program.functions.get(&destructor)
+                .ok_or(VmArtifactError::MissingFunction { definition: destructor })?;
+            if cleanup.captures != 0 || cleanup.parameters as usize != environment.captures.len()
+                || !matches!(declared_result(cleanup)?, Some((VmType::Unit, true))) || cleanup.safety != Safety::Safe
+                || environment.captures.iter().enumerate().any(|(index, capture)|
+                    cleanup.registers.get(index) != Some(&capture.ty))
+            {
+                return Err(VmArtifactError::InvalidCallableEnvironment {
+                    message: "capture destruction has an incompatible environment ABI",
+                });
+            }
+        }
     }
     for function in program.functions.values() {
         verify_function(function)?;
+        for action in declared_frame_cleanup(function)? {
+            let target = program.functions.get(&action.destructor)
+                .ok_or(VmArtifactError::MissingFunction { definition: action.destructor })?;
+            if target.captures != 0 || target.parameters != 1 || target.safety != Safety::Safe
+                || target.registers.first() != function.registers.get(action.owner as usize)
+                || !matches!(declared_result(target)?, Some((VmType::Unit, true)))
+            {
+                return Err(VmArtifactError::MalformedEncoding {
+                    message: "frame cleanup target has an incompatible owner ABI",
+                });
+            }
+        }
     }
+    native_bridge::validate_resident_operations(&program)?;
     verify_program_effect_operation_abis(&program.functions)?;
     for function in program.functions.values() {
         for instruction in &function.instructions {
@@ -6370,11 +6507,19 @@ fn reachable_host_capabilities(
         };
         for instruction in &function.instructions {
             match instruction {
-                VmInstruction::HostCall { capability, .. } => {
+                VmInstruction::HostCall { capability, resident_operations, .. } => {
                     capabilities.insert(capability.clone());
+                    pending.extend(resident_operations.iter().filter_map(|resident| resident.destructor));
                 }
-                VmInstruction::Call { callee, .. } | VmInstruction::MakeCallable { callee, .. } => {
+                VmInstruction::MakeCallable { callee, environment, .. } => {
+                    pending.push(*callee);
+                    pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
+                }
+                VmInstruction::Call { callee, .. } => {
                     pending.push(*callee)
+                }
+                VmInstruction::DeclareFrameCleanup { actions } => {
+                    pending.extend(actions.iter().map(|action| action.destructor));
                 }
                 _ => {}
             }
@@ -6731,6 +6876,32 @@ fn declared_result(function: &VmFunction) -> Result<Option<(&VmType, bool)>, VmA
         });
     }
     Ok(Some((result, *returns)))
+}
+
+fn declared_frame_cleanup(function: &VmFunction) -> Result<&[VmFrameDrop], VmArtifactError> {
+    let mut found = &[][..];
+    for (index, instruction) in function.instructions.iter().enumerate() {
+        if let VmInstruction::DeclareFrameCleanup { actions } = instruction {
+            if index != 1 || !matches!(function.instructions.first(), Some(VmInstruction::DeclareResult { .. }))
+                || actions.is_empty()
+            {
+                return Err(VmArtifactError::MalformedEncoding {
+                    message: "frame cleanup declaration must be a nonempty second header",
+                });
+            }
+            let mut owners = BTreeSet::new();
+            for action in actions {
+                register_type(function, action.owner)?;
+                if action.owner < function.captures || !owners.insert(action.owner) {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "frame cleanup repeats an owner or owns an invocation capture",
+                    });
+                }
+            }
+            found = actions.as_slice();
+        }
+    }
+    Ok(found)
 }
 
 fn lower_instruction(
@@ -7303,6 +7474,7 @@ fn lower_instruction(
                 .expect("validated MIR handler target exists"),
         },
         MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
+        MirInstruction::CompleteHandler { value } => VmInstruction::CompleteHandler { value: value.0 },
         MirInstruction::CaptureResumption { dst, .. } => {
             VmInstruction::CaptureResumption { dst: dst.0 }
         }
@@ -7602,13 +7774,16 @@ fn lower_instruction(
             dst,
             capability,
             symbol,
+            source_contract,
             parameters,
             result,
+            resident_operations,
             arguments,
         } => VmInstruction::HostCall {
             dst: dst.0,
             capability: capability.clone(),
             symbol: symbol.clone(),
+            source_contract: *source_contract,
             parameters: parameters
                 .iter()
                 .map(vm_type)
@@ -7616,9 +7791,21 @@ fn lower_instruction(
                 .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
             result: vm_type(result)
                 .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
+            resident_operations: {
+                let mut residents = resident_operations.iter().map(|(ty, destructor)| Ok(VmNativeResident {
+                    ty: vm_type(ty).map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
+                    source_type: Digest::of_bytes(&crate::types::canonical_type_encoding(ty)),
+                    destructor: *destructor,
+                })).collect::<Result<Vec<_>, VmArtifactError>>()?;
+                residents.sort_by_key(|resident| resident.source_type);
+                residents
+            },
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
         MirInstruction::Abort => VmInstruction::Trap,
+        MirInstruction::DestroyCallable { dst, value } => VmInstruction::DestroyCallable {
+            dst: dst.0, value: value.0,
+        },
         MirInstruction::MakeCallable {
             dst,
             callee,
@@ -7636,6 +7823,7 @@ fn lower_instruction(
                         owner: environment.brand.owner,
                         callable: environment.brand.callable.0,
                         instance: None,
+                        destructor: environment.destructor,
                         captures: environment
                             .captures
                             .iter()
@@ -8020,6 +8208,8 @@ struct VerifierState {
     /// frame and still leave an outer replay frame to be restored by that
     /// clause-return edge; unrelated frames remain an error.
     resumption_return_handler_ids: Vec<u32>,
+    /// Exact handler brand and result ABI of the pending callable resumption.
+    resumption_return_result: Vec<(u32, VmType)>,
 }
 
 impl Deref for VerifierState {
@@ -8137,6 +8327,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         validate_vm_type(register)?;
     }
     let declared_result = declared_result(function)?;
+    declared_frame_cleanup(function)?;
     validate_vm_nominal_copy_descriptors(&function.nominal_copy_descriptors)?;
     for instruction in &function.instructions {
         match instruction {
@@ -8211,6 +8402,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             pending_leave: None,
             resumption_return_depth: 0,
             resumption_return_handler_ids: Vec::new(),
+            resumption_return_result: Vec::new(),
         });
     }
     let mut worklist = if function.instructions.is_empty() {
@@ -8229,7 +8421,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         let mut advances = true;
         let instruction = &function.instructions[pc];
         match instruction {
-            VmInstruction::DeclareResult { .. } => {
+            VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {
                 // `declared_result` above has already proven this is the
                 // unique leading ABI declaration. It is not executable work.
             }
@@ -9250,6 +9442,22 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     propagate_state(&mut incoming, &mut worklist, *target, &terminal)?;
                 }
             }
+            VmInstruction::CompleteHandler { value } => {
+                read(&states, *value)?;
+                let frame = states.handlers.last()
+                    .ok_or(VmArtifactError::HandlerStackUnderflow)?;
+                if !frame.continuations.is_empty() || states.resumptions[*value as usize] {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                if !states.resumption_return_result.is_empty() {
+                    for (_, expected) in states.resumption_return_result.iter()
+                        .filter(|(brand, _)| *brand == frame.id) {
+                        expect_type(function, *value, expected.clone())?;
+                    }
+                    states.resumption_return_result.retain(|(brand, _)| *brand != frame.id);
+                    advances = !states.resumption_return_result.is_empty();
+                }
+            }
             VmInstruction::UninstallHandler => {
                 let Some(frame) = states.handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
@@ -9313,6 +9521,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
                         resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
+                        resumption_return_result: states.resumption_return_result.clone(),
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -9342,20 +9551,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         found,
                     });
                 }
-                // The resumed path returns from the enclosing function after
-                // its protected computation completes.  A replay-only root
-                // shape can have the same type as the resume argument, but
-                // an interprocedural one-shot continuation commonly does
-                // not (for example `Unit -> i64`).
+                // The destination ABI is checked at the completion boundary,
+                // not against the operation parameter or enclosing function.
                 let result = register_type(function, *dst)?;
-                let function_result = return_type(function)?;
-                if result != frame.resume_type && result != function_result {
-                    return Err(VmArtifactError::TypeMismatch {
-                        register: *dst,
-                        expected: function_result,
-                        found: result,
-                    });
-                }
+                let resumption_return_result = vec![(frame.id, result)];
                 let mut resumed_handlers = states.handlers.clone();
                 resumed_handlers
                     .last_mut()
@@ -9377,9 +9576,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     pending_leave: continuation.pending_leave,
                     resumption_return_depth: states.resumption_return_depth.saturating_add(1),
                     resumption_return_handler_ids,
+                    resumption_return_result,
                 };
                 write(&mut resumed, continuation.dst)?;
                 propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                if states.handlers.last().is_some_and(|frame| frame.continuation == VmContinuationPolicy::Consume) {
+                    states.handlers.last_mut().expect("checked handler exists").continuations.clear();
+                }
                 write(&mut states, *dst)?;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -9491,6 +9694,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
                         resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
+                        resumption_return_result: states.resumption_return_result.clone(),
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -9578,6 +9782,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     states.resumption_return_depth = 0;
                     states.resumption_return_handler_ids.clear();
+                    states.resumption_return_result.clear();
                 }
             }
             VmInstruction::Copy { dst, src } => {
@@ -10066,6 +10271,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 parameters,
                 result,
                 arguments,
+                ..
             } => {
                 if capability.is_empty()
                     || symbol.is_empty()
@@ -10084,16 +10290,22 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *dst, result.clone())?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::MakeCallable { dst, captures, .. } => {
+            VmInstruction::DestroyCallable { dst, value } => {
+                read(&states, *value)?;
+                if !matches!(register_type(function, *value)?, VmType::Callable { .. }) {
+                    return Err(VmArtifactError::NotCallable { register: *value });
+                }
+                expect_type(function, *dst, VmType::Unit)?;
+                states.registers[*value as usize] = Some(false);
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::MakeCallable { dst, captures, environment, .. } => {
                 for &capture in captures {
                     read(&states, capture)?;
-                    // A callable environment is retained independently of
-                    // this frame. The executor cannot freeze an `&mut`
-                    // capture without severing its write-back target, so
-                    // reject the artifact at verification instead of
-                    // deferring this safety failure until a caller observes
-                    // the returned callable.
-                    if vm_type_contains_unique_reference(
+                    // Native-backed references retain their original storage.
+                    // Only unique references to private frame-relative values
+                    // still lack a retained write-back representation.
+                    if vm_type_contains_unanchored_unique_reference(
                         &register_type(function, capture)?,
                         &function.nominal_copy_descriptors,
                     ) {
@@ -10113,6 +10325,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 if !matches!(register_type(function, *dst)?, VmType::Callable { .. }) {
                     return Err(VmArtifactError::NotCallable { register: *dst });
+                }
+                if let Some(environment) = environment {
+                    for (capture, descriptor) in captures.iter().zip(&environment.captures) {
+                        if matches!(descriptor.mode, VmCaptureMode::Copy | VmCaptureMode::Move) {
+                            states.registers[*capture as usize] = Some(false);
+                        }
+                    }
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = false;
@@ -10278,6 +10497,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if states.resumption_return_depth != 0 {
+                    if states.resumption_return_result.is_empty() {
+                        return Err(VmArtifactError::HandlerStateMismatch);
+                    }
+                    for (_, expected) in &states.resumption_return_result {
+                        expect_type(function, *value, expected.clone())?;
+                    }
                     if states
                         .handlers
                         .iter()
@@ -10513,7 +10738,7 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
 
     for (pc, instruction) in function.instructions.iter().enumerate() {
         let enters_handler = match instruction {
-            VmInstruction::DeclareResult { .. } => false,
+            VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => false,
             VmInstruction::Jump { target }
             | VmInstruction::Leave { target, .. }
             | VmInstruction::MakeLabel { target, .. } => {
@@ -10573,6 +10798,16 @@ fn propagate_state(
             }
             let handler_changed = merge_handler_states(&mut existing.handlers, &state.handlers)
                 .ok_or(VmArtifactError::HandlerStateMismatch)?;
+            // Forwarding can resume one protected path from distinct arms.
+            // Retain every caller ABI: a completion must satisfy all callers
+            // whose dynamic handler brand can select that boundary.
+            let mut result_changed = false;
+            for result in &state.resumption_return_result {
+                if !existing.resumption_return_result.contains(result) {
+                    existing.resumption_return_result.push(result.clone());
+                    result_changed = true;
+                }
+            }
             // This is a forward must-analysis: a register is readable at a
             // join only when every predecessor has initialized it and none
             // has moved it.  Requiring identical complete register files
@@ -10644,6 +10879,7 @@ fn propagate_state(
                 || existing.resumptions != resumptions
                 || existing.pending_leave != pending_leave
                 || handler_changed
+                || result_changed
             {
                 existing.registers = joined;
                 existing.storage_live = storage_live;
@@ -10931,21 +11167,19 @@ fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -
     visit(ty, descriptors, &mut Vec::new())
 }
 
-/// A retained callable environment is a snapshot boundary.  It may carry a
-/// shared reference, but a unique reference anywhere in an explicitly known
-/// aggregate would lose its write-back target when frozen.
-fn vm_type_contains_unique_reference(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -> bool {
+/// A native-representable referent has an address-stable source home. Private
+/// referents still cannot retain a unique frame-relative write-back target.
+fn vm_type_contains_unanchored_unique_reference(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -> bool {
     fn visit(
         ty: &VmType,
         descriptors: &[VmNominalCopyDescriptor],
         active: &mut Vec<(DefKey, Vec<VmType>)>,
     ) -> bool {
         match ty {
-            // Freezing a shared reference retains a recursively frozen
-            // snapshot of its referent. A unique capability nested behind
-            // that otherwise benign shared carrier is therefore just as
-            // invalid as a directly captured `&mut`.
-            VmType::Reference { unique, referent } => *unique || visit(referent, descriptors, active),
+            VmType::Reference { unique, referent } => {
+                (*unique && native_memory::native_layout(referent, &Arc::from(descriptors), &mut vec![]).is_err())
+                    || visit(referent, descriptors, active)
+            }
             VmType::Tuple(elements) => elements.iter().any(|element| visit(element, descriptors, active)),
             VmType::Array(element) => visit(element, descriptors, active),
             VmType::Nominal {
@@ -11044,6 +11278,9 @@ fn read(states: &[Option<bool>], register: u32) -> Result<(), VmArtifactError> {
 }
 #[derive(Clone, Debug)]
 enum VmValue {
+    /// A typed, addressable source resident. Bytes live only in its native
+    /// home; cloning this carrier retains storage identity, not a value copy.
+    Resident(Arc<native_storage::NativeHome>),
     /// A unique loan whose resident was moved out. Its address survives so
     /// assignment can restore it, but it is not a readable language value.
     SuspendedReference(Box<VmValue>),
@@ -11103,7 +11340,7 @@ enum VmValue {
     },
     Callable {
         callee: DefKey,
-        captures: Arc<[VmValue]>,
+        captures: Arc<RuntimeCaptureEnvironment>,
         signature: VmType,
     },
     /// A dynamic instance of one verified lexical label destination. It is
@@ -11126,8 +11363,83 @@ enum VmValue {
     },
 }
 
+/// Idle callables own their captured values here. An invocation borrows that
+/// ownership by transferring the slots into its frame; this environment is
+/// vacant until the frame releases the loan. There is no second initialized
+/// capture snapshot for cancellation or destruction to mistake for an owner.
+#[derive(Debug)]
+struct RuntimeCaptureEnvironment {
+    values: RefCell<Vec<VmValue>>,
+    owned: Vec<bool>,
+}
+
+impl RuntimeCaptureEnvironment {
+    fn new(values: Vec<VmValue>) -> Arc<Self> {
+        let owned = vec![true; values.len()];
+        Self::with_ownership(values, owned)
+    }
+
+    fn with_ownership(values: Vec<VmValue>, owned: Vec<bool>) -> Arc<Self> {
+        debug_assert_eq!(values.len(), owned.len());
+        Arc::new(Self { values: RefCell::new(values), owned })
+    }
+
+    fn duplicate(&self, budget: &mut ExecutionBudget) -> Result<Arc<Self>, VmArtifactError> {
+        let captured = self.values.borrow();
+        budget.reserve_value("copied callable captures", captured.len())?;
+        budget.reserve_allocation(self.owned.len())?;
+        let values = captured.iter().zip(&self.owned).map(|(value, owned)| {
+            if *owned { copy_owned_value(value, budget) } else { Ok(value.clone()) }
+        }).collect::<Result<Vec<_>, _>>()?;
+        Ok(Self::with_ownership(values, self.owned.clone()))
+    }
+
+    fn len(&self) -> usize { self.values.borrow().len() }
+
+    fn lend_to_invocation(&self) -> Vec<VmValue> { self.take() }
+
+    fn take(&self) -> Vec<VmValue> {
+        self.values.borrow_mut().iter_mut().map(|value| {
+            let ty = value.ty();
+            std::mem::replace(value, VmValue::Uninitialized(ty))
+        }).collect()
+    }
+}
+
+/// A source Copy creates independent owned storage. Interpreter bookkeeping
+/// clones remain shallow; borrowed captures keep the same referent authority.
+fn copy_owned_value(value: &VmValue, budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
+    budget.tick()?;
+    let fields = |values: &[VmValue], budget: &mut ExecutionBudget| -> Result<Arc<[VmValue]>, VmArtifactError> {
+        budget.reserve_value("copied aggregate fields", values.len())?;
+        Ok(values.iter().map(|value| copy_owned_value(value, budget))
+            .collect::<Result<Vec<_>, _>>()?.into())
+    };
+    Ok(match value {
+        VmValue::Callable { callee, captures, signature } => VmValue::Callable {
+            callee: *callee, captures: captures.duplicate(budget)?, signature: signature.clone(),
+        },
+        VmValue::Resident(home) => {
+            let copied = native_storage::NativeHome::new(home.layout.clone(), budget)?;
+            copied.store(&[], value, budget)?;
+            VmValue::Resident(copied)
+        }
+        VmValue::Tuple(values) => VmValue::Tuple(fields(values, budget)?),
+        VmValue::Array { values } => VmValue::Array { values: fields(values, budget)? },
+        VmValue::Record { definition, fields: values, signature } => VmValue::Record {
+            definition: *definition, fields: fields(values, budget)?, signature: signature.clone(),
+        },
+        VmValue::Enum { definition, variant, fields: values, signature } => VmValue::Enum {
+            definition: *definition, variant: *variant, fields: fields(values, budget)?, signature: signature.clone(),
+        },
+        _ => value.clone(),
+    })
+}
+
 #[derive(Clone, Debug)]
 enum ReferenceTarget {
+    /// Checked source storage with a stable address and tracked initialization.
+    Home(Arc<native_storage::NativeHome>),
     /// A checked language reference into real native storage. Its lifetime and
     /// alias contract was established by an explicit unsafe source operation.
     Native(NativeReference),
@@ -11159,11 +11471,194 @@ struct RuntimeHandlerFrame {
     suspended: Option<RuntimeContinuation>,
 }
 
+/// SSA temporaries are restored with a continuation; live source storage is
+/// shared by that continuation and its clause. An allocation brand prevents
+/// a later lexical activation of the same register from impersonating the
+/// storage captured by an older snapshot.
+#[derive(Clone, Default)]
+struct RuntimeRegisters {
+    values: Vec<Option<VmValue>>,
+    source_storage: BTreeMap<u32, u64>,
+    native_plan: Option<Arc<native_storage::NativeFramePlan>>,
+    native_homes: BTreeMap<u32, Arc<native_storage::NativeHome>>,
+    pending_native: Vec<u32>,
+    capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
+}
+
+impl RuntimeRegisters {
+    fn as_slice(&self) -> &[Option<VmValue>] { &self.values }
+
+    fn for_function(function: &VmFunction, budget: &mut ExecutionBudget) -> Result<Self, VmArtifactError> {
+        Self::for_function_with_native_return(function, budget, false)
+    }
+
+    fn for_function_with_native_return(function: &VmFunction, budget: &mut ExecutionBudget, native_return: bool) -> Result<Self, VmArtifactError> {
+        Self::with_values(function, budget, native_return, vec![None; function.registers.len()])
+    }
+
+    fn with_values(function: &VmFunction, budget: &mut ExecutionBudget, native_return: bool, values: Vec<Option<VmValue>>) -> Result<Self, VmArtifactError> {
+        debug_assert_eq!(values.len(), function.registers.len());
+        debug_assert!(values.iter().all(Option::is_none));
+        let mut registers = Self { values, ..Self::default() };
+        registers.native_plan = Some(if native_return { budget.native_memory.native_return_plan(function) }
+            else { budget.native_memory.storage_plan(function) });
+        let results = registers.native_plan.as_ref().expect("installed native plan").native_results.clone();
+        for result in results { registers.native_home(result, budget)?; }
+        for parameter in 0..function.parameters { registers.native_write(parameter); }
+        Ok(registers)
+    }
+
+    fn install_argument(&mut self, index: usize, value: VmValue) {
+        if let VmValue::Resident(home) = &value && home.is_external() {
+            self.native_homes.insert(index as u32, home.clone());
+        }
+        self.values[index] = Some(value);
+    }
+
+    fn install_captures(&mut self, environment: Arc<RuntimeCaptureEnvironment>) {
+        // A noncapturing callable has no residual slots to restore. Do not
+        // introduce a restoration boundary that blocks its first tail call.
+        if environment.len() == 0 { return; }
+        // Captured native storage is already an owner home. Borrow it for this
+        // invocation instead of constructing a second metadata/payload home.
+        for index in 0..environment.len() {
+            if let Some(VmValue::Resident(home)) = &self.values[index] {
+                self.native_homes.insert(index as u32, home.clone());
+            }
+        }
+        self.capture_environment = Some(environment);
+    }
+
+    fn release_capture_loan(&mut self, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        if let Some(environment) = self.capture_environment.take() {
+            for (index, captured) in environment.values.borrow_mut().iter_mut().enumerate() {
+                budget.tick()?;
+                *captured = self.values[index].take().unwrap_or_else(|| VmValue::Uninitialized(captured.ty()));
+            }
+        }
+        Ok(())
+    }
+
+    fn wants_native(&self, local: u32) -> bool {
+        self.native_homes.contains_key(&local)
+            || self.native_plan.as_ref().is_some_and(|plan| plan.layouts[local as usize].is_some())
+    }
+
+    fn native_write(&mut self, local: u32) {
+        if self.wants_native(local) {
+            self.pending_native.push(local);
+        }
+    }
+
+    fn instruction_result(&mut self, pc: usize) {
+        if let Some(local) = self.native_plan.as_ref().and_then(|plan| plan.results[pc]) {
+            self.native_write(local);
+        }
+    }
+
+    fn read_projection(&self, pc: usize) -> Option<(u32, u32)> {
+        self.native_plan.as_ref().and_then(|plan| plan.read_projections[pc])
+    }
+
+    fn native_home(&mut self, local: u32, budget: &mut ExecutionBudget) -> Result<Arc<native_storage::NativeHome>, VmArtifactError> {
+        if let Some(home) = self.native_homes.get(&local) { return Ok(home.clone()); }
+        let layout = self.native_plan.as_ref().and_then(|plan| plan.layouts[local as usize].clone())
+            .ok_or(VmArtifactError::InvalidRegister { register: local })?;
+        let home = if let Some(home) = self.native_homes.get(&local) { home.clone() }
+            else {
+                let home = native_storage::NativeHome::new(layout, budget)?;
+                self.native_homes.insert(local, home.clone()); home
+            };
+        Ok(home)
+    }
+
+    fn materialize_native(&mut self, local: u32, value: &VmValue, budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
+        let home = self.native_home(local, budget)?;
+        home.store(&[], value, budget)?;
+        Ok(VmValue::Resident(home))
+    }
+
+    fn finish_native_writes(&mut self, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        while let Some(local) = self.pending_native.pop() {
+            if let Some(value) = self.values[local as usize].take() {
+                self.values[local as usize] = Some(self.materialize_native(local, &value, budget)?);
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_value(&self, local: u32, budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
+        let value = self.values[local as usize].as_ref().ok_or(VmArtifactError::UseAfterMove { register: local })?;
+        match value { VmValue::Resident(home) => home.load(&[], budget), value => Ok(value.clone()) }
+    }
+
+    fn constructor_field(&self, destination: u32, field: u32, budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
+        if self.native_plan.as_ref().is_some_and(|plan| plan.layouts[destination as usize].is_some()) {
+            self.values[field as usize].clone().ok_or(VmArtifactError::UseAfterMove { register: field })
+        } else { self.copy_value(field, budget) }
+    }
+
+    fn copy_into(&mut self, dst: u32, src: u32, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        let native = self.native_plan.as_ref().is_some_and(|plan| plan.layouts[dst as usize].is_some());
+        self.values[dst as usize] = Some(if native {
+            self.values[src as usize].as_ref().ok_or(VmArtifactError::UseAfterMove { register: src })?.clone()
+        } else {
+            let value = self.copy_value(src, budget)?;
+            if self.native_plan.as_ref().is_some_and(|plan| plan.copy_environments[dst as usize]) {
+                copy_owned_value(&value, budget)?
+            } else { value }
+        });
+        Ok(())
+    }
+
+    fn move_into(&mut self, dst: u32, src: u32, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        if dst == src { return Ok(()); }
+        let value = self.values[src as usize].take().ok_or(VmArtifactError::UseAfterMove { register: src })?;
+        let value = if let VmValue::Resident(home) = &value {
+            let moved = if self.native_plan.as_ref().is_some_and(|plan| plan.layouts[dst as usize].is_some()) {
+                let moved = self.materialize_native(dst, &value, budget)?;
+                home.clear(&[]); moved
+            } else { home.take(&[], budget)? };
+            // A checked whole-owner move cannot retain a live source loan.
+            // Reclaim its vacant backing when no raw/native observer has seen
+            // the address. Exposed slots retain their stable storage until the
+            // lexical lifetime ends, including across later reinitialization.
+            if !home.address_was_exposed() {
+                home.retire();
+                self.native_homes.remove(&src);
+            }
+            moved
+        } else { value };
+        self.values[dst as usize] = Some(value); Ok(())
+    }
+
+    fn clear_value(&mut self, local: u32) {
+        if let Some(VmValue::Resident(home)) = self.values[local as usize].take() { home.clear(&[]); }
+    }
+
+    fn synchronize_source_storage(&mut self, current: &Self) {
+        for (local, brand) in &self.source_storage {
+            if current.source_storage.get(local) == Some(brand) {
+                self.values[*local as usize] = current.values[*local as usize].clone();
+            }
+        }
+    }
+}
+
+impl Deref for RuntimeRegisters {
+    type Target = [Option<VmValue>];
+    fn deref(&self) -> &Self::Target { &self.values }
+}
+
+impl DerefMut for RuntimeRegisters {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.values }
+}
+
 #[derive(Clone)]
 struct RuntimeContinuation {
     target: usize,
     dst: u32,
-    registers: Vec<Option<VmValue>>,
+    registers: RuntimeRegisters,
     performed: RuntimePerformed,
     above: Vec<RuntimeHandlerFrame>,
     pending_leave: Option<PendingLeave>,
@@ -11180,7 +11675,7 @@ struct RuntimeContinuation {
 #[derive(Clone)]
 struct RuntimeProgramCaller {
     definition: DefKey,
-    registers: Vec<Option<VmValue>>,
+    registers: RuntimeRegisters,
     pc: usize,
     return_destination: u32,
 }
@@ -11191,6 +11686,33 @@ struct RuntimeProgramContinuation {
     callers: Vec<RuntimeProgramCaller>,
 }
 
+/// Copy only shared, still-live source allocations between saved executions.
+/// Their SSA values and clause-local temporaries remain independent. The
+/// protected computation may currently be deeper in the ordinary call stack.
+fn synchronize_saved_source_storage(
+    saved: &mut RuntimeRegisters,
+    saved_program: Option<&mut RuntimeProgramContinuation>,
+    current: &RuntimeRegisters,
+    current_callers: &[RuntimeProgramCaller],
+) {
+    let Some(saved_program) = saved_program else {
+        saved.synchronize_source_storage(current);
+        return;
+    };
+    for (saved_caller, current_caller) in saved_program.callers.iter_mut().zip(current_callers) {
+        saved_caller.registers.synchronize_source_storage(&current_caller.registers);
+    }
+    match saved_program.callers.len().cmp(&current_callers.len()) {
+        std::cmp::Ordering::Equal => saved.synchronize_source_storage(current),
+        std::cmp::Ordering::Less => {
+            saved.synchronize_source_storage(&current_callers[saved_program.callers.len()].registers);
+        }
+        std::cmp::Ordering::Greater => {
+            saved_program.callers[current_callers.len()].registers.synchronize_source_storage(current);
+        }
+    }
+}
+
 /// A clause-side call frame for `ResumeReturn`.  It is intentionally separate
 /// from ordinary function calls: resumption return restores the handler
 /// environment captured immediately before the transfer, including the
@@ -11198,7 +11720,7 @@ struct RuntimeProgramContinuation {
 struct RuntimeResumptionReturn {
     pc: usize,
     dst: u32,
-    registers: Vec<Option<VmValue>>,
+    registers: RuntimeRegisters,
     handlers: Vec<RuntimeHandlerFrame>,
     /// A replayed continuation can cross ordinary calls. Restoring only its
     /// registers and handler frames would resume the saved program counter
@@ -11222,6 +11744,7 @@ struct RuntimePerformed {
 impl VmValue {
     fn ty(&self) -> VmType {
         match self {
+            Self::Resident(home) => home.ty().clone(),
             Self::RawPointer { signature, .. } => signature.clone(),
             Self::Uninitialized(ty) => ty.clone(),
             Self::SuspendedReference(reference) => reference.ty(),
@@ -11270,6 +11793,7 @@ impl VmValue {
 
 fn storage_is_initialized(value: Option<&VmValue>, fields: &[u32]) -> bool {
     let Some(value) = value else { return false; };
+    if let VmValue::Resident(home) = value { return home.is_initialized(fields); }
     if matches!(value, VmValue::Uninitialized(_)) { return false; }
     let Some((field, rest)) = fields.split_first() else { return true; };
     let values = match value {
@@ -11290,6 +11814,13 @@ fn take_storage_projection(
     let value = registers.get_mut(base as usize)
         .ok_or(VmArtifactError::InvalidRegister { register: base })?
         .as_mut().ok_or(VmArtifactError::UseAfterMove { register: base })?;
+    if let VmValue::Resident(home) = value {
+        let value = home.take(fields, budget)?;
+        if !vm_type_matches(&value.ty(), expected) {
+            return Err(VmArtifactError::ResultType { expected: expected.clone(), found: value.ty() });
+        }
+        return Ok(value);
+    }
     let slot = project_reference_mut(value, fields, budget)?;
     if matches!(slot, VmValue::Uninitialized(_)) {
         return Err(VmArtifactError::UseAfterMove { register: base });
@@ -11320,6 +11851,19 @@ fn project_reference(value: &VmValue, fields: &[u32]) -> Result<VmValue, VmArtif
         .get(*field as usize)
         .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
     project_reference(value, rest)
+}
+
+fn project_native_home(value: &VmValue, index: u32, count: u32, expected: &VmType, budget: &mut ExecutionBudget)
+    -> Result<Option<VmValue>, VmArtifactError>
+{
+    let VmValue::Resident(home) = value else { return Ok(None); };
+    let fields = home.field_count(&[])?;
+    if fields != count as usize { return Err(VmArtifactError::CallArity { expected: count, found: fields as u32 }); }
+    let value = home.load(&[index], budget)?;
+    if !value_matches_vm_type(&value, expected) {
+        return Err(VmArtifactError::ResultType { expected: expected.clone(), found: value.ty() });
+    }
+    Ok(Some(value))
 }
 
 // Mutable projections retain uniquely owned backing and detach only shared
@@ -11393,6 +11937,13 @@ fn borrow_value(
         }
         let mut path = parent_fields.to_vec();
         path.extend_from_slice(fields);
+        if let ReferenceTarget::Home(home) = target {
+            let (_, layout) = home.project(&path)?;
+            if layout.ty != *declared_referent {
+                return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: layout.ty.clone() });
+            }
+            return Ok(VmValue::Reference { target: target.clone(), fields: path.into(), unique, referent: layout.ty.clone() });
+        }
         if let ReferenceTarget::Native(native) = target {
             let projected = native.project(&path)?;
             let referent = projected.ty().clone();
@@ -11420,6 +11971,14 @@ fn borrow_value(
             referent,
         });
     }
+    if let VmValue::Resident(home) = value {
+        let (_, layout) = home.project(fields)?;
+        if !unique && !home.is_initialized(fields) { return Err(VmArtifactError::UseAfterMove { register: source }); }
+        if layout.ty != *declared_referent {
+            return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: layout.ty.clone() });
+        }
+        return Ok(VmValue::Reference { target: ReferenceTarget::Home(home.clone()), fields: fields.to_vec().into(), unique, referent: layout.ty.clone() });
+    }
     Ok(VmValue::Reference {
         target: ReferenceTarget::Register(source),
         fields: fields.to_vec().into(),
@@ -11434,6 +11993,7 @@ fn reference_target<'a>(
     target: &'a ReferenceTarget,
 ) -> Result<&'a VmValue, VmArtifactError> {
     match target {
+        ReferenceTarget::Home(_) => Err(VmArtifactError::NativeMemory { message: "native home requires a typed memory access" }),
         ReferenceTarget::Native(_) => Err(VmArtifactError::NativeMemory { message: "native reference requires a typed memory access" }),
         ReferenceTarget::Register(target) => registers
             .get(*target as usize)
@@ -11462,6 +12022,7 @@ fn load_reference_target(
     fields: &[u32], budget: &mut ExecutionBudget,
 ) -> Result<VmValue, VmArtifactError> {
     match target {
+        ReferenceTarget::Home(home) => home.load(fields, budget),
         ReferenceTarget::Native(native) => native.read(fields, budget),
         _ => project_reference(reference_target(registers, callers, target)?, fields),
     }
@@ -11471,6 +12032,7 @@ fn referent_is_initialized(registers: &[Option<VmValue>], callers: &[RuntimeProg
     reference: &VmValue) -> Result<bool, VmArtifactError> {
     match reference {
         VmValue::SuspendedReference(_) => Ok(false),
+        VmValue::Reference { target: ReferenceTarget::Home(home), fields, .. } => Ok(home.is_initialized(fields)),
         // Native references promise an initialized resident when constructed.
         // A later move retains its restoration capability in the variant above.
         VmValue::Reference { target: ReferenceTarget::Native(_), .. } => Ok(true),
@@ -11488,6 +12050,9 @@ fn store_reference_target(
     replacement: VmValue,
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
+    if let ReferenceTarget::Home(home) = target {
+        return home.store(fields, &replacement, budget);
+    }
     if let ReferenceTarget::Native(native) = target {
         return native.write(fields, replacement);
     }
@@ -11502,6 +12067,7 @@ fn reference_target_mut<'a>(
     target: &ReferenceTarget,
 ) -> Result<&'a mut VmValue, VmArtifactError> {
     let register = match target {
+        ReferenceTarget::Home(_) => return Err(VmArtifactError::NativeMemory { message: "native home requires a typed memory store" }),
         ReferenceTarget::Native(_) => return Err(VmArtifactError::NativeMemory { message: "native reference requires a typed memory store" }),
         ReferenceTarget::Register(register) => {
             registers
@@ -11676,7 +12242,7 @@ fn freeze_frame_value(
     callers: &[RuntimeProgramCaller],
 ) -> Result<VmValue, VmArtifactError> {
     match value {
-        VmValue::Reference { target: ReferenceTarget::Native(_), .. } => Ok(value.clone()),
+        VmValue::Reference { target: ReferenceTarget::Native(_) | ReferenceTarget::Home(_), .. } => Ok(value.clone()),
         VmValue::Reference { unique: true, .. } => {
             Err(VmArtifactError::UnsupportedEscapingUniqueReference)
         }
@@ -11696,7 +12262,7 @@ fn freeze_frame_value(
                     (callers[index].registers.as_slice(), &callers[..index])
                 }
                 ReferenceTarget::Register(_) => (registers, callers),
-                ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => (&[][..], &[][..]),
+                ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) | ReferenceTarget::Home(_) => (&[][..], &[][..]),
             };
             let projected = project_reference(reference_target(registers, callers, target)?, fields)?;
             Ok(VmValue::Reference {
@@ -11778,6 +12344,7 @@ fn rebase_caller_references(value: VmValue, caller_depth: u32) -> Result<VmValue
             referent,
         } => {
             let target = match target {
+                ReferenceTarget::Home(home) => ReferenceTarget::Home(home),
                 ReferenceTarget::Native(native) => ReferenceTarget::Native(native),
                 ReferenceTarget::Register(register) => ReferenceTarget::Caller {
                     caller_depth,
@@ -11879,6 +12446,7 @@ fn transfer_call_frame_value(
             referent,
         } => {
             let target = match (transfer, target) {
+                (_, ReferenceTarget::Home(home)) => ReferenceTarget::Home(home.clone()),
                 (_, ReferenceTarget::Native(native)) => ReferenceTarget::Native(native.clone()),
                 (UniqueReferenceTransfer::IntoCallee, ReferenceTarget::Register(register)) => {
                     ReferenceTarget::Caller {
@@ -12028,8 +12596,9 @@ fn transfer_to_resumed_frame(
     Ok(value)
 }
 
-fn format_vm_value(value: &VmValue) -> String {
-    match value {
+fn format_vm_value(value: &VmValue, budget: &mut ExecutionBudget) -> Result<String, VmArtifactError> {
+    Ok(match value {
+        VmValue::Resident(home) => return format_vm_value(&home.load(&[], budget)?, budget),
         VmValue::Uninitialized(_) | VmValue::SuspendedReference(_) => "<uninitialized storage>".into(),
         VmValue::RawPointer { .. } => "<raw pointer>".into(),
         VmValue::Unit => "()".into(),
@@ -12059,16 +12628,16 @@ fn format_vm_value(value: &VmValue) -> String {
             "({})",
             values
                 .iter()
-                .map(format_vm_value)
-                .collect::<Vec<_>>()
+                .map(|value| format_vm_value(value, budget))
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         ),
         VmValue::Array { values, .. } => format!(
             "[{}]",
             values
                 .iter()
-                .map(format_vm_value)
-                .collect::<Vec<_>>()
+                .map(|value| format_vm_value(value, budget))
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         ),
         VmValue::Record {
@@ -12077,8 +12646,8 @@ fn format_vm_value(value: &VmValue) -> String {
             "record@{definition:?}({})",
             fields
                 .iter()
-                .map(format_vm_value)
-                .collect::<Vec<_>>()
+                .map(|value| format_vm_value(value, budget))
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         ),
         VmValue::Enum {
@@ -12090,8 +12659,8 @@ fn format_vm_value(value: &VmValue) -> String {
             "enum@{definition:?}#{variant}({})",
             fields
                 .iter()
-                .map(format_vm_value)
-                .collect::<Vec<_>>()
+                .map(|value| format_vm_value(value, budget))
+                .collect::<Result<Vec<_>, _>>()?
                 .join(", ")
         ),
         VmValue::Callable {
@@ -12107,14 +12676,15 @@ fn format_vm_value(value: &VmValue) -> String {
                     register,
                 } => format!("caller-{caller_depth}@{register}"),
                 ReferenceTarget::Captured(_) => "captured".into(),
-                ReferenceTarget::Native(_) => "native".into(),
+                ReferenceTarget::Native(_) | ReferenceTarget::Home(_) => "native".into(),
             };
             format!("reference@{target}[fields={}]", fields.len())
         }
-    }
+    })
 }
 fn expect_unit(value: impl Borrow<VmValue>) -> Result<(), VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_unit(home.scalar_value()?),
         VmValue::Unit => Ok(()),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::Unit,
@@ -12124,6 +12694,7 @@ fn expect_unit(value: impl Borrow<VmValue>) -> Result<(), VmArtifactError> {
 }
 fn expect_i64(value: impl Borrow<VmValue>) -> Result<i64, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_i64(home.scalar_value()?),
         VmValue::I64(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I64,
@@ -12133,6 +12704,7 @@ fn expect_i64(value: impl Borrow<VmValue>) -> Result<i64, VmArtifactError> {
 }
 fn expect_usize(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_usize(home.scalar_value()?),
         VmValue::Usize(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::Usize,
@@ -12142,6 +12714,7 @@ fn expect_usize(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
 }
 fn expect_u32(value: impl Borrow<VmValue>) -> Result<u32, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_u32(home.scalar_value()?),
         VmValue::U32(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::U32,
@@ -12151,6 +12724,7 @@ fn expect_u32(value: impl Borrow<VmValue>) -> Result<u32, VmArtifactError> {
 }
 fn expect_u8(value: impl Borrow<VmValue>) -> Result<u8, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_u8(home.scalar_value()?),
         VmValue::U8(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::U8,
@@ -12160,6 +12734,7 @@ fn expect_u8(value: impl Borrow<VmValue>) -> Result<u8, VmArtifactError> {
 }
 fn expect_u16(value: impl Borrow<VmValue>) -> Result<u16, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_u16(home.scalar_value()?),
         VmValue::U16(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::U16,
@@ -12169,6 +12744,7 @@ fn expect_u16(value: impl Borrow<VmValue>) -> Result<u16, VmArtifactError> {
 }
 fn expect_i16(value: impl Borrow<VmValue>) -> Result<i16, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_i16(home.scalar_value()?),
         VmValue::I16(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I16,
@@ -12178,6 +12754,7 @@ fn expect_i16(value: impl Borrow<VmValue>) -> Result<i16, VmArtifactError> {
 }
 fn expect_i32(value: impl Borrow<VmValue>) -> Result<i32, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_i32(home.scalar_value()?),
         VmValue::I32(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I32,
@@ -12187,6 +12764,7 @@ fn expect_i32(value: impl Borrow<VmValue>) -> Result<i32, VmArtifactError> {
 }
 fn expect_i8(value: impl Borrow<VmValue>) -> Result<i8, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_i8(home.scalar_value()?),
         VmValue::I8(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I8,
@@ -12196,6 +12774,7 @@ fn expect_i8(value: impl Borrow<VmValue>) -> Result<i8, VmArtifactError> {
 }
 fn expect_u64(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_u64(home.scalar_value()?),
         VmValue::U64(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::U64,
@@ -12205,6 +12784,7 @@ fn expect_u64(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
 }
 fn expect_isize(value: impl Borrow<VmValue>) -> Result<i64, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_isize(home.scalar_value()?),
         VmValue::Isize(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::Isize,
@@ -12214,6 +12794,7 @@ fn expect_isize(value: impl Borrow<VmValue>) -> Result<i64, VmArtifactError> {
 }
 fn expect_u128(value: impl Borrow<VmValue>) -> Result<u128, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_u128(home.scalar_value()?),
         VmValue::U128(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::U128,
@@ -12223,6 +12804,7 @@ fn expect_u128(value: impl Borrow<VmValue>) -> Result<u128, VmArtifactError> {
 }
 fn expect_i128(value: impl Borrow<VmValue>) -> Result<i128, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_i128(home.scalar_value()?),
         VmValue::I128(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I128,
@@ -12296,6 +12878,7 @@ fn expect_enum_i64(value: impl Borrow<VmValue>) -> Result<Vec<i64>, VmArtifactEr
 }
 fn expect_f64(value: impl Borrow<VmValue>) -> Result<f64, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_f64(home.scalar_value()?),
         VmValue::F64(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::F64,
@@ -12305,6 +12888,7 @@ fn expect_f64(value: impl Borrow<VmValue>) -> Result<f64, VmArtifactError> {
 }
 fn expect_f32(value: impl Borrow<VmValue>) -> Result<f32, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_f32(home.scalar_value()?),
         VmValue::F32(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::F32,
@@ -12911,6 +13495,7 @@ fn scalar_from_checked_float(value: f64, target: ScalarType) -> Result<VmValue, 
 
 fn expect_bool(value: impl Borrow<VmValue>) -> Result<bool, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_bool(home.scalar_value()?),
         VmValue::Bool(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::Bool,
@@ -12920,6 +13505,7 @@ fn expect_bool(value: impl Borrow<VmValue>) -> Result<bool, VmArtifactError> {
 }
 fn expect_char(value: impl Borrow<VmValue>) -> Result<char, VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_char(home.scalar_value()?),
         VmValue::Char(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::Char,
@@ -13073,6 +13659,13 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
         },
     }
 }
+
+fn matches_runtime_pattern(value: &VmValue, pattern: &VmPattern, budget: &mut ExecutionBudget) -> Result<bool, VmArtifactError> {
+    match value {
+        VmValue::Resident(home) => home.matches_pattern(&mut vec![], pattern, budget),
+        _ => Ok(matches_pattern(value, pattern)),
+    }
+}
 fn matches_pattern_fields(values: &[VmValue], fields: &[VmPatternField]) -> bool {
     fields.iter().all(|field| {
         values.get(field.index as usize).is_some_and(|value| {
@@ -13089,13 +13682,21 @@ fn aggregate_matches_layout(values: &[VmValue], field_types: &[VmType]) -> bool 
         && values
             .iter()
             .zip(field_types)
-            .all(|(value, ty)| value_matches_vm_type(value, ty))
+            .all(|(value, ty)| match value {
+                // A moved payload preserves its frozen slot type. Tag-only
+                // destruction dispatch must still recognize the remaining
+                // aggregate; selecting this hole as a value remains rejected
+                // by matches_pattern_fields/value_matches_vm_type.
+                VmValue::Uninitialized(actual) => vm_type_matches(actual, ty),
+                _ => value_matches_vm_type(value, ty),
+            })
 }
 
 /// A VM generic is a declaration-local wildcard at runtime; every other
 /// structural component must agree exactly with the value's concrete shape.
 fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
     if matches!(value, VmValue::Uninitialized(_) | VmValue::SuspendedReference(_)) { return false; }
+    if let VmValue::Resident(home) = value { return home.is_initialized(&[]) && vm_type_matches(home.ty(), expected); }
     match expected {
         VmType::Generic(_) => true,
         // Structural constants inhabit nominal identity only; no standalone
@@ -13457,15 +14058,18 @@ fn execute(
         });
     }
     budget.reserve_allocation(function.registers.len())?;
-    let mut registers = vec![None; function.registers.len()];
+    let mut registers = RuntimeRegisters::for_function(function, budget)?;
+    let mut next_storage_id = 0u64;
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut resumption_returns = Vec::<RuntimeResumptionReturn>::new();
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc).cloned() {
+        registers.finish_native_writes(budget)?;
         budget.tick()?;
+        registers.instruction_result(pc);
         match instruction {
-            VmInstruction::DeclareResult { .. } => {}
+            VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
             VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
                 registers[dst as usize] = Some(execute_memory_intrinsic(primitive, &types, &arguments, function, &mut registers, budget)?);
@@ -14011,26 +14615,16 @@ fn execute(
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 registers[dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
             }
             VmInstruction::MakeArray { dst, fields, .. } => {
                 budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 registers[dst as usize] = Some(VmValue::Array {
                     values: Arc::from(values),
                 });
@@ -14044,13 +14638,8 @@ fn execute(
                 budget.reserve_value("record fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, dst)?;
                 registers[dst as usize] = Some(VmValue::Record {
                     definition,
@@ -14068,13 +14657,8 @@ fn execute(
                 budget.reserve_value("enum fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, dst)?;
                 registers[dst as usize] = Some(VmValue::Enum {
                     definition,
@@ -14090,7 +14674,7 @@ fn execute(
             }
             VmInstruction::DerefIsInitialized { dst, reference } => {
                 let initialized = referent_is_initialized(&registers, &[],
-                    registers[reference as usize].as_ref().expect("verified reference"))?;
+                    &registers.copy_value(reference, budget)?)?;
                 registers[dst as usize] = Some(VmValue::Bool(initialized));
             }
             VmInstruction::TakeProjection { dst, base, fields } => {
@@ -14106,6 +14690,10 @@ fn execute(
                 field_count,
                 field_type,
             } => {
+                if let Some(value) = project_native_home(registers[base as usize].as_ref().expect("verified register"),
+                    index, field_count, &field_type, budget)? {
+                    registers[dst as usize] = Some(value); pc += 1; continue;
+                }
                 let fields = match registers[base as usize]
                     .as_ref()
                     .expect("verified register")
@@ -14164,6 +14752,10 @@ fn execute(
                 field_count,
                 ..
             } => {
+                if let Some(value) = project_native_home(registers[base as usize].as_ref().expect("verified register"),
+                    index, field_count, &function.registers[dst as usize], budget)? {
+                    registers[dst as usize] = Some(value); pc += 1; continue;
+                }
                 let VmValue::Tuple(fields) = registers[base as usize]
                     .as_ref()
                     .expect("verified register")
@@ -14191,13 +14783,12 @@ fn execute(
                 value,
                 ..
             } => {
+                let base_value = registers.copy_value(base, budget)?;
                 let VmValue::Record {
                     definition,
                     fields,
                     signature,
-                } = registers[base as usize]
-                    .as_ref()
-                    .expect("verified register")
+                } = &base_value
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: base });
                 };
@@ -14215,10 +14806,7 @@ fn execute(
                         register: index as u32,
                     });
                 };
-                *field = registers[value as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone();
+                *field = registers.copy_value(value, budget)?;
                 registers[dst as usize] = Some(VmValue::Record {
                     definition: *definition,
                     fields: Arc::from(fields),
@@ -14230,12 +14818,12 @@ fn execute(
                 subject,
                 pattern,
             } => {
-                registers[dst as usize] = Some(VmValue::Bool(matches_pattern(
+                registers[dst as usize] = Some(VmValue::Bool(matches_runtime_pattern(
                     registers[subject as usize]
                         .as_ref()
                         .expect("verified register"),
-                    &pattern,
-                )));
+                    &pattern, budget,
+                )?));
             }
             VmInstruction::Perform {
                 dst,
@@ -14248,11 +14836,7 @@ fn execute(
                 let values = arguments
                     .iter()
                     .map(|argument| {
-                        registers[*argument as usize]
-                            .clone()
-                            .ok_or(VmArtifactError::ReadBeforeWrite {
-                                register: *argument,
-                            })
+                        registers.copy_value(*argument, budget)
                             .and_then(|value| freeze_frame_value(&value, &registers, &[]))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -14294,6 +14878,7 @@ fn execute(
                     .zip(values.iter().cloned())
                 {
                     registers[*destination as usize] = Some(value);
+                    registers.native_write(*destination);
                 }
                 frame.suspended = Some(RuntimeContinuation {
                     target: pc + 1,
@@ -14343,6 +14928,26 @@ fn execute(
                     suspended: None,
                 })
             }
+            VmInstruction::CompleteHandler { value } => {
+                let frame = handlers.last().ok_or(VmArtifactError::HandlerStackUnderflow)?;
+                if frame.suspended.is_some() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                if resumption_returns.last().is_some_and(|pending| {
+                    pending.handlers.last().is_some_and(|owner| owner.id == frame.id)
+                }) {
+                    let result = registers.copy_value(value, budget)?;
+                    let mut pending = resumption_returns.pop().expect("checked pending resumption");
+                    expect_type(function, value, register_type(function, pending.dst)?)?;
+                    pending.registers.synchronize_source_storage(&registers);
+                    registers = pending.registers;
+                    registers[pending.dst as usize] = Some(result);
+                    registers.native_write(pending.dst);
+                    handlers = pending.handlers;
+                    pc = pending.pc;
+                    continue;
+                }
+            }
             VmInstruction::UninstallHandler => {
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
@@ -14352,9 +14957,7 @@ fn execute(
                 }
             }
             VmInstruction::Resume { value } => {
-                let resumed = registers[value as usize]
-                    .clone()
-                    .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
+                let resumed = registers.copy_value(value, budget)?;
                 let Some(frame) = handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
@@ -14377,27 +14980,27 @@ fn execute(
                 let RuntimeContinuation {
                     target,
                     dst,
-                    registers: saved_registers,
+                    registers: mut saved_registers,
                     above,
                     pending_leave,
                     ..
                 } = continuation;
+                saved_registers.synchronize_source_storage(&registers);
                 if let Some(leave) = pending_leave {
                     registers = saved_registers;
                     handlers.extend(above);
-                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave, budget)?;
                     continue;
                 }
                 registers = saved_registers;
                 registers[dst as usize] = Some(resumed);
+                registers.native_write(dst);
                 handlers.extend(above);
                 pc = target;
                 continue;
             }
             VmInstruction::ResumeReturn { dst, value } => {
-                let resumed = registers[value as usize]
-                    .clone()
-                    .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
+                let resumed = registers.copy_value(value, budget)?;
                 let Some(frame) = handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
@@ -14418,11 +15021,12 @@ fn execute(
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
-                    registers: saved_registers,
+                    registers: mut saved_registers,
                     above,
                     pending_leave,
                     ..
                 } = continuation;
+                saved_registers.synchronize_source_storage(&registers);
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
@@ -14456,6 +15060,7 @@ fn execute(
                 handlers.extend(above);
                 registers = saved_registers;
                 registers[continuation_dst as usize] = Some(resumed);
+                registers.native_write(continuation_dst);
                 pc = target;
                 continue;
             }
@@ -14476,9 +15081,7 @@ fn execute(
                 });
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
-                let resumed = registers[value as usize]
-                    .clone()
-                    .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
+                let resumed = registers.copy_value(value, budget)?;
                 let VmValue::Resumption { frame: id, .. } =
                     registers[snapshot as usize]
                         .as_ref()
@@ -14508,19 +15111,21 @@ fn execute(
                 let RuntimeContinuation {
                     target,
                     dst,
-                    registers: saved_registers,
+                    registers: mut saved_registers,
                     above,
                     pending_leave,
                     ..
                 } = continuation;
+                saved_registers.synchronize_source_storage(&registers);
                 if let Some(leave) = pending_leave {
                     registers = saved_registers;
                     handlers.extend(above);
-                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave, budget)?;
                     continue;
                 }
                 registers = saved_registers;
                 registers[dst as usize] = Some(resumed);
+                registers.native_write(dst);
                 handlers.extend(above);
                 pc = target;
                 continue;
@@ -14562,6 +15167,7 @@ fn execute(
                     .zip(continuation.performed.payloads.iter().cloned())
                 {
                     registers[*destination as usize] = Some(payload);
+                    registers.native_write(*destination);
                 }
                 frame.suspended = Some(RuntimeContinuation {
                     target: continuation.target,
@@ -14588,20 +15194,21 @@ fn execute(
                 }
             }
             VmInstruction::Copy { dst, src } => {
-                registers[dst as usize] = registers[src as usize].clone()
+                registers.copy_into(dst, src, budget)?;
             }
             VmInstruction::StorageLive { local, .. } => {
                 if registers[local as usize].is_some() {
                     return Err(VmArtifactError::ReadBeforeWrite { register: local });
                 }
-                // `None` is the runtime representation of a live but
-                // uninitialized addressable slot; verification carries the
-                // distinction from dead storage.
+                next_storage_id = next_storage_id.checked_add(1).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                registers.source_storage.insert(local, next_storage_id);
             }
             VmInstruction::StorageDead { local, .. } => {
                 if registers[local as usize].is_some() {
                     return Err(VmArtifactError::ReadBeforeWrite { register: local });
                 }
+                registers.source_storage.remove(&local);
+                if let Some(home) = registers.native_homes.remove(&local) { home.retire(); }
             }
             VmInstruction::SetDropFlag { flag, value } => {
                 registers[flag as usize] = Some(VmValue::Bool(value))
@@ -14611,13 +15218,13 @@ fn execute(
                     Some(VmValue::Bool(_)) => {}
                     _ => return Err(VmArtifactError::ReadBeforeWrite { register: flag }),
                 }
-                registers[local as usize] = None;
+                registers.clear_value(local);
             }
             VmInstruction::Store { dst, src } => {
-                registers[dst as usize] = registers[src as usize].clone()
+                registers.copy_into(dst, src, budget)?;
             }
             VmInstruction::Move { dst, src } => {
-                registers[dst as usize] = registers[src as usize].take()
+                registers.move_into(dst, src, budget)?;
             }
             VmInstruction::Borrow {
                 dst,
@@ -14629,11 +15236,13 @@ fn execute(
                 let VmType::Reference { referent, .. } = &function.registers[dst as usize] else {
                     return Err(VmArtifactError::InvalidRegister { register: dst });
                 };
+                let carrier = if reborrow { registers.copy_value(src, budget)? }
+                    else { registers[src as usize].as_ref().expect("verified register").clone() };
                 registers[dst as usize] = Some(borrow_value(
                     &registers,
                     &[],
                     src,
-                    registers[src as usize].as_ref().expect("verified register"),
+                    &carrier,
                     &fields,
                     unique,
                     reborrow,
@@ -14641,53 +15250,62 @@ fn execute(
                 )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
-                let VmValue::Reference { target, fields, .. } = registers[reference as usize]
-                    .as_ref()
-                    .expect("verified register")
+                let carrier = registers.copy_value(reference, budget)?;
+                let VmValue::Reference { target, fields, .. } = &carrier
                 else {
                     return Err(VmArtifactError::InvalidRegister {
                         register: reference,
                     });
                 };
+                if matches!(target, ReferenceTarget::Home(_) | ReferenceTarget::Native(_))
+                    && let Some((result, index)) = registers.read_projection(pc)
+                {
+                    // The intervening value has one producer and exactly this
+                    // one adjacent consumer. Read only the selected native field;
+                    // no aggregate snapshot is observable or needs allocation.
+                    let mut path = fields.to_vec(); path.push(index);
+                    budget.tick()?;
+                    registers[result as usize] = Some(load_reference_target(&registers, &[], target, &path, budget)?);
+                    registers.native_write(result);
+                    pc += 2; continue;
+                }
                 registers[dst as usize] = Some(load_reference_target(&registers, &[], target, fields, budget)?);
             }
             VmInstruction::DerefMove { dst, reference } => {
-                let VmValue::Reference { target, fields, .. } = registers[reference as usize]
-                    .as_ref()
-                    .expect("verified register")
+                let carrier = registers.copy_value(reference, budget)?;
+                let VmValue::Reference { target, fields, .. } = &carrier
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: reference });
                 };
                 // The loan retains its address but becomes unreadable until
                 // restoration. This state also prevents replacement cleanup
                 // from destroying the resident transferred out by this move.
-                registers[dst as usize] = Some(load_reference_target(&registers, &[], target, fields, budget)?);
-                let capability = registers[reference as usize].take().expect("verified unique loan");
-                registers[reference as usize] = Some(VmValue::SuspendedReference(Box::new(capability)));
+                registers[dst as usize] = Some(match target {
+                    ReferenceTarget::Home(home) => home.take(fields, budget)?,
+                    _ => load_reference_target(&registers, &[], target, fields, budget)?,
+                });
+                registers[reference as usize] = Some(VmValue::SuspendedReference(Box::new(carrier)));
             }
             VmInstruction::DerefStore { reference, src } => {
                 registers[reference as usize] = registers[reference as usize].take().map(|capability| match capability {
                     VmValue::SuspendedReference(reference) => *reference,
                     reference => reference,
                 });
+                let carrier = registers.copy_value(reference, budget)?;
+                registers.native_write(reference);
                 let VmValue::Reference {
                     target,
                     fields,
                     unique: true,
                     ..
-                } = registers[reference as usize]
-                    .as_ref()
-                    .expect("verified register")
+                } = &carrier
                 else {
                     return Err(VmArtifactError::InvalidRegister {
                         register: reference,
                     });
                 };
                 let (target, fields) = (target.clone(), fields.clone());
-                let replacement = registers[src as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone();
+                let replacement = registers.copy_value(src, budget)?;
                 store_reference_target(&mut registers, &mut [], &target, &fields, replacement, budget)?;
             }
             VmInstruction::NotBool { dst, value } => {
@@ -15244,7 +15862,8 @@ fn execute(
                         found: arguments.len() as u32,
                     });
                 };
-                registers[destination as usize] = registers[*argument as usize].clone();
+                registers[destination as usize] = Some(registers.copy_value(*argument, budget)?);
+                registers.native_write(destination);
                 handlers.truncate(handler_depth);
                 // A dynamic label invocation is the same nonlocal control
                 // boundary as a direct Leave: no suspended clause-return
@@ -15253,7 +15872,8 @@ fn execute(
                 pc = target as usize;
                 continue;
             }
-            VmInstruction::Call { .. } | VmInstruction::MakeCallable { .. } => {
+            VmInstruction::Call { .. } | VmInstruction::MakeCallable { .. }
+            | VmInstruction::DestroyCallable { .. } => {
                 return Err(VmArtifactError::CallRequiresProgram);
             }
             VmInstruction::HostCall {
@@ -15286,6 +15906,7 @@ fn execute(
                         destinations,
                         cleanup,
                     },
+                    budget,
                 )?;
                 // A lexical leave abandons every suspended clause-return
                 // path it crosses.  Restoring one after reaching the label
@@ -15317,15 +15938,14 @@ fn execute(
                     {
                         return Err(VmArtifactError::HandlerStillActive);
                     }
-                    let value = registers[value as usize]
-                        .as_ref()
-                        .expect("verified register")
-                        .clone();
-                    let return_to_clause = resumption_returns
+                    let value = registers.copy_value(value, budget)?;
+                    let mut return_to_clause = resumption_returns
                         .pop()
                         .expect("checked clause-return frame exists");
+                    return_to_clause.registers.synchronize_source_storage(&registers);
                     registers = return_to_clause.registers;
                     registers[return_to_clause.dst as usize] = Some(value);
+                    registers.native_write(return_to_clause.dst);
                     handlers = return_to_clause.handlers;
                     pc = return_to_clause.pc;
                     continue;
@@ -15333,10 +15953,7 @@ fn execute(
                 if !handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
-                return Ok(registers[value as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone());
+                return registers.copy_value(value, budget);
             }
             VmInstruction::Trap => return Err(VmArtifactError::Trap),
         }
@@ -15348,9 +15965,10 @@ fn execute(
 /// is essential: a label edge may swap block parameters, so writing one
 /// destination before reading all arguments would corrupt a legal transfer.
 fn complete_pending_leave(
-    registers: &mut [Option<VmValue>],
+    registers: &mut RuntimeRegisters,
     handlers: &mut Vec<RuntimeHandlerFrame>,
     leave: PendingLeave,
+    budget: &mut ExecutionBudget,
 ) -> Result<usize, VmArtifactError> {
     if !leave.cleanup.validate()
         || !leave
@@ -15364,14 +15982,7 @@ fn complete_pending_leave(
     let values = leave
         .arguments
         .iter()
-        .map(|argument| {
-            registers
-                .get(*argument as usize)
-                .and_then(Clone::clone)
-                .ok_or(VmArtifactError::ReadBeforeWrite {
-                    register: *argument,
-                })
-        })
+        .map(|argument| registers.copy_value(*argument, budget))
         .collect::<Result<Vec<_>, _>>()?;
     for (&destination, value) in leave.destinations.iter().zip(values) {
         let slot =
@@ -15381,6 +15992,7 @@ fn complete_pending_leave(
                     register: destination,
                 })?;
         *slot = Some(value);
+        registers.native_write(destination);
     }
     // A leave has crossed every active lexical handler. Any captured one-shot
     // continuation was abandoned by the source control transfer, so no frame
@@ -15394,6 +16006,14 @@ fn complete_pending_leave(
 }
 fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
     match value {
+        VmInstruction::DeclareFrameCleanup { actions } => {
+            output.push(200);
+            output.extend_from_slice(&(actions.len() as u64).to_le_bytes());
+            for action in actions {
+                output.extend_from_slice(&action.owner.to_le_bytes());
+                output.extend_from_slice(&action.destructor.0.as_bytes());
+            }
+        }
         VmInstruction::DeclareResult { result, returns } => {
             output.push(172);
             encode_type(result, output);
@@ -15714,6 +16334,10 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&target.to_le_bytes());
         }
         VmInstruction::UninstallHandler => output.push(45),
+        VmInstruction::CompleteHandler { value } => {
+            output.push(198);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::Resume { value } => {
             output.push(46);
             output.extend_from_slice(&value.to_le_bytes());
@@ -16021,8 +16645,10 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             dst,
             capability,
             symbol,
+            source_contract,
             parameters,
             result,
+            resident_operations,
             arguments,
         } => {
             output.push(56);
@@ -16031,11 +16657,19 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(capability.as_bytes());
             output.extend_from_slice(&(symbol.len() as u64).to_le_bytes());
             output.extend_from_slice(symbol.as_bytes());
+            output.extend_from_slice(&source_contract.as_bytes());
             output.extend_from_slice(&(parameters.len() as u64).to_le_bytes());
             for parameter in parameters {
                 encode_type(parameter, output);
             }
             encode_type(result, output);
+            output.extend_from_slice(&(resident_operations.len() as u64).to_le_bytes());
+            for resident in resident_operations {
+                encode_type(&resident.ty, output);
+                output.extend_from_slice(&resident.source_type.as_bytes());
+                output.push(u8::from(resident.destructor.is_some()));
+                if let Some(destructor) = resident.destructor { output.extend_from_slice(&destructor.0.as_bytes()); }
+            }
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments {
                 output.extend_from_slice(&argument.to_le_bytes());
@@ -16370,6 +17004,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(15);
             output.extend_from_slice(&value.to_le_bytes())
         }
+        VmInstruction::DestroyCallable { dst, value } => {
+            output.push(199);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::Trap => output.push(43),
     }
 }
@@ -16550,7 +17189,7 @@ fn execute_with_arguments_with_host(
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
 ) -> Result<VmValue, VmArtifactError> {
-    execute_program_profiled(program, definition, arguments, depth, budget, host, None)
+    execute_program_profiled(program, definition, arguments, depth, budget, host, None, false, None, None)
 }
 
 // Recycling leaves the caller stack unchanged. Loans into surviving callers
@@ -16561,22 +17200,39 @@ fn execute_with_arguments_with_host(
 // The scan is iterative, budgeted, and measured.
 fn recyclable_tail_arguments(
     registers: &[Option<VmValue>],
+    homes: &BTreeMap<u32, Arc<native_storage::NativeHome>>,
     arguments: &[u32],
     callers: &[RuntimeProgramCaller],
     budget: &mut ExecutionBudget,
     profile: &mut VmAuthoringProfile,
 ) -> Result<bool, VmArtifactError> {
+    // A raw/native recipient may have stored an address somewhere outside the
+    // argument graph. Keep the source frame alive for its ordinary lifetime.
+    for home in homes.values() {
+        budget.tick()?;
+        if home.address_was_exposed() { return Ok(false); }
+    }
     let mut pending = Vec::new();
     budget.reserve_allocation(arguments.len())?;
     for argument in arguments {
         pending.push((registers[*argument as usize].as_ref().ok_or(
             VmArtifactError::ReadBeforeWrite { register: *argument },
-        )?, true));
+        )?.clone(), true));
     }
     while let Some((value, allow_callers)) = pending.pop() {
         budget.tick()?;
         profile.inspected_tail_argument_elements += 1;
-        let fields = match value {
+        let fields = match &value {
+            VmValue::Reference { target: ReferenceTarget::Home(home), fields, .. } => {
+                if !allow_callers || !home.is_initialized(fields)
+                    || homes.values().any(|current| Arc::ptr_eq(current, home))
+                    || !callers.iter().any(|caller| caller.registers.native_homes.values().any(|owner| Arc::ptr_eq(owner, home)))
+                    || home.has_reference_fields(budget)?
+                { return Ok(false); }
+                continue;
+            }
+            VmValue::Resident(_) => return Ok(false),
+            VmValue::RawPointer { pointer, .. } if homes.values().any(|home| home.contains_address(*pointer)) => return Ok(false),
             VmValue::Reference {
                 target: target @ ReferenceTarget::Caller { caller_depth, .. }, ..
             } if allow_callers && (*caller_depth as usize) < callers.len() => {
@@ -16584,14 +17240,14 @@ fn recyclable_tail_arguments(
                 // Deliberately inspect the whole owner, not only a projection.
                 // Nested frame-relative loans fail closed rather than following
                 // an unbounded/cyclic reference graph without a retention proof.
-                pending.push((reference_target(registers, callers, target)?, false));
+                pending.push((reference_target(registers, callers, target)?.clone(), false));
                 continue;
             }
             VmValue::Reference {
                 target: ReferenceTarget::Captured(value), unique: false, ..
             } => {
                 budget.reserve_allocation(1)?;
-                pending.push((value.as_ref(), false));
+                pending.push((value.as_ref().clone(), false));
                 continue;
             }
             VmValue::Reference { .. } | VmValue::Label { .. } | VmValue::Resumption { .. } => {
@@ -16600,12 +17256,17 @@ fn recyclable_tail_arguments(
             VmValue::Tuple(fields)
             | VmValue::Array { values: fields, .. }
             | VmValue::Record { fields, .. }
-            | VmValue::Enum { fields, .. }
-            | VmValue::Callable { captures: fields, .. } => fields.as_ref(),
+            | VmValue::Enum { fields, .. } => fields.as_ref(),
+            VmValue::Callable { captures, .. } => {
+                let values = captures.values.borrow();
+                budget.reserve_allocation(values.len())?;
+                pending.extend(values.iter().cloned().map(|value| (value, allow_callers)));
+                continue;
+            }
             _ => continue,
         };
         budget.reserve_allocation(fields.len())?;
-        pending.extend(fields.iter().map(|value| (value, allow_callers)));
+        pending.extend(fields.iter().cloned().map(|value| (value, allow_callers)));
     }
     Ok(true)
 }
@@ -16631,6 +17292,262 @@ fn tail_return_suffix(
     Ok(false)
 }
 
+// Structural cleanup can leave a guarded CFG after a tail call even when
+// every owned payload has already moved. Prove that this *particular* suffix
+// only examines frame-local tags/initialization and forwards the unknown call
+// result. Never execute or erase a call, load, store, trap, or source destructor.
+// A callable with no registered environment destructor has no cleanup effect.
+// The caller separately proves that no argument can mutate this frame.
+fn tail_cleanup_suffix(
+    function: &VmFunction,
+    mut pc: usize,
+    result: u32,
+    registers: &[Option<VmValue>],
+    environments: &BTreeMap<DefKey, VmCaptureEnvironment>,
+    budget: &mut ExecutionBudget,
+) -> Result<bool, VmArtifactError> {
+    if !matches!(function.instructions.get(pc), Some(VmInstruction::IsInitialized { .. })) {
+        return Ok(false);
+    }
+    #[derive(Clone)]
+    enum Value { Known(VmValue), Result }
+    // Read untouched slots from the existing frame. Only proof writes need
+    // scratch storage; copying every unused register would cost a whole new
+    // frame per recycled call. Each new scratch entry is still charged.
+    fn read(values: &BTreeMap<u32, Option<Value>>, registers: &[Option<VmValue>], register: u32) -> Option<Value> {
+        values.get(&register).cloned().unwrap_or_else(|| registers[register as usize].clone().map(Value::Known))
+    }
+    fn write(values: &mut BTreeMap<u32, Option<Value>>, register: u32, value: Option<Value>, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        if !values.contains_key(&register) { budget.reserve_allocation(1)?; }
+        values.insert(register, value);
+        Ok(())
+    }
+    let mut values = BTreeMap::new();
+    write(&mut values, result, Some(Value::Result), budget)?;
+    // A valid erasable path cannot revisit an instruction. This bound also
+    // makes cyclic or malformed suffixes fail closed without an endless scan.
+    for _ in 0..function.instructions.len() {
+        budget.tick()?;
+        let Some(instruction) = function.instructions.get(pc) else { return Ok(false); };
+        match instruction {
+            VmInstruction::Copy { dst, src } => {
+                let value = read(&values, registers, *src);
+                if value.is_none() { return Ok(false); }
+                write(&mut values, *dst, value, budget)?;
+            }
+            VmInstruction::Move { dst, src } => {
+                let value = read(&values, registers, *src);
+                if value.is_none() { return Ok(false); }
+                write(&mut values, *src, None, budget)?;
+                write(&mut values, *dst, value, budget)?;
+            }
+            VmInstruction::DestroyCallable { dst, value } => {
+                let Some(Value::Known(VmValue::Callable { callee, .. })) = read(&values, registers, *value)
+                    else { return Ok(false); };
+                if environments.get(&callee).is_some_and(|environment| environment.destructor.is_some()) {
+                    return Ok(false);
+                }
+                write(&mut values, *value, None, budget)?;
+                write(&mut values, *dst, Some(Value::Known(VmValue::Unit)), budget)?;
+            }
+            VmInstruction::IsInitialized { dst, base, fields } => {
+                let value = read(&values, registers, *base);
+                let value = match &value {
+                    Some(Value::Known(value)) => Some(value),
+                    None => None,
+                    Some(Value::Result) => return Ok(false),
+                };
+                for _ in fields { budget.tick()?; }
+                let initialized = storage_is_initialized(value, fields);
+                write(&mut values, *dst, Some(Value::Known(VmValue::Bool(initialized))), budget)?;
+            }
+            VmInstruction::PatternTest {
+                dst, subject, pattern: VmPattern::Enum { definition, variant, fields, .. },
+            } if fields.is_empty() => {
+                let Some(Value::Known(VmValue::Enum {
+                    definition: actual_definition, variant: actual_variant, ..
+                })) = read(&values, registers, *subject) else { return Ok(false); };
+                let matched = *definition == actual_definition && *variant == actual_variant;
+                write(&mut values, *dst, Some(Value::Known(VmValue::Bool(matched))), budget)?;
+            }
+            VmInstruction::BranchBool { condition, then_target, else_target } => {
+                let Some(Value::Known(VmValue::Bool(condition))) = read(&values, registers, *condition)
+                    else { return Ok(false); };
+                pc = if condition { *then_target } else { *else_target } as usize;
+                continue;
+            }
+            VmInstruction::Jump { target } => {
+                pc = *target as usize;
+                continue;
+            }
+            VmInstruction::Return { value } => {
+                return Ok(matches!(read(&values, registers, *value), Some(Value::Result)));
+            }
+            _ => return Ok(false),
+        }
+        pc += 1;
+    }
+    Ok(false)
+}
+
+/// Execute compiler-selected frame obligations while retaining the original
+/// caller path. A destructor's checked references must observe and update the
+/// same owners as an ordinary call; freezing a private snapshot would sever
+/// unique loans. The borrowed call prefix cannot become a return destination.
+fn destroy_program_frame(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    registers: &mut RuntimeRegisters,
+    callers: &mut Vec<RuntimeProgramCaller>,
+    transferred: Option<u32>,
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
+    let function = program.functions.get(&definition)
+        .ok_or(VmArtifactError::MissingFunction { definition })?;
+    // Header placement and target ABIs were validated before execution.
+    // Reading the plan must not perform an uncharged scan of the whole body.
+    let actions = match function.instructions.get(1) {
+        Some(VmInstruction::DeclareFrameCleanup { actions }) => actions.as_slice(),
+        _ => &[],
+    };
+    for action in actions {
+        budget.tick()?;
+        if Some(action.owner) == transferred { continue; }
+        if !storage_is_initialized(registers.values[action.owner as usize].as_ref(), &[]) {
+            continue;
+        }
+        let value = registers.values[action.owner as usize].take()
+            .ok_or(VmArtifactError::UseAfterMove { register: action.owner })?;
+        let value = match value {
+            VmValue::Resident(home) => home.take(&[], budget)?,
+            value => value,
+        };
+        let argument = transfer_call_frame_value(&value, registers, callers, UniqueReferenceTransfer::IntoCallee)?;
+        budget.reserve_value("frame destruction arguments", 1)?;
+        budget.reserve_allocation(1)?;
+        callers.push(RuntimeProgramCaller {
+            definition, registers: std::mem::take(registers), pc: 0, return_destination: 0,
+        });
+        execute_program_profiled(program, action.destructor, &[argument], depth, budget, host,
+            None, false, None, Some(callers))?;
+        *registers = callers.pop().ok_or(VmArtifactError::HandlerStateMismatch)?.registers;
+    }
+    registers.release_capture_loan(budget)?;
+    Ok(())
+}
+
+/// Abandon the retained branches of a discarded handler suffix before its
+/// live call path is unwound. Suspended computations are not ordinary callers
+/// of the clause currently executing, but still own their deeper frames.
+fn abandon_program_handlers(
+    program: &CandidateVmProgram,
+    handlers: &mut Vec<RuntimeHandlerFrame>,
+    retained_depth: usize,
+    current: &mut RuntimeRegisters,
+    current_callers: &mut [RuntimeProgramCaller],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
+    if retained_depth > handlers.len() {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    while handlers.len() > retained_depth {
+        budget.tick()?;
+        let mut frame = handlers.pop().expect("checked handler suffix");
+        if let Some(suspended) = frame.suspended.take() {
+            abandon_program_continuation(program, suspended, frame.call_depth,
+                current, current_callers, depth, budget, host)?;
+        }
+    }
+    Ok(())
+}
+
+/// Abandon only the call frames strictly inside the handler's owner. That
+/// owner's source storage survives in the clause and is cleaned by its own
+/// exit. The clause may itself have called a helper before transferring out.
+/// Process retained inner branches and deeper frames before their callers so
+/// a destructor never observes an already-ended ancestor loan.
+fn abandon_program_continuation(
+    program: &CandidateVmProgram,
+    mut suspended: RuntimeContinuation,
+    owner_depth: usize,
+    current: &mut RuntimeRegisters,
+    current_callers: &mut [RuntimeProgramCaller],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
+    synchronize_saved_source_storage(&mut suspended.registers, suspended.program.as_mut(), current, current_callers);
+    let saved = suspended.program.as_ref().ok_or(VmArtifactError::HandlerStateMismatch)?;
+    if owner_depth > current_callers.len() || saved.callers.len() < owner_depth {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    // Explicit postorder traversal: deeply nested retained handlers must not
+    // recurse on the Rust stack. Every visited edge and saved path is charged.
+    budget.reserve_value("abandoned continuation paths", 1)?;
+    budget.reserve_allocation(1)?;
+    let mut pending = vec![(suspended, owner_depth)];
+    while let Some((parent, _)) = pending.last_mut() {
+        if let Some(mut frame) = parent.above.pop() {
+            budget.tick()?;
+            if let Some(mut child) = frame.suspended.take() {
+                let parent_program = parent.program.as_ref().ok_or(VmArtifactError::HandlerStateMismatch)?;
+                synchronize_saved_source_storage(&mut child.registers, child.program.as_mut(),
+                    &parent.registers, &parent_program.callers);
+                if frame.call_depth > parent_program.callers.len()
+                    || child.program.as_ref().is_none_or(|saved| saved.callers.len() < frame.call_depth) {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                budget.reserve_value("abandoned continuation paths", pending.len() + 1)?;
+                budget.reserve_allocation(1)?;
+                pending.push((child, frame.call_depth));
+            }
+            continue;
+        }
+        let (mut finished, owner_depth) = pending.pop().expect("checked pending path");
+        let saved = finished.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
+        while saved.callers.len() > owner_depth {
+            budget.tick()?;
+            destroy_program_frame(program, saved.definition, &mut finished.registers,
+                &mut saved.callers, None, depth, budget, host)?;
+            let caller = saved.callers.pop().ok_or(VmArtifactError::HandlerStateMismatch)?;
+            saved.definition = caller.definition;
+            finished.registers = caller.registers;
+        }
+        if let Some((parent, _)) = pending.last_mut() {
+            let parent_program = parent.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
+            synchronize_abandoned_source_storage(&finished.registers, &saved.callers,
+                &mut parent.registers, &mut parent_program.callers);
+        } else {
+            synchronize_abandoned_source_storage(&finished.registers, &saved.callers,
+                current, current_callers);
+        }
+    }
+    Ok(())
+}
+
+fn synchronize_abandoned_source_storage(
+    saved: &RuntimeRegisters,
+    saved_callers: &[RuntimeProgramCaller],
+    current: &mut RuntimeRegisters,
+    current_callers: &mut [RuntimeProgramCaller],
+) {
+    // Propagate checked writes performed by cleanup through retained caller
+    // loans. SSA temporaries stay private; source storage uses activation IDs.
+    let owner_depth = saved_callers.len();
+    if owner_depth == current_callers.len() {
+        current.synchronize_source_storage(saved);
+    } else {
+        current_callers[owner_depth].registers.synchronize_source_storage(saved);
+    }
+    for (current, saved) in current_callers.iter_mut().zip(saved_callers) {
+        current.registers.synchronize_source_storage(&saved.registers);
+    }
+}
+
 fn execute_program_profiled(
     program: &CandidateVmProgram,
     definition: DefKey,
@@ -16639,8 +17556,12 @@ fn execute_program_profiled(
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
     mut profile: Option<&mut VmAuthoringProfile>,
+    native_return: bool,
+    capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
+    mut borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
 ) -> Result<VmValue, VmArtifactError> {
-    if depth >= budget.limits.max_call_depth {
+    let return_floor = borrowed_callers.as_ref().map_or(0, |callers| callers.len());
+    if depth.saturating_add(return_floor as u32) >= budget.limits.max_call_depth {
         return Err(VmArtifactError::CallDepthLimit {
             limit: budget.limits.max_call_depth,
         });
@@ -16657,22 +17578,30 @@ fn execute_program_profiled(
         });
     }
     budget.reserve_allocation(function.registers.len())?;
-    let mut registers = vec![None; function.registers.len()];
+    budget.native_memory.install_program_layouts(program);
+    let mut registers = RuntimeRegisters::for_function_with_native_return(function, budget, native_return)?;
+    let mut next_storage_id = 0u64;
     for (index, value) in arguments.iter().enumerate() {
-        registers[index] = Some(value.clone());
+        registers.install_argument(index, value.clone());
     }
+    if let Some(environment) = capture_environment { registers.install_captures(environment); }
     // The program engine deliberately keeps ordinary calls explicit rather
     // than recursively invoking a fresh interpreter. Handler frames are
     // dynamically scoped, so a `Perform` in any callee must be able to find
     // a frame installed by an ancestor. A continuation records this exact
     // call stack and restores it on `Resume`.
     let mut definition = definition;
-    let mut callers = Vec::<RuntimeProgramCaller>::new();
+    let mut callers = borrowed_callers.as_deref_mut().map(std::mem::take).unwrap_or_default();
+    // One empty allocation per function, local to this execution. Keep map
+    // entries stable so warm calls do not allocate/remove bookkeeping nodes.
+    // Never retain homes, lexical brands, loans, or continuation state here.
+    let mut spare_registers = BTreeMap::<DefKey, Option<Vec<Option<VmValue>>>>::new();
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut resumption_returns = Vec::<RuntimeResumptionReturn>::new();
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     loop {
+        registers.finish_native_writes(budget)?;
         if let Some(profile) = profile.as_deref_mut() {
             profile.peak_call_depth = profile.peak_call_depth.max(
                 depth.saturating_add(callers.len() as u32).saturating_add(1),
@@ -16687,8 +17616,9 @@ fn execute_program_profiled(
             return Err(VmArtifactError::NoReturn);
         };
         budget.tick()?;
+        registers.instruction_result(pc);
         match instruction {
-            VmInstruction::DeclareResult { .. } => {}
+            VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
             VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
                 registers[*dst as usize] = Some(execute_memory_intrinsic(*primitive, types, arguments, function, &mut registers, budget)?);
@@ -17242,26 +18172,16 @@ fn execute_program_profiled(
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(*dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 registers[*dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
             }
             VmInstruction::MakeArray { dst, fields, .. } => {
                 budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(*dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 registers[*dst as usize] = Some(VmValue::Array {
                     values: Arc::from(values),
                 });
@@ -17275,13 +18195,8 @@ fn execute_program_profiled(
                 budget.reserve_value("record fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(*dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, *dst)?;
                 registers[*dst as usize] = Some(VmValue::Record {
                     definition: *definition,
@@ -17299,13 +18214,8 @@ fn execute_program_profiled(
                 budget.reserve_value("enum fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| {
-                        registers[*field as usize]
-                            .as_ref()
-                            .expect("verified register")
-                            .clone()
-                    })
-                    .collect::<Vec<_>>();
+                    .map(|field| registers.constructor_field(*dst, *field, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, *dst)?;
                 registers[*dst as usize] = Some(VmValue::Enum {
                     definition: *definition,
@@ -17321,7 +18231,7 @@ fn execute_program_profiled(
             }
             VmInstruction::DerefIsInitialized { dst, reference } => {
                 let initialized = referent_is_initialized(&registers, &callers,
-                    registers[*reference as usize].as_ref().expect("verified reference"))?;
+                    &registers.copy_value(*reference, budget)?)?;
                 registers[*dst as usize] = Some(VmValue::Bool(initialized));
             }
             VmInstruction::TakeProjection { dst, base, fields } => {
@@ -17337,6 +18247,10 @@ fn execute_program_profiled(
                 field_count,
                 field_type,
             } => {
+                if let Some(value) = project_native_home(registers[*base as usize].as_ref().expect("verified register"),
+                    *index, *field_count, field_type, budget)? {
+                    registers[*dst as usize] = Some(value); pc += 1; continue;
+                }
                 let fields = match registers[*base as usize]
                     .as_ref()
                     .expect("verified register")
@@ -17369,6 +18283,10 @@ fn execute_program_profiled(
                 field_count,
                 ..
             } => {
+                if let Some(value) = project_native_home(registers[*base as usize].as_ref().expect("verified register"),
+                    *index, *field_count, &function.registers[*dst as usize], budget)? {
+                    registers[*dst as usize] = Some(value); pc += 1; continue;
+                }
                 let VmValue::Tuple(fields) = registers[*base as usize]
                     .as_ref()
                     .expect("verified register")
@@ -17422,13 +18340,12 @@ fn execute_program_profiled(
                 value,
                 ..
             } => {
+                let base_value = registers.copy_value(*base, budget)?;
                 let VmValue::Record {
                     definition,
                     fields,
                     signature,
-                } = registers[*base as usize]
-                    .as_ref()
-                    .expect("verified register")
+                } = &base_value
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: *base });
                 };
@@ -17446,10 +18363,7 @@ fn execute_program_profiled(
                         register: index as u32,
                     });
                 };
-                *field = registers[*value as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone();
+                *field = registers.copy_value(*value, budget)?;
                 registers[*dst as usize] = Some(VmValue::Record {
                     definition: *definition,
                     fields: Arc::from(fields),
@@ -17461,12 +18375,12 @@ fn execute_program_profiled(
                 subject,
                 pattern,
             } => {
-                registers[*dst as usize] = Some(VmValue::Bool(matches_pattern(
+                registers[*dst as usize] = Some(VmValue::Bool(matches_runtime_pattern(
                     registers[*subject as usize]
                         .as_ref()
                         .expect("verified register"),
-                    pattern,
-                )));
+                    pattern, budget,
+                )?));
             }
             VmInstruction::Perform {
                 dst,
@@ -17479,11 +18393,7 @@ fn execute_program_profiled(
                 let values = arguments
                     .iter()
                     .map(|argument| {
-                        registers[*argument as usize].clone().ok_or(
-                            VmArtifactError::ReadBeforeWrite {
-                                register: *argument,
-                            },
-                        )
+                        registers.copy_value(*argument, budget)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let Some(index) = handlers.iter().rposition(|frame| {
@@ -17546,6 +18456,7 @@ fn execute_program_profiled(
                 for (destination, value) in payload_destinations.iter().zip(clause_values)
                 {
                     registers[*destination as usize] = Some(value);
+                    registers.native_write(*destination);
                 }
                 handlers[index].suspended = Some(RuntimeContinuation {
                     target: pc + 1,
@@ -17595,6 +18506,33 @@ fn execute_program_profiled(
                     suspended: None,
                 });
             }
+            VmInstruction::CompleteHandler { value } => {
+                let frame = handlers.last().ok_or(VmArtifactError::HandlerStackUnderflow)?;
+                if frame.suspended.is_some() || frame.call_depth != callers.len() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                if resumption_returns.last().is_some_and(|pending| {
+                    pending.handlers.last().is_some_and(|owner| owner.id == frame.id)
+                }) {
+                    let result = registers.copy_value(*value, budget)?;
+                    let mut pending = resumption_returns.pop().expect("checked pending resumption");
+                    synchronize_saved_source_storage(&mut pending.registers, pending.program.as_mut(), &registers, &callers);
+                    let saved_program = pending.program.ok_or(VmArtifactError::HandlerStateMismatch)?;
+                    let expected = register_type(
+                        program.functions.get(&saved_program.definition).ok_or(VmArtifactError::MissingFunction { definition: saved_program.definition })?,
+                        pending.dst,
+                    )?;
+                    expect_type(function, *value, expected)?;
+                    definition = saved_program.definition;
+                    callers = saved_program.callers;
+                    registers = pending.registers;
+                    registers[pending.dst as usize] = Some(result);
+                    registers.native_write(pending.dst);
+                    handlers = pending.handlers;
+                    pc = pending.pc;
+                    continue;
+                }
+            }
             VmInstruction::UninstallHandler => {
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
@@ -17604,9 +18542,7 @@ fn execute_program_profiled(
                 }
             }
             VmInstruction::Resume { value } => {
-                let resumed = registers[*value as usize]
-                    .clone()
-                    .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
+                let resumed = registers.copy_value(*value, budget)?;
                 let Some(frame) = handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
@@ -17634,12 +18570,13 @@ fn execute_program_profiled(
                 let RuntimeContinuation {
                     target,
                     dst,
-                    registers: saved_registers,
+                    registers: mut saved_registers,
                     above,
                     pending_leave,
-                    program,
+                    mut program,
                     ..
                 } = continuation;
+                synchronize_saved_source_storage(&mut saved_registers, program.as_mut(), &registers, &callers);
                 if let Some(program) = program {
                     definition = program.definition;
                     callers = program.callers;
@@ -17647,19 +18584,18 @@ fn execute_program_profiled(
                 if let Some(leave) = pending_leave {
                     registers = saved_registers;
                     handlers.extend(above);
-                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave, budget)?;
                     continue;
                 }
                 registers = saved_registers;
                 registers[dst as usize] = Some(resumed);
+                registers.native_write(dst);
                 handlers.extend(above);
                 pc = target;
                 continue;
             }
             VmInstruction::ResumeReturn { dst, value } => {
-                let resumed = registers[*value as usize]
-                    .clone()
-                    .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
+                let resumed = registers.copy_value(*value, budget)?;
                 let Some(frame) = handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
@@ -17685,12 +18621,13 @@ fn execute_program_profiled(
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
-                    registers: saved_registers,
+                    registers: mut saved_registers,
                     above,
                     pending_leave,
-                    program,
+                    mut program,
                     ..
                 } = continuation;
+                synchronize_saved_source_storage(&mut saved_registers, program.as_mut(), &registers, &callers);
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
@@ -17728,6 +18665,7 @@ fn execute_program_profiled(
                 }
                 registers = saved_registers;
                 registers[continuation_dst as usize] = Some(resumed);
+                registers.native_write(continuation_dst);
                 pc = target;
                 continue;
             }
@@ -17748,9 +18686,7 @@ fn execute_program_profiled(
                 });
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
-                let resumed = registers[*value as usize]
-                    .clone()
-                    .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
+                let resumed = registers.copy_value(*value, budget)?;
                 let VmValue::Resumption { frame: id, .. } = registers[*snapshot as usize]
                     .as_ref()
                     .ok_or(VmArtifactError::ReadBeforeWrite {
@@ -17778,7 +18714,8 @@ fn execute_program_profiled(
                 // See the standalone-artifact interpreter above: an explicit
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.
-                handlers.truncate(index + 1);
+                abandon_program_handlers(program, &mut handlers, index + 1,
+                    &mut registers, &mut callers, depth, budget, host)?;
                 let resumed = transfer_to_resumed_frame(
                     resumed, &registers, &callers, handlers[index].call_depth,
                     continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
@@ -17787,12 +18724,13 @@ fn execute_program_profiled(
                 let RuntimeContinuation {
                     target,
                     dst,
-                    registers: saved_registers,
+                    registers: mut saved_registers,
                     above,
                     pending_leave,
-                    program,
+                    mut program,
                     ..
                 } = continuation;
+                synchronize_saved_source_storage(&mut saved_registers, program.as_mut(), &registers, &callers);
                 if let Some(program) = program {
                     definition = program.definition;
                     callers = program.callers;
@@ -17800,11 +18738,12 @@ fn execute_program_profiled(
                 if let Some(leave) = pending_leave {
                     registers = saved_registers;
                     handlers.extend(above);
-                    pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
+                    pc = complete_pending_leave(&mut registers, &mut handlers, leave, budget)?;
                     continue;
                 }
                 registers = saved_registers;
                 registers[dst as usize] = Some(resumed);
+                registers.native_write(dst);
                 handlers.extend(above);
                 pc = target;
                 continue;
@@ -17872,6 +18811,7 @@ fn execute_program_profiled(
                     .zip(clause_values)
                 {
                     registers[*destination as usize] = Some(payload);
+                    registers.native_write(*destination);
                 }
                 handlers[index].suspended = Some(RuntimeContinuation {
                     target: continuation.target,
@@ -17887,28 +18827,32 @@ fn execute_program_profiled(
                 continue;
             }
             VmInstruction::Cancel => {
-                let Some(frame) = handlers.pop() else {
+                let Some(mut frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.suspended.is_none() {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
-                }
+                let suspended = frame.suspended.take().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                abandon_program_continuation(program, suspended, frame.call_depth,
+                    &mut registers, &mut callers, depth, budget, host)?;
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     resumption_returns.clear();
                 }
             }
             VmInstruction::Copy { dst, src } => {
-                registers[*dst as usize] = registers[*src as usize].clone()
+                registers.copy_into(*dst, *src, budget)?;
             }
             VmInstruction::StorageLive { local, .. } => {
                 if registers[*local as usize].is_some() {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
+                next_storage_id = next_storage_id.checked_add(1).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                registers.source_storage.insert(*local, next_storage_id);
             }
             VmInstruction::StorageDead { local, .. } => {
                 if registers[*local as usize].is_some() {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
+                registers.source_storage.remove(local);
+                if let Some(home) = registers.native_homes.remove(local) { home.retire(); }
             }
             VmInstruction::SetDropFlag { flag, value } => {
                 registers[*flag as usize] = Some(VmValue::Bool(*value))
@@ -17918,13 +18862,13 @@ fn execute_program_profiled(
                     Some(VmValue::Bool(_)) => {}
                     _ => return Err(VmArtifactError::ReadBeforeWrite { register: *flag }),
                 }
-                registers[*local as usize] = None;
+                registers.clear_value(*local);
             }
             VmInstruction::Store { dst, src } => {
-                registers[*dst as usize] = registers[*src as usize].clone()
+                registers.copy_into(*dst, *src, budget)?;
             }
             VmInstruction::Move { dst, src } => {
-                registers[*dst as usize] = registers[*src as usize].take()
+                registers.move_into(*dst, *src, budget)?;
             }
             VmInstruction::Borrow {
                 dst,
@@ -17936,13 +18880,13 @@ fn execute_program_profiled(
                 let VmType::Reference { referent, .. } = &function.registers[*dst as usize] else {
                     return Err(VmArtifactError::InvalidRegister { register: *dst });
                 };
+                let carrier = if *reborrow { registers.copy_value(*src, budget)? }
+                    else { registers[*src as usize].as_ref().expect("verified register").clone() };
                 registers[*dst as usize] = Some(borrow_value(
                     &registers,
                     &callers,
                     *src,
-                    registers[*src as usize]
-                        .as_ref()
-                        .expect("verified register"),
+                    &carrier,
                     fields,
                     *unique,
                     *reborrow,
@@ -17950,14 +18894,22 @@ fn execute_program_profiled(
                 )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
-                let VmValue::Reference { target, fields, .. } = registers[*reference as usize]
-                    .as_ref()
-                    .expect("verified register")
+                let carrier = registers.copy_value(*reference, budget)?;
+                let VmValue::Reference { target, fields, .. } = &carrier
                 else {
                     return Err(VmArtifactError::InvalidRegister {
                         register: *reference,
                     });
                 };
+                if matches!(target, ReferenceTarget::Home(_) | ReferenceTarget::Native(_))
+                    && let Some((result, index)) = registers.read_projection(pc)
+                {
+                    let mut path = fields.to_vec(); path.push(index);
+                    budget.tick()?;
+                    registers[result as usize] = Some(load_reference_target(&registers, &callers, target, &path, budget)?);
+                    registers.native_write(result);
+                    pc += 2; continue;
+                }
                 let value = load_reference_target(&registers, &callers, target, fields, budget)?;
                 // Dereferencing a reference into a caller frame materializes
                 // a value whose nested references are still expressed in the
@@ -17969,51 +18921,49 @@ fn execute_program_profiled(
                     ReferenceTarget::Caller { caller_depth, .. } => {
                         rebase_caller_references(value, *caller_depth)?
                     }
-                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => value,
+                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) | ReferenceTarget::Home(_) => value,
                 };
                 registers[*dst as usize] = Some(value);
             }
             VmInstruction::DerefMove { dst, reference } => {
-                let VmValue::Reference { target, fields, .. } = registers[*reference as usize]
-                    .as_ref()
-                    .expect("verified register")
+                let carrier = registers.copy_value(*reference, budget)?;
+                let VmValue::Reference { target, fields, .. } = &carrier
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: *reference });
                 };
-                let value = load_reference_target(&registers, &callers, target, fields, budget)?;
+                let value = match target {
+                    ReferenceTarget::Home(home) => home.take(fields, budget)?,
+                    _ => load_reference_target(&registers, &callers, target, fields, budget)?,
+                };
                 let value = match target {
                     ReferenceTarget::Caller { caller_depth, .. } => {
                         rebase_caller_references(value, *caller_depth)?
                     }
-                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => value,
+                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) | ReferenceTarget::Home(_) => value,
                 };
                 registers[*dst as usize] = Some(value);
-                let capability = registers[*reference as usize].take().expect("verified unique loan");
-                registers[*reference as usize] = Some(VmValue::SuspendedReference(Box::new(capability)));
+                registers[*reference as usize] = Some(VmValue::SuspendedReference(Box::new(carrier)));
             }
             VmInstruction::DerefStore { reference, src } => {
                 registers[*reference as usize] = registers[*reference as usize].take().map(|capability| match capability {
                     VmValue::SuspendedReference(reference) => *reference,
                     reference => reference,
                 });
+                let carrier = registers.copy_value(*reference, budget)?;
+                registers.native_write(*reference);
                 let VmValue::Reference {
                     target,
                     fields,
                     unique: true,
                     ..
-                } = registers[*reference as usize]
-                    .as_ref()
-                    .expect("verified register")
+                } = &carrier
                 else {
                     return Err(VmArtifactError::InvalidRegister {
                         register: *reference,
                     });
                 };
                 let (target, fields) = (target.clone(), fields.clone());
-                let mut replacement = registers[*src as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone();
+                let mut replacement = registers.copy_value(*src, budget)?;
                 // `DerefCopy` rebases references nested inside a value read
                 // from a caller frame into this callee's coordinate system.
                 // Before writing that aggregate back through the same caller
@@ -18561,6 +19511,14 @@ fn execute_program_profiled(
                 arguments,
                 ..
             } => {
+                if let Some(imports) = budget.native_memory.imports.clone() {
+                    let current_depth = depth.saturating_add(callers.len() as u32).saturating_add(1);
+                    registers[*dst as usize] = Some(native_bridge::execute(
+                        program, imports, capability, symbol, &mut registers, arguments, *dst, budget, current_depth,
+                    )?);
+                    pc += 1;
+                    continue;
+                }
                 let Some(host) = host.as_deref_mut() else {
                     return Err(VmArtifactError::HostCallRequiresAuthority {
                         capability: capability.clone(),
@@ -18595,34 +19553,49 @@ fn execute_program_profiled(
                     && handlers.is_empty()
                     && resumption_returns.is_empty()
                     && let Some(profile) = profile.as_deref_mut()
-                    && tail_return_suffix(&function.instructions[pc + 1..], *dst, budget)?
-                    && recyclable_tail_arguments(&registers, arguments, &callers, budget, profile)?
+                    && registers.capture_environment.is_none()
+                    && (tail_return_suffix(&function.instructions[pc + 1..], *dst, budget)?
+                        || tail_cleanup_suffix(function, pc + 1, *dst, &registers, &program.callable_environments, budget)?)
+                    && recyclable_tail_arguments(&registers, &registers.native_homes, arguments, &callers, budget, profile)?
                 {
                     // Clone only the small argument vector before clearing
                     // registers; aggregate contents retain their Arc backing.
                     // Do not run the ordinary call rebasing here: no frame
                     // is pushed, so surviving caller loans must not move.
                     // No source-visible storage destructor is skipped: the
-                    // verified suffix only forwards and returns call_result.
+                    // verified suffix only forwards call_result and may
+                    // inspect already-vacant frame-local cleanup slots.
                     let values: Vec<_> = arguments.iter().map(|argument| {
                         registers[*argument as usize].clone()
                     }).collect();
                     registers.fill(None);
+                    registers.source_storage.clear();
+                    for home in registers.native_homes.values() { home.clear(&[]); }
+                    registers.pending_native.clear();
                     for (index, value) in values.into_iter().enumerate() {
                         registers[index] = value;
+                        registers.native_write(index as u32);
                     }
                     profile.recycled_tail_calls += 1;
                     pc = 0;
                     continue;
                 }
+                let callee_function = program.functions.get(callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: *callee })?;
+                let native_return = registers.wants_native(*dst);
+                let callee_plan = if native_return { budget.native_memory.native_return_plan(callee_function) }
+                    else { budget.native_memory.storage_plan(callee_function) };
                 let values = arguments
                     .iter()
-                    .map(|argument| {
-                        registers[*argument as usize]
-                            .clone()
-                            .ok_or(VmArtifactError::ReadBeforeWrite {
-                                register: *argument,
-                            })
+                    .enumerate()
+                    .map(|(index, argument)| {
+                        // Native parameters still receive their own home. Carry
+                        // resident bytes to that copy without first rebuilding
+                        // every aggregate field as a temporary VM value.
+                        (if callee_plan.layouts[index].is_some() {
+                            registers[*argument as usize].clone()
+                                .ok_or(VmArtifactError::UseAfterMove { register: *argument })
+                        } else { registers.copy_value(*argument, budget) })
                             .and_then(|value| {
                                 transfer_call_frame_value(
                                     &value,
@@ -18640,14 +19613,14 @@ fn execute_program_profiled(
                         limit: budget.limits.max_call_depth,
                     });
                 }
-                let callee_function =
-                    program
-                        .functions
-                        .get(callee)
-                        .ok_or(VmArtifactError::MissingFunction {
-                            definition: *callee,
-                        })?;
-                budget.reserve_allocation(callee_function.registers.len())?;
+                let callee_values = if let Some(profile) = profile.as_deref_mut()
+                    && let Some(values) = spare_registers.get_mut(callee).and_then(Option::take) {
+                    profile.reused_call_register_buffers += 1;
+                    values
+                } else {
+                    budget.reserve_allocation(callee_function.registers.len())?;
+                    vec![None; callee_function.registers.len()]
+                };
                 callers.push(RuntimeProgramCaller {
                     definition,
                     registers: std::mem::take(&mut registers),
@@ -18655,9 +19628,55 @@ fn execute_program_profiled(
                     return_destination: *dst,
                 });
                 definition = *callee;
-                registers = vec![None; callee_function.registers.len()];
+                registers = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
                 for (index, value) in values.into_iter().enumerate() {
                     registers[index] = Some(value);
+                }
+                pc = 0;
+                continue;
+            }
+            VmInstruction::DestroyCallable { dst, value } => {
+                let callable = registers.values[*value as usize].take()
+                    .ok_or(VmArtifactError::UseAfterMove { register: *value })?;
+                let (callee, captures) = match callable {
+                    VmValue::Callable { callee, captures, .. } => (callee, captures),
+                    // Labels and resumptions expose a callable source ABI,
+                    // but carry only a capability into the control engine.
+                    // Disposing the token owns no capture environment and
+                    // must not repeat an already checked Cancel/Leave.
+                    VmValue::Label { .. } | VmValue::Resumption { .. } => {
+                        registers[*dst as usize] = Some(VmValue::Unit);
+                        pc += 1;
+                        continue;
+                    }
+                    _ => return Err(VmArtifactError::NotCallable { register: *value }),
+                };
+                let destructor = program.callable_environments.get(&callee)
+                    .and_then(|environment| environment.destructor);
+                let Some(callee) = destructor else {
+                    registers[*dst as usize] = Some(VmValue::Unit);
+                    pc += 1;
+                    continue;
+                };
+                budget.reserve_value("callable destruction arguments", captures.len())?;
+                let values = captures.take();
+                let callee_function = program.functions.get(&callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: callee })?;
+                if depth.saturating_add(callers.len() as u32).saturating_add(1)
+                    >= budget.limits.max_call_depth {
+                    return Err(VmArtifactError::CallDepthLimit { limit: budget.limits.max_call_depth });
+                }
+                budget.reserve_allocation(callee_function.registers.len())?;
+                callers.push(RuntimeProgramCaller {
+                    definition,
+                    registers: std::mem::take(&mut registers),
+                    pc,
+                    return_destination: *dst,
+                });
+                definition = callee;
+                registers = RuntimeRegisters::for_function(callee_function, budget)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    registers.install_argument(index, value);
                 }
                 pc = 0;
                 continue;
@@ -18666,35 +19685,46 @@ fn execute_program_profiled(
                 dst,
                 callee,
                 captures,
-                ..
+                environment,
             } => {
                 budget.reserve_value("callable captures", captures.len())?;
+                budget.reserve_allocation(captures.len())?;
+                let ownership = (0..captures.len()).map(|index| environment.as_ref().is_some_and(|environment|
+                    matches!(environment.captures[index].mode, VmCaptureMode::Copy | VmCaptureMode::Move)))
+                    .collect::<Vec<_>>();
                 let values = captures
                     .iter()
-                    .map(|capture| {
-                        registers[*capture as usize]
-                            .as_ref()
-                            .ok_or(VmArtifactError::ReadBeforeWrite { register: *capture })
-                            .and_then(|value| freeze_frame_value(value, &registers, &callers))
+                    .enumerate()
+                    .map(|(index, capture)| {
+                        let value = if ownership[index] {
+                            registers.values[*capture as usize].take()
+                                .ok_or(VmArtifactError::UseAfterMove { register: *capture })?
+                        } else {
+                            registers.values[*capture as usize].clone()
+                                .ok_or(VmArtifactError::UseAfterMove { register: *capture })?
+                        };
+                        freeze_frame_value(&value, &registers, &callers)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, *dst)?;
                 registers[*dst as usize] = Some(VmValue::Callable {
                     callee: *callee,
-                    captures: Arc::from(values),
+                    captures: RuntimeCaptureEnvironment::with_ownership(values, ownership),
                     signature,
                 });
             }
             VmInstruction::MakeLabel {
                 dst,
-                brand_owner,
+                brand_owner: _,
                 brand_label,
                 target,
                 destination,
             } => {
                 let signature = register_type(function, *dst)?;
                 registers[*dst as usize] = Some(VmValue::Label {
-                    owner: *brand_owner,
+                    // The lexical brand names the source definition; its
+                    // specialized runtime frame can have a different key.
+                    owner: definition,
                     label: *brand_label,
                     target: *target,
                     destination: *destination,
@@ -18727,12 +19757,20 @@ fn execute_program_profiled(
                             found: arguments.len() as u32,
                         });
                     };
-                    let payload = registers[*argument as usize].clone().ok_or(
-                        VmArtifactError::ReadBeforeWrite {
-                            register: *argument,
-                        },
-                    )?;
+                    let destination_owner = if call_depth == callers.len() { Some(definition) }
+                        else { callers.get(call_depth).map(|caller| caller.definition) };
+                    if call_depth < return_floor || destination_owner != Some(owner) {
+                        return Err(VmArtifactError::HandlerStateMismatch);
+                    }
+                    let payload = transfer_to_ancestor_frame(registers.copy_value(*argument, budget)?,
+                        &registers, &callers, call_depth, budget)?;
+                    abandon_program_handlers(program, &mut handlers, handler_depth,
+                        &mut registers, &mut callers, depth, budget, host)?;
+                    let mut transferred = Some(*argument);
                     while callers.len() > call_depth {
+                        destroy_program_frame(program, definition, &mut registers, &mut callers,
+                            transferred, depth, budget, host)?;
+                        transferred = None;
                         let caller = callers.pop().expect("checked dynamic call depth");
                         definition = caller.definition;
                         registers = caller.registers;
@@ -18746,6 +19784,7 @@ fn execute_program_profiled(
                         },
                     )?;
                     *slot = Some(payload);
+                    registers.native_write(destination);
                     handlers.truncate(handler_depth);
                     // See the standalone interpreter above. Restoring the
                     // captured lexical label prefix abandons every pending
@@ -18766,18 +19805,23 @@ fn execute_program_profiled(
                     },
                 )?;
                 budget.reserve_value("indirect call arguments", value_count)?;
-                let mut values = captures.as_ref().to_vec();
+                let callee_function = program.functions.get(&callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: callee })?;
+                let native_return = registers.wants_native(*dst);
+                let callee_plan = if native_return { budget.native_memory.native_return_plan(callee_function) }
+                    else { budget.native_memory.storage_plan(callee_function) };
+                let mut values = captures.lend_to_invocation();
                 values.extend(
                     arguments
                         .iter()
-                        .map(|argument| {
-                            registers[*argument as usize]
-                                .as_ref()
-                                .expect("verified register")
-                        })
-                        .map(|value| {
+                        .enumerate()
+                        .map(|(index, argument)| {
+                            let value = if callee_plan.layouts[captures.len() + index].is_some() {
+                                registers[*argument as usize].clone()
+                                    .ok_or(VmArtifactError::UseAfterMove { register: *argument })?
+                            } else { registers.copy_value(*argument, budget)? };
                             transfer_call_frame_value(
-                                value,
+                                &value,
                                 &registers,
                                 &callers,
                                 UniqueReferenceTransfer::IntoCallee,
@@ -18792,11 +19836,14 @@ fn execute_program_profiled(
                         limit: budget.limits.max_call_depth,
                     });
                 }
-                let callee_function = program
-                    .functions
-                    .get(&callee)
-                    .ok_or(VmArtifactError::MissingFunction { definition: callee })?;
-                budget.reserve_allocation(callee_function.registers.len())?;
+                let callee_values = if let Some(profile) = profile.as_deref_mut()
+                    && let Some(values) = spare_registers.get_mut(&callee).and_then(Option::take) {
+                    profile.reused_call_register_buffers += 1;
+                    values
+                } else {
+                    budget.reserve_allocation(callee_function.registers.len())?;
+                    vec![None; callee_function.registers.len()]
+                };
                 callers.push(RuntimeProgramCaller {
                     definition,
                     registers: std::mem::take(&mut registers),
@@ -18804,10 +19851,11 @@ fn execute_program_profiled(
                     return_destination: *dst,
                 });
                 definition = callee;
-                registers = vec![None; callee_function.registers.len()];
+                registers = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
                 for (index, value) in values.into_iter().enumerate() {
                     registers[index] = Some(value);
                 }
+                registers.install_captures(captures);
                 pc = 0;
                 continue;
             }
@@ -18824,6 +19872,8 @@ fn execute_program_profiled(
                 destinations,
                 cleanup,
             } => {
+                abandon_program_handlers(program, &mut handlers, *handler_depth as usize,
+                    &mut registers, &mut callers, depth, budget, host)?;
                 pc = complete_pending_leave(
                     &mut registers,
                     &mut handlers,
@@ -18836,6 +19886,7 @@ fn execute_program_profiled(
                         destinations: destinations.clone(),
                         cleanup: cleanup.clone(),
                     },
+                    budget,
                 )?;
                 // See the standalone interpreter above. A branded leave is
                 // terminal with respect to replay clause-return frames.
@@ -18859,11 +19910,39 @@ fn execute_program_profiled(
                 continue;
             }
             VmInstruction::Return { value } => {
-                let value = registers[*value as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone();
-                if !callers.is_empty() {
+                let value = if registers.native_plan.as_ref().is_some_and(|plan| plan.native_return) {
+                    registers[*value as usize].clone().ok_or(VmArtifactError::UseAfterMove { register: *value })?
+                } else { registers.copy_value(*value, budget)? };
+                // A root handler's delimiter can be the current function's
+                // return, even when that function has ordinary callers. Do
+                // not replay those callers' suffixes before returning to the
+                // clause. This is not an exit from the owning frame, so its
+                // capture loan remains installed until its actual return.
+                if let Some(return_to_clause) = resumption_returns.last()
+                    && (callers.len() == return_floor
+                        || return_to_clause.program.as_ref().is_some_and(|saved|
+                            saved.definition == definition && saved.callers.len() == callers.len())) {
+                    if handlers.iter().any(|handler|
+                        !return_to_clause.resumed_handler_ids.contains(&handler.id)) {
+                        return Err(VmArtifactError::HandlerStillActive);
+                    }
+                    let mut return_to_clause = resumption_returns.pop()
+                        .expect("checked clause-return frame exists");
+                    synchronize_saved_source_storage(&mut return_to_clause.registers,
+                        return_to_clause.program.as_mut(), &registers, &callers);
+                    if let Some(program) = return_to_clause.program {
+                        definition = program.definition;
+                        callers = program.callers;
+                    }
+                    registers = return_to_clause.registers;
+                    registers[return_to_clause.dst as usize] = Some(value);
+                    registers.native_write(return_to_clause.dst);
+                    handlers = return_to_clause.handlers;
+                    pc = return_to_clause.pc;
+                    continue;
+                }
+                registers.release_capture_loan(budget)?;
+                if callers.len() > return_floor {
                     // Ancestor handlers remain dynamically active across a
                     // callee return. Only a handler installed by this frame
                     // may make its ordinary return ill-formed.
@@ -18880,34 +19959,26 @@ fn execute_program_profiled(
                         UniqueReferenceTransfer::ToCaller,
                     )?;
                     let caller = callers.pop().expect("checked nonempty call stack");
+                    if profile.is_some() {
+                        // The returned value has already been transferred out.
+                        // Clear every slot before pooling only its Vec backing;
+                        // replacing the frame below releases all other state.
+                        let mut values = std::mem::take(&mut registers.values);
+                        values.fill(None);
+                        spare_registers.entry(definition).or_default().get_or_insert(values);
+                    }
                     definition = caller.definition;
                     registers = caller.registers;
                     registers[caller.return_destination as usize] = Some(value);
+                    registers.native_write(caller.return_destination);
                     pc = caller.pc + 1;
-                    continue;
-                }
-                if let Some(return_to_clause) = resumption_returns.last() {
-                    if handlers
-                        .iter()
-                        .any(|handler| !return_to_clause.resumed_handler_ids.contains(&handler.id))
-                    {
-                        return Err(VmArtifactError::HandlerStillActive);
-                    }
-                    let return_to_clause = resumption_returns
-                        .pop()
-                        .expect("checked clause-return frame exists");
-                    if let Some(program) = return_to_clause.program {
-                        definition = program.definition;
-                        callers = program.callers;
-                    }
-                    registers = return_to_clause.registers;
-                    registers[return_to_clause.dst as usize] = Some(value);
-                    handlers = return_to_clause.handlers;
-                    pc = return_to_clause.pc;
                     continue;
                 }
                 if !handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
+                }
+                if let Some(borrowed) = borrowed_callers.as_deref_mut() {
+                    *borrowed = callers;
                 }
                 return Ok(value);
             }
@@ -19021,11 +20092,79 @@ impl ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resumption_storage_sync_preserves_allocations_not_register_spellings() {
+        use super::*;
+        let mut saved = RuntimeRegisters {
+            values: vec![Some(VmValue::I64(1)), Some(VmValue::I64(2)), Some(VmValue::I64(3)), None],
+            source_storage: BTreeMap::from([(0, 10), (1, 11), (3, 13)]),
+            ..Default::default()
+        };
+        let mut current = RuntimeRegisters {
+            values: vec![Some(VmValue::I64(42)), Some(VmValue::I64(99)), Some(VmValue::I64(100)), Some(VmValue::I64(7))],
+            source_storage: BTreeMap::from([(0, 10), (1, 99), (3, 13)]),
+            ..Default::default()
+        };
+        saved.synchronize_source_storage(&current);
+        assert!(matches!(saved[0], Some(VmValue::I64(42))));
+        assert!(matches!(saved[1], Some(VmValue::I64(2))), "a fresh allocation must not overwrite the captured one");
+        assert!(matches!(saved[2], Some(VmValue::I64(3))), "SSA temporaries belong to their saved execution");
+        assert!(matches!(saved[3], Some(VmValue::I64(7))), "initialization is shared even when the old slot was empty");
+        current[0] = None;
+        saved.synchronize_source_storage(&current);
+        assert!(saved[0].is_none(), "a moved resident must not be revived by restoration");
+    }
+
+    #[test]
+    fn partial_enum_layout_allows_tag_inspection_but_not_reading_a_hole() {
+        use super::*;
+        let definition = DefKey(Digest::of_bytes(b"partial-enum-pattern"));
+        let value = VmValue::Enum {
+            definition,
+            signature: VmType::Nominal { definition, arguments: vec![] },
+            variant: 0,
+            fields: vec![VmValue::Uninitialized(VmType::I64), VmValue::I64(42)].into(),
+        };
+        let tag = VmPattern::Enum {
+            definition, variant: 0, field_types: vec![VmType::I64, VmType::I64],
+            field_count: 2, fields: vec![],
+        };
+        assert!(matches_pattern(&value, &tag));
+        let VmPattern::Enum { definition, variant, field_types, field_count, .. } = tag else { unreachable!() };
+        let hole = VmPattern::Enum { definition, variant, field_types, field_count,
+            fields: vec![VmPatternField { index: 0, ty: VmType::I64, pattern: VmPattern::Any }],
+        };
+        assert!(!matches_pattern(&value, &hole));
+        assert!(!aggregate_matches_layout(&[VmValue::Uninitialized(VmType::Bool)], &[VmType::I64]));
+    }
     use super::*;
     use crate::{MirBlock, MirScopeId, PrimitiveRole};
 
     fn cow_budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false, limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn capture_loans_transfer_authority_and_return_only_residual_slots() {
+        let environment = RuntimeCaptureEnvironment::new(vec![VmValue::Tuple(
+            vec![VmValue::I64(11), VmValue::I64(22)].into(),
+        )]);
+        let mut budget = cow_budget();
+        let values = environment.lend_to_invocation();
+        assert!(!storage_is_initialized(environment.values.borrow().first(), &[]));
+        let mut registers = RuntimeRegisters {
+            values: values.into_iter().map(Some).collect(), ..RuntimeRegisters::default()
+        };
+        registers.install_captures(environment.clone());
+        let moved = take_storage_projection(&mut registers, 0, &[0], &VmType::I64, &mut budget).unwrap();
+        assert!(matches!(moved, VmValue::I64(11)));
+        registers.release_capture_loan(&mut budget).unwrap();
+        assert!(registers.values[0].is_none());
+        assert!(!storage_is_initialized(environment.values.borrow().first(), &[0]));
+        assert!(storage_is_initialized(environment.values.borrow().first(), &[1]));
+        // Releasing an already-ended frame loan cannot republish stale slots.
+        registers.release_capture_loan(&mut budget).unwrap();
+        assert!(storage_is_initialized(environment.values.borrow().first(), &[1]));
     }
 
     fn cow_owner() -> VmValue {
@@ -19270,6 +20409,85 @@ mod tests {
     }
 
     #[test]
+    fn authoring_cleanup_suffix_proves_only_vacant_paths_and_preserves_the_unknown_result() {
+        let definition = DefKey(Digest::of_bytes(b"tail-cleanup-proof"));
+        let mut function = VmFunction {
+            definition, safety: Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers: vec![VmType::I64, VmType::I64, VmType::Bool, VmType::I64],
+            instructions: vec![
+                VmInstruction::IsInitialized { dst: 2, base: 1, fields: vec![] },
+                VmInstruction::BranchBool { condition: 2, then_target: 2, else_target: 3 },
+                VmInstruction::Call { dst: 3, callee: definition, arguments: vec![1] },
+                VmInstruction::Move { dst: 3, src: 0 },
+                VmInstruction::Return { value: 3 },
+            ],
+        };
+        let empty = [None, None, None, None];
+        let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(), unsafe_execution: false,
+            limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+        };
+        let environments = BTreeMap::new();
+        assert!(tail_cleanup_suffix(&function, 0, 0, &empty, &environments, &mut budget).unwrap());
+        assert_eq!(budget.allocated_elements, 3);
+        let live = [None, Some(VmValue::I64(42)), None, None];
+        assert!(!tail_cleanup_suffix(&function, 0, 0, &live, &environments, &mut budget).unwrap());
+        function.instructions[0] = VmInstruction::IsInitialized { dst: 2, base: 0, fields: vec![] };
+        assert!(!tail_cleanup_suffix(&function, 0, 0, &empty, &environments, &mut budget).unwrap(),
+            "the call result is unknown, not its old register content");
+        function.instructions[0] = VmInstruction::IsInitialized { dst: 2, base: 1, fields: vec![] };
+        function.instructions[3] = VmInstruction::Jump { target: 0 };
+        assert!(!tail_cleanup_suffix(&function, 0, 0, &empty, &environments, &mut budget).unwrap(),
+            "an endless cleanup cycle is not a return suffix");
+        function.instructions[3] = VmInstruction::Move { dst: 3, src: 0 };
+        function.instructions[4] = VmInstruction::Return { value: 1 };
+        assert!(!tail_cleanup_suffix(&function, 0, 0, &live, &environments, &mut budget).unwrap());
+        budget.limits.max_allocation_elements = budget.allocated_elements;
+        assert!(matches!(tail_cleanup_suffix(&function, 0, 0, &empty, &environments, &mut budget),
+            Err(VmArtifactError::AllocationLimit { .. })));
+        budget.limits.max_allocation_elements = u64::MAX;
+        budget.limits.max_instructions = budget.instructions;
+        assert!(matches!(tail_cleanup_suffix(&function, 0, 0, &empty, &environments, &mut budget),
+            Err(VmArtifactError::InstructionLimit { .. })));
+    }
+
+    #[test]
+    fn authoring_tail_cleanup_never_erases_registered_capture_destruction() {
+        let callee = DefKey(Digest::of_bytes(b"tail-callable-cleanup"));
+        let signature = VmType::Callable {
+            safety: Safety::Safe, parameters: vec![], result: Box::new(VmType::I64),
+            effects: Box::default(),
+        };
+        let function = VmFunction {
+            definition: callee, safety: Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers: vec![VmType::I64, signature.clone(), VmType::Bool, VmType::Unit],
+            instructions: vec![
+                VmInstruction::IsInitialized { dst: 2, base: 1, fields: vec![] },
+                VmInstruction::BranchBool { condition: 2, then_target: 2, else_target: 3 },
+                VmInstruction::DestroyCallable { dst: 3, value: 1 },
+                VmInstruction::Return { value: 0 },
+            ],
+        };
+        let registers = [None, Some(VmValue::Callable {
+            callee, captures: RuntimeCaptureEnvironment::new(vec![]), signature,
+        }), None, None];
+        let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(), unsafe_execution: false,
+            limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+        };
+        let mut environments = BTreeMap::new();
+        assert!(tail_cleanup_suffix(&function, 0, 0, &registers, &environments, &mut budget).unwrap());
+        environments.insert(callee, VmCaptureEnvironment {
+            owner: callee, callable: 0, instance: None, captures: vec![],
+            destructor: Some(crate::mir::callable_environment_destructor_definition(callee)),
+        });
+        assert!(!tail_cleanup_suffix(&function, 0, 0, &registers, &environments, &mut budget).unwrap());
+        assert!(matches!(&registers[1], Some(VmValue::Callable { .. })), "proof inspection cannot consume the live closure");
+    }
+
+    #[test]
     fn authoring_tail_recycling_rejects_nested_frame_capabilities() {
         let definition = DefKey(Digest::of_bytes(b"tail-safety"));
         let capabilities = vec![
@@ -19298,7 +20516,7 @@ mod tests {
         for capability in capabilities {
             let registers = vec![Some(VmValue::Callable {
                 callee: definition,
-                captures: Arc::from([VmValue::Tuple(Arc::from([capability]))]),
+                captures: RuntimeCaptureEnvironment::new(vec![VmValue::Tuple(Arc::from([capability]))]),
                 signature: VmType::Unit,
             })];
             let mut budget = ExecutionBudget {
@@ -19307,7 +20525,7 @@ mod tests {
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             let mut profile = VmAuthoringProfile::default();
-            assert!(!recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut profile).unwrap());
+            assert!(!recyclable_tail_arguments(&registers, &BTreeMap::new(), &[0], &[], &mut budget, &mut profile).unwrap());
             assert_eq!(profile.inspected_tail_argument_elements, 3);
         }
     }
@@ -19325,7 +20543,7 @@ mod tests {
                 let captured = matches!(&target, ReferenceTarget::Captured(_));
                 let registers = vec![Some(VmValue::Callable {
                     callee: definition,
-                    captures: Arc::from([VmValue::Tuple(Arc::from([VmValue::Reference {
+                    captures: RuntimeCaptureEnvironment::new(vec![VmValue::Tuple(Arc::from([VmValue::Reference {
                         target: target.clone(), fields: Arc::from([]), unique, referent: VmType::I64,
                     }]))]),
                     signature: VmType::Unit,
@@ -19336,7 +20554,7 @@ mod tests {
                     limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
                 };
                 let mut profile = VmAuthoringProfile::default();
-                assert_eq!(recyclable_tail_arguments(&registers, &[0], &callers, &mut budget, &mut profile).unwrap(),
+                assert_eq!(recyclable_tail_arguments(&registers, &BTreeMap::new(), &[0], &callers, &mut budget, &mut profile).unwrap(),
                     !(captured && unique));
                 assert_eq!(profile.inspected_tail_argument_elements, if !captured { 4 } else if !unique { 5 } else { 3 });
             }
@@ -19361,7 +20579,7 @@ mod tests {
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             let mut profile = VmAuthoringProfile::default();
-            assert!(!recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut profile).unwrap());
+            assert!(!recyclable_tail_arguments(&registers, &BTreeMap::new(), &[0], &[], &mut budget, &mut profile).unwrap());
             assert_eq!(profile.inspected_tail_argument_elements, 3);
         }
     }
@@ -19369,7 +20587,7 @@ mod tests {
     fn tail_caller(value: VmValue) -> RuntimeProgramCaller {
         RuntimeProgramCaller {
             definition: DefKey(Digest::of_bytes(b"tail-owner")),
-            registers: vec![None, Some(value)], pc: 0, return_destination: 0,
+            registers: RuntimeRegisters { values: vec![None, Some(value)], ..Default::default() }, pc: 0, return_destination: 0,
         }
     }
 
@@ -19389,7 +20607,7 @@ mod tests {
         ];
         for capability in capabilities {
             let callers = vec![tail_caller(VmValue::Callable {
-                callee: definition, captures: Arc::from([VmValue::Tuple(Arc::from([capability]))]),
+                callee: definition, captures: RuntimeCaptureEnvironment::new(vec![VmValue::Tuple(Arc::from([capability]))]),
                 signature: VmType::Unit,
             })];
             let registers = vec![Some(VmValue::Reference {
@@ -19402,7 +20620,7 @@ mod tests {
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             let mut profile = VmAuthoringProfile::default();
-            assert!(!recyclable_tail_arguments(&registers, &[0], &callers, &mut budget, &mut profile).unwrap());
+            assert!(!recyclable_tail_arguments(&registers, &BTreeMap::new(), &[0], &callers, &mut budget, &mut profile).unwrap());
             assert_eq!(profile.inspected_tail_argument_elements, 4);
         }
     }
@@ -19416,12 +20634,12 @@ mod tests {
             limits: VmExecutionLimits { max_instructions: 0, ..Default::default() },
             instructions: 0, allocated_elements: 0,
         };
-        assert!(matches!(recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut VmAuthoringProfile::default()),
+        assert!(matches!(recyclable_tail_arguments(&registers, &BTreeMap::new(), &[0], &[], &mut budget, &mut VmAuthoringProfile::default()),
             Err(VmArtifactError::InstructionLimit { limit: 0 })));
         budget.limits.max_instructions = 100;
         budget.limits.max_allocation_elements = 0;
         budget.allocated_elements = 0;
-        assert!(matches!(recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut VmAuthoringProfile::default()),
+        assert!(matches!(recyclable_tail_arguments(&registers, &BTreeMap::new(), &[0], &[], &mut budget, &mut VmAuthoringProfile::default()),
             Err(VmArtifactError::AllocationLimit { limit: 0 })));
     }
 

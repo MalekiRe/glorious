@@ -30,10 +30,10 @@ fn row(db: &Db, session: registry::Session, revision: identity::RevisionId, pare
     handle registry::request_traces(db, session) {
         Result::Ok(Result::Ok(traces)) => handle Slice::len(&traces) == 1 {
             false => 0, true => {
-                let trace = *Slice::get_unchecked(traces, 0);
+                let trace = Slice::get_unchecked(traces, 0);
                 yes(identity::same_revision(trace.revision, revision)) * yes(identity::equal(trace.fingerprint, fingerprint))
                     * count(Vec::len(&trace.dependencies), 0) * handle trace.node {
-                        Node::Input(key) => yes(identity::equal(key.digest, file().digest)) * trace_status(trace.status, parent, status), _ => 0,
+                        Node::Input(key) => yes(identity::equal(key.digest, file().digest)) * trace_status(&trace.status, parent, status), _ => 0,
                     }
             },
         }, _ => 0,
@@ -42,12 +42,12 @@ fn row(db: &Db, session: registry::Session, revision: identity::RevisionId, pare
 fn same_parent(actual: identity::RevisionId, parent: Option<identity::RevisionId>) -> i64 {
     handle parent { Result::Err(_) => 0, Result::Ok(parent) => yes(identity::same_revision(actual, parent)) }
 }
-fn trace_status(value: dependency::Status, parent: Option<identity::RevisionId>, status: usize) -> i64 {
-    handle value {
+fn trace_status(value: &dependency::Status, parent: Option<identity::RevisionId>, status: usize) -> i64 {
+    handle *value {
         dependency::Status::Cold => count(status, 0),
         dependency::Status::Green { parent: actual } => count(status, 1) * same_parent(actual, parent),
-        dependency::Status::Red { parent: actual, first_changed: changed } => count(status, 2) * same_parent(actual, parent)
-            * handle changed { Node::Input(key) => yes(identity::equal(key.digest, file().digest)), _ => 0 },
+        dependency::Status::Red { parent: actual, first_changed: Node::Input(key) } => count(status, 2) * same_parent(actual, parent)
+            * yes(identity::equal(key.digest, file().digest)),
         _ => 0,
     }
 }

@@ -8,8 +8,9 @@ usage: tooling/ram-gate.sh <command> [args...]
 
 `cargo build` and `cargo check` deliberately pass through: compilation may run
 freely. Every `cargo test` invocation must use this gate; at most four may
-run concurrently across Grandiose worktrees and each receives a 16 GiB
+run concurrently across Grandiose worktrees and each receives a 24 GiB
 virtual-memory limit. Other direct commands retain the 8 GiB limit.
+Cargo tests default to 12 workers; RUST_TEST_THREADS can override this.
 USAGE
     exit 2
 }
@@ -24,7 +25,7 @@ fi
 
 readonly lock_dir="${TMPDIR:-/tmp}/grandiose-ram-gate"
 readonly direct_ram_kib=$((8 * 1024 * 1024))
-readonly cargo_test_ram_kib=$((16 * 1024 * 1024))
+readonly cargo_test_ram_kib=$((24 * 1024 * 1024))
 mkdir -p "$lock_dir"
 
 # Each separately locked file is a semaphore slot. Unlike a counter, flock
@@ -36,7 +37,7 @@ while :; do
         if flock -n "$lock_fd"; then
             export G1_TEST_MEMORY_CAPPED=1
             if [[ $1 == cargo && ${2:-} == test ]]; then
-                export RUST_TEST_THREADS="${RUST_TEST_THREADS:-1}"
+                export RUST_TEST_THREADS="${RUST_TEST_THREADS:-12}"
                 ulimit -v "$cargo_test_ram_kib"
             elif [[ $1 != cargo ]]; then
                 ulimit -v "$direct_ram_kib"

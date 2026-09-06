@@ -306,8 +306,11 @@ fn transition(work: &mut Work, limits: Limits, controls: &mut operation::Control
     }
 }
 fn checked(builder: &mut Builder, controls: &mut operation::Controls) -> Result<Event, Failure> {
-    handle control(operation::charge(&mut *controls, 1)) {
-        Result::Err(error) => Result::Err(error),
+    // Charge before inspecting the builder as before, but construct the
+    // public failure only on rejection. A successful tick needs no temporary
+    // Result carrying the owning ManifestError variant and its cleanup.
+    handle operation::charge(&mut *controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
         Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
             Result::Err(_) => Result::Err(Failure::Closed), Result::Ok(work) => transition(work, builder.limits, controls),
         },

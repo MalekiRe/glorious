@@ -39,6 +39,9 @@ pub struct Policy { validate_spans: Bool, error_limit: Option<usize>, input_fing
 pub enum Failure { Closed, Busy, Capacity, Invariant, Control(operation::Failure) }
 pub enum Event { Continue, Validate(Span), Ready }
 pub struct Batch { private values: Vec<CompileDiagnostic> }
+pub impl Clone for Batch {
+    clone(value: &Batch) -> Batch { Batch { values: Clone::clone(&value.values) } }
+}
 pub struct Builder { private limits: Limits, private work: Option<Work> }
 pub impl Use<[0, 1]> for Builder {}
 enum Order { Identity, Presentation }
@@ -252,7 +255,10 @@ fn related(work: &mut Work, item: usize, edge: usize) -> Result<Event, Failure> 
     let value = Vec::get_unchecked(&work.values, item);
     handle Vec::get(&value.related, edge) {
         Result::Err(_) => next(work, Phase::Primary { item: item + 1 }),
-        Result::Ok(related) => await_span(work, item, edge + 1, related.span),
+        Result::Ok(related) => {
+            let span = related.span;
+            await_span(work, item, edge + 1, span)
+        },
     }
 }
 fn valid_span(span: Span, length: Option<u32>) -> Bool {
@@ -326,8 +332,7 @@ fn sort_values(work: &mut Work, order: Order, outer: usize, inner: usize) -> Res
     }
 }
 fn replace_output(work: &mut Work) -> () {
-    let output = work.output;
-    (*work).output = Vec::new();
+    let output = replace(&mut work.output, Vec::new());
     (*work).values = output;
 }
 fn same_last(output: &Vec<CompileDiagnostic>, value: &CompileDiagnostic) -> Bool {

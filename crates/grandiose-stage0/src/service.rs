@@ -2051,7 +2051,9 @@ impl StageZeroCompiler {
                 diagnostics.extend(core_validation.iter().map(|diagnostic| {
                     CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
                 }));
-                let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+                let flow = PlaceFlow::analyze_with_interface_and_bounds(
+                    &core, &signatures, &ambient_projection_bounds,
+                );
                 diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
                         diagnostic.code,
@@ -2221,7 +2223,9 @@ impl StageZeroCompiler {
                     diagnostics.extend(core_validation.iter().map(|diagnostic| {
                         CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
                     }));
-                    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+                    let flow = PlaceFlow::analyze_with_interface_and_bounds(
+                        &core, &signatures, &ambient_projection_bounds,
+                    );
                     diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
                             diagnostic.code,
@@ -2337,12 +2341,38 @@ impl StageZeroCompiler {
             let caller_arguments = materialization_body_arguments(&caller, &signatures)
                 .map_err(|message| failed(input_fingerprint,
                     vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))?;
+            let direct_callees = body.expressions.iter().filter_map(|expression| match &expression.kind {
+                crate::CoreKind::Call { callee, .. } => Some(*callee),
+                _ => None,
+            }).collect::<BTreeSet<_>>();
             // Implicit destruction is a real call edge, even though source
             // Core contains no explicit invocation of the selected hook.
             // Discover it under the same concrete substitution as body calls.
+            let mut cleanup_normalization = TraitSolver::new(&signatures);
             for ty in body.parameters.iter().map(|(_, ty)| ty)
-                .chain(body.expressions.iter().map(|expression| &expression.ty)) {
-                if let Some(glue) = destruction.discover(&specialize_type(ty, &caller_arguments))
+                .chain(body.expressions.iter().enumerate().filter_map(|(index, expression)| {
+                    // A direct-call callee is declaration evidence, not a
+                    // first-class environment requiring an owned destructor.
+                    (!direct_callees.contains(&crate::CoreId(index as u32))
+                        || !matches!(expression.kind, crate::CoreKind::Function { .. } | crate::CoreKind::TraitMethod { .. }))
+                        .then_some(&expression.ty)
+                }))
+                .chain(body.expressions.iter().flat_map(|expression| match &expression.kind {
+                    crate::CoreKind::Closure { environment, .. } => environment.captures.iter().map(|capture| &capture.ty).collect::<Vec<_>>(),
+                    _ => vec![],
+                })) {
+                // Frame cleanup names the executable glue itself, including
+                // for callable owners whose ordinary structural cleanup can
+                // be inlined. Normalize associated rows exactly as the later
+                // MIR instance does, before admitting that demanded edge.
+                let specialized = specialize_type(ty, &caller_arguments);
+                // Discovery is not the source diagnostic frontier. An open
+                // or invalid projection must still receive the existing
+                // semantic/materialization diagnostic rather than an early
+                // invariant error from this implicit-edge walk.
+                let ty = normalize_materialized_type(&specialized, &mut cleanup_normalization)
+                    .unwrap_or(specialized);
+                if let Some(glue) = destruction.discover(&ty)
                     .map_err(|message| failed(input_fingerprint,
                         vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
                     instance_graph.discover_callee(&caller, glue, limits).map_err(|error| failed(input_fingerprint,
@@ -2350,19 +2380,28 @@ impl StageZeroCompiler {
                         &source_lengths))?;
                 }
             }
+            // Native-visible pointees/referents need their concrete source
+            // operations even when this body never owns or destroys a T.
+            for expression in &body.expressions {
+                if !matches!(&expression.kind, crate::core::CoreKind::Function { host_import: Some(_), .. }) { continue; }
+                let roots = [specialize_type(&expression.ty, &caller_arguments)];
+                let residents = crate::mir::native_contract_residents(&roots, &signatures)
+                    .map_err(|message| failed(input_fingerprint,
+                        vec![CompileDiagnostic::invariant("G6005", message)], &source_lengths))?;
+                for ty in residents {
+                    if let Some(glue) = destruction.discover(&ty).map_err(|message| failed(input_fingerprint,
+                        vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
+                        instance_graph.discover_callee(&caller, glue, limits).map_err(|error| failed(input_fingerprint,
+                            vec![CompileDiagnostic::resource("G7031", format!("native destruction instance discovery limit: {error:?}"))],
+                            &source_lengths))?;
+                    }
+                }
+            }
             // A direct call owns its callable child in Core. Process that
             // child through the call below, rather than once as a first-class
             // function value and again as the call's callee. Retaining
             // standalone callable values here is still essential: a value
             // can flow through a closure or aggregate before invocation.
-            let direct_callees = body
-                .expressions
-                .iter()
-                .filter_map(|expression| match &expression.kind {
-                    crate::core::CoreKind::Call { callee, .. } => Some(*callee),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>();
             for (index, expression) in body.expressions.iter().enumerate() {
                 // An implementation head can introduce binders which do not
                 // occur in the trait relation (`impl<T, U> Trait<T> for
@@ -2827,7 +2866,7 @@ fn materialize_concrete_instances(
         specialize_mir_local_types(&mut specialized, &body_arguments);
         normalize_materialized_associated_projections(&mut specialized, signatures)?;
         materialize_deferred_scalar_operations(&mut specialized)?;
-        register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
+        register_specialized_nominal_copy_descriptors(&mut specialized, signatures)?;
         targets.insert(key.clone(), executable);
         functions.insert(executable, specialized);
         materialize_lifted_callable_instances(
@@ -2839,11 +2878,13 @@ fn materialize_concrete_instances(
         )?;
         instances.insert(executable, MirInstance { key, executable });
     }
-    let glue_definitions = instances.iter().filter_map(|(definition, instance)|
+    let mut glue_definitions = instances.iter().filter_map(|(definition, instance)|
         crate::destruction::is_glue(&instance.key).then_some(*definition)).collect::<BTreeSet<_>>();
+    glue_definitions.extend(destruction.seal_callable_environments(functions)?);
     for function in functions.values_mut() {
         if !glue_definitions.contains(&function.definition) {
             destruction.elaborate(function)?;
+            destruction.seal_native_operations(function)?;
         }
     }
     let mut unmaterialized_trait_calls = BTreeMap::new();
@@ -3128,7 +3169,7 @@ fn materialize_lifted_callable_instances(
             specialize_mir_local_types(&mut specialized, body_arguments);
             normalize_materialized_associated_projections(&mut specialized, signatures)?;
             materialize_deferred_scalar_operations(&mut specialized)?;
-            register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
+            register_specialized_nominal_copy_descriptors(&mut specialized, signatures)?;
             functions.insert(target, specialized);
             pending.push(target);
         }
@@ -3692,8 +3733,8 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
 pub(crate) fn register_specialized_nominal_copy_descriptors(
     function: &mut MirFunction,
     signatures: &ElaboratedInterface,
-) {
-    let roots = function
+) -> Result<(), String> {
+    let mut roots = function
         .locals
         .iter()
         .map(|local| local.ty.clone())
@@ -3702,6 +3743,14 @@ pub(crate) fn register_specialized_nominal_copy_descriptors(
             match instruction { MirInstruction::MemoryIntrinsic { types, .. } => types.as_slice(), _ => &[] }
         }).cloned())
         .collect::<Vec<_>>();
+    let native_roots = function.blocks.iter().flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            MirInstruction::HostCall { parameters, result, .. } => Some((parameters, result)),
+            _ => None,
+        })
+        .flat_map(|(parameters, result)| parameters.iter().chain(std::iter::once(result)))
+        .cloned().collect::<Vec<_>>();
+    roots.extend(crate::mir::native_contract_nominals(&native_roots, signatures)?);
     let mut building = vec![];
     for root in roots {
         register_specialized_nominal_copy_type(&root, function, signatures, &mut building);
@@ -3720,6 +3769,7 @@ pub(crate) fn register_specialized_nominal_copy_descriptors(
         }
     }
     function.nominal_copy_descriptors = canonical;
+    Ok(())
 }
 
 fn register_specialized_nominal_copy_type(
@@ -3784,6 +3834,10 @@ fn register_specialized_nominal_copy_type(
             let Some(variants) = variants else {
                 return;
             };
+            let Some(source_contract) = signatures.definitions.get(definition)
+                .and_then(|header| crate::signature::nominal_contract_fingerprint(*definition, header)) else {
+                return;
+            };
             building.push(key);
             for variant in &variants {
                 for field in variant {
@@ -3806,6 +3860,7 @@ fn register_specialized_nominal_copy_type(
                 .nominal_copy_descriptors
                 .push(crate::MirNominalCopyDescriptor {
                     definition: *definition,
+                    source_contract,
                     is_enum: matches!(signatures.definitions.get(definition),
                         Some(ElaboratedHeader::Nominal { layout: crate::signature::ElaboratedNominalLayout::Enum(_), .. })),
                     arguments: arguments.clone(),
@@ -4502,12 +4557,19 @@ fn reachable_function_keys(
         let Some(function) = functions.get(&definition) else {
             continue;
         };
+        pending.extend(function.control.frame_cleanup.iter().map(|action| action.destructor));
         for block in &function.blocks {
             for instruction in &block.instructions {
                 if let crate::MirInstruction::Call { callee, .. }
                 | crate::MirInstruction::MakeCallable { callee, .. } = instruction
                 {
                     pending.insert(*callee);
+                }
+                if let crate::MirInstruction::HostCall { resident_operations, .. } = instruction {
+                    pending.extend(resident_operations.iter().filter_map(|(_, destructor)| *destructor));
+                }
+                if let crate::MirInstruction::MakeCallable { environment: Some(environment), .. } = instruction {
+                    pending.extend(environment.destructor);
                 }
             }
         }
@@ -5013,6 +5075,8 @@ mod tests {
                         dst: MirLocal(0),
                         capability: "test".into(),
                         symbol: "specialized".into(),
+                        source_contract: Digest::of_bytes(b"specialized-host-contract"),
+                        resident_operations: vec![],
                         parameters: vec![generic.clone()],
                         result: generic.clone(),
                         arguments: vec![],
@@ -5024,6 +5088,7 @@ mod tests {
                         generic_arguments: vec![],
                         trait_instance: None,
                         environment: Some(MirCaptureEnvironment {
+                            destructor: None,
                             brand: EnvironmentBrand {
                                 owner: key("generic-owner"),
                                 callable: CallableId(0),

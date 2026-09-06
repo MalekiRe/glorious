@@ -4025,6 +4025,88 @@ fn service_lowers_word_boolean_operators_as_short_circuit_cfg() {
 }
 
 #[test]
+fn service_lowers_nested_lazy_boolean_values_in_strict_contexts() {
+    for expression in [
+        "a and b and c", "a or b or c", "(a or b) and c", "a or (b and c)",
+    ] {
+        for mask in 0..8 {
+            let a = mask & 1 != 0;
+            let b = mask & 2 != 0;
+            let c = mask & 4 != 0;
+            let expected = match expression {
+                "a and b and c" => a && b && c,
+                "a or b or c" => a || b || c,
+                "(a or b) and c" => (a || b) && c,
+                _ => a || (b && c),
+            };
+            for body in [
+                expression.to_owned(),
+                format!("let value = {expression}; value"),
+                format!("identity({expression})"),
+                format!("let select = (ignored: Bool) -> Bool {{ {expression} }}; select(true)"),
+                format!("handle {expression} {{ true => true, false => false }}"),
+                format!("let pair = ({expression}, true); handle pair {{ (value, _) => value }}"),
+            ] {
+                let source = format!(r#"
+                    fn identity(value: Bool) -> Bool {{ value }}
+                    fn check(a: Bool, b: Bool, c: Bool) -> Bool {{ {body} }}
+                    pub fn main() -> Bool {{ check({a}, {b}, {c}) }}
+                "#);
+                let outcome = StageZeroCompiler::new().compile(request(&source))
+                    .unwrap_or_else(|error| panic!("{body}, mask {mask}: {error:?}"));
+                assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+                let program = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+                assert_eq!(program.run_bool().unwrap(), expected, "{body}, mask {mask}");
+            }
+        }
+    }
+}
+
+#[test]
+fn service_nested_lazy_boolean_values_preserve_order_and_skip_traps() {
+    for mask in 0..8 {
+        let a = mask & 1 != 0;
+        let b = mask & 2 != 0;
+        let c = mask & 4 != 0;
+        let mut trace = 12;
+        if a { trace = trace * 10 + 3; }
+        if !(a && b) { trace = trace * 10 + 4; }
+        trace = trace * 10 + 5;
+        let source = format!(r#"
+            fn mark(trace: &mut i64, digit: i64, result: Bool) -> Bool {{
+                *trace = *trace * 10 + digit; result
+            }}
+            fn accept(first: Bool, selected: Bool, last: Bool) -> Bool {{ selected }}
+            fn check(a: Bool, b: Bool, c: Bool) -> i64 {{
+                let trace = 0;
+                let result = accept(mark(&mut trace, 1, true),
+                    (mark(&mut trace, 2, a) and mark(&mut trace, 3, b))
+                        or mark(&mut trace, 4, c),
+                    mark(&mut trace, 5, true));
+                trace * 10 + handle result {{ true => 1, false => 0 }}
+            }}
+            pub fn main() -> i64 {{ check({a}, {b}, {c}) }}
+        "#);
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        let program = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+        assert_eq!(program.run_i64().unwrap(), trace * 10 + i64::from((a && b) || c));
+    }
+    for expression in [
+        "a and b and (1 / 0 == 0)",
+        "(a and (1 / 0 == 0)) or b",
+        "false and (true or (1 / 0 == 0))",
+        "true and (a and (1 / 0 == 0))",
+        "handle b { true => a and (1 / 0 == 0), false => true }",
+        "a and (handle b { true => 1 / 0 == 0, false => true })",
+    ] {
+        let source = format!("fn check(a: Bool, b: Bool) -> Bool {{ let selected = {expression}; selected }} pub fn main() -> Bool {{ check(false, true) }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        let program = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+        assert_eq!(program.run_bool().unwrap(), expression == "(a and (1 / 0 == 0)) or b", "{expression}");
+    }
+}
+
+#[test]
 fn service_exposes_canonical_verified_vm_program_bytes_for_external_tools() {
     let artifact = StageZeroCompiler::new()
         .compile(request(
@@ -4918,19 +5000,12 @@ fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler
     assert_eq!(selected_whole.run_i64().unwrap(), 42);
     assert_eq!(selected_whole_decoded.run_i64().unwrap(), 42);
 
-    // A returned callable may not retain an external `&mut`: its creator
-    // frame is gone before indirect invocation, so the VM must reject the
-    // artifact rather than severing the write-back target.
-    let unique_root = "use facade::capture_unique; pub fn main() -> i64 { let value = 41; let closure = capture_unique(&mut value); closure() }";
-    let Err(grandiose_stage0::ServiceError::Failed(unique_diagnostics)) =
-        StageZeroCompiler::new().compile(world(unique_root, provider))
-    else {
-        panic!("a returned facade closure unexpectedly retained an external unique borrow");
-    };
-    assert!(
-        unique_diagnostics.iter().any(|diagnostic| diagnostic.code == "G7005"),
-        "unique closure escape must fail at the verified VM boundary: {unique_diagnostics:#?}"
-    );
+    // Native-backed checked references retain the caller's actual storage
+    // after the closure's creator frame returns. Verify write-back, not just
+    // the closure's returned scalar.
+    let unique_root = "use facade::capture_unique; pub fn main() -> i64 { let value = 41; { let closure = capture_unique(&mut value); closure(); }; value }";
+    let unique = StageZeroCompiler::new().compile(world(unique_root, provider)).unwrap().artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&unique.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
 
     // A later provider revision that selects Drop makes the old partial move
     // illegal. No rejected child product may disturb the frozen legal facade
@@ -11600,7 +11675,7 @@ fn service_dynamic_label_rejoin_returns_a_shared_reference_closure() {
 }
 
 #[test]
-fn service_vm_rejects_unique_reference_closure_escape_across_dynamic_label_rejoin() {
+fn service_vm_preserves_a_native_home_unique_capture_across_dynamic_label_rejoin() {
     let source = r#"
         effect Ask { [1, 1] ask(value: i64) -> i64; }
         pub fn make(outer: &mut i64) -> () -> i64 {
@@ -11631,16 +11706,10 @@ fn service_vm_rejects_unique_reference_closure_escape_across_dynamic_label_rejoi
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(matches!(
-        artifact.run_i64(),
-        Err(grandiose_stage0::VmArtifactError::UnsupportedEscapingUniqueReference)
-    ));
+    assert_eq!(artifact.run_i64().unwrap(), 142);
     let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
     assert_eq!(decoded.fingerprint(), artifact.fingerprint());
-    assert!(matches!(
-        decoded.run_i64(),
-        Err(grandiose_stage0::VmArtifactError::UnsupportedEscapingUniqueReference)
-    ));
+    assert_eq!(decoded.run_i64().unwrap(), 142);
 }
 
 #[test]
@@ -12226,8 +12295,9 @@ fn service_rejects_double_use_of_a_callable_extracted_by_a_record_completion_pat
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G5011" || diagnostic.code == "G5013"),
-        "missing pattern-extraction callable ownership diagnostic: {diagnostics:#?}"
+            .any(|diagnostic| diagnostic.code == "G5001"
+                && diagnostic.message.contains("pair.0")),
+        "missing use-after-move diagnostic for the extracted callable field: {diagnostics:#?}"
     );
 }
 
@@ -20779,7 +20849,7 @@ fn service_executes_enum_payload_reference_refinements() {
             let holder = Holder::Held(&mut value);
             handle holder is Holder::Held(parent) {
                 true => {
-                    *parent
+                    *(*parent)
                 };
                 false => 0
             }
@@ -20797,7 +20867,7 @@ fn service_executes_enum_payload_reference_refinements() {
             let holder = Holder::Held(value);
             handle holder is Holder::Held(parent) {
                 true => {
-                    *parent
+                    *(*parent)
                 };
                 false => 0
             }

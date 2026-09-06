@@ -118,7 +118,7 @@ fn record_execution_values(
         return;
     };
     let bytes = program.canonical_bytes();
-    let (ticks, allocations, depth, tails, inspected) = profile
+    let (ticks, allocations, depth, tails, inspected, buffers) = profile
         .map(|p| {
             (
                 p.work_ticks.to_string(),
@@ -126,11 +126,12 @@ fn record_execution_values(
                 p.peak_call_depth.to_string(),
                 p.recycled_tail_calls.to_string(),
                 p.inspected_tail_argument_elements.to_string(),
+                p.reused_call_register_buffers.to_string(),
             )
         })
         .unwrap_or_default();
     let record = format!(
-        "fixture\tartifact_digest\tartifact_bytes\tresult_i64\tresult_i64_tuple\tprofiled\twork_ticks\tcharged_allocation_elements\tpeak_call_depth\trecycled_tail_calls\tinspected_tail_argument_elements\n{case}\t{}\t{}\t{result}\t{tuple}\t{}\t{ticks}\t{allocations}\t{depth}\t{tails}\t{inspected}\n",
+        "fixture\tartifact_digest\tartifact_bytes\tresult_i64\tresult_i64_tuple\tprofiled\twork_ticks\tcharged_allocation_elements\tpeak_call_depth\trecycled_tail_calls\tinspected_tail_argument_elements\treused_call_register_buffers\n{case}\t{}\t{}\t{result}\t{tuple}\t{}\t{ticks}\t{allocations}\t{depth}\t{tails}\t{inspected}\t{buffers}\n",
         Digest::of_bytes(&bytes),
         bytes.len(),
         profile.is_some()

@@ -120,6 +120,45 @@ fn compile(source: &str) -> VerifiedVmProgram {
 }
 
 #[test]
+fn finite_replay_destroys_residual_owners_once_per_execution() {
+    let program = compile(r#"
+        effect Ask { [2, 2] ask() -> i64; }
+        struct Counter { pointer: *mut i64 }
+        impl Use<[0, 1]> for Counter {}
+        impl Drop for Counter {
+            drop(&mut self) -> {
+                unsafe { write(self.pointer, read(as_const(self.pointer)) + 1); }
+            }
+        }
+        fn worker(pointer: *mut i64) -> i64 / Ask {
+            let value = Ask::ask();
+            let owner = Counter { pointer: pointer };
+            value
+        }
+        fn replay(pointer: *mut i64) -> i64 {
+            handle worker(pointer) { Ask::ask() with k => k(20) + k(21) }
+        }
+        pub fn main() -> i64 {
+            unsafe {
+                let bytes = allocate(size_of<i64>(), align_of<i64>());
+                let pointer = cast<u8, i64>(bytes);
+                write(pointer, 0);
+                let answer = replay(pointer);
+                let count = read(as_const(pointer));
+                deallocate(bytes, size_of<i64>(), align_of<i64>());
+                count * 100 + answer
+            }
+        }
+    "#);
+    // SAFETY: both sequential residuals borrow the same initialized counter;
+    // it remains allocated until both destructors and the replay have ended.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 241);
+    let decoded = grandiose_stage0::decode_and_verify_program(&program.canonical_bytes()).unwrap();
+    // SAFETY: independently decoded execution has the same closed allocation lifecycle.
+    assert_eq!(unsafe { decoded.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 241);
+}
+
+#[test]
 fn source_defined_ownership_markers_have_zero_layout_and_preserve_owner_moves() {
     let declarations = r#"
         struct PhantomData<T> {}

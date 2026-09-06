@@ -22,6 +22,22 @@ pub enum Failure {
     Foreign, Closed, Busy, Capacity, Invariant, Cycle { family: u32 },
     Query(query::Failure), Control(operation::Failure), Package(package::Failure), Publication(publication::Failure),
 }
+pub impl Clone for Failure {
+    clone(value: &Failure) -> Failure {
+        handle *value {
+            Failure::Foreign => Failure::Foreign,
+            Failure::Closed => Failure::Closed,
+            Failure::Busy => Failure::Busy,
+            Failure::Capacity => Failure::Capacity,
+            Failure::Invariant => Failure::Invariant,
+            Failure::Cycle { family } => Failure::Cycle { family: family },
+            Failure::Query(error) => Failure::Query(error),
+            Failure::Control(error) => Failure::Control(error),
+            Failure::Package(_) => Failure::Package(Clone::clone(&value.0)),
+            Failure::Publication(_) => Failure::Publication(Clone::clone(&value.0)),
+        }
+    }
+}
 pub enum ReusePolicy { Never, Tracked }
 enum PublicationMode { Fresh, Reused }
 pub struct Family { private database: u64, private index: u32 }
@@ -176,7 +192,7 @@ fn cell_root(database: u64, cell: &Cell, slot: usize, read: Option<usize>) -> Re
         Result::Err(_) => root_key(database, cell.key.identity, RootPhase::Cells { slot: slot, read: Result::Ok(0) }),
         Result::Ok(read) => handle cell.state {
             CellState::Pending { owner: _ } => root_next(database, RootPhase::Cells { slot: slot + 1, read: None }),
-            CellState::Ready { memo, execution: _ } => handle query::memo_read(&memo, read) {
+            CellState::Ready { memo: _, execution: _ } => handle query::memo_read(&cell.state.memo, read) {
                 Result::Err(_) => root_next(database, RootPhase::Cells { slot: slot + 1, read: None }),
                 Result::Ok(identity) => root_key(database, identity, RootPhase::Cells { slot: slot, read: Result::Ok(read + 1) }),
             },
@@ -625,7 +641,7 @@ fn parent_replay(engine: &Engine, cell: Handle) -> Result<query::Replay, Failure
         Result::Err(_) => Result::Err(Failure::Closed),
         Result::Ok(cell) => handle cell.state {
             CellState::Pending { owner: _ } => Result::Err(Failure::Busy),
-            CellState::Ready { memo: memo, execution: _ } => Result::Ok(query::replay(&memo)),
+            CellState::Ready { memo: _, execution: _ } => Result::Ok(query::replay(&cell.state.memo)),
         },
     }
 }
@@ -729,9 +745,9 @@ fn ready(engine: &Engine, key: Handle) -> Result<Outcome, Failure> {
         Result::Err(_) => Result::Err(Failure::Closed),
         Result::Ok(cell) => handle cell.state {
             CellState::Pending { owner: _ } => Result::Err(Failure::Busy),
-            CellState::Ready { memo: memo, execution: execution } => Result::Ok(Outcome { cell: key,
+            CellState::Ready { memo: _, execution: _ } => { let memo = &cell.state.memo; Result::Ok(Outcome { cell: key,
                 revision: cell.key.revision, identity: cell.key.identity, product: memo.value,
-                fingerprint: memo.fingerprint, completeness: memo.completeness, execution: execution }),
+                fingerprint: memo.fingerprint, completeness: memo.completeness, execution: cell.state.execution }) },
         },
     }
 }
@@ -785,8 +801,9 @@ fn record_execution(engine: &mut Engine, key: Handle, execution: Execution) -> (
         Result::Err(_) => (),
         Result::Ok(cell) => handle cell.state {
             CellState::Pending { owner: _ } => (),
-            CellState::Ready { memo: memo, execution: _ } => {
-                (*cell).state = CellState::Ready { memo: memo, execution: execution };
+            CellState::Ready { memo: _, execution: _ } => {
+                replace(&mut cell.state.execution, execution);
+                ()
             },
         },
     }
@@ -1010,7 +1027,7 @@ pub fn observation(engine: &Engine, session: Session, outcome: Outcome, index: u
             Result::Err(_) => Result::Err(Failure::Closed),
             Result::Ok(cell) => handle cell.state {
                 CellState::Pending { owner: _ } => Result::Err(Failure::Busy),
-                CellState::Ready { memo: memo, execution: _ } => Result::Ok(query::observation(&memo, index)),
+                CellState::Ready { memo: _, execution: _ } => Result::Ok(query::observation(&cell.state.memo, index)),
             },
         },
     }

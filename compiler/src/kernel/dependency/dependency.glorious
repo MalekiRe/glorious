@@ -481,16 +481,14 @@ fn freeze(work: &mut Work, revision: RevisionId, cursor: usize) -> Result<Progre
 // Freezing transfers the dependency buffer and completed status into the
 // published trace. It never duplicates their owned residents through a borrow.
 fn drain_fact(value: &mut Fact) -> Fact {
-    let dependencies = value.dependencies;
-    (*value).dependencies = Vec::new();
+    let dependencies = replace(&mut value.dependencies, Vec::new());
     Fact { node: Clone::clone(&value.node), fingerprint: value.fingerprint, dependencies: dependencies }
 }
 fn take_status(colors: &mut Vec<Color>, index: usize) -> Result<Status, Failure> {
     handle Vec::get_mut(colors, index) {
         Result::Err(_) => Result::Err(Failure::Invariant),
         Result::Ok(value) => {
-            let previous = *value;
-            *value = Color::Unseen;
+            let previous = replace(value, Color::Unseen);
             handle previous { Color::Done(status) => Result::Ok(status), _ => Result::Err(Failure::Invariant) }
         },
     }

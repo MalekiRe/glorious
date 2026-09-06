@@ -34,7 +34,7 @@ pub struct CompilationRequest {
 // from an independently versioned compiler retains its explicit build fields.
 pub fn stage0_identity(compiler: Digest) -> CompilerBuildIdentity {
     CompilerBuildIdentity { compiler: compiler, language_generation: 3, query_generation: 1,
-        interface_generation: 3, cache_generation: 14, bytecode_generation: 54, verifier_generation: 13 }
+        interface_generation: 3, cache_generation: 22, bytecode_generation: 64, verifier_generation: 20 }
 }
 pub fn mode_tag(mode: &CompilationMode) -> u8 {
     handle *mode {
@@ -84,11 +84,6 @@ pub fn package<'a>(value: &'a AdmittedSource) -> &'a PackageKey { &value.package
 pub fn path<'a>(value: &'a AdmittedSource) -> &'a LogicalPath { &value.logical_path }
 pub fn blob<'a>(value: &'a AdmittedSource) -> &'a source::Blob { &value.blob }
 
-fn charge(controls: &mut operation::Controls, amount: u64) -> Result<(), Failure> {
-    handle operation::charge(controls, amount) {
-        Result::Err(error) => Result::Err(Failure::Control(error)), Result::Ok(_) => Result::Ok(()),
-    }
-}
 pub fn begin_path(value: String) -> PathBuilder {
     PathBuilder { work: Result::Ok(PathWork { value: value, cursor: 0, segment: 0, ready: false }) }
 }
@@ -135,8 +130,8 @@ fn invalid_path(builder: &mut PathBuilder) -> Result<Event, Failure> {
     }
 }
 fn path_checked(builder: &mut PathBuilder, controls: &mut operation::Controls) -> Result<Event, Failure> {
-    handle charge(controls, 1) {
-        Result::Err(error) => Result::Err(error),
+    handle operation::charge(controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
         Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
             Result::Err(_) => Result::Err(Failure::Closed),
             Result::Ok(work) => handle path_byte(work) {
@@ -168,17 +163,17 @@ pub fn begin_source(input: SourceInput, byte_limit: usize, identity_limit: usize
     SourceBuilder { work: Result::Ok(SourceWork::Identity(input)), byte_limit: byte_limit, identity_limit: identity_limit }
 }
 pub fn abort_source(builder: &mut SourceBuilder) -> () { (*builder).work = None; }
-fn identity_charge(input: &SourceInput, controls: &mut operation::Controls) -> Result<(), Failure> {
+fn identity_charge(input: &SourceInput, controls: &mut operation::Controls) -> Result<(), operation::Failure> {
     // Charge each extent separately: neither length addition nor budget
     // arithmetic can wrap. Hash/UTF-8 leaves remain synchronous as in Blob.
-    handle charge(&mut *controls, as<u64>(String::len(&input.package.value))) {
+    handle operation::charge(&mut *controls, as<u64>(String::len(&input.package.value))) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => charge(controls, as<u64>(String::len(&input.logical_path.value))),
+        Result::Ok(_) => operation::charge(controls, as<u64>(String::len(&input.logical_path.value))),
     }
 }
 fn check_identity(input: SourceInput, limit: usize, controls: &mut operation::Controls) -> Result<SourceWork, Failure> {
     handle identity_charge(&input, controls) {
-        Result::Err(error) => Result::Err(error),
+        Result::Err(error) => Result::Err(Failure::Control(error)),
         Result::Ok(_) => handle identity::file(Str::as_bytes(String::as_str(&input.package.value)),
             Str::as_bytes(String::as_str(&input.logical_path.value)), limit) {
             Result::Err(_) => Result::Err(Failure::Capacity { name: 1, limit: limit }),
@@ -190,8 +185,8 @@ fn check_identity(input: SourceInput, limit: usize, controls: &mut operation::Co
     }
 }
 fn digest_sized(input: SourceInput, controls: &mut operation::Controls) -> Result<SourceWork, Failure> {
-    handle charge(controls, as<u64>(Vec::len(&input.bytes))) {
-        Result::Err(error) => Result::Err(error),
+    handle operation::charge(controls, as<u64>(Vec::len(&input.bytes))) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
         Result::Ok(_) => handle identity::hash(Vec::as_slice(&input.bytes)) {
             Result::Err(_) => Result::Err(Failure::Invariant),
             Result::Ok(actual) => handle identity::equal(input.digest, actual) {
@@ -243,8 +238,8 @@ fn work_event(work: &SourceWork) -> Event {
     handle *work { SourceWork::Ready(_) => Event::Ready, _ => Event::Continue }
 }
 fn source_checked(builder: &mut SourceBuilder, controls: &mut operation::Controls) -> Result<Event, Failure> {
-    handle charge(&mut *controls, 1) {
-        Result::Err(error) => Result::Err(error),
+    handle operation::charge(&mut *controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
         Result::Ok(_) => handle Option::take(&mut builder.work) {
             Result::Err(_) => Result::Err(Failure::Closed),
             Result::Ok(work) => handle transition(work, builder.byte_limit, builder.identity_limit, controls) {

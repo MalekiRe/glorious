@@ -328,6 +328,22 @@ fn never_is_the_bottom_type_for_expected_result_positions() {
 }
 
 #[test]
+fn never_does_not_bind_an_unresolved_expected_result() {
+    for terminal_first in [false, true] {
+        let mut inference = InferContext::default();
+        let expected = inference.fresh();
+        let result = if terminal_first {
+            inference.unify(Type::Never, expected.clone())
+        } else {
+            inference.unify(expected.clone(), Type::Never)
+        }.unwrap();
+        assert_eq!(result, expected);
+        inference.unify(expected.clone(), Type::Scalar(ScalarType::I64)).unwrap();
+        assert_eq!(inference.zonk(expected).unwrap(), Type::Scalar(ScalarType::I64));
+    }
+}
+
+#[test]
 fn open_effect_rows_unify_without_becoming_type_holes() {
     let read = DefKey(Digest::of_bytes(b"Read"));
     let write = DefKey(Digest::of_bytes(b"Write"));

@@ -12,6 +12,20 @@ pub struct Limits { packages: package::Limits, dependencies: dependency::Limits,
     diagnostics: diagnostic::Limits, error_limit: Option<usize> }
 pub enum Failure { Closed, Busy, Invariant, Control(operation::Failure), Package(package::Failure),
     Diagnostic(diagnostic::Failure), Dependency(dependency::Failure), Rejected(diagnostic::Batch) }
+pub impl Clone for Failure {
+    clone(value: &Failure) -> Failure {
+        handle *value {
+            Failure::Closed => Failure::Closed,
+            Failure::Busy => Failure::Busy,
+            Failure::Invariant => Failure::Invariant,
+            Failure::Control(error) => Failure::Control(error),
+            Failure::Package(_) => Failure::Package(Clone::clone(&value.0)),
+            Failure::Diagnostic(error) => Failure::Diagnostic(error),
+            Failure::Dependency(error) => Failure::Dependency(error),
+            Failure::Rejected(_) => Failure::Rejected(Clone::clone(&value.0)),
+        }
+    }
+}
 pub enum Event { Continue, Validate(diagnostic::Span), Ready }
 enum Phase { Unused, Recording, Packages, Diagnostics, Checking { cursor: usize }, Dependencies, Ready, Committed, Aborted }
 pub struct Frame { private phase: Phase, private dependencies: Option<dependency::Transaction>,

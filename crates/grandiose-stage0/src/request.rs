@@ -100,12 +100,35 @@ pub struct CompilerBuildIdentity {
 /// Cache fourteen adds body-local constructor lifetime inference and union
 /// caller-loan provenance. Bytecode 54 and verifier thirteen add concrete
 /// destruction glue and explicit projected/resident initialization state.
+/// Cache fifteen records owned-pattern/reference transfers and selected-variant
+/// destructor loans. Bytecode 55 and verifier fourteen delimit resumption
+/// completion and preserve live source allocations across restored frames.
+/// Cache sixteen preserves unsafe/external result loans through reborrowing.
+/// Bytecode 56 and verifier fifteen retain source callable and nominal-field
+/// contracts for capability-bound native linking before region erasure.
+/// Cache seventeen, bytecode 57 and verifier sixteen select native storage
+/// homes for addressable source locals and the corresponding resource contract.
+/// Cache eighteen, bytecode 58 and verifier seventeen retain owned native
+/// argument/result storage through synchronous native callbacks (native ABI 2).
+/// Cache nineteen, bytecode 59 and verifier eighteen retain selected native
+/// destruction operations and fix lexical cleanup after declined root probes.
+/// Cache twenty, bytecode 60 and verifier nineteen retain callable capture
+/// destruction and restore residual capture storage across invocations.
+/// Cache twenty-one, bytecode 61 and verifier twenty seal frame destruction
+/// obligations independently of a particular return or cancellation lowerer.
+/// Bytecode 62 applies those obligations to abandoned dynamic-label frames
+/// and resolves specialized label destinations by their executing definition.
+/// Cache twenty-two and bytecode 63 preserve unresolved result inference at
+/// bottom branches and explicit non-returning value-CFG paths, including
+/// strict callee ordering and normal returns from label helpers.
+/// Bytecode 64 extends abandonment cleanup to retained handler branches and
+/// preserves terminal cancellation-clause control flow.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 3;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 3;
-pub const STAGE0_CACHE_GENERATION: u32 = 14;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 54;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 13;
+pub const STAGE0_CACHE_GENERATION: u32 = 22;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 64;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 20;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

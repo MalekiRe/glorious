@@ -1,5 +1,107 @@
 # Authoring runtime: physical allocation measurements
 
+## Terminal value-CFG checkpoint
+
+A36's frozen report `target/compiler-check/run-bvgwj_9n/report.json` passes all
+48 source entries in 188.40 seconds. A 15-second CPU sample was collected during
+this run, so its wall time is not an uninstrumented speed comparison. All 50
+scalar/tuple results match A35, with unchanged batches and resource limits.
+Bootstrap remains `[145, 80, 13]`, at 38,791,339 work ticks and 5,888,032 charged
+elements. Dependencies remain `[1, 1, 1, 1, 1, 1, 24]`, at 4,654,390 ticks and
+1,637,820 elements. The ordinary 10,000-step loop remains at 930,476 ticks,
+310,469 elements, 10,000 recycled calls and peak depth 11. Other changed counters
+are retained in the report; they are not claimed identical to A35. Historical
+physical allocation figures have not been remeasured here.
+
+## Nonlocal label frame cleanup checkpoint
+
+A35 reuses the shared frame destruction plan for dynamic label exits, with
+deepest-frame-first cleanup and the same work/allocation/depth budgets. The
+source report `target/compiler-check/run-0mn6_v5w/report.json` passes all 48
+entries in 185.92 seconds. All 50 results match A34; execution counters match
+for 49 records, including the complete bootstrap/dependency batches and the
+10,000-step loop below. `request/world_registry` uses 12,187,543 ticks and
+2,896,043 charged elements (previously 12,189,531 and 2,896,166); its tail proof
+inspects 79,909 elements, recycles 21,745 calls and reuses 283,924 buffers
+(previously 79,922, 21,748 and 283,945). The new label regressions check destructor
+order, transferred and
+partial owners, and enforcement of the ordinary call-depth limit. Historical
+physical allocation totals are not remeasured or newly certified here.
+
+## Shared frame ownership checkpoint
+
+A34's frame declarations and centralized return obligations retain the existing
+work/allocation checks. Cleanup of abandoned frames executes compiler-selected
+bytecode while retaining the original caller storage, and a regression proves
+that destruction cannot bypass the ordinary call-depth limit. The four existing
+physical-storage tests pass unchanged; historical absolute allocation figures
+below are not remeasured for this checkpoint.
+
+The frozen report `target/compiler-check/run-m17oe7s1/report.json` passes all
+48 source entries in 175.59 seconds. Bootstrap remains `[145, 80, 13]`, now with
+38,727,997 work ticks and 5,888,023 charged elements. The dependency-publication
+batch remains `[1, 1, 1, 1, 1, 1, 24]`, with 4,619,375 ticks and 1,637,736 elements.
+The 10,000-step state loop charges 930,476 ticks and 310,469 elements, recycles
+all 10,000 calls and retains peak depth 11 under its unchanged 64-frame limit.
+All original batch sizes, scaling assertions and resource ceilings pass. These
+are logical VM counters, not a certificate of compiler-scale physical costs.
+
+## Owned callable capture checkpoint
+
+A33 preserves the existing ordinary aggregate COW path: independent interpreter
+copying is selected only for types that own callable environments. Borrowed
+captures preserve their source storage. The immutable scalar native-callback
+regression still passes with both native allocation limits set to zero. The
+four existing physical-storage tests pass with their original comparisons;
+their historical absolute allocation measurements below are not remeasured here.
+
+The frozen source report `target/compiler-check/run-3j7b80x3/report.json` passes
+all 48 entries in 177.89 seconds. Bootstrap remains `[145, 80, 13]` with
+38,550,344 work ticks and 5,880,146 charged elements. The dependency-publication
+batch remains `[1, 1, 1, 1, 1, 1, 24]` with 4,551,979 ticks and 1,626,889 elements.
+The 10,000-step state loop now charges 880,466 ticks and 300,456 elements while
+recycling all 10,000 calls at peak depth 11. Its 64-frame ceiling and original
+1,000/10,000-step scaling checks remain unchanged. Added callable cleanup is
+charged; no accounting or resource ceiling is weakened. These are logical VM
+costs, not a compiler-scale physical-memory certificate.
+
+## September 6 native-destructor and register-buffer checkpoint
+
+The native-destructor contract checkpoint fixes omitted root-scope cleanup and
+avoids intermediate field boxing when an ordinary resident argument is copied
+into a native callee home. The opt-in authoring runner also reuses one empty
+returned call-register buffer per function. It releases values and all native
+home/source/continuation state before pooling only the Vec backing. Allocation
+charges now omit genuinely reused register allocations, while new buffers and
+all existing value charges retain their original checks. The profile reports
+`reused_call_register_buffers`; ordinary unprofiled execution does not enable
+this buffer cache. These remain logical charges, not physical allocation counts.
+
+With the optimized test profile and the existing thread-local physical meter:
+
+| Preallocated Vec residents | Charged elements | Requested bytes |
+| ---: | ---: | ---: |
+| 64 | 1,468 | 1,306,672 |
+| 256 | 4,480 | 4,682,656 |
+| 1,024 | 16,528 | 18,186,592 |
+
+The exact steady-state whole push/destruction slopes are **15.6875 charged
+elements and 17,583.25 requested bytes per resident**. The original less-than-100
+logical ceiling and exact rational physical-linearity assertion are unchanged.
+Sixteen warm hash lookups add **1,172,086 requested bytes and 6,563 work ticks**
+at both 8 and 64 entries. Sixteen element writes add **205,682 requested bytes**
+at 8, 64 and 512 elements. All four physical-allocation regressions pass without
+changing their fixtures, assertions or budgets for this optimization.
+
+An initial size-keyed cache failed the hash-read size-independence check because
+its bookkeeping allocations depended on construction history. The final cache
+uses stable function-keyed entries and passes the original check. Failed and
+passing runs are retained as `physical1.log` and `physical2.log` under
+`/tmp/grandiose-native-drop-contract-PpjOy8/`. These local measurements do not
+certify allocation-free native boundaries or compiler-scale performance.
+
+## Historical measurements
+
 Measured September 4, 2026 on Linux x86_64 with Rust
 `1.96.1 (31fca3adb 2026-06-26)`, unoptimized test profile, System allocator,
 and the opt-in C0 authoring runner with a 64-frame limit. These are substrate
@@ -159,6 +261,33 @@ version before the final run. The related byte-cursor and digest-output source
 changes and compiler batch evidence are recorded in
 [source call-frame costs](unsafe-memory-progress.md#source-call-frame-costs).
 
+## Source resident destruction checkpoint
+
+September 6, 2026. The preallocated-Vec probe now executes real resident and
+buffer destruction before returning. Its exact steady-state slope is **81.875
+charged elements and 36,259.25 requested bytes per resident**, measured at 64,
+256 and 1,024 residents. The original less-than-100 charged-elements ceiling
+is unchanged. Bounded destruction chunks make both slopes rational; integer
+cross-products retain exact linearity checks without rounding or tolerances.
+These are whole push-and-destruction costs, not isolated push timings.
+
+The table probe now performs one checked, metered lookup in both executions
+before measuring their difference. This equalizes first-use native descriptor
+cache history: larger-table construction can already have populated those
+descriptors. The additional sixteen warm reads consume exactly **6,563 work
+ticks, 6,348 charged elements and 2,237,434 requested bytes** at both 8 and 64
+entries. The exact size-independence assertions remain; this is not a cold
+lookup measurement, and neither the meter nor the VM budget resets at warmup.
+The shared cold hash fixture used by other probes is unchanged.
+
+Sixteen element writes add exactly **379,072 requested bytes** at 8, 64 and
+512 elements. All four physical-storage tests and 140 standard-library tests
+pass at this checkpoint. Log:
+`/tmp/grandiose-selfhost-next-k1aZEn/std-physical-final3.log`. The final resident
+chunk stops after destroying its first resident without an empty recursive call.
+Earlier unchunked/pairwise cleanup and the
+unequal first-use-cache measurements remain in the numbered diagnostic logs.
+
 ## Measurement scope and remaining work
 
 Requested bytes are cumulative successful allocation requests, with each
@@ -176,8 +305,9 @@ Source inspection identifies concrete remaining work in
   `freeze_frame_value` remains necessary at independently retained capture
   boundaries and can recursively copy aggregates there.
 - The surviving legacy `ArrayPushMove` still uses `to_vec()` and reconstructs
-  backing arrays. The canonical Vec no longer uses it; the opaque BLAKE3 input
-  bridge still does. Most old array algorithm instructions have been retired.
+  backing arrays. Neither canonical Vec nor source BLAKE3 uses it now. Its
+  remaining artifact compatibility path is separate from current library
+  algorithms; most old array algorithm instructions have been retired.
 - Tail-call eligibility traverses surviving owners. The original A09
   construction runs inspected 1,237 and 69,711 argument/owner elements;
   the native-backed 8/64-entry runs now inspect 619 and 6,933. This

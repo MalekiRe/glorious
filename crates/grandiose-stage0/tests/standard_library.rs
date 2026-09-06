@@ -127,6 +127,400 @@ fn source_clones_create_independent_nested_collection_owners() {
 }
 
 #[test]
+fn source_vec_destruction_releases_allocations_before_execution_ends() {
+    let source = r#"
+        use std::*;
+        fn churn(remaining: usize) -> i64 {
+            handle remaining {
+                0 => 42,
+                _ => {
+                    { let value = Vec<u8>::with_capacity(32); Vec::push(&mut value, as<u8>(7)); () };
+                    churn(remaining - 1)
+                },
+            }
+        }
+        pub fn main() -> i64 { churn(12) }
+    "#;
+    let bytes = StageZeroCompiler::new().compile(request(source)).unwrap()
+        .artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    // SAFETY: freshly compiled source uses trusted Vec internals only. The
+    // budget holds one 32-byte backing plus the source and cleanup Vec homes;
+    // end-of-execution reclamation cannot make the second iteration succeed.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits {
+        max_native_bytes: 32 + 2 * 24,
+        max_native_allocation_bytes: 32,
+        ..Default::default()
+    }) }.unwrap(), 42);
+}
+
+fn check_vec_drop_action(action: &str, expected: i64) {
+    check_vec_drop_action_with_declarations(action, "", expected);
+}
+
+fn check_vec_drop_action_with_declarations(action: &str, declarations: &str, expected: i64) {
+    let mut input = request("use std::*; pub fn main() -> i64 { vec_drop_fixture() }");
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler.import_revision(input.clone(), None).unwrap();
+    input.runtime_manifest = compiler.open_session(revision).unwrap()
+        .snapshot().world().runtime_manifest.clone();
+    let source = format!(r#"{}
+        struct DropProbe {{ target: *mut i64 }}
+        impl Use<[0, 1]> for DropProbe {{}}
+        impl Drop for DropProbe {{
+            drop(&mut self) -> {{ unsafe {{
+                __g1_memory_write(self.target, __g1_memory_read(__g1_memory_as_const(self.target)) + 1);
+            }} }}
+        }}
+        struct OrderedDropProbe {{ target: *mut i64, digit: i64 }}
+        struct DropPair {{ first: DropProbe, second: DropProbe }}
+        effect CaptureStop {{ [0, 1] stop() -> i64; }}
+        impl Use<[0, 1]> for OrderedDropProbe {{}}
+        impl Drop for OrderedDropProbe {{
+            drop(&mut self) -> {{ unsafe {{
+                __g1_memory_write(self.target, __g1_memory_read(__g1_memory_as_const(self.target)) * 10 + self.digit);
+            }} }}
+        }}
+        struct CopyDropProbe {{ target: *mut i64 }}
+        impl Use<[0, *]> for CopyDropProbe {{}}
+        impl Drop for CopyDropProbe {{
+            drop(&mut self) -> {{ unsafe {{
+                __g1_memory_write(self.target, __g1_memory_read(__g1_memory_as_const(self.target)) + 1);
+            }} }}
+        }}
+        {declarations}
+        pub fn vec_drop_fixture() -> i64 {{ unsafe {{
+            let allocation = __g1_memory_allocate(__g1_memory_size_of<i64>(), __g1_memory_align_of<i64>());
+            let target = __g1_memory_cast<u8, i64>(allocation);
+            __g1_memory_write(target, 0);
+            {action};
+            let result = __g1_memory_read(__g1_memory_as_const(target));
+            __g1_memory_deallocate(allocation, __g1_memory_size_of<i64>(), __g1_memory_align_of<i64>());
+            result
+        }} }}
+    "#, include_str!("../../../stdlib/src/lib.glorious"));
+    input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes());
+    let bytes = compiler.compile(input).unwrap().artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    // SAFETY: the counter allocation outlives every probe, each initialized
+    // resident is consumed once, and the counter is released after inspection.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), expected, "{action}");
+}
+
+#[test]
+fn source_owned_closure_captures_destroy_vector_residents_and_independent_copies() {
+    for invoke in ["", "pending();"] {
+        check_vec_drop_action(&format!(r#"{{
+            let values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe {{ target: target }});
+            let pending = move (values) {{ Vec::len(&values) }};
+            {invoke}
+            ()
+        }}"#), 1);
+    }
+    check_vec_drop_action(r#"{
+        let value = CopyDropProbe { target: target };
+        let first = move (value) { 42 };
+        let second = first;
+        first(); second();
+        ()
+    }"#, 3);
+    check_vec_drop_action(r#"{
+        let first = OrderedDropProbe { target: target, digit: 1 };
+        let second = OrderedDropProbe { target: target, digit: 2 };
+        let pending = move (first, second) { 42 };
+        ()
+    }"#, 21);
+    for invoke in ["", "pending();"] {
+        check_vec_drop_action(&format!(r#"{{
+            let pair = DropPair {{ first: DropProbe {{ target: target }}, second: DropProbe {{ target: target }} }};
+            let pending = () -> i64 {{ let taken = move pair.first; 42 }};
+            {invoke}
+            ()
+        }}"#), 2);
+    }
+}
+
+fn check_cancelled_capture(body: &str) {
+    let declarations = format!(r#"
+        fn cancel_capture(target: *mut i64) -> i64 {{
+            let owner = DropProbe {{ target: target }};
+            let pending = () -> i64 / CaptureStop {{ {body} }};
+            handle pending() {{ CaptureStop::stop() with _ => 0 }}
+        }}"#);
+    check_vec_drop_action_with_declarations("{ cancel_capture(target); () }", &declarations, 1);
+}
+
+#[test]
+fn cancelled_closure_invocations_destroy_retained_capture_owners_once() {
+    check_cancelled_capture("CaptureStop::stop(); let taken = move owner; 42");
+}
+
+#[test]
+fn cancelled_closure_invocations_destroy_transferred_capture_owners_once() {
+    check_cancelled_capture("let taken = move owner; CaptureStop::stop()");
+}
+
+#[test]
+fn cancelled_closure_invocations_do_not_destroy_consumed_captures_again() {
+    check_cancelled_capture("{ let taken = move owner; () }; CaptureStop::stop()");
+}
+
+#[test]
+fn cancellation_destroys_invocation_locals_as_well_as_retained_captures() {
+    let declarations = r#"
+        fn cancel_capture(target: *mut i64) -> i64 {
+            let owner = DropProbe { target: target };
+            let pending = () -> i64 / CaptureStop {
+                let local = DropProbe { target: owner.target };
+                CaptureStop::stop();
+                let taken = move owner;
+                42
+            };
+            handle pending() { CaptureStop::stop() with _ => 0 }
+        }"#;
+    check_vec_drop_action_with_declarations("{ cancel_capture(target); () }", declarations, 2);
+}
+
+#[test]
+fn cancellation_destroys_transferred_parameters_in_deeper_ordinary_calls() {
+    let declarations = r#"
+        fn stop_with_owner(owner: DropProbe) -> i64 / CaptureStop {
+            CaptureStop::stop()
+        }
+        fn cancel_capture(target: *mut i64) -> i64 {
+            let owner = DropProbe { target: target };
+            let pending = () -> i64 / CaptureStop { stop_with_owner(move owner) };
+            handle pending() { CaptureStop::stop() with _ => 0 }
+        }"#;
+    check_vec_drop_action_with_declarations("{ cancel_capture(target); () }", declarations, 1);
+}
+
+#[test]
+fn cancellation_destroys_deeper_frames_before_locals_and_residual_captures() {
+    let declarations = r#"
+        fn deep_stop(target: *mut i64) -> i64 / CaptureStop {
+            let deepest = OrderedDropProbe { target: target, digit: 3 };
+            CaptureStop::stop()
+        }
+        fn cancel_capture(target: *mut i64) -> i64 {
+            let owner = OrderedDropProbe { target: target, digit: 1 };
+            let pending = () -> i64 / CaptureStop {
+                let local = OrderedDropProbe { target: owner.target, digit: 2 };
+                deep_stop(owner.target);
+                let taken = move owner;
+                42
+            };
+            handle pending() { CaptureStop::stop() with _ => 0 }
+        }"#;
+    check_vec_drop_action_with_declarations("{ cancel_capture(target); () }", declarations, 321);
+}
+
+#[test]
+fn cancellation_preserves_partial_capture_moves_during_frame_cleanup() {
+    let declarations = r#"
+        struct OrderedPair { first: OrderedDropProbe, second: OrderedDropProbe }
+        fn cancel_capture(target: *mut i64) -> i64 {
+            let owner = OrderedPair {
+                first: OrderedDropProbe { target: target, digit: 1 },
+                second: OrderedDropProbe { target: target, digit: 2 }
+            };
+            let pending = () -> i64 / CaptureStop {
+                let taken = move owner.first;
+                CaptureStop::stop()
+            };
+            handle pending() { CaptureStop::stop() with _ => 0 }
+        }"#;
+    check_vec_drop_action_with_declarations("{ cancel_capture(target); () }", declarations, 12);
+}
+
+#[test]
+fn nonlocal_label_cleanup_destroys_deeper_frames_before_locals_and_residual_captures() {
+    let declarations = r#"
+        fn deep_jump<L>(destination: L, target: *mut i64) -> ! where L: Label<i64> {
+            let deepest = OrderedDropProbe { target: target, digit: 3 };
+            destination(0)
+        }
+        fn invoke<L>(destination: L, target: *mut i64) -> ! where L: Label<i64> {
+            let owner = OrderedDropProbe { target: target, digit: 1 };
+            let pending = (exit: L) -> ! {
+                let local = OrderedDropProbe { target: owner.target, digit: 2 };
+                deep_jump(exit, owner.target);
+                let taken = move owner;
+                ()
+            };
+            pending(destination)
+        }
+        fn finish(target: *mut i64) -> i64 { @done: i64 { invoke(@done, target) } }
+    "#;
+    check_vec_drop_action_with_declarations("{ finish(target); () }", declarations, 321);
+}
+
+#[test]
+fn nonlocal_label_cleanup_preserves_partial_capture_moves() {
+    let declarations = r#"
+        struct OrderedPair { first: OrderedDropProbe, second: OrderedDropProbe }
+        fn invoke<L>(destination: L, target: *mut i64) -> ! where L: Label<i64> {
+            let owner = OrderedPair {
+                first: OrderedDropProbe { target: target, digit: 1 },
+                second: OrderedDropProbe { target: target, digit: 2 }
+            };
+            let pending = (exit: L) -> ! {
+                let taken = move owner.first;
+                exit(0)
+            };
+            pending(destination)
+        }
+        fn finish(target: *mut i64) -> i64 { @done: i64 { invoke(@done, target) } }
+    "#;
+    check_vec_drop_action_with_declarations("{ finish(target); () }", declarations, 12);
+}
+
+#[test]
+fn source_vec_destruction_calls_element_hooks_before_releasing_the_buffer() {
+    check_vec_drop_action(r#"{
+        let values = Vec<DropProbe>::new();
+        Vec::push(&mut values, DropProbe { target: target });
+        Vec::push(&mut values, DropProbe { target: target });
+        ()
+    }"#, 2);
+}
+
+#[test]
+fn source_vec_truncation_preserves_reverse_hook_order_across_uneven_ranges() {
+    check_vec_drop_action(r#"{
+        let values = Vec<OrderedDropProbe>::new();
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 1 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 2 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 3 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 4 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 5 });
+        Vec::truncate(&mut values, 2);
+        Vec::truncate(&mut values, 9);
+        Vec::truncate(&mut values, 2);
+        Vec::clear(&mut values);
+        Vec::clear(&mut values)
+    }"#, 54321);
+}
+
+#[test]
+fn source_vec_balanced_destruction_keeps_reverse_order_across_chunk_boundaries() {
+    check_vec_drop_action(r#"{
+        let values = Vec<OrderedDropProbe>::new();
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 1 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 2 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 3 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 4 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 5 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 6 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 7 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 8 });
+        Vec::push(&mut values, OrderedDropProbe { target: target, digit: 9 });
+        ()
+    }"#, 987654321);
+}
+
+#[test]
+fn source_vec_runs_zero_sized_user_destructors_with_only_header_bytes() {
+    let mut input = request("use std::*; pub fn main() -> i64 { zero_sized_drop_fixture() }");
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler.import_revision(input.clone(), None).unwrap();
+    input.runtime_manifest = compiler.open_session(revision).unwrap()
+        .snapshot().world().runtime_manifest.clone();
+    let source = format!(r#"{}
+        struct Stop {{}}
+        impl Use<[0, 1]> for Stop {{}}
+        impl Drop for Stop {{ drop(&mut self) -> {{ __g1_abort(); }} }}
+        pub fn zero_sized_drop_fixture() -> i64 {{
+            {{ let values = Vec<Stop>::new(); Vec::push(&mut values, Stop {{}}); () }};
+            42
+        }}
+    "#, include_str!("../../../stdlib/src/lib.glorious"));
+    input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes());
+    let bytes = compiler.compile(input).unwrap().artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    // SAFETY: the sole resident is zero-sized and the source hook aborts;
+    // only its original and cleanup Vec headers occupy native bytes.
+    assert!(matches!(unsafe { program.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits {
+        max_native_bytes: 2 * 24, max_native_allocation_bytes: 24, ..Default::default()
+    }) }, Err(grandiose_stage0::VmArtifactError::Trap)));
+}
+
+#[test]
+fn source_vec_destruction_follows_nested_owners_moves_and_partial_consumption() {
+    for (action, expected) in [
+        (r#"{
+            let nested = Vec<DropProbe>::new();
+            Vec::push(&mut nested, DropProbe { target: target });
+            let outer = Vec<Vec<DropProbe>>::new(); Vec::push(&mut outer, nested); ()
+        }"#, 1),
+        (r#"{
+            let first = Vec<DropProbe>::new(); let second = Vec<DropProbe>::new();
+            Vec::push(&mut first, DropProbe { target: target });
+            Vec::push(&mut second, DropProbe { target: target });
+            Vec::append(&mut first, second); ()
+        }"#, 2),
+        (r#"{
+            let values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe { target: target });
+            Vec::push(&mut values, DropProbe { target: target });
+            let extracted = Vec::pop(&mut values);
+            discard(values); discard(extracted)
+        }"#, 2),
+        (r#"{
+            let values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe { target: target });
+            Vec::push(&mut values, DropProbe { target: target });
+            values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe { target: target }); ()
+        }"#, 3),
+        (r#"{
+            let values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe { target: target });
+            Vec::push(&mut values, DropProbe { target: target });
+            Vec::push(&mut values, DropProbe { target: target });
+            Vec::truncate(&mut values, 1); Vec::truncate(&mut values, 1); ()
+        }"#, 3),
+        (r#"{
+            let values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe { target: target });
+            Vec::push(&mut values, DropProbe { target: target });
+            let iterator = Vec::into_iter(values);
+            VecIntoIter::next(&mut iterator); ()
+        }"#, 2),
+        (r#"@done: () {
+            let values = Vec<DropProbe>::new();
+            Vec::push(&mut values, DropProbe { target: target });
+            @done(())
+        }"#, 1),
+    ] {
+        check_vec_drop_action(action, expected);
+    }
+}
+
+#[test]
+fn zero_sized_vec_residents_require_only_header_bytes_during_destruction() {
+    let source = r#"
+        use std::*;
+        fn fill(value: &mut Vec<()>, remaining: usize) -> () {
+            handle remaining { 0 => (), _ => { Vec::push(&mut *value, ()); fill(value, remaining - 1) } }
+        }
+        pub fn main() -> i64 {
+            { let values = Vec<()>::new(); fill(&mut values, 32); () };
+            42
+        }
+    "#;
+    let bytes = StageZeroCompiler::new().compile(request(source)).unwrap()
+        .artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    // SAFETY: Unit residents occupy no bytes; the source Vec uses an aligned
+    // dangling backing address. Only its original and cleanup headers need bytes.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits {
+        max_native_bytes: 2 * 24, max_native_allocation_bytes: 24, ..Default::default()
+    }) }.unwrap(), 42);
+}
+
+#[test]
 fn byte_cursor_fixed_width_reads_preserve_unaligned_windows_and_failed_positions() {
     let bytes: Vec<u8> = (0..16).map(|index| 0xf0 + index).collect();
     let literal: String = bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect();
@@ -2799,7 +3193,7 @@ fn empty_string_views_survive_nested_vector_extraction_and_calls() {
         pub fn main() -> usize {
             let inputs = Vec<Vec<u8>>::new();
             Vec::push(&mut inputs, owned(b""));
-            handle Vec::get(&inputs, 0) { Result::Err(_) => 0, Result::Ok(bytes) => digest(*bytes) }
+            handle Vec::get(&inputs, 0) { Result::Err(_) => 0, Result::Ok(bytes) => digest(Clone::clone(bytes)) }
         }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -2821,12 +3215,24 @@ fn blake3_returns_the_complete_digest_for_empty_text_and_binary_input() {
                 },
             }
         }
-        pub fn main() -> i64 {
-            let digest = blake3(@INPUT@);
+        fn hash(input: Slice<u8>) -> i64 {
+            let digest = blake3(input);
             handle Vec::len(&digest) == 32 {
                 false => 0,
                 true => check(&digest, @EXPECTED@, 0),
             }
+        }
+        fn hash_window(bytes: Slice<u8>) -> i64 {
+            handle Slice::slice(bytes, Range<usize> { start: 1, end: @END@ }) {
+                Result::Ok(window) => hash(window),
+                Result::Err(_) => 0,
+            }
+        }
+        fn padded_input() -> Slice<'static, u8> { @PADDED@ }
+        pub fn main() -> i64 {
+            let padded = padded_input();
+            let owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, padded);
+            hash(@INPUT@) + hash_window(padded) + hash_window(Vec::as_slice(&owned))
         }
     "#;
     let bytes_literal = |bytes: &[u8]| {
@@ -2835,11 +3241,149 @@ fn blake3_returns_the_complete_digest_for_empty_text_and_binary_input() {
     for input in [b"".as_slice(), b"abc", b"\x00\xff\xc3\xa9"] {
         let expected = blake3::hash(input);
         assert_eq!(expected.as_bytes().len(), 32);
+        let padded = [b"\xa5".as_slice(), input, b"\x5a"].concat();
         let application = source.replace("@INPUT@", &bytes_literal(input))
+            .replace("@PADDED@", &bytes_literal(&padded))
+            .replace("@END@", &(input.len() + 1).to_string())
             .replace("@EXPECTED@", &bytes_literal(expected.as_bytes()));
         let program = StageZeroCompiler::new().compile(request(&application)).unwrap().artifact.unwrap();
-        assert_eq!(program.run_std_i64().unwrap(), 42);
+        assert_eq!(program.run_std_i64().unwrap(), 126);
     }
+}
+
+#[test]
+fn source_blake3_matches_block_chunk_and_tree_boundaries_without_hash_opcodes() {
+    use grandiose_stage0::{VmExecutionLimits, VmInstruction, decode_and_verify_program, decode_program};
+    let lengths = [0, 1, 2, 3, 4, 7, 8, 31, 32, 63, 64, 65, 127, 128, 129,
+        255, 256, 511, 512, 513, 1023, 1024, 1025, 2047, 2048, 2049,
+        3072, 4096, 4097, 8192, 8193, 16384, 16385, 65536, 65537];
+    let bytes: Vec<u8> = (0..65544_u64).map(|index| {
+        (index.wrapping_mul(0x9e3779b97f4a7c15) >> 17) as u8
+    }).collect();
+    let literal = |bytes: &[u8]| format!("b\"{}\"",
+        bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>());
+    let calls = lengths.iter().map(|length| {
+        let expected = blake3::hash(&bytes[3..3 + length]);
+        format!("check(input, 3, {length}, {})", literal(expected.as_bytes()))
+    }).collect::<Vec<_>>();
+    let source = format!(r#"
+        use std::*;
+        fn check(input: Slice<u8>, start: usize, length: usize, expected: Slice<u8>) -> i64 {{
+            handle Slice::slice(input, Range<usize> {{ start: start, end: start + length }}) {{
+                Result::Err(_) => 0,
+                Result::Ok(window) => {{
+                    let digest = blake3(window);
+                    handle Slice::lex_compare(Vec::as_slice(&digest), expected) {{
+                        Ordering::Equal => 1, _ => 0,
+                    }}
+                }},
+            }}
+        }}
+        fn input_bytes() -> Slice<'static, u8> {{ {} }}
+        pub fn main() -> ({}) {{ let input = input_bytes(); ({}) }}
+    "#,
+        literal(&bytes), vec!["i64"; lengths.len()].join(", "), calls.join(", "));
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let encoded = outcome.artifact.unwrap().canonical_bytes();
+    let candidate = decode_program(&encoded).unwrap();
+    let instructions: Vec<_> = candidate.functions.values().flat_map(|function| &function.instructions).collect();
+    assert!(instructions.iter().any(|instruction| matches!(instruction, VmInstruction::MemoryIntrinsic { .. })));
+    assert!(!instructions.iter().any(|instruction| matches!(instruction,
+        VmInstruction::Blake3 { .. } | VmInstruction::ArrayEmpty { .. }
+        | VmInstruction::BytesFromArrayMove { .. } | VmInstruction::BytesToArray { .. })),
+        "source hashing must not reach the old whole-hash or collection-conversion opcodes");
+    let program = decode_and_verify_program(&encoded).unwrap();
+    // SAFETY: locally compiled source and the trusted source stdlib. This is
+    // one whole batch under the original shared value/instruction budgets.
+    let (results, profile) = unsafe { program.run_tuple_i64_for_authoring_with_unsafe(VmExecutionLimits {
+        max_call_depth: 64, max_native_bytes: 4096, max_native_allocation_bytes: 64,
+        ..Default::default()
+    }) }.unwrap();
+    assert_eq!(results, vec![1; lengths.len()]);
+    assert!(profile.peak_call_depth < 64);
+    eprintln!("source BLAKE3 boundary batch: {profile:?}");
+}
+
+#[test]
+fn source_blake3_compression_preserves_high_chunk_counter_bits() {
+    use blake3::hazmat::HasherExt;
+    let data: Vec<u8> = (0..64_u8).map(|byte| byte.wrapping_mul(73)).collect();
+    let literal = |bytes: &[u8]| format!("b\"{}\"",
+        bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>());
+    let offsets = [0, 1024, u32::MAX as u64 * 1024, 1_u64 << 42,
+        (1_u64 << 42) + 1024, (1_u64 << 63) - 1024];
+    let calls = offsets.iter().map(|offset| {
+        let expected = blake3::Hasher::new().set_input_offset(*offset).update(&data).finalize_non_root();
+        format!("blake3_compress_fixture({}, {}, {})", literal(&data), offset / 1024, literal(&expected))
+    }).collect::<Vec<_>>();
+    let source = format!("use std::*; pub fn main() -> ({}) {{ ({}) }}",
+        vec!["i64"; offsets.len()].join(", "), calls.join(", "));
+    let compiler = StageZeroCompiler::new();
+    let mut input = request(&source);
+    let revision = compiler.import_revision(input.clone(), None).unwrap();
+    input.runtime_manifest = compiler.open_session(revision).unwrap().snapshot().world().runtime_manifest.clone();
+    // The original machine manifest is retained. This test helper is ordinary
+    // source with access to private compression functions, not a new primitive.
+    let standard = format!(r#"{}
+        pub fn blake3_compress_fixture(input: Slice<u8>, counter: u64, expected: Slice<u8>) -> i64 {{
+            let actual = blake3_compress(blake3_iv(), blake3_block(input, 0, 64), counter, 64, 3);
+            let wanted = blake3_block(expected, 0, 32);
+            handle actual.a == wanted.a and actual.b == wanted.b
+                and actual.c == wanted.c and actual.d == wanted.d
+                and actual.e == wanted.e and actual.f == wanted.f
+                and actual.g == wanted.g and actual.h == wanted.h
+            {{ true => 1, false => 0 }}
+        }}
+    "#, include_str!("../../../stdlib/src/lib.glorious"));
+    input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(), standard.as_bytes());
+    let outcome = compiler.compile(input).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    // SAFETY: all reads address the actual 64-byte and 32-byte slices. The
+    // large counter is compression data, never a fabricated memory address.
+    let (results, _) = unsafe { program.run_tuple_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+    assert_eq!(results, vec![1; offsets.len()]);
+}
+
+#[test]
+fn source_blake3_releases_input_loans_and_hashes_mutated_owned_storage() {
+    let data: Vec<u8> = (0..2051).map(|index| (index % 251) as u8).collect();
+    let first = blake3::hash(&data[1..2050]);
+    let mut changed = data.clone();
+    changed[1025] ^= 255;
+    let second = blake3::hash(&changed[1..2050]);
+    assert_ne!(first, second);
+    let literal = |bytes: &[u8]| format!("b\"{}\"",
+        bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>());
+    let source = format!(r#"
+        use std::*;
+        fn check(input: &Vec<u8>, expected: Slice<u8>) -> i64 {{
+            handle Slice::slice(Vec::as_slice(input), Range<usize> {{ start: 1, end: 2050 }}) {{
+                Result::Err(_) => 0,
+                Result::Ok(window) => {{
+                    let digest = blake3(window);
+                    handle Slice::lex_compare(Vec::as_slice(&digest), expected) {{ Ordering::Equal => 1, _ => 0 }}
+                }},
+            }}
+        }}
+        pub fn main() -> i64 {{
+            let input = Vec<u8>::new();
+            Vec::extend_from_slice(&mut input, {});
+            let before = check(&input, {});
+            let changed = handle Vec::get_mut(&mut input, 1025) {{
+                Result::Err(_) => 0,
+                Result::Ok(byte) => {{ *byte = bit_xor<u8>(*byte, 255); 1 }},
+            }};
+            let after = check(&input, {});
+            before + changed * after
+        }}
+    "#, literal(&data), literal(first.as_bytes()), literal(second.as_bytes()));
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    assert_eq!(program.run_std_i64().unwrap(), 2);
 }
 
 #[test]

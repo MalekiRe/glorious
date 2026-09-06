@@ -7,6 +7,9 @@ use super::kernel::operation;
 // FileKey is admitted by the request normalizer. This constructor checks the
 // actual bytes; it neither opens a path nor invents a normalized-world identity.
 pub struct Blob { private stamp: Stamp, private text: String }
+pub impl Clone for Blob {
+    clone(value: &Blob) -> Blob { Blob { stamp: value.stamp, text: Clone::clone(&value.text) } }
+}
 struct Stamp { file: FileKey, fingerprint: Digest, length: u32 }
 pub enum Failure { Capacity, InvalidUtf8 { valid_up_to: usize }, Identity, SourceMismatch, Offset, Closed, Busy, Control(operation::Failure) }
 pub enum Event { Continue, Ready }

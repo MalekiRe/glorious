@@ -94,7 +94,17 @@ fn measured<T>(run: impl FnOnce() -> T) -> (T, AllocationCounts) {
 }
 
 fn program(size: usize, read: bool) -> VerifiedVmProgram {
-    let source = include_str!("fixtures/hash_indexing_profile.glorious")
+    let fixture = include_str!("fixtures/hash_indexing_profile.glorious");
+    assert_eq!(fixture.matches("    fill(&mut map, 0);").count(), 1);
+    assert_eq!(fixture.matches("=> 42").count(), 2);
+    // Warm one checked lookup in both executions. Native layout descriptors
+    // are cached on first use, and large-table construction can already have
+    // populated them. The delta must measure the same sixteen warm lookups,
+    // not that size-dependent first-use history. The warmup remains metered
+    // and charged, and the result is checked in both branches.
+    let source = fixture
+        .replace("    fill(&mut map, 0);", "    fill(&mut map, 0);\n    let warm = probe(&map, HashMap::len(&map) - 1);")
+        .replace("=> 42", "=> 42 * warm")
         .replace("@SIZE@", &size.to_string())
         .replace("@READ@", if read { "1" } else { "0" });
     compile_source(&source)
@@ -223,8 +233,9 @@ fn source_vec_pushes_with_capacity_do_not_materialize_growth_only_registers() {
         eprintln!("physical preallocated Vec pushes={count}: {allocation:?}; {profile:?}");
         profiles.push((count, allocation, profile));
     }
-    // Once capacity is available, every additional push has the same source
-    // path. Both logical charges and physical requests must stay linear.
+    // Once capacity is available, pushes plus the final source destruction
+    // stay linear. Drop consumes bounded chunks, so an exact per-resident
+    // slope can be fractional; compare rational slopes without rounding.
     let slopes: Vec<_> = profiles
         .windows(2)
         .map(|pair| {
@@ -232,29 +243,22 @@ fn source_vec_pushes_with_capacity_do_not_materialize_growth_only_registers() {
             let bytes = pair[1].1.requested_bytes - pair[0].1.requested_bytes;
             let elements =
                 pair[1].2.charged_allocation_elements - pair[0].2.charged_allocation_elements;
-            assert_eq!(
-                bytes % count,
-                0,
-                "physical requests must have an exact steady-state slope"
-            );
-            assert_eq!(
-                elements % count,
-                0,
-                "logical charges must have an exact steady-state slope"
-            );
-            (bytes / count, elements / count)
+            (bytes, elements, count)
         })
         .collect();
-    assert_eq!(slopes[0], slopes[1], "steady-state push costs: {slopes:?}");
+    assert_eq!(slopes[0].0 * slopes[1].2, slopes[1].0 * slopes[0].2,
+        "physical requests must have an exact steady-state slope: {slopes:?}");
+    assert_eq!(slopes[0].1 * slopes[1].2, slopes[1].1 * slopes[0].2,
+        "logical charges must have an exact steady-state slope: {slopes:?}");
     // The old reserve routine materialized 129 registers even when it did
     // nothing, taking this whole source path above 170 charged elements/push.
-    // Keep headroom above the measured 66 without allowing that regression.
+    // Keep the same ceiling, now including actual resident destruction.
     assert!(
-        slopes[0].1 < 100,
+        slopes[0].1 < 100 * slopes[0].2,
         "growth-only temporaries reached the steady-state path: {slopes:?}"
     );
     eprintln!(
-        "preallocated Vec per-push (physical requested bytes, charged elements): {:?}",
+        "preallocated Vec per-resident (physical numerator, charged numerator, denominator): {:?}",
         slopes[0]
     );
 }

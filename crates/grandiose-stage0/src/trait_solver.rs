@@ -5,7 +5,7 @@
 //! body arenas.  Associated projections, HRTBs, and inference variables build
 //! on the same goal/table boundary later.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
@@ -322,6 +322,10 @@ fn select_answer(
 #[derive(Clone)]
 pub struct TraitSolver {
     rules: Arc<Vec<Rule>>,
+    /// Manual Use rules are nominal-headed. Index those heads once in the
+    /// same immutable snapshot as the rules, rather than rescanning every
+    /// source declaration for each structural ownership query.
+    manual_use_nominals: Arc<BTreeSet<DefKey>>,
     /// Trait declarations carry associated-item defaults.  The solver owns a
     /// frozen copy alongside implementation rules so projection selection
     /// remains self-contained and deterministic.
@@ -440,6 +444,15 @@ impl TraitSolver {
             })
             .collect::<Vec<_>>();
         rules.sort_by_key(|rule| rule.definition);
+        let manual_use_nominals = rules.iter().filter_map(|rule| {
+            if rule.implementation.relation.definition != crate::resolution::language_use_trait_definition() {
+                return None;
+            }
+            match &rule.implementation.self_ty {
+                Type::Nominal { definition, .. } => Some(*definition),
+                _ => None,
+            }
+        }).collect();
         let traits = signatures
             .definitions
             .iter()
@@ -450,6 +463,7 @@ impl TraitSolver {
             .collect();
         Self {
             rules: Arc::new(rules),
+            manual_use_nominals: Arc::new(manual_use_nominals),
             traits: Arc::new(traits),
             // Queries need nominal field layouts, not source callable/value
             // headers. Rules and trait declarations are already frozen above.
@@ -468,15 +482,24 @@ impl TraitSolver {
     /// Unlike `Clone`, this never carries answers or spent work into the new
     /// solver. The snapshot must be created after interface mutation ends.
     pub(crate) fn fresh_query(&self) -> Self {
+        self.fresh_query_with_limits(self.limits.clone())
+    }
+
+    pub(crate) fn fresh_query_with_limits(&self, limits: TraitSolverLimits) -> Self {
         Self {
             rules: Arc::clone(&self.rules),
+            manual_use_nominals: Arc::clone(&self.manual_use_nominals),
             traits: Arc::clone(&self.traits),
             definitions: Arc::clone(&self.definitions),
             tables: BTreeMap::new(),
             principal_active: vec![],
-            limits: self.limits.clone(),
+            limits,
             steps: 0,
         }
+    }
+
+    pub(crate) fn has_manual_use_for(&self, definition: DefKey) -> bool {
+        self.manual_use_nominals.contains(&definition)
     }
 
     pub fn solve(&mut self, goal: TraitGoal) -> TraitAnswer {
@@ -912,6 +935,7 @@ impl TraitSolver {
         let answer = self.solve(goal.clone());
         let mut probe = Self {
             rules: self.rules.clone(),
+            manual_use_nominals: self.manual_use_nominals.clone(),
             traits: self.traits.clone(),
             definitions: self.definitions.clone(),
             tables: BTreeMap::new(),
@@ -4129,6 +4153,7 @@ mod tests {
         assert!(!original.tables.is_empty());
         let mut fresh = original.fresh_query();
         assert!(Arc::ptr_eq(&original.rules, &fresh.rules));
+        assert!(Arc::ptr_eq(&original.manual_use_nominals, &fresh.manual_use_nominals));
         assert!(Arc::ptr_eq(&original.traits, &fresh.traits));
         assert!(Arc::ptr_eq(&original.definitions, &fresh.definitions));
         assert_eq!(fresh.limits, original.limits);
@@ -4137,6 +4162,82 @@ mod tests {
         assert_eq!(fresh.solve(goal.clone()), TraitAnswer::NoSolution);
         assert_eq!(fresh.solve(goal.clone()), TraitAnswer::Overflow);
         assert_eq!(original.solve(goal), TraitAnswer::Overflow);
+    }
+
+    fn ownership_snapshot_fixture() -> (ElaboratedInterface, BTreeMap<String, DefKey>) {
+        let source = r#"
+            trait Mark: Use<[0, 1]> {}
+            struct Ticket {}
+            impl Use<[1, 1]> for Ticket {}
+            struct Marker {}
+            impl Mark for Marker {}
+            struct Owner<T> { pointer: *mut T }
+            impl<T> Use<[0, 1]> for Owner<T> where T: Mark {}
+            struct Pair<T> { left: T, right: Ticket }
+            fn bounded<T>() where T: Mark {}
+        "#;
+        let package = crate::PackageKey("ownership-snapshot@0.1.0".into());
+        let file = crate::FileKey::new(&package, "src/lib.glorious");
+        let lexed = crate::LexedFile::lex(file, source);
+        let scan = crate::DeclarationScan::scan(&lexed, source);
+        let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+        let names = interface.definitions.iter().filter_map(|definition|
+            definition.name.clone().map(|name| (name, definition.key))).collect();
+        (signatures, names)
+    }
+
+    #[test]
+    fn indexed_ownership_queries_match_uncached_queries_without_inheriting_budgets() {
+        let (signatures, names) = ownership_snapshot_fixture();
+        let solver = TraitSolver::with_limits(&signatures,
+            TraitSolverLimits { max_depth: 0, max_steps: 0 });
+        let nominal = |name: &str, arguments| Type::Nominal { definition: names[name], arguments };
+        let ticket = nominal("Ticket", vec![]);
+        let marker = nominal("Marker", vec![]);
+        let owner = |value| nominal("Owner", vec![GenericArgument::Type(value)]);
+        let types = vec![
+            Type::Unit, Type::Scalar(ScalarType::I64), ticket.clone(), marker.clone(),
+            owner(marker), owner(Type::Scalar(ScalarType::I64)), owner(Type::Generic(0)),
+            nominal("Pair", vec![GenericArgument::Type(ticket.clone())]),
+            Type::Array(Box::new(ticket.clone())),
+            Type::Tuple(vec![ticket.clone(), Type::Generic(0)]),
+        ];
+        assert_eq!(solver.principal_use_with_assumptions(&ticket, &[]), None);
+        assert_eq!(signatures.principal_use_interval_with_solver(&ticket, &solver), Some(crate::Quantity::ONCE));
+        let ElaboratedHeader::Callable(bounded) = &signatures.definitions[&names["bounded"]] else { panic!() };
+        for _ in 0..3 {
+            for ty in &types {
+                assert_eq!(signatures.principal_use_interval_with_solver(ty, &solver),
+                    signatures.principal_use_interval(ty), "{ty:?}");
+                assert_eq!(signatures.principal_use_interval_with_bounds_and_solver(ty, &bounded.where_bounds, &solver),
+                    signatures.principal_use_interval_with_bounds(ty, &bounded.where_bounds), "{ty:?}");
+            }
+        }
+        assert!(solver.tables.is_empty());
+        assert!(solver.principal_active.is_empty());
+        assert_eq!(solver.steps, 0);
+        assert_eq!(solver.limits.max_steps, 0);
+    }
+
+    #[test]
+    fn manual_ownership_index_is_frozen_with_its_rule_snapshot() {
+        let (mut signatures, names) = ownership_snapshot_fixture();
+        let frozen = TraitSolver::new(&signatures);
+        assert!(frozen.has_manual_use_for(names["Ticket"]));
+        assert!(frozen.has_manual_use_for(names["Owner"]));
+        assert!(!frozen.has_manual_use_for(names["Pair"]));
+        signatures.definitions.retain(|_, header| !matches!(header,
+            ElaboratedHeader::Implementation(implementation)
+                if implementation.relation.definition == crate::resolution::language_use_trait_definition()));
+        let fresh = frozen.fresh_query();
+        assert!(Arc::ptr_eq(&frozen.manual_use_nominals, &fresh.manual_use_nominals));
+        assert!(fresh.has_manual_use_for(names["Ticket"]));
+        assert!(fresh.has_manual_use_for(names["Owner"]));
+        let changed = TraitSolver::new(&signatures);
+        assert!(!changed.has_manual_use_for(names["Ticket"]));
+        assert!(!changed.has_manual_use_for(names["Owner"]));
     }
 
     #[test]

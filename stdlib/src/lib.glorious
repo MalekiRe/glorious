@@ -41,8 +41,8 @@ unsafe fn __g1_memory_static_bytes_address(value: __StaticData<u8>) -> *const u8
 unsafe fn __g1_memory_forget<T>(value: T) -> ();
 __g1_memory_static_bytes_len(value: __StaticData<u8>) -> usize;
 
-// Temporary legacy byte bridge for the opaque BLAKE3 leaf only. None of the
-// Vec, Slice, String or hash-table storage algorithms use Array anymore.
+// Legacy manifest declarations retained for existing artifact compatibility.
+// Source collections and hashing do not call these whole-operation leaves.
 __g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T;
 __g1_array_empty<T>() -> Array<T>;
 __g1_array_push_move<T>(value: &mut Array<T>, item: T) -> ();
@@ -564,6 +564,21 @@ fn utf8_decode_width(value: Slice<u8>, index: usize, code: u32, minimum: u32, wi
         true => utf8_decode_tail(value, index + 1, width - 1, code, minimum, width),
     }
 }
+fn utf8_decode_multibyte(value: Slice<u8>, index: usize, first: u32) -> Option<(char, usize)> {
+    handle first < 194 {
+        true => None,
+        false => handle first < 224 {
+            true => utf8_decode_width(value, index, first - 192, 128, 2),
+            false => handle first < 240 {
+                true => utf8_decode_width(value, index, first - 224, 2048, 3),
+                false => handle first < 245 {
+                    true => utf8_decode_width(value, index, first - 240, 65536, 4),
+                    false => None,
+                },
+            },
+        },
+    }
+}
 fn utf8_decode(value: Slice<u8>, index: usize) -> Option<(char, usize)> {
     handle index < value.length {
         false => None,
@@ -571,19 +586,9 @@ fn utf8_decode(value: Slice<u8>, index: usize) -> Option<(char, usize)> {
             let first = as<u32>(*Slice::get_unchecked(value, index));
             handle first < 128 {
                 true => Result::Ok((__g1_char_from_u32_checked(first), 1)),
-                false => handle first < 194 {
-                    true => None,
-                    false => handle first < 224 {
-                        true => utf8_decode_width(value, index, first - 192, 128, 2),
-                        false => handle first < 240 {
-                            true => utf8_decode_width(value, index, first - 224, 2048, 3),
-                            false => handle first < 245 {
-                                true => utf8_decode_width(value, index, first - 240, 65536, 4),
-                                false => None,
-                            },
-                        },
-                    },
-                },
+                // ASCII does not allocate the multibyte decoder's register
+                // frame. The slow path retains every width/scalar check.
+                false => utf8_decode_multibyte(value, index, first),
             }
         },
     }
@@ -719,38 +724,206 @@ pub struct Vec<T> {
     private unique: VecOwner,
 }
 
-// BLAKE3's input is an exact borrowed byte window. The legacy immutable Bytes
-// representation remains private to these machine bindings.
+impl<T> Drop for Vec<T> where T: Use<[0, 1]> {
+    drop(&mut self) -> {
+        // Remove each resident from the initialized prefix before invoking
+        // its ordinary source destruction. The allocation remains live until
+        // the final resident and all of its owned fields have been destroyed.
+        Vec::clear(&mut *self);
+        unsafe {
+            __g1_memory_deallocate(__g1_memory_cast<T, u8>(self.pointer),
+                self.capacity * __g1_memory_size_of<T>(), __g1_memory_align_of<T>());
+        }
+    }
+}
+
+// The caller withdraws this entire initialized suffix from its Vec first.
+// Visit the upper half before the lower half to preserve reverse destruction
+// order with logarithmic ordinary call depth. Bounded leaf chunks amortize
+// range-dispatch frames without depending on ordinary tail-call recycling.
+// No intermediate Vec or Option owner is manufactured for these residents.
+unsafe fn vec_drop_range<T>(pointer: *mut T, length: usize) -> ()
+    where T: Use<[0, 1]> {
+    handle length <= 8 {
+        true => unsafe { vec_drop_chunk(pointer, length) },
+        false => {
+            let half = length / 2;
+            unsafe {
+                vec_drop_range(__g1_memory_offset(pointer, half), length - half);
+                vec_drop_range(pointer, half)
+            }
+        },
+    }
+}
+// Called only for one through eight initialized residents. Even the ordinary
+// non-recycling interpreter therefore needs a fixed, small leaf stack.
+// Stop after the first resident instead of making an empty recursive call.
+unsafe fn vec_drop_chunk<T>(pointer: *mut T, length: usize) -> ()
+    where T: Use<[0, 1]> {
+    let last = length - 1;
+    unsafe {
+        discard(__g1_memory_read(__g1_memory_as_const(__g1_memory_offset(pointer, last))));
+    };
+    handle last {
+        0 => (),
+        _ => unsafe { vec_drop_chunk(pointer, last) },
+    }
+}
+
+// Unkeyed BLAKE3-256, implemented entirely by ordinary source functions.
+// Compression, chunk flags, tree shape and byte order follow the BLAKE3
+// specification/reference: https://github.com/BLAKE3-team/BLAKE3/tree/master/reference_impl
+// The borrowed input is never copied into an intermediate collection. Tree
+// recursion is logarithmic; a leaf processes at most sixteen 64-byte blocks.
 pub fn blake3(input: Slice<u8>) -> Vec<u8> {
-    // Compatibility bridge for the existing opaque hash leaf only. Vec's
-    // own allocation and operations never use this legacy Array storage.
-    let input_array = __g1_array_empty<u8>();
-    blake3_copy_input(&mut input_array, input, 0);
-    let digest = __g1_bytes_to_array(__g1_blake3(__g1_bytes_from_array_move(input_array)));
+    let digest = blake3_tree(input, 0, input.length, true);
     let output = Vec<u8>::with_capacity(32);
-    // The complete output extent is reserved once. Populate its uninitialized
-    // bytes directly, then publish the initialized length after all writes.
-    unsafe { blake3_copy_output(output.pointer, &digest, 0); };
+    // The complete result extent is reserved once; publish initialization only
+    // after every byte has been written. No native-endian u32 stores are used.
+    unsafe {
+        blake3_write_word(output.pointer, 0, digest.a);
+        blake3_write_word(output.pointer, 4, digest.b);
+        blake3_write_word(output.pointer, 8, digest.c);
+        blake3_write_word(output.pointer, 12, digest.d);
+        blake3_write_word(output.pointer, 16, digest.e);
+        blake3_write_word(output.pointer, 20, digest.f);
+        blake3_write_word(output.pointer, 24, digest.g);
+        blake3_write_word(output.pointer, 28, digest.h);
+    };
     output.length = as<usize>(32);
     output
 }
-fn blake3_copy_input(value: &mut Array<u8>, input: Slice<u8>, index: usize) -> () {
-    handle index < input.length {
-        false => (),
-        true => { __g1_array_push_move(&mut *value, *Slice::get_unchecked(input, index)); blake3_copy_input(&mut *value, input, index + 1) },
+struct Blake3Cv { a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32 }
+struct Blake3Words {
+    a: u32, b: u32, c: u32, d: u32, e: u32, f: u32, g: u32, h: u32,
+    i: u32, j: u32, k: u32, l: u32, m: u32, n: u32, o: u32, p: u32,
+}
+fn blake3_iv() -> Blake3Cv {
+    Blake3Cv { a: 1779033703, b: 3144134277, c: 1013904242, d: 2773480762,
+        e: 1359893119, f: 2600822924, g: 528734635, h: 1541459225 }
+}
+fn blake3_rotate(value: u32, shift: u32) -> u32 {
+    __g1_int_bit_or(__g1_int_shr(value, shift), __g1_int_shl(value, __g1_int_wrapping_sub<u32>(32, shift)))
+}
+fn blake3_mix(a: &mut u32, b: &mut u32, c: &mut u32, d: &mut u32, x: u32, y: u32) -> () {
+    *a = __g1_int_wrapping_add(__g1_int_wrapping_add(*a, *b), x);
+    *d = blake3_rotate(__g1_int_bit_xor(*d, *a), 16);
+    *c = __g1_int_wrapping_add(*c, *d);
+    *b = blake3_rotate(__g1_int_bit_xor(*b, *c), 12);
+    *a = __g1_int_wrapping_add(__g1_int_wrapping_add(*a, *b), y);
+    *d = blake3_rotate(__g1_int_bit_xor(*d, *a), 8);
+    *c = __g1_int_wrapping_add(*c, *d);
+    *b = blake3_rotate(__g1_int_bit_xor(*b, *c), 7);
+}
+fn blake3_permute(m: Blake3Words) -> Blake3Words {
+    Blake3Words { a: m.c, b: m.g, c: m.d, d: m.k, e: m.h, f: m.a, g: m.e, h: m.n,
+        i: m.b, j: m.l, k: m.m, l: m.f, m: m.j, n: m.o, o: m.p, p: m.i }
+}
+fn blake3_rounds(s: &mut Blake3Words, m: Blake3Words, remaining: usize) -> () {
+    blake3_mix(&mut s.a, &mut s.e, &mut s.i, &mut s.m, m.a, m.b);
+    blake3_mix(&mut s.b, &mut s.f, &mut s.j, &mut s.n, m.c, m.d);
+    blake3_mix(&mut s.c, &mut s.g, &mut s.k, &mut s.o, m.e, m.f);
+    blake3_mix(&mut s.d, &mut s.h, &mut s.l, &mut s.p, m.g, m.h);
+    blake3_mix(&mut s.a, &mut s.f, &mut s.k, &mut s.p, m.i, m.j);
+    blake3_mix(&mut s.b, &mut s.g, &mut s.l, &mut s.m, m.k, m.l);
+    blake3_mix(&mut s.c, &mut s.h, &mut s.i, &mut s.n, m.m, m.n);
+    blake3_mix(&mut s.d, &mut s.e, &mut s.j, &mut s.o, m.o, m.p);
+    handle remaining == 1 {
+        true => (),
+        false => blake3_rounds(s, blake3_permute(m), remaining - 1),
     }
 }
-// Safety: value names 32 writable u8 slots and index is at most 32. This
-// helper is used only by blake3's freshly reserved, still-empty result owner.
-unsafe fn blake3_copy_output(value: *mut u8, digest: &Array<u8>, index: usize) -> () {
-    // The hash leaf returns the fixed 256-bit BLAKE3 digest. This bridge
-    // consumes that exact contract, not a dynamic collection-length query.
-    handle index < 32 {
-        false => (),
+fn blake3_compress(cv: Blake3Cv, block: Blake3Words, counter: u64, length: u32, flags: u32) -> Blake3Cv {
+    let state = Blake3Words {
+        a: cv.a, b: cv.b, c: cv.c, d: cv.d, e: cv.e, f: cv.f, g: cv.g, h: cv.h,
+        i: 1779033703, j: 3144134277, k: 1013904242, l: 2773480762,
+        m: __g1_int_convert_wrapping_to_u32(counter),
+        n: __g1_int_convert_wrapping_to_u32(__g1_int_shr(counter, 32)), o: length, p: flags,
+    };
+    blake3_rounds(&mut state, block, 7);
+    // Both a chaining value and the first 32 root-output bytes use this half.
+    Blake3Cv {
+        a: __g1_int_bit_xor(state.a, state.i), b: __g1_int_bit_xor(state.b, state.j),
+        c: __g1_int_bit_xor(state.c, state.k), d: __g1_int_bit_xor(state.d, state.l),
+        e: __g1_int_bit_xor(state.e, state.m), f: __g1_int_bit_xor(state.f, state.n),
+        g: __g1_int_bit_xor(state.g, state.o), h: __g1_int_bit_xor(state.h, state.p),
+    }
+}
+fn blake3_byte(input: Slice<u8>, index: usize, end: usize) -> u32 {
+    handle index < end {
+        false => 0,
         true => unsafe {
-            __g1_memory_write(__g1_memory_offset(value, index), *__g1_array_get_borrow_shared(digest, index));
-            blake3_copy_output(value, digest, index + 1)
+            // end belongs to the current block and never exceeds input.length.
+            __g1_int_convert_wrapping_to_u32(__g1_memory_read(__g1_memory_offset_const(
+                __g1_memory_cast_const<(), u8>(__g1_memory_as_raw_shared(input.storage)), index)))
         },
+    }
+}
+fn blake3_word(input: Slice<u8>, index: usize, end: usize) -> u32 {
+    __g1_int_bit_or(
+        __g1_int_bit_or(blake3_byte(input, index, end), __g1_int_shl(blake3_byte(input, index + 1, end), 8)),
+        __g1_int_bit_or(__g1_int_shl(blake3_byte(input, index + 2, end), 16), __g1_int_shl(blake3_byte(input, index + 3, end), 24)))
+}
+fn blake3_block(input: Slice<u8>, start: usize, length: usize) -> Blake3Words {
+    let end = start + length;
+    Blake3Words {
+        a: blake3_word(input, start, end), b: blake3_word(input, start + 4, end),
+        c: blake3_word(input, start + 8, end), d: blake3_word(input, start + 12, end),
+        e: blake3_word(input, start + 16, end), f: blake3_word(input, start + 20, end),
+        g: blake3_word(input, start + 24, end), h: blake3_word(input, start + 28, end),
+        i: blake3_word(input, start + 32, end), j: blake3_word(input, start + 36, end),
+        k: blake3_word(input, start + 40, end), l: blake3_word(input, start + 44, end),
+        m: blake3_word(input, start + 48, end), n: blake3_word(input, start + 52, end),
+        o: blake3_word(input, start + 56, end), p: blake3_word(input, start + 60, end),
+    }
+}
+fn blake3_chunk(input: Slice<u8>, start: usize, length: usize, offset: usize, cv: Blake3Cv, root: Bool) -> Blake3Cv {
+    let remaining = length - offset;
+    let first = handle offset == 0 { true => as<u32>(1), false => as<u32>(0) };
+    handle remaining <= 64 {
+        true => {
+            let flags = __g1_int_bit_or(first, handle root { true => as<u32>(10), false => as<u32>(2) });
+            blake3_compress(cv, blake3_block(input, start + offset, remaining),
+                __g1_int_convert_wrapping_to_u64(start / 1024), __g1_int_convert_wrapping_to_u32(remaining), flags)
+        },
+        false => {
+            let next = blake3_compress(cv, blake3_block(input, start + offset, 64),
+                __g1_int_convert_wrapping_to_u64(start / 1024), 64, first);
+            blake3_chunk(input, start, length, offset + 64, next, root)
+        },
+    }
+}
+// Largest power-of-two chunk extent strictly below length. The comparison
+// proves doubling is within length, so even a maximal input cannot overflow.
+fn blake3_left_extent(length: usize, extent: usize) -> usize {
+    handle extent < length - extent {
+        true => blake3_left_extent(length, extent * 2),
+        false => extent,
+    }
+}
+fn blake3_tree(input: Slice<u8>, start: usize, length: usize, root: Bool) -> Blake3Cv {
+    handle length <= 1024 {
+        true => blake3_chunk(input, start, length, 0, blake3_iv(), root),
+        false => {
+            let left_length = blake3_left_extent(length, 1024);
+            let left = blake3_tree(input, start, left_length, false);
+            let right = blake3_tree(input, start + left_length, length - left_length, false);
+            let block = Blake3Words {
+                a: left.a, b: left.b, c: left.c, d: left.d, e: left.e, f: left.f, g: left.g, h: left.h,
+                i: right.a, j: right.b, k: right.c, l: right.d, m: right.e, n: right.f, o: right.g, p: right.h,
+            };
+            blake3_compress(blake3_iv(), block, 0, 64, handle root { true => as<u32>(12), false => as<u32>(4) })
+        },
+    }
+}
+// Safety: output is the freshly reserved 32-byte result, and offset is one
+// of 0,4,...,28. Every write initializes one distinct in-bounds byte.
+unsafe fn blake3_write_word(output: *mut u8, offset: usize, word: u32) -> () {
+    unsafe {
+        __g1_memory_write(__g1_memory_offset(output, offset), __g1_int_convert_wrapping_to_u8(word));
+        __g1_memory_write(__g1_memory_offset(output, offset + 1), __g1_int_convert_wrapping_to_u8(__g1_int_shr(word, 8)));
+        __g1_memory_write(__g1_memory_offset(output, offset + 2), __g1_int_convert_wrapping_to_u8(__g1_int_shr(word, 16)));
+        __g1_memory_write(__g1_memory_offset(output, offset + 3), __g1_int_convert_wrapping_to_u8(__g1_int_shr(word, 24)))
     }
 }
 
@@ -843,7 +1016,12 @@ impl ByteCursor {
             false => Result::Err(ByteError::Truncated),
             true => {
                 // The complete eight-byte extent was checked once above.
-                let value = unsafe { byte_cursor_word(bytes, cursor.position) };
+                let value = unsafe {
+                    let pointer = __g1_memory_offset_const(
+                        __g1_memory_cast_const<(), u8>(__g1_memory_as_raw_shared(bytes.storage)), cursor.position,
+                    );
+                    byte_cursor_word(pointer, 0, 0)
+                };
                 (*cursor).position = cursor.position + 8;
                 Result::Ok(value)
             },
@@ -853,31 +1031,25 @@ impl ByteCursor {
 
 fn byte_cursor_has(cursor: &ByteCursor, bytes: Slice<u8>, width: usize) -> Bool {
     let length = Slice::len(&bytes);
-    handle cursor.position <= length {
+    let position = cursor.position;
+    handle position <= length {
         false => false,
-        true => width <= length - cursor.position,
+        true => width <= length - position,
     }
 }
 
-// Safety: offset..offset+8 is inside the live borrowed byte window. Its sole
-// caller proves this before entering and advances the cursor only on success.
+// Safety: pointer starts an eight-byte extent inside the live borrowed window.
+// The public caller proves this before entering with shift=0 and value=0, and
+// advances the cursor only on success. Each recursive call consumes one byte;
+// shift is 0,8,..,56 and no pointer beyond the checked extent is constructed.
 // Read u8 residents, not an unaligned/endian-dependent native u64.
-unsafe fn byte_cursor_word(bytes: Slice<u8>, offset: usize) -> u64 {
-    unsafe {
-        let pointer = __g1_memory_offset_const(
-            __g1_memory_cast_const<(), u8>(__g1_memory_as_raw_shared(bytes.storage)), offset,
-        );
-        let b0 = __g1_int_convert_checked_to_u64(__g1_memory_read(pointer));
-        let b1 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 1)));
-        let b2 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 2)));
-        let b3 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 3)));
-        let b4 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 4)));
-        let b5 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 5)));
-        let b6 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 6)));
-        let b7 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 7)));
-        let low = __g1_int_bit_or(__g1_int_bit_or(b0, __g1_int_shl(b1, 8)), __g1_int_bit_or(__g1_int_shl(b2, 16), __g1_int_shl(b3, 24)));
-        let high = __g1_int_bit_or(__g1_int_bit_or(__g1_int_shl(b4, 32), __g1_int_shl(b5, 40)), __g1_int_bit_or(__g1_int_shl(b6, 48), __g1_int_shl(b7, 56)));
-        __g1_int_bit_or(low, high)
+unsafe fn byte_cursor_word(pointer: *const u8, shift: u32, value: u64) -> u64 {
+    let next = unsafe {
+        __g1_int_bit_or(value, __g1_int_shl(__g1_int_convert_checked_to_u64(__g1_memory_read(pointer)), shift))
+    };
+    handle shift == 56 {
+        true => next,
+        false => unsafe { byte_cursor_word(__g1_memory_offset_const(pointer, 1), shift + 8, next) },
     }
 }
 
@@ -1116,8 +1288,11 @@ impl<T> Vec<T> {
         where T: Use<[0, 1]> {
         handle length < value.length {
             true => {
-                handle Vec::pop(&mut *value) { Result::Ok(item) => discard(item), Result::Err(_) => () };
-                Vec::truncate(&mut *value, length)
+                let remaining = value.length - length;
+                (*value).length = length;
+                unsafe {
+                    vec_drop_range(__g1_memory_offset(value.pointer, length), remaining)
+                }
             },
             false => (),
         }
@@ -1129,7 +1304,8 @@ impl<T> Vec<T> {
     }
 
     pub fn reverse(value: &mut Self) -> () {
-        vec_reverse_from(&mut *value, 0, value.length)
+        let length = value.length;
+        vec_reverse_from(&mut *value, 0, length)
     }
 
     pub fn split_off(value: &mut Self, index: usize) -> Option<Self> {
@@ -1186,7 +1362,8 @@ impl<T> Vec<T> {
 
     pub fn partition_by<F>(value: &mut Self, predicate: F) -> usize
         where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
-        vec_partition_by_from(&mut *value, predicate, 0, Vec::len(& *value))
+        let length = Vec::len(& *value);
+        vec_partition_by_from(&mut *value, predicate, 0, length)
     }
 
     pub fn dedup(value: &mut Self) -> ()

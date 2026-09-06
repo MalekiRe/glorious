@@ -6058,7 +6058,7 @@ fn placeflow_releases_aggregate_reborrows_after_their_last_handler_use() {
 fn placeflow_preserves_enum_payload_reference_origins_across_handler_boundaries() {
     let core = core_for(
         "core-enum-reference-reborrow-handler@0.1.0",
-        "pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder::Held(&mut value); handle holder is Holder::Held(parent) { true => { let child = &mut *parent; handle Tick::tick() { Tick::tick() => *child }; *parent }; false => 0 } }",
+        "pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder::Held(&mut value); handle holder is Holder::Held(parent) { true => { let child = & *(*parent); handle Tick::tick() { Tick::tick() => *child }; *(*parent) }; false => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);

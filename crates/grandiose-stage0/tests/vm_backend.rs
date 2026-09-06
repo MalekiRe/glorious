@@ -16,6 +16,66 @@ use grandiose_stage0::{
 use std::collections::BTreeMap;
 
 #[test]
+fn frame_cleanup_declarations_round_trip_and_validate_owner_and_target_abis() {
+    use grandiose_stage0::VmFrameDrop;
+    let entry = DefKey(Digest::of_bytes(b"frame-plan-entry"));
+    let destructor = DefKey(Digest::of_bytes(b"frame-plan-drop"));
+    let main = VmFunction {
+        definition: entry, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+        nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+            VmInstruction::DeclareFrameCleanup { actions: vec![VmFrameDrop { owner: 0, destructor }] },
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let cleanup = VmFunction {
+        definition: destructor, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+        nominal_copy_descriptors: vec![], captures: 0, parameters: 1,
+        registers: vec![VmType::I64, VmType::Unit],
+        instructions: vec![
+            VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+            VmInstruction::ConstUnit { dst: 1 }, VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        host_capabilities: vec![], entry,
+        functions: BTreeMap::from([(entry, main), (destructor, cleanup)]),
+        callable_environments: BTreeMap::new(), fingerprint: Digest::of_bytes(b"unsealed"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_program(&candidate);
+    assert_eq!(decode_program(&encoded).unwrap(), candidate);
+    assert_eq!(decode_and_verify_program(&encoded).unwrap().run_i64().unwrap(), 42);
+    for case in 0..7 {
+        let mut invalid = candidate.clone();
+        match case {
+            0 => { invalid.functions.remove(&destructor); }
+            1 => { invalid.functions.get_mut(&destructor).unwrap().registers[0] = VmType::Bool; }
+            2 => { invalid.functions.get_mut(&destructor).unwrap().parameters = 0; }
+            3 => { invalid.functions.get_mut(&entry).unwrap().instructions.swap(1, 2); }
+            4 => {
+                let VmInstruction::DeclareFrameCleanup { actions } = &mut invalid.functions.get_mut(&entry).unwrap().instructions[1]
+                    else { unreachable!() };
+                actions.push(actions[0].clone());
+            }
+            5 => {
+                let VmInstruction::DeclareFrameCleanup { actions } = &mut invalid.functions.get_mut(&entry).unwrap().instructions[1]
+                    else { unreachable!() };
+                actions[0].owner = 99;
+            }
+            6 => { invalid.functions.get_mut(&destructor).unwrap().safety = grandiose_stage0::Safety::Unsafe; }
+            _ => unreachable!(),
+        }
+        invalid.fingerprint = invalid.computed_fingerprint();
+        assert!(decode_and_verify_program(&encode_program(&invalid)).is_err(), "case {case}");
+    }
+}
+
+#[test]
 fn owned_projection_moves_preserve_holes_and_validate_the_frozen_path() {
     let definition = DefKey(Digest::of_bytes(b"owned-projection-moves"));
     let candidate = |instructions: Vec<VmInstruction>, registers: Vec<VmType>| {
@@ -109,6 +169,78 @@ fn authoring_tuple_runner_preserves_results_types_and_existing_execution_limits(
     let mixed = authoring_tuple_program(VmType::Bool, VmInstruction::ConstBool { dst: 1, value: true });
     assert!(matches!(mixed.run_tuple_i64_for_authoring(Default::default()),
         Err(VmArtifactError::ResultType { expected: VmType::I64, found: VmType::Bool })));
+}
+
+#[test]
+fn authoring_reuses_only_empty_returned_register_buffers_within_one_execution() {
+    for indirect in [false, true] {
+        let entry = DefKey(Digest::of_bytes(b"register-pool-entry"));
+        let first = DefKey(Digest::of_bytes(b"register-pool-first"));
+        let make = |definition, registers, instructions| VmFunction {
+            definition, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers, instructions,
+        };
+        let mut entry_registers = vec![VmType::Bool, VmType::Bool, VmType::I64, VmType::I64, VmType::I64];
+        let mut entry_instructions = vec![
+            VmInstruction::ConstBool { dst: 0, value: true },
+            VmInstruction::ConstBool { dst: 1, value: false },
+            VmInstruction::Call { dst: 2, callee: first, arguments: vec![0] },
+        ];
+        if indirect {
+            entry_registers.push(VmType::Callable {
+                safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::Bool],
+                result: Box::new(VmType::I64), effects: Box::default(),
+            });
+            entry_instructions.extend([
+                VmInstruction::MakeCallable { dst: 5, callee: first, captures: vec![], environment: None },
+                VmInstruction::CallIndirect { dst: 3, callee: 5, arguments: vec![1] },
+            ]);
+        } else {
+            entry_instructions.push(VmInstruction::Call { dst: 3, callee: first, arguments: vec![1] });
+        }
+        entry_instructions.extend([
+            VmInstruction::AddI64 { dst: 4, left: 2, right: 3 }, VmInstruction::Return { value: 4 },
+        ]);
+        let expected_allocation = entry_registers.len() as u64 + 4 + 2;
+        let mut callee = make(first, vec![VmType::Bool, VmType::I64, VmType::Bool, VmType::I64], vec![
+            VmInstruction::BranchBool { condition: 0, then_target: 1, else_target: 3 },
+            VmInstruction::ConstI64 { dst: 1, value: 20 },
+            VmInstruction::Return { value: 1 },
+            // The second invocation must not retain the first invocation's
+            // initialized slot, even though its physical buffer is reused.
+            VmInstruction::IsInitialized { dst: 2, base: 1, fields: vec![] },
+            VmInstruction::BranchBool { condition: 2, then_target: 5, else_target: 6 },
+            VmInstruction::Trap,
+            VmInstruction::ConstI64 { dst: 3, value: 22 },
+            VmInstruction::Return { value: 3 },
+        ]);
+        callee.parameters = 1;
+        let mut candidate = CandidateVmProgram {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None, host_capabilities: vec![],
+            entry, callable_environments: BTreeMap::new(), fingerprint: Digest::of_bytes(b"stale"),
+            functions: BTreeMap::from([
+                (entry, make(entry, entry_registers, entry_instructions)),
+                (first, callee),
+            ]),
+        };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        let program = decode_and_verify_program(&encode_program(&candidate)).unwrap();
+        let limits = VmExecutionLimits { max_allocation_elements: expected_allocation, ..Default::default() };
+        for _ in 0..2 {
+            let (result, profile) = program.run_i64_for_authoring(limits).unwrap();
+            assert_eq!(result, 42);
+            assert_eq!(profile.charged_allocation_elements, expected_allocation);
+            assert_eq!(profile.reused_call_register_buffers, 1);
+            assert_eq!(profile.recycled_tail_calls, 0);
+            assert_eq!(profile.peak_call_depth, 2);
+        }
+        assert_eq!(program.run_i64().unwrap(), 42);
+        assert!(matches!(program.run_i64_with_limits(limits), Err(VmArtifactError::AllocationLimit { .. })));
+        assert!(matches!(program.run_i64_for_authoring(VmExecutionLimits {
+            max_allocation_elements: expected_allocation - 1, ..limits
+        }), Err(VmArtifactError::AllocationLimit { .. })));
+    }
 }
 
 #[derive(Default)]
@@ -2016,6 +2148,8 @@ fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() 
                 dst: 0,
                 capability: "clock".into(),
                 symbol: "now".into(),
+                source_contract: Digest::of_bytes(b"clock-now-contract"),
+                resident_operations: vec![],
                 parameters: vec![],
                 result: VmType::I64,
                 arguments: vec![],
@@ -2106,6 +2240,8 @@ fn program_host_execution_requires_and_uses_an_explicit_adapter() {
                 dst: 1,
                 capability: "diagnostic".into(),
                 symbol: "__g1_diagnostic_write".into(),
+                source_contract: Digest::of_bytes(b"diagnostic-write-contract"),
+                resident_operations: vec![],
                 parameters: vec![VmType::Text],
                 result: VmType::Unit,
                 arguments: vec![0],
@@ -2163,6 +2299,8 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
                 dst: 0,
                 capability: "clock".into(),
                 symbol: "now".into(),
+                source_contract: Digest::of_bytes(b"clock-now-contract"),
+                resident_operations: vec![],
                 parameters: vec![],
                 result: VmType::I64,
                 arguments: vec![],
@@ -2211,6 +2349,7 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
                     safety: grandiose_stage0::Safety::Safe,
                     unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                         is_enum: false,
                         definition: nominal,
                         arguments: vec![],
@@ -2243,6 +2382,7 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
                     safety: grandiose_stage0::Safety::Safe,
                     unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                         is_enum: false,
                         definition: nominal,
                         arguments: vec![],
@@ -2313,6 +2453,8 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
                             dst: 1,
                             capability: "zeta".into(),
                             symbol: "after_call".into(),
+                            source_contract: Digest::of_bytes(b"zeta-after-call-contract"),
+                            resident_operations: vec![],
                             parameters: vec![],
                             result: VmType::I64,
                             arguments: vec![],
@@ -2336,6 +2478,8 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
                             dst: 0,
                             capability: "alpha".into(),
                             symbol: "before_call".into(),
+                            source_contract: Digest::of_bytes(b"alpha-before-call-contract"),
+                            resident_operations: vec![],
                             parameters: vec![],
                             result: VmType::I64,
                             arguments: vec![],
@@ -2370,6 +2514,7 @@ fn verifier_rejects_reordered_nominal_descriptor_sets_before_cache_or_execution(
     let first = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-first"));
     let second = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-second"));
     let descriptor = |definition| VmNominalCopyDescriptor {
+        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
         is_enum: false,
         definition,
         arguments: vec![],
@@ -4783,6 +4928,7 @@ fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
             safety: grandiose_stage0::Safety::Safe,
             unsafe_execution: false,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                 is_enum: false,
                 definition,
                 arguments: vec![],
@@ -4849,6 +4995,7 @@ fn vm_decoder_verifier_rejects_nominal_pattern_field_type_forgery() {
             safety: grandiose_stage0::Safety::Safe,
             unsafe_execution: false,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                 is_enum: false,
                 definition,
                 arguments: vec![],
@@ -5297,6 +5444,83 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
 }
 
 #[test]
+fn handler_completion_is_delimited_and_checks_the_resumption_result_abi() {
+    let effect = DefKey(Digest::of_bytes(b"delimited-ask"));
+    let definition = DefKey(Digest::of_bytes(b"delimited-handler"));
+    let candidate = |function: VmFunction| {
+        let mut artifact = CandidateVmArtifact {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+            runtime_manifest: None,
+            function,
+            fingerprint: Digest::of_bytes(b"stale"),
+        };
+        artifact.fingerprint = artifact.computed_fingerprint();
+        artifact
+    };
+    let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
+        definition,
+        nominal_copy_descriptors: vec![],
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64; 7],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 1 },
+            VmInstruction::InstallHandler {
+                effect, effect_arguments: vec![], operation: 0,
+                payload_destinations: vec![], resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume, target: 8,
+            },
+            VmInstruction::Perform { dst: 1, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
+            VmInstruction::CompleteHandler { value: 1 },
+            VmInstruction::UninstallHandler,
+            VmInstruction::ConstI64 { dst: 5, value: 100 },
+            VmInstruction::AddI64 { dst: 6, left: 1, right: 5 },
+            VmInstruction::Return { value: 6 },
+            VmInstruction::ResumeReturn { dst: 2, value: 0 },
+            VmInstruction::ConstI64 { dst: 3, value: 2 },
+            VmInstruction::MulI64 { dst: 4, left: 2, right: 3 },
+            VmInstruction::CompleteHandler { value: 4 },
+            VmInstruction::UninstallHandler,
+            VmInstruction::ConstI64 { dst: 5, value: 100 },
+            VmInstruction::AddI64 { dst: 6, left: 4, right: 5 },
+            VmInstruction::Return { value: 6 },
+        ],
+    };
+    let artifact = candidate(function.clone());
+    let bytes = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&bytes).unwrap(), artifact);
+    assert_eq!(decode_and_verify_artifact(&bytes).unwrap().run_i64().unwrap(), 102);
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None, host_capabilities: vec![], entry: definition,
+        functions: BTreeMap::from([(definition, function.clone())]),
+        callable_environments: BTreeMap::new(), fingerprint: Digest::of_bytes(b"stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), 102);
+
+    let mut wrong_abi = function.clone();
+    wrong_abi.registers.push(VmType::Bool);
+    wrong_abi.instructions[8] = VmInstruction::ResumeReturn { dst: 7, value: 0 };
+    wrong_abi.instructions[10] = VmInstruction::MulI64 { dst: 4, left: 0, right: 3 };
+    assert!(matches!(verify_vm(candidate(wrong_abi)),
+        Err(VmArtifactError::TypeMismatch { register: 1, expected: VmType::Bool, found: VmType::I64 })));
+
+    let mut still_suspended = function.clone();
+    still_suspended.instructions[8] = VmInstruction::CompleteHandler { value: 0 };
+    assert!(matches!(verify_vm(candidate(still_suspended)), Err(VmArtifactError::HandlerResumeUnavailable)));
+    let mut no_handler = function;
+    no_handler.instructions = vec![
+        VmInstruction::ConstI64 { dst: 0, value: 1 },
+        VmInstruction::CompleteHandler { value: 0 },
+        VmInstruction::Return { value: 0 },
+    ];
+    assert!(matches!(verify_vm(candidate(no_handler)), Err(VmArtifactError::HandlerStackUnderflow)));
+}
+
+#[test]
 fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-ask"));
     let residual_effect = DefKey(Digest::of_bytes(b"snapshot-residual-log"));
@@ -5536,8 +5760,8 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
     };
     // The normal CFG route removes the facade before jumping to the rejoin.
     // A real label invocation instead reaches that rejoin with the facade
-    // retained. In either case, freezing the unique reference into the
-    // returned closure must fail before it can become observable.
+    // retained. A unique reference to a private Array still lacks native
+    // write-back storage and must fail before it can become observable.
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
@@ -5552,21 +5776,23 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                 VmType::I64,
                 VmType::Reference {
                     unique: true,
-                    referent: Box::new(VmType::I64),
+                    referent: Box::new(VmType::Array(Box::new(VmType::I64))),
                 },
                 VmType::Tuple(vec![VmType::Reference {
                     unique: true,
-                    referent: Box::new(VmType::I64),
+                    referent: Box::new(VmType::Array(Box::new(VmType::I64))),
                 }]),
                 label.clone(),
                 closure,
                 VmType::Unit,
+                VmType::Array(Box::new(VmType::I64)),
             ],
             instructions: vec![
                 VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::ArrayEmpty { dst: 6, element_type: VmType::I64 },
                 VmInstruction::Borrow {
                     dst: 1,
-                    src: 0,
+                    src: 6,
                     fields: vec![],
                     unique: true,
                     reborrow: false,
@@ -5582,13 +5808,13 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
                     continuation: VmContinuationPolicy::Consume,
-                    target: 10,
+                    target: 11,
                 },
                 VmInstruction::MakeLabel {
                     dst: 3,
                     brand_owner: owner,
                     brand_label: 0,
-                    target: 8,
+                    target: 9,
                     destination: 0,
                 },
                 VmInstruction::CallIndirect {
@@ -5597,7 +5823,7 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     arguments: vec![0],
                 },
                 VmInstruction::UninstallHandler,
-                VmInstruction::Jump { target: 8 },
+                VmInstruction::Jump { target: 9 },
                 VmInstruction::MakeCallable {
                     dst: 4,
                     callee: DefKey(Digest::of_bytes(b"forged-unique-closure")),
@@ -5752,6 +5978,7 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
             safety: grandiose_stage0::Safety::Safe,
             unsafe_execution: false,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                 is_enum: false,
                 definition: record,
                 arguments: vec![],
@@ -6010,6 +6237,7 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
         effects: Box::<VmEffectRow>::default(),
     };
     let environment = VmCaptureEnvironment {
+        destructor: None,
         owner,
         callable: 0,
         instance: None,
@@ -6172,7 +6400,7 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
     let facade = DefKey(Digest::of_bytes(b"nested-shared-unique-facade"));
     let unique = VmType::Reference {
         unique: true,
-        referent: Box::new(VmType::I64),
+        referent: Box::new(VmType::Array(Box::new(VmType::I64))),
     };
     let tuple = VmType::Tuple(vec![unique.clone()]);
     let shared_tuple = VmType::Reference {
@@ -6210,12 +6438,14 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
                 label,
                 closure,
                 VmType::Unit,
+                VmType::Array(Box::new(VmType::I64)),
             ],
             instructions: vec![
                 VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::ArrayEmpty { dst: 8, element_type: VmType::I64 },
                 VmInstruction::Borrow {
                     dst: 1,
-                    src: 0,
+                    src: 8,
                     fields: vec![],
                     unique: true,
                     reborrow: false,
@@ -6240,7 +6470,7 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
                     dst: 5,
                     brand_owner: owner,
                     brand_label: 0,
-                    target: 9,
+                    target: 10,
                     destination: 0,
                 },
                 VmInstruction::InstallHandler {
@@ -6250,7 +6480,7 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
                     continuation: VmContinuationPolicy::Consume,
-                    target: 12,
+                    target: 13,
                 },
                 VmInstruction::CallIndirect {
                     dst: 7,
@@ -7479,6 +7709,7 @@ fn verified_vm_round_trips_and_executes_typed_nominal_records() {
             unsafe_execution: false,
             definition,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                 is_enum: false,
                 definition,
                 arguments: vec![],
@@ -7531,6 +7762,7 @@ fn verifier_round_trips_record_projection_and_rejects_out_of_bounds_indices() {
             unsafe_execution: false,
             definition,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                 is_enum: false,
                 definition,
                 arguments: vec![],
@@ -7638,6 +7870,7 @@ fn verifier_rejects_callable_signature_forged_through_a_nominal_record_projectio
                     safety: grandiose_stage0::Safety::Safe,
                     unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                         is_enum: false,
                         definition: record,
                         arguments: vec![],
@@ -7754,6 +7987,7 @@ fn runtime_rechecks_callable_signature_when_an_enum_projection_is_variant_depend
                     safety: grandiose_stage0::Safety::Safe,
                     unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                         is_enum: true,
                         definition: choice,
                         arguments: vec![],
@@ -8301,6 +8535,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
     ]));
     let entry = DefKey(Digest::of_bytes(b"callable-environment-entry"));
     let environment = VmCaptureEnvironment {
+        destructor: None,
         owner: brand.owner,
         callable: brand.callable.0,
         instance: None,
@@ -8368,6 +8603,57 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         verify_vm_program(valid.clone()).unwrap().run_i64().unwrap(),
         42
     );
+
+    // Environment destruction is executable authority authenticated by the
+    // lifted target, with an exact capture ABI and ordinary codec coverage.
+    let destructor = DefKey(Digest::of_parts([
+        b"grandiose-callable-environment-destruction-v1".as_slice(),
+        callable.0.as_bytes().as_slice(),
+    ]));
+    let mut cleanup = valid.clone();
+    cleanup.callable_environments.get_mut(&callable).unwrap().destructor = Some(destructor);
+    let entry_body = cleanup.functions.get_mut(&entry).unwrap();
+    if let VmInstruction::MakeCallable { environment: Some(environment), .. } = &mut entry_body.instructions[1] {
+        environment.destructor = Some(destructor);
+    }
+    entry_body.registers.push(VmType::Unit);
+    entry_body.instructions.insert(3, VmInstruction::DestroyCallable { dst: 3, value: 1 });
+    cleanup.functions.insert(destructor, VmFunction {
+        definition: destructor, safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0, parameters: 1,
+        registers: vec![VmType::I64, VmType::Unit],
+        instructions: vec![
+            VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+            VmInstruction::ConstUnit { dst: 1 }, VmInstruction::Return { value: 1 },
+        ],
+    });
+    cleanup.fingerprint = cleanup.computed_fingerprint();
+    assert_eq!(decode_program(&encode_program(&cleanup)).unwrap(), cleanup);
+    assert_eq!(decode_and_verify_program(&encode_program(&cleanup)).unwrap().run_i64().unwrap(), 42);
+    let mut missing_cleanup = cleanup.clone();
+    missing_cleanup.functions.remove(&destructor);
+    missing_cleanup.fingerprint = missing_cleanup.computed_fingerprint();
+    assert!(matches!(verify_vm_program(missing_cleanup), Err(VmArtifactError::MissingFunction { definition }) if definition == destructor));
+    let mut wrong_cleanup = cleanup.clone();
+    wrong_cleanup.functions.get_mut(&destructor).unwrap().parameters = 0;
+    wrong_cleanup.fingerprint = wrong_cleanup.computed_fingerprint();
+    assert!(matches!(verify_vm_program(wrong_cleanup), Err(VmArtifactError::InvalidCallableEnvironment {
+        message: "capture destruction has an incompatible environment ABI"
+    })));
+    let mut foreign_cleanup = cleanup.clone();
+    foreign_cleanup.callable_environments.get_mut(&callable).unwrap().destructor = Some(entry);
+    if let VmInstruction::MakeCallable { environment: Some(environment), .. } =
+        &mut foreign_cleanup.functions.get_mut(&entry).unwrap().instructions[1] {
+        environment.destructor = Some(entry);
+    }
+    foreign_cleanup.fingerprint = foreign_cleanup.computed_fingerprint();
+    assert!(matches!(verify_vm_program(foreign_cleanup), Err(VmArtifactError::InvalidCallableEnvironment {
+        message: "capture destruction does not belong to its callable"
+    })));
+    let mut reused_capture = valid.clone();
+    reused_capture.functions.get_mut(&entry).unwrap().instructions[3] = VmInstruction::Return { value: 0 };
+    reused_capture.fingerprint = reused_capture.computed_fingerprint();
+    assert!(matches!(verify_vm_program(reused_capture), Err(VmArtifactError::UseAfterMove { register: 0 })));
 
     // The lexical environment brand is an executable provenance witness, not
     // merely capture-layout metadata.  Even a sibling whose body and ABI are
@@ -8509,6 +8795,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
     orphan_registry.callable_environments.insert(
         orphan,
         VmCaptureEnvironment {
+            destructor: None,
             owner: orphan_owner,
             callable: 0,
             instance: None,
@@ -8651,6 +8938,8 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
                     dst: 1,
                     capability: "test".into(),
                     symbol: "accept".into(),
+                    source_contract: Digest::of_bytes(b"test-accept-contract"),
+                    resident_operations: vec![],
                     parameters: vec![expected.clone()],
                     result: VmType::I64,
                     arguments: vec![0],
@@ -9934,6 +10223,7 @@ fn verifier_rejects_copying_a_nominal_carrier_of_a_unique_reference() {
             unsafe_execution: false,
             definition,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
                 is_enum: false,
                 definition,
                 arguments: vec![],
@@ -10288,6 +10578,7 @@ fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
     // Supply the same declaration-owned record layout before validating MIR,
     // emitting, and independently verifying the raw artifact.
     mir.nominal_copy_descriptors = vec![grandiose_stage0::MirNominalCopyDescriptor {
+        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
         is_enum: false,
         definition: pair,
         arguments: vec![],

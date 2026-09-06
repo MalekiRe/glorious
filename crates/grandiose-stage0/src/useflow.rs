@@ -1932,6 +1932,13 @@ impl Analyzer<'_> {
         expected: &Type,
         boundary: CallableEscapeBoundary,
     ) -> Summary {
+        if let CoreKind::Block(values) = &self.body.expression(id).kind {
+            // Only the tail value crosses this boundary. Prefix expressions
+            // were checked during evaluation; neither discard their use
+            // counts nor reclassify them as outgoing capabilities.
+            return values.last().map_or_else(Summary::default, |value|
+                self.escape_value_as(*value, environment, expected, boundary));
+        }
         // An enum constructor carries its active variant at this expression,
         // unlike an enum parameter whose variant is genuinely dynamic. Use
         // that proof to preserve payload capabilities across a call or effect

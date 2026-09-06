@@ -124,6 +124,89 @@ pub struct CallableSignature {
     pub where_associated_effect_bindings: Vec<ElaboratedAssociatedEffectBinding>,
 }
 
+/// Native linking must retain the complete source contract before VM types
+/// erase regions and use bounds. Use tagged semantic encodings, never Debug
+/// strings or an ABI-size comparison, for this declaration-owned identity.
+pub(crate) fn host_contract_fingerprint(
+    definition: DefKey,
+    signature: &CallableSignature,
+) -> crate::Digest {
+    use crate::types::{canonical_generic_arguments_encoding, canonical_type_encoding};
+    fn part(bytes: &mut Vec<u8>, value: &[u8]) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value);
+    }
+    fn kinds(bytes: &mut Vec<u8>, values: &[GenericKind]) {
+        bytes.extend_from_slice(&(values.len() as u64).to_le_bytes());
+        for kind in values {
+            bytes.push(match kind {
+                GenericKind::Type => 0,
+                GenericKind::EffectRow => 1,
+                GenericKind::Lifetime => 2,
+                GenericKind::Const(crate::types::ConstKind::U32) => 3,
+                GenericKind::Const(crate::types::ConstKind::Quantity) => 4,
+            });
+        }
+    }
+    fn relation(bytes: &mut Vec<u8>, subject: &Type, relation: &ElaboratedTraitReference) {
+        part(bytes, &canonical_type_encoding(subject));
+        bytes.extend_from_slice(&relation.definition.0.as_bytes());
+        part(
+            bytes,
+            &canonical_generic_arguments_encoding(&relation.arguments),
+        );
+    }
+    let mut bytes = b"grandiose-native-source-call-contract-v1".to_vec();
+    bytes.extend_from_slice(&definition.0.as_bytes());
+    bytes.extend_from_slice(&signature.generics.to_le_bytes());
+    kinds(&mut bytes, &signature.generic_kinds);
+    part(
+        &mut bytes,
+        &canonical_type_encoding(&Type::Callable {
+            safety: signature.safety,
+            lifetime_binders: 0,
+            parameters: signature.parameters.clone(),
+            result: Box::new(signature.result.clone()),
+            effects: signature.effects.clone(),
+            invocation: signature.invocation,
+        }),
+    );
+    bytes.extend_from_slice(&(signature.where_bounds.len() as u64).to_le_bytes());
+    for (subject, bound) in &signature.where_bounds {
+        relation(&mut bytes, subject, bound);
+    }
+    bytes.extend_from_slice(&(signature.where_associated_type_bindings.len() as u64).to_le_bytes());
+    for binding in &signature.where_associated_type_bindings {
+        relation(&mut bytes, &binding.subject, &binding.relation);
+        part(&mut bytes, binding.name.as_bytes());
+        kinds(&mut bytes, &binding.item_generic_kinds);
+        part(
+            &mut bytes,
+            &canonical_generic_arguments_encoding(&binding.item_arguments),
+        );
+        part(&mut bytes, &canonical_type_encoding(&binding.value));
+    }
+    bytes.extend_from_slice(
+        &(signature.where_associated_effect_bindings.len() as u64).to_le_bytes(),
+    );
+    for binding in &signature.where_associated_effect_bindings {
+        relation(&mut bytes, &binding.subject, &binding.relation);
+        part(&mut bytes, binding.name.as_bytes());
+        kinds(&mut bytes, &binding.item_generic_kinds);
+        part(
+            &mut bytes,
+            &canonical_generic_arguments_encoding(&binding.item_arguments),
+        );
+        part(
+            &mut bytes,
+            &canonical_generic_arguments_encoding(&[GenericArgument::EffectRow(
+                binding.value.clone(),
+            )]),
+        );
+    }
+    crate::Digest::of_bytes(&bytes)
+}
+
 /// The frozen authority identity of one source-declared host import.  A
 /// capability is request-granted policy; the symbol is a stable ABI label,
 /// intentionally separate from source paths and VM function identities.
@@ -307,6 +390,81 @@ pub enum ElaboratedNominalLayout {
     Struct(Vec<NominalField>),
     Enum(Vec<ElaboratedEnumVariant>),
     Opaque,
+}
+
+/// Preserve declaration-owned field contracts before concrete substitution
+/// and VM region erasure. In particular, swapping two lifetime binders in a
+/// field must invalidate a native binding even when all offsets are unchanged.
+pub(crate) fn nominal_contract_fingerprint(
+    definition: DefKey,
+    header: &ElaboratedHeader,
+) -> Option<crate::Digest> {
+    use crate::types::canonical_type_encoding;
+    fn part(bytes: &mut Vec<u8>, value: &[u8]) {
+        bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(value);
+    }
+    fn fields(bytes: &mut Vec<u8>, fields: &[NominalField]) {
+        bytes.extend_from_slice(&(fields.len() as u64).to_le_bytes());
+        for field in fields {
+            part(bytes, field.name.as_bytes());
+            part(bytes, &canonical_type_encoding(&field.ty));
+            bytes.push(u8::from(field.private_authority.is_some()));
+            if let Some(authority) = field.private_authority {
+                bytes.extend_from_slice(&authority.0.as_bytes());
+            }
+        }
+    }
+    let ElaboratedHeader::Nominal {
+        generics,
+        generic_kinds,
+        layout,
+    } = header
+    else {
+        return None;
+    };
+    let mut bytes = b"grandiose-native-source-nominal-contract-v1".to_vec();
+    bytes.extend_from_slice(&definition.0.as_bytes());
+    bytes.extend_from_slice(&generics.to_le_bytes());
+    bytes.extend_from_slice(&(generic_kinds.len() as u64).to_le_bytes());
+    for kind in generic_kinds {
+        bytes.push(match kind {
+            GenericKind::Type => 0,
+            GenericKind::EffectRow => 1,
+            GenericKind::Lifetime => 2,
+            GenericKind::Const(crate::types::ConstKind::U32) => 3,
+            GenericKind::Const(crate::types::ConstKind::Quantity) => 4,
+        });
+    }
+    match layout {
+        ElaboratedNominalLayout::Struct(members) => {
+            bytes.push(0);
+            fields(&mut bytes, members);
+        }
+        ElaboratedNominalLayout::Enum(variants) => {
+            bytes.push(1);
+            bytes.extend_from_slice(&(variants.len() as u64).to_le_bytes());
+            for variant in variants {
+                part(&mut bytes, variant.name.as_bytes());
+                match &variant.payload {
+                    ElaboratedEnumVariantPayload::Unit => bytes.push(0),
+                    ElaboratedEnumVariantPayload::Tuple(members) => {
+                        bytes.push(1);
+                        bytes.extend_from_slice(&(members.len() as u64).to_le_bytes());
+                        for member in members {
+                            part(&mut bytes, &canonical_type_encoding(member));
+                        }
+                    }
+                    ElaboratedEnumVariantPayload::Struct(members) => {
+                        bytes.push(2);
+                        fields(&mut bytes, members);
+                    }
+                }
+            }
+        }
+        ElaboratedNominalLayout::Opaque => return None,
+    }
+    Some(crate::Digest::of_bytes(&bytes))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1102,7 +1260,16 @@ impl ElaboratedInterface {
     /// type still contains an unconstrained generic or projection and must be
     /// resolved at its concrete use site.
     pub fn principal_use_interval(&self, ty: &Type) -> Option<Quantity> {
-        self.principal_use(ty, &mut vec![])
+        self.principal_use(ty, &mut vec![], None)
+    }
+
+    /// Internal frozen-phase entry: the snapshot must belong to this exact
+    /// immutable interface. Query tables, cycle state and work limits remain
+    /// independent; only immutable rule/layout inputs are reused.
+    pub(crate) fn principal_use_interval_with_solver(
+        &self, ty: &Type, solver: &crate::TraitSolver,
+    ) -> Option<Quantity> {
+        self.principal_use(ty, &mut vec![], Some(solver))
     }
 
     pub fn principal_use_interval_with_bounds(
@@ -1114,19 +1281,28 @@ impl ElaboratedInterface {
         crate::TraitSolver::new(self).principal_use_with_assumptions(ty, &assumptions)
     }
 
-    fn principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {
-        match self.manual_principal_use(ty) {
+    pub(crate) fn principal_use_interval_with_bounds_and_solver(
+        &self, ty: &Type, bounds: &[(Type, ElaboratedTraitReference)], solver: &crate::TraitSolver,
+    ) -> Option<Quantity> {
+        let assumptions = bounds.iter().map(|(subject, relation)| crate::TraitGoal {
+            subject: subject.clone(), relation: relation.clone(),
+        }).collect::<Vec<_>>();
+        solver.fresh_query_with_limits(Default::default()).principal_use_with_assumptions(ty, &assumptions)
+    }
+
+    fn principal_use(&self, ty: &Type, active: &mut Vec<Type>, solver: Option<&crate::TraitSolver>) -> Option<Quantity> {
+        match self.manual_principal_use(ty, solver) {
             Some(result) => result,
-            None => self.structural_principal_use(ty, active),
+            None => self.structural_principal_use(ty, active, solver),
         }
     }
 
     // The outer option distinguishes absence of a manual rule from an
     // unresolved conditional rule: the latter must not fall back to copying
     // an otherwise fieldless/raw-pointer-backed nominal.
-    fn manual_principal_use(&self, ty: &Type) -> Option<Option<Quantity>> {
+    fn manual_principal_use(&self, ty: &Type, solver: Option<&crate::TraitSolver>) -> Option<Option<Quantity>> {
         let Type::Nominal { definition, .. } = ty else { return None; };
-        let has_rule = self.definitions.values().any(|header| {
+        let has_rule = solver.map_or_else(|| self.definitions.values().any(|header| {
             let ElaboratedHeader::Implementation(implementation) = header else {
                 return false;
             };
@@ -1134,25 +1310,28 @@ impl ElaboratedInterface {
                 == crate::resolution::language_use_trait_definition()
                 && matches!(&implementation.self_ty, Type::Nominal { definition: owner, .. }
                     if owner == definition)
-        });
-        has_rule.then(|| crate::TraitSolver::new(self)
-            .principal_use_with_assumptions(ty, &[]))
+        }), |solver| solver.has_manual_use_for(*definition));
+        has_rule.then(|| {
+            let solver = solver.map_or_else(|| crate::TraitSolver::new(self),
+                |solver| solver.fresh_query_with_limits(Default::default()));
+            solver.principal_use_with_assumptions(ty, &[])
+        })
     }
 
-    fn structural_principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {
+    fn structural_principal_use(&self, ty: &Type, active: &mut Vec<Type>, solver: Option<&crate::TraitSolver>) -> Option<Quantity> {
         match ty {
             Type::Unit | Type::Never | Type::Scalar(_) => Some(Quantity::UNRESTRICTED),
             Type::Tuple(values) => {
                 values
                     .iter()
                     .try_fold(Quantity::UNRESTRICTED, |quantity, value| {
-                        let field = self.principal_use(value, active)?;
+                        let field = self.principal_use(value, active, solver)?;
                         quantity.intersection(field).ok()
                     })
             }
             // An array is moved as one aggregate, but every element must be
             // legal under that aggregate's interval.
-            Type::Array(value) => self.principal_use(value, active),
+            Type::Array(value) => self.principal_use(value, active, solver),
             // A static-data handle is immutable, sealed compiler data. It is
             // freely reusable regardless of the element's ordinary ownership
             // contract; raw handles never expose an owning element value.
@@ -1183,7 +1362,7 @@ impl ElaboratedInterface {
                                         field.ty.clone(),
                                         arguments,
                                     );
-                                    let field = self.principal_use(&field, active)?;
+                                    let field = self.principal_use(&field, active, solver)?;
                                     quantity.intersection(field).ok()
                                 })
                         }
@@ -1203,7 +1382,7 @@ impl ElaboratedInterface {
                                     fields.into_iter().try_fold(quantity, |quantity, field| {
                                         let field =
                                             substitute_alias_generic_identity(field, arguments);
-                                        let field = self.principal_use(&field, active)?;
+                                        let field = self.principal_use(&field, active, solver)?;
                                         quantity.intersection(field).ok()
                                     })
                                 })

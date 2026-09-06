@@ -98,7 +98,7 @@ fn cases(buffer: &mut ByteBuf, inputs: &Vec<Vec<u8>>, file: identity::FileKey, c
     -> Result<(), source::Failure> {
     handle Vec::get(inputs, cursor) {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(bytes) => handle source::create(file, *bytes, 4096, &mut *controls) {
+        Result::Ok(bytes) => handle source::create(file, Clone::clone(bytes), 4096, &mut *controls) {
             Result::Err(error) => Result::Err(error),
             Result::Ok(blob) => handle dump(&mut *buffer, &blob, &mut *controls) {
                 Result::Err(error) => Result::Err(error), Result::Ok(_) => cases(buffer, inputs, file, controls, cursor + 1),

@@ -30,6 +30,8 @@ hashing takes a `Slice<u8>` and returns `Vec<u8>`; the old scalar `Bytes` ABI is
 private. There are no new native opcodes or compiler semantics. Bounded
 `ByteBuf` and position-only `ByteCursor` implement encoding and range policy
 in source. Their failure tests check unchanged bytes/cursor positions.
+This is the historical initial bridge. A31 below replaces hashing with ordinary
+source bytecode while retaining legacy artifact meanings and declarations.
 
 ## A03: measured state-loop execution
 
@@ -623,11 +625,458 @@ The complete workspace passes 2,455 tests with zero failures and two existing
 ignored manual VM benchmarks in 84.670 seconds; all 48 source entries pass
 within that run. The source-lock audit is unchanged before/after execution.
 
+## A26: owned patterns, resident destruction and delimited completion
+
+September 6, 2026. Source Vec now destroys application-defined residents through
+ordinary specialized source hooks, then frees its raw allocation. Pattern
+extraction preserves residual ownership, and selected-variant destructor loans
+do not retain unrelated error payloads. Terminal completion returns clean up
+their enclosing lexical owners. Explicit unique-reference reborrows remain
+required after a call that would otherwise consume the handle.
+
+The authoring runner recognizes vacant structural cleanup CFGs after self-tail
+calls with a bounded, allocation-charged proof. Active hooks and all other
+source work prevent recycling; ordinary execution is unchanged. An explicit
+resumption-completion delimiter separates the resumed computation from its
+enclosing suffix, and restored frames synchronize surviving source allocations
+without conflating fresh shadowed storage. Stage0 schema/cache/bytecode/verifier
+generations are now 100/15/55/14, not an independent G1 format change.
+
+Frozen validation passes 2,577 workspace/all-targets tests with the 48 source
+entries excluded, then all 48 entries in the separately audited complete suite:
+2,625 passed, zero failed, two existing ignored benchmarks. Source execution
+takes 172.79 seconds. `target/compiler-check/run-4hvcrnb9/report.json` contains
+50 execution records, a matching source-lock digest, complete-suite pass status
+and `release_ready: false`. All original source assertions, complete batches,
+590-second command guards and VM budgets remain in force.
+
+See [resident-cleanup evidence and remaining gaps](unsafe-memory-progress.md#source-owned-resident-destruction-and-handler-cleanup).
+These are authoring prerequisites, not certification of the source semantic
+compiler, service or C2/C3 bootstrap.
+
+## A27: native bridge source contracts and unsafe-result reborrowing
+
+Stage0 schema 101 retains callable and nominal-field source contract digests
+through region erasure for capability-bound native linking. Explicitly unsafe
+host bindings now support scalar/native-reference calls and synchronous
+bytecode callbacks, including source-specialized Vec growth and resident Drop
+while native code is active. The fixtures use genuine source-allocated homes,
+not copied aggregate payloads or native collection implementations.
+
+An unsafe-created unique reference forwarded through a safe borrowing function
+previously lost its parent-loan provenance and failed a legal child reborrow.
+Frozen unsafe/external results now introduce explicit reference-leaf origins
+that survive forwarding, blocks and reborrowing. Existing overlap, parent-write
+and shared-to-unique rejection remain covered; raw pointer bits alone introduce
+no checked authority. Cache/bytecode/verifier generations are 16/56/15.
+
+General frame homes, owned/callable ABI, outward callback effects and complete
+cleanup remain open. See the [native bridge checkpoint](unsafe-memory-progress.md#native-calls-and-bytecode-callback-checkpoint)
+for the exact execution and safety scope. This does not implement compiler
+semantics in a host callback or certify G1/self-hosting.
+
+Frozen validation passes 2,592 workspace/all-targets tests and all 48 separately
+audited source entries: 2,640 passed, zero failed, two existing ignored manual
+benchmarks. The 171.55-second source run has no filters and keeps all original
+batches, assertions and budgets. Its evidence is
+`target/compiler-check/run-9dlur2gc/report.json`, with 50 execution records,
+matching source-lock digest and `release_ready: false`.
+
+## A28: native homes for ordinary source storage
+
+Schema 102 and cache/bytecode/verifier 17/57/16 initialize supported addressable
+source locals in native homes before any borrow or engine boundary. Source
+cleanup and partial-initialization metadata govern those homes; raw/native
+address exposure prevents premature reclamation or frame recycling. Source
+Vec callback fixtures use ordinary locals and count actual cleanup homes in
+their byte budgets. A surviving unique native-home capture works across the
+existing dynamic-label rejoin.
+
+An adjacent single-consumer dereference/projection can read one native field
+directly instead of allocating an unobserved aggregate value. It retains both
+instruction charges and checks all local uses, including deferred control
+payloads. This restores the four source batches exposed by native-home costs
+to their original allocation budget. No source assertion or limit is relaxed.
+
+See the [native source-storage checkpoint](unsafe-memory-progress.md#native-source-storage-checkpoint)
+for the precise supported layouts, runtime limits and remaining ABI/compiler
+work. This does not certify complete U4, G1 or self-hosting.
+
+Frozen validation passes **2,646 tests**, zero failures and two existing ignored
+manual benchmarks: 2,598 workspace/all-targets tests and all 48 source entries
+in 176.98 seconds. `target/compiler-check/run-9d708b6q/report.json` contains
+50 execution records, no filters, a complete-suite pass and `release_ready: false`,
+bound to source lock SHA-256
+`55825cc00ee932738eb43d441e736c60bf5fba3fc674b7b57e09d3231779f466`.
+The Rust and source build-identity constructors both retain the new generations;
+the source bootstrap comparator still checks all seven build fields.
+
+## A29: synchronous owned native arguments and results
+
+Schema/cache/bytecode/verifier 103/18/58/17 and native ABI 2 retain owned
+aggregate arguments in producer-established native storage and initialize
+native results in preallocated caller slots. Callback frames bind the native
+caller's existing owned parameter slots and retain native return producers
+through ordinary calls. Source Vec growth and element Drop execute as bytecode
+during an owned round trip; a zero-size owner crosses both directions without
+native payload allocation and is destroyed once by source cleanup.
+
+The [owned ABI checkpoint](unsafe-memory-progress.md#synchronous-owned-native-abi-checkpoint)
+records the tests and limits. This is synchronous ownership placement, not
+durable external ownership, a general callable ABI, selected drop-code identity,
+complete exceptional cleanup, physical allocation-free certification or U4
+completion. Both build-identity constructors advance; source comparison batches
+and execution limits are unchanged.
+
+Frozen validation passes **2,651 tests**, zero failures and two existing ignored
+benchmarks: 2,603 workspace/all-targets tests (23 native-bridge regressions) and
+all 48 audited source entries in 168.02 seconds. The unfiltered, 50-record report
+is `target/compiler-check/run-xyt6cbon/report.json`, source lock SHA-256
+`6811bd9278b2ee73c90bb50d336ec47e0639c5f3960035bdaf7404615cdcd7fb`.
+It records a complete current-suite pass, not release readiness or self-hosting.
+
+## A30: selected native destruction and normal-return register reuse
+
+Schema/cache/bytecode/verifier 104/19/59/18 and native ABI 3 bind each native
+resident's full source-type identity and selected destructor to its emitted
+reachable code. Native code can invoke this specialized bytecode operation
+without a separately declared source callback argument. Return-only referents
+retain operations too, and ABI matching includes the execution allocation-domain
+protocol. This is not complete copy/use-operation identity, durable external
+ownership or a general callable ABI. See the
+[destructor contract checkpoint](unsafe-memory-progress.md#native-destructor-contract-checkpoint).
+
+The new source Drop fixture exposed prefix-binding mutation in a speculative
+root short-circuit lowering path. Declining that path now leaves the lexical
+scope unchanged; accepted paths also clean up prefix owners on normal return.
+Ordinary native-resident call arguments copy into distinct callee homes without
+intermediate field boxing. The opt-in authoring runtime reuses empty register
+buffers after ordinary returns, with stable function-keyed cache entries local
+to one execution. Only Vec backing survives: all values, native homes, source
+brands and continuation state are released. New allocations remain charged;
+normal source cleanup, call-depth checks and the original execution limits
+remain. `reused_call_register_buffers` records the number of actual reuses.
+
+The complete bootstrap batch initially exceeded its 16,777,216-element limit
+after restored cleanup. A temporary larger-limit diagnostic measured 17,557,304
+elements; that diagnostic is not a passing original-limit certificate. Its
+temporary test edit was restored before validation. The register-buffer and
+native-argument changes reduce real allocation work, not comparator coverage.
+The physical meter's original size-independence and rational-slope assertions
+remain unchanged; [current measurements](runtime-costs.md#september-6-native-destructor-and-register-buffer-checkpoint)
+record the executed results separately from logical allocation charges.
+
+Frozen validation passes **2,658 tests**, zero failures and two existing ignored
+benchmarks: 2,610 workspace/all-targets tests and all 48 audited source entries
+in 174.90 seconds. Bootstrap returns `[145, 80, 13]` with 7,699,624 charged
+elements and 495,108 reused buffers under its original limits. The unfiltered,
+50-record report is `target/compiler-check/run-47qvcf5a/report.json`, bound to
+source lock SHA-256
+`4da7e82758161ab0586d5c3a7098c6acf7c746a235d48f082567e359bd620575`.
+It certifies the current suite, not language parity, release readiness or C2/C3.
+
+## A31: source-owned BLAKE3
+
+The public `blake3(Slice<u8>) -> Vec<u8>` API now runs unkeyed BLAKE3-256 as
+ordinary source bytecode. Compression uses existing scalar leaves; block
+loading and digest writing use existing byte-memory operations. Chunk flags,
+64-bit counters, message permutation and tree reduction are library policy,
+not a new runtime primitive. No input Array/Bytes conversion remains. Legacy
+declarations and opcodes retain their explicit artifact compatibility meanings,
+but no current source library function calls them. No artifact generation,
+runtime authority, budget or accounting rule changes in this checkpoint.
+
+The original complete-digest fixture remains. New regressions cover 35 lengths
+through 65,537 bytes in one shared-budget execution, exact emitted-opcode
+inspection, six high/low counter cases against non-root reference chaining
+values, and a mutated owned input whose first hash releases its loan. The
+large batch passes within 64 call frames and a 4,096-byte native-storage budget
+with no native allocation over 64 bytes. This limit excludes separately
+accounted private VM registers/metadata, not a physical allocator census.
+
+The first high-counter test's nested Boolean-handler comparison encountered an
+existing C0 lowering restriction. At this checkpoint its comparison checked all
+eight words with the same XOR/OR reduction used by compiler identities; A32
+below fixes the restriction and restores the chained comparison. An initial
+owned-input fixture referenced a nonexistent unchecked
+Vec accessor and was corrected to the actual checked `Vec::get_mut` API. These
+were test-fixture failures, not passing executions of the source algorithm.
+
+See [source hashing evidence and remaining gates](unsafe-memory-progress.md#source-blake3-checkpoint).
+Compiler identities call the source implementation without test-only selection
+or native fallback. This does not establish full U4–U6, G1 or self-hosting.
+
+Frozen validation passes **2,661 tests**, zero failures and two existing ignored
+benchmarks: 2,613 workspace/all-targets tests and all 48 audited source entries
+in 178.29 seconds. The unfiltered 50-record report is
+`target/compiler-check/run-m8odofrz/report.json`, bound to source lock SHA-256
+`6457eac1483c3f5375c702239e64d1ec9421f0be7468b97283324dafb22d1d6d`.
+Every result matches the preceding native-destructor checkpoint; only actual
+code and execution costs change. Original batches and ceilings remain intact.
+
+## A32: nested lazy Boolean values
+
+The authoring compiler now lowers nested `and`/`or` through the value CFG used
+by normal completions. Strict evaluation pauses at a control value; its typed
+join feeds one shared continuation. The left operand executes first, only the
+selected right operand executes, and branch-local bindings do not leak into
+the continuation. Literal-skipped operands are not lowered. The existing
+specialized handler/label paths remain responsible for their control forms.
+
+A regression failed on `a and b and c` before this fix. The matrix now checks
+all eight truth assignments for four nested forms in six contexts: root return,
+initializer, call argument, lifted closure, completion subject and tuple field.
+Additional tests record exact call-argument side-effect order, skip division
+traps, compose Booleans with completion values, and check exactly-once cleanup
+of enclosing owners and owners created only in the selected branch. The BLAKE3
+high-counter fixture again compares all eight words with chained `and`, without
+the temporary bitwise-reduction workaround. Emitted programs are decoded and
+reverified before execution. No opcode, artifact generation or budget changes.
+
+This fixes an authoring-language defect, not the remaining source compiler
+pipeline, exceptional cleanup, complete U4–U6 ABI or C2/C3 self-hosting gates.
+
+Frozen validation passes **2,664 tests**, zero failures and two existing ignored
+benchmarks: 2,616 workspace/all-targets tests and all 48 audited source entries
+in 180.46 seconds. The unfiltered 50-record report is
+`target/compiler-check/run-szycqpui/report.json`, bound to source lock SHA-256
+`facd5ff21c981f4fccde59a572ddff0c8f01999aa7173a9be22bea41e9ea2489`.
+Every scalar/tuple result matches A31, and original batches and ceilings remain
+intact. The report still records `release_ready: false`.
+
+The first expanded workspace run exposed the separate lifted-closure path;
+that failure was fixed before the final workspace run. A concurrent source run
+passed its 48 executions but correctly failed its closure audit after that edit.
+It is not counted as frozen evidence; the report above is the fresh final run.
+
+## A33: owned callable environment destruction
+
+Concrete lifted environments now retain an authenticated executable cleanup
+entry. The destruction planner visits owned captures in reverse layout order;
+borrowed captures are not destroyed by the callable. A normal invocation returns
+the capture slots' residual initialization state to the owning environment, so
+moving a captured field into the invocation does not destroy it again later.
+The same normal-return mechanism is used by synchronous native callbacks.
+
+Calling a local closure observes its receiver in place. An ordinary source
+copy of a duplicable closure instead creates independent owned capture storage;
+borrowed captures retain their original storage. MIR lowering distinguishes
+known affine environments from copyable ones and transfers already-evaluated
+callable temporaries into bindings. Ordinary aggregate copies without callable
+owners retain their existing COW path. Borrowed native-representable captures
+retain their source homes, including assignment write-back; immutable scalar
+callbacks still require no native allocation.
+
+Regressions cover uninvoked, invoked, transferred, returned and nested owned
+closures; retained versus moved-out captures; reverse capture cleanup;
+partially consumed aggregate captures; borrowed-owner cleanup; and independent
+copies of a capture with a source Drop hook. Callable return checking propagates
+the declared contract to a block's tail without erasing preceding invocation
+counts. Frozen environment cleanup identity, capture ABI, missing targets and
+use of consumed capture operands have codec/verifier regressions.
+
+The source loop gate exposed a tail-call regression: retaining cleanup for
+callable parameters made a named-function callback appear to need post-call
+work. The budgeted suffix proof can now recognize callable cleanup with no
+registered destructor. It still refuses every registered capture destructor
+and retains the separate argument/loan checks; no stack limit is increased.
+
+Stage0 program schema is 105. Canonical-cache/bytecode/verifier generations are
+20/60/19 in Rust and the source compiler; language/interface generations and the
+native ABI generation are unchanged. This does not finish exceptional capture
+cleanup, private callable/Array shared layouts, durable external ownership,
+the independent G1 extension, U4–U6 or the source semantic compiler.
+
+Frozen validation passes **2,670 tests**, zero failures and two existing ignored
+benchmarks: 2,622 workspace/all-targets tests and all 48 audited source entries
+in 177.89 seconds. The unfiltered 50-record report is
+`target/compiler-check/run-3j7b80x3/report.json`, bound to source lock SHA-256
+`e25c2fa291f791530cc75a3274201e90cab49082f0ddf4fa4ce7f91a2d8e25ca`.
+All scalar/tuple results match A32. Original batches, assertions and budgets
+remain intact, and `release_ready` remains false. The 10,000-step state loop
+recycles all 10,000 calls at peak depth 11 under its unchanged 64-frame limit.
+
+The preceding source run passed 47 entries but exposed the tail-call regression
+and failed its closure audit after concurrent test corrections. It is not a
+passing frozen checkpoint. Earlier focused runs likewise exposed ownership
+copy/alias, native-allocation and fixture-contract errors; the final runs above
+follow those corrections.
+
+## A34: shared frame ownership and cancellation cleanup
+
+Whole-function cleanup now derives its owner inventory from frozen source
+binding identities and ABI parameters, rather than requiring each specialized
+return lowerer to enumerate the surrounding bindings. Destruction elaboration
+uses this inventory for ordinary returns, protects the transferred result,
+excludes invocation captures owned by the callable, and retains conditional
+initialization checks. Source binding order determines reverse local cleanup;
+owned parameters follow locals. The interprocedural cancellation-handler
+lowerer no longer inserts its own duplicate return cleanup.
+
+The same inventory now produces frozen whole-frame cleanup plans. Cancellation
+executes compiler-selected destruction glue for abandoned ordinary call frames,
+deepest first, retaining checked caller loans and propagating their writes to
+surviving source storage. The handler's owning frame survives in its clause and
+is cleaned by its own exit. Destruction runs under the ordinary work, allocation
+and call-depth budgets. Label and resumption tokens have no captured environment;
+disposing a token does not repeat its control engine's Cancel or Leave.
+
+Capture handoff transfers slots into the invocation instead of leaving a second
+initialized snapshot in the callable. Normal return and abandoned-frame cleanup
+release the invocation loan by transferring only residual slots back. This also
+applies to synchronous native callbacks. Tests distinguish retained, transferred,
+already-destroyed and partially moved captures; new invocation locals; deeper
+owned parameters; reverse frame/local/capture order; and checked caller loans.
+
+Stage0 schema 106 and cache/bytecode/verifier generations 21/61/20 seal the new
+frame declarations in Rust and the source compiler. The decoder/verifier checks
+header placement, owner uniqueness, capture exclusion and destructor ABI;
+linking, host-capability reachability and native destruction-code commitments
+retain the new edges. Discovery normalizes associated effect rows consistently
+with concrete MIR materialization without moving source diagnostic frontiers.
+
+This is not complete exceptional-cleanup coverage. Lexical inner-scope cleanup
+still has lowering-side requests; other nonlocal transfers and retained replay
+histories need further ownership integration. General temporary ownership,
+private runtime layouts, the exported callable ABI, independent G1 and the
+source semantic compiler remain open.
+
+Frozen validation passes **2,685 tests**, zero failures and two existing ignored
+benchmarks: 2,637 workspace/all-targets tests plus all 48 audited source entries
+in 175.59 seconds. The unfiltered 50-record report is
+`target/compiler-check/run-m17oe7s1/report.json`, bound to source lock SHA-256
+`b067ba5298964824b1f3da79870353e871f46f67affbd3d23bda8baabf27cc9f`.
+All scalar/tuple results match A33. Original batches, assertions and execution
+limits remain unchanged, and `release_ready` remains false. Earlier runs
+exposed missing cleanup reachability, stale generation assertions and associated
+row discovery/diagnostic ordering; this report follows those corrections.
+The first source run also passed, but the authoring audit list omitted the new
+ownership module. The final report above follows its inclusion in the locked
+closure and a fresh complete replay run.
+
+## A35: nonlocal label frame cleanup
+
+Dynamic label calls now use A34's shared frame destruction plan when abandoning
+ordinary frames. Cleanup runs deepest first, returns residual invocation
+captures before their callable owner is destroyed, and excludes the outgoing
+payload. Checked references embedded in that payload are translated into the
+surviving destination frame. A runtime label records its executing definition,
+not the unspecialized source brand: these differ for lifetime-specialized
+functions. Lexical brand validation remains unchanged.
+
+Seven focused regressions pass: abandoned locals and transferred parameters,
+owned payloads, three capture ownership states, call-depth enforcement,
+deep-frame/local/capture ordering, and partially moved captures. Bytecode
+generation 62 mirrors the runtime semantic change in Rust and source request
+identity; schema 106 and cache/verifier generations 21/20 remain unchanged.
+
+This does not complete ownership or nonlocal lowering. Retained replay histories
+and temporary ownership remain open. Probing also found a label-as-initializer
+shape rejected with G6012 and terminal generic-closure calls with non-unit dead
+suffixes rejected during VM verification. The focused capture tests use explicit
+label parameters and unit dead suffixes; they do not establish those other
+source shapes.
+
+Frozen validation passes **2,692 tests**, zero failures and two existing ignored
+benchmarks: 2,644 workspace/all-targets tests plus all 48 audited source entries
+in 185.92 seconds. The unfiltered 50-record report is
+`target/compiler-check/run-0mn6_v5w/report.json`, bound to source lock SHA-256
+`72e2add96b6dbf23daa4377698b9ed08d52d86ea82f1f2d6078114cae206ac36`.
+All scalar/tuple results match A34; artifact identities change with the
+generation. Execution counters match for 49 records; `request/world_registry`
+uses 12,187,543 work ticks and 2,896,043 charged elements (previously 12,189,531
+and 2,896,166). Original batches, assertions and limits
+remain unchanged, and `release_ready` remains false. The first replay attempt
+stopped at the stale-lock audit before testing; this report follows a correct
+lock refresh and a fresh complete run.
+
+## A36: terminal strict-value control flow
+
+The shared value-CFG lowerer now represents the absence of a normal continuation
+explicitly. A terminal call or operation ends its path after evaluating the
+strict prefix; no suffix, cleanup return, later operand or join argument is
+manufactured. This applies inside lifted closures, initializers, strict call
+operands, completion arms and lazy Boolean operands. A computed callee executes
+before its arguments. First-class tail-label wrappers use the same segment
+result: helpers may return normally to the label destination as well as invoke
+it nonlocally.
+
+Bottom-type inference no longer binds an unresolved expected result to `Never`.
+A terminal first completion arm therefore cannot erase a later returning arm's
+type; completions whose arms are all terminal retain `Never` explicitly. Cache
+generation 22 and bytecode generation 63 mirror these changes in Rust and the
+source request implementation; schema 106 and verifier generation 20 remain.
+
+Regressions check strict-prefix execution, skipped suffixes and arguments,
+callee-before-argument ordering, both lazy Boolean paths, returning versus
+terminal completion arms, all-terminal joins, ordinary functions and closure
+capture ownership. The label-as-initializer G6012 gap, retained replay cleanup,
+general temporary ownership, U4–U6, independent G1, the source semantic compiler
+and verified C2/C3 remain open.
+
+Frozen validation passes **2,700 tests**, zero failures and two existing ignored
+benchmarks: 2,652 workspace/all-targets tests plus all 48 audited source entries
+in 188.40 seconds. The unfiltered 50-record report is
+`target/compiler-check/run-bvgwj_9n/report.json`, bound to source lock SHA-256
+`7c9ebca1d7d74e48526c7b73fe3ca6aa00e48899405c7081019f57b699fbc2ba`.
+All scalar/tuple results match A35; execution counters change with the emitted
+control flow, as recorded in runtime-costs.md. Original batches, assertions and
+resource ceilings remain unchanged, and `release_ready` remains false. A
+15-second CPU sample was collected during this passing run; its wall time is
+not an uninstrumented performance comparison. The first workspace attempt found
+one additional stale generation assertion. Its concurrent source replay was
+deliberately interrupted, not passed; this report follows that test correction,
+a fresh source lock and a complete replay.
+
+## A37: indexed ownership-query inputs
+
+Manual `Use` lookup now uses a nominal-head index frozen with the solver's
+implementation rules. Core, PlaceFlow and MIR share immutable query inputs;
+fresh queries preserve independent tables, cycle state and original default
+work limits. Conditional manual ownership still prevents structural fallback
+when its proof is unresolved. No schema, cache or bytecode generation changes.
+
+The same eight-worker lifecycle benchmark improves from 26.30 to 10.48 seconds
+with identical artifacts, results and counters. These are individual local
+runs, not a controlled distribution. The test defaults are now 12 workers and
+a 24 GiB cargo-test address-space ceiling; direct commands retain 8 GiB, with
+the four-slot gate and 590-second command guard unchanged. CI's workspace job
+skips GSC-2 only because the dedicated compiler job audits and runs every entry.
+
+Frozen validation passes **2,702 tests**, zero failures and two existing ignored
+benchmarks: 2,654 workspace/all-targets tests and all 48 audited source entries
+in 50.03 seconds. The complete 50-record report is
+`target/compiler-check/run-2ibhuzod/report.json`, bound to source lock SHA-256
+`e2941e18fd203f88c97d84c115aadeb56cec3f0c9ee5caba72b301e21896a06b`.
+Every execution record matches A36 exactly. VM budgets and assertions are
+unchanged. This improves authoring throughput, not source language coverage;
+the remaining ownership, U4–U6, source compiler and C2/C3 gaps remain open.
+See [performance measurements](../../docs/stage0-performance.md).
+
+## A38: retained continuation cleanup and replay boundaries
+
+Program execution now destroys abandoned suspended handler branches in
+postorder, preserving transferred operation payloads and synchronizing only
+activation-branded source storage. Nonlocal label calls, lexical leaves and
+cancellation share this cleanup path. Resumed function returns restore their
+handler clause before executing the caller suffix; finite replay no longer
+repeats that suffix. Existing MIR lowering admits discarded interprocedural
+handler leaves and terminal clause paths through the shared value CFG.
+Bytecode generation is 64. This is not yet the planned staged-MIR architecture
+or a complete continuation-ownership contract.
+
+Focused validation passes 985 destruction, service, runtime-memory and request
+tests, plus the subsequently added transferred-payload regression. One audited
+source lifecycle entry passes in 10.52 seconds
+(`target/compiler-check/run-kuqilgic/report.json`). No full suite was run for
+this checkpoint; A37's full-suite numbers are historical. Remaining suspended
+return-path ownership and compositional lowering work remain open.
+
 ## Source profile established during initial probes
 
-The timings below are historical. The latest complete-current-suite evidence
-is `target/compiler-check/run-jgx73yx0/report.json`; the full workspace now
-passes after the native performance changes and A24. See also
+The timings below are historical. One complete-current-suite checkpoint is
+`target/compiler-check/run-jgx73yx0/report.json`, recorded after the native
+performance changes and A24. See also
 [stage0 performance](../../docs/stage0-performance.md).
 
 The later 41-test closure with the first typed source registry reached the

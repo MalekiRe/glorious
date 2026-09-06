@@ -3689,6 +3689,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
     ]));
     let entry = DefKey(Digest::of_bytes(b"mir-callable-environment-entry"));
     let layout = MirCaptureEnvironment {
+        destructor: None,
         brand,
         captures: vec![MirCapture {
             mode: CaptureMode::Move,

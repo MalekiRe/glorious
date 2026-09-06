@@ -164,6 +164,15 @@ fn flag(value: Bool) -> usize { handle value { true => 1, false => 0 } }
 fn float_order(value: FloatPrimitive) -> usize {
     // Fixed digit ranges encode native (variant, fields...) ordering even for
     // malformed Convert values. No encoded field can overlap another digit.
+    // Conversion comparisons do not need the other variants' call-frame
+    // temporaries; retain their finite ordering in a separate source branch.
+    handle value {
+        FloatPrimitive::Convert { from: from, to: to, checked: checked } =>
+            30000 + types::scalar_order(from) * 100 + types::scalar_order(to) * 2 + flag(checked),
+        _ => non_conversion_float_order(value),
+    }
+}
+fn non_conversion_float_order(value: FloatPrimitive) -> usize {
     handle value {
         FloatPrimitive::Binary { width: width, operation: op } => width_order(width) * 100 + binary_order(op) * 2,
         FloatPrimitive::Neg { width: width } => 10000 + width_order(width) * 100,
@@ -258,14 +267,16 @@ fn role_order(value: PrimitiveRole) -> usize {
     }
 }
 pub fn compare(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering {
-    let a = role_order(*left); let b = role_order(*right);
-    handle Ord::compare(&a, &b) {
-        Ordering::Equal => handle (*left, *right) {
-            (PrimitiveRole::Float(a), PrimitiveRole::Float(b)) => { let a_key = float_order(a); let b_key = float_order(b); Ord::compare(&a_key, &b_key) },
-            (PrimitiveRole::Memory(a), PrimitiveRole::Memory(b)) => { let a_key = memory_ordinal(a); let b_key = memory_ordinal(b); Ord::compare(&a_key, &b_key) },
-            _ => Ordering::Equal,
+    // Equal parameterized variants already prove equal outer discriminants.
+    // Comparing their payloads directly avoids constructing both wide outer
+    // ordinal dispatch frames on every conversion comparison.
+    handle (*left, *right) {
+        (PrimitiveRole::Float(a), PrimitiveRole::Float(b)) => { let a_key = float_order(a); let b_key = float_order(b); Ord::compare(&a_key, &b_key) },
+        (PrimitiveRole::Memory(a), PrimitiveRole::Memory(b)) => { let a_key = memory_ordinal(a); let b_key = memory_ordinal(b); Ord::compare(&a_key, &b_key) },
+        _ => {
+            let a = role_order(*left); let b = role_order(*right);
+            Ord::compare(&a, &b)
         },
-        result => result,
     }
 }
 pub impl Ord for PrimitiveRole { compare(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering { compare(left, right) } }
@@ -335,6 +346,17 @@ fn float_ordinal(value: FloatPrimitive) -> Option<usize> {
     }
 }
 pub fn stable_tag(value: PrimitiveRole) -> Option<u8> {
+    // Keep the parameterized families out of the wide leaf-tag frame. These
+    // are the same frozen authority formulas, not additional runtime grants.
+    handle value {
+        PrimitiveRole::Memory(primitive) => Result::Ok(as<u8>(183 + memory_ordinal(primitive))),
+        PrimitiveRole::Float(primitive) => handle float_ordinal(primitive) {
+            Result::Err(_) => None, Result::Ok(ordinal) => Result::Ok(as<u8>(69 + ordinal)),
+        },
+        _ => leaf_stable_tag(value),
+    }
+}
+fn leaf_stable_tag(value: PrimitiveRole) -> Option<u8> {
     handle value {
         PrimitiveRole::Memory(primitive) => Result::Ok(as<u8>(183 + memory_ordinal(primitive))),
         PrimitiveRole::Float(primitive) => handle float_ordinal(primitive) {

@@ -93,14 +93,13 @@ fn publication_steps(db: &mut Db, pending: &mut registry::Publication<source::Li
         Result::Ok(_) => publication_steps(db, pending, fuel - 1),
     } }
 }
-fn published_status(status: dependency::Status, parent: Option<identity::RevisionId>, changed: Bool) -> i64 {
+fn published_status(status: &dependency::Status, parent: Option<identity::RevisionId>, changed: Bool) -> i64 {
     handle parent {
-        Result::Err(_) => handle status { dependency::Status::Cold => 1, _ => 0 },
+        Result::Err(_) => handle *status { dependency::Status::Cold => 1, _ => 0 },
         Result::Ok(parent) => handle changed {
-            false => handle status { dependency::Status::Green { parent: actual } => same_revision(parent, actual), _ => 0 },
-            true => handle status { dependency::Status::Red { parent: actual, first_changed: edge } =>
-                same_revision(parent, actual) * handle edge { dependency::node::Node::Input(file) =>
-                    same_digest(file.digest, fixture_file().digest), _ => 0 }, _ => 0 },
+            false => handle *status { dependency::Status::Green { parent: actual } => same_revision(parent, actual), _ => 0 },
+            true => handle *status { dependency::Status::Red { parent: actual, first_changed: dependency::node::Node::Input(file) } =>
+                same_revision(parent, actual) * same_digest(file.digest, fixture_file().digest), _ => 0 },
         },
     }
 }
@@ -108,9 +107,9 @@ fn published_row(db: &Db, session: registry::Session, root: Root, parent: Option
     handle registry::request_traces(db, session) {
         Result::Ok(Result::Ok(values)) => handle Slice::len(&values) == 1 {
             false => 0, true => {
-                let value = *Slice::get_unchecked(values, 0);
+                let value = Slice::get_unchecked(values, 0);
                 same_revision(value.revision, root.revision) * same_digest(value.fingerprint, fixture_source_digest(changed))
-                    * eq(as<i64>(Vec::len(&value.dependencies)), 0) * published_status(value.status, parent, changed)
+                    * eq(as<i64>(Vec::len(&value.dependencies)), 0) * published_status(&value.status, parent, changed)
                     * handle value.node { dependency::node::Node::Input(file) => same_digest(file.digest, fixture_file().digest), _ => 0 }
             },
         }, _ => 0,

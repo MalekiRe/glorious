@@ -17,6 +17,7 @@ pub enum Failure {
 // names are assigned by the source registry, never by native callbacks.
 pub struct ReadIdentity { private family: u32, private key: Handle, private projection: u32 }
 pub struct Read { identity: ReadIdentity, fingerprint: Digest, completeness: Completeness }
+pub impl Clone for Read { clone(value: &Read) -> Read { *value } }
 pub struct Frame {
     private journal: Option<Journal>, private policy: RecoveryPolicy, private limit: usize,
 }
@@ -181,7 +182,7 @@ pub enum Validation { Continue, Complete, Changed { index: usize } }
 // Replay owns immutable reads, not a borrowed database view. The scheduler
 // must separately prove immediate-parent ownership and family generations.
 pub fn replay<V>(memo: &Memo<V>) -> Replay {
-    Replay { reads: memo.reads, cursor: 0, state: ReplayState::Checking }
+    Replay { reads: Clone::clone(&memo.reads), cursor: 0, state: ReplayState::Checking }
 }
 
 pub fn next(replay: &Replay, controls: &operation::Controls) -> Result<Option<Read>, Failure> {

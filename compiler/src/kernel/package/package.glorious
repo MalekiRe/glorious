@@ -14,6 +14,25 @@ pub enum Failure {
     ActiveBodyScratch(PackageKey), UnstagedPackages(Vec<PackageKey>), RequestRolledBack,
     Closed, Busy, ForeignBody, StaleBody, Capacity, Invariant, Control(operation::Failure),
 }
+pub impl Clone for Failure {
+    clone(value: &Failure) -> Failure {
+        handle *value {
+            Failure::PackageNotInRequest(_) => Failure::PackageNotInRequest(Clone::clone(&value.0)),
+            Failure::PackageAlreadyActive(_) => Failure::PackageAlreadyActive(Clone::clone(&value.0)),
+            Failure::PackageNotOpen(_) => Failure::PackageNotOpen(Clone::clone(&value.0)),
+            Failure::ActiveBodyScratch(_) => Failure::ActiveBodyScratch(Clone::clone(&value.0)),
+            Failure::UnstagedPackages(_) => Failure::UnstagedPackages(Clone::clone(&value.0)),
+            Failure::RequestRolledBack => Failure::RequestRolledBack,
+            Failure::Closed => Failure::Closed,
+            Failure::Busy => Failure::Busy,
+            Failure::ForeignBody => Failure::ForeignBody,
+            Failure::StaleBody => Failure::StaleBody,
+            Failure::Capacity => Failure::Capacity,
+            Failure::Invariant => Failure::Invariant,
+            Failure::Control(error) => Failure::Control(error),
+        }
+    }
+}
 pub struct Body { private owner: Handle, private ordinal: u64 }
 pub enum Action {
     Open(PackageKey), OpenBody(PackageKey), PublishBody(Body), AbandonBody(Body),
@@ -67,14 +86,14 @@ fn recording(registry: &Registry) -> Result<(), Failure> {
 }
 fn locate(registry: &Registry, key: &PackageKey) -> Result<usize, Failure> {
     handle HashMap::get(&registry.index, key) {
-        Result::Err(_) => Result::Err(Failure::PackageNotOpen(*key)), Result::Ok(index) => Result::Ok(*index),
+        Result::Err(_) => Result::Err(Failure::PackageNotOpen(Clone::clone(key))), Result::Ok(index) => Result::Ok(*index),
     }
 }
 fn open_index(registry: &Registry, key: &PackageKey) -> Result<usize, Failure> {
     handle locate(registry, key) {
         Result::Err(error) => Result::Err(error),
         Result::Ok(index) => handle Vec::get_unchecked(&registry.entries, index).status {
-            Status::Open => Result::Ok(index), _ => Result::Err(Failure::PackageNotOpen(*key)),
+            Status::Open => Result::Ok(index), _ => Result::Err(Failure::PackageNotOpen(Clone::clone(key))),
         },
     }
 }
@@ -263,14 +282,14 @@ fn validate_entry(registry: &mut Registry, cursor: usize) -> Result<Event, Failu
             false => { (*registry).phase = Phase::Ordering { outer: 1, inner: 1 }; Result::Ok(Event::Continue) },
         },
         false => {
-            let entry = *Vec::get_unchecked(&registry.entries, cursor);
+            let entry = Vec::get_unchecked(&registry.entries, cursor);
             handle entry.status {
                 Status::Staged => {
                     (*registry).phase = Phase::Checking { cursor: cursor + 1 };
                     Result::Ok(Event::Continue)
                 },
                 _ => {
-                    Vec::push(&mut registry.unstaged, entry.key);
+                    Vec::push(&mut registry.unstaged, Clone::clone(&entry.key));
                     (*registry).phase = Phase::Checking { cursor: cursor + 1 };
                     Result::Ok(Event::Continue)
                 },
@@ -281,8 +300,7 @@ fn validate_entry(registry: &mut Registry, cursor: usize) -> Result<Event, Failu
 fn order_missing(registry: &mut Registry, outer: usize, inner: usize) -> Result<Event, Failure> {
     handle outer >= Vec::len(&registry.unstaged) {
         true => {
-            let missing = registry.unstaged;
-            (*registry).unstaged = Vec::new();
+            let missing = replace(&mut registry.unstaged, Vec::new());
             (*registry).phase = Phase::Recording;
             Result::Err(Failure::UnstagedPackages(missing))
         },
@@ -323,13 +341,13 @@ pub fn metadata(registry: &Registry, key: &PackageKey) -> Result<Metadata, Failu
     handle locate(registry, key) {
         Result::Err(error) => Result::Err(error),
         Result::Ok(index) => {
-            let entry = *Vec::get_unchecked(&registry.entries, index);
+            let entry = Vec::get_unchecked(&registry.entries, index);
             handle registry.phase {
-                Phase::Committed => Result::Ok(Metadata { package: entry.key, status: Status::Committed,
+                Phase::Committed => Result::Ok(Metadata { package: Clone::clone(&entry.key), status: Status::Committed,
                     active_body_scratch: 0, staged_body_products: 0 }),
-                Phase::RolledBack => Result::Ok(Metadata { package: entry.key, status: Status::RolledBack,
+                Phase::RolledBack => Result::Ok(Metadata { package: Clone::clone(&entry.key), status: Status::RolledBack,
                     active_body_scratch: 0, staged_body_products: 0 }),
-                _ => Result::Ok(Metadata { package: entry.key, status: entry.status,
+                _ => Result::Ok(Metadata { package: Clone::clone(&entry.key), status: entry.status,
                     active_body_scratch: entry.active, staged_body_products: entry.staged }),
             }
         },

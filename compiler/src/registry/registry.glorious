@@ -24,6 +24,21 @@ pub struct Limits {
     source_products: usize, line_products: usize, drivers: usize, frames: usize, source_bytes: usize, lines: usize,
 }
 pub enum Failure { Database(database::Failure), Source(source::Failure), MissingSource(FileKey), Closed, Closing, Busy, Capacity, Invariant, Cancelled }
+pub impl Clone for Failure {
+    clone(value: &Failure) -> Failure {
+        handle *value {
+            Failure::Database(_) => Failure::Database(Clone::clone(&value.0)),
+            Failure::Source(error) => Failure::Source(error),
+            Failure::MissingSource(file) => Failure::MissingSource(file),
+            Failure::Closed => Failure::Closed,
+            Failure::Closing => Failure::Closing,
+            Failure::Busy => Failure::Busy,
+            Failure::Capacity => Failure::Capacity,
+            Failure::Invariant => Failure::Invariant,
+            Failure::Cancelled => Failure::Cancelled,
+        }
+    }
+}
 pub struct Session { private handle: Handle }
 pub struct Query<T> { private handle: Handle }
 pub struct Value<T> { private outcome: engine::Outcome }
@@ -403,7 +418,7 @@ fn input_blob<W>(core: &database::Database<W, Product>, session: database::Sessi
     handle pinned_source(core, session, file) {
         Result::Err(error) => Result::Err(error),
         Result::Ok(value) => handle as<usize>(source::length(value)) <= limit {
-            false => Result::Err(Failure::Capacity), true => Result::Ok(*value),
+            false => Result::Err(Failure::Capacity), true => Result::Ok(Clone::clone(value)),
         },
     }
 }
@@ -663,7 +678,13 @@ fn running<W>(core: &mut database::Database<W, Product>, sources: &mut database:
 fn tick<W>(core: &mut database::Database<W, Product>, sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>,
     stores: &mut Stores, requests: &Arena<Request>, driver: &mut Driver, limits: Limits) -> Result<Step, Failure> where W: World {
     handle driver.mode {
-        Mode::Failed(error) => handle cleanup(core, driver) { true => Result::Err(error), false => Result::Ok(Step::Continue) },
+        Mode::Failed(_) => handle cleanup(core, &mut *driver) {
+            false => Result::Ok(Step::Continue),
+            true => handle driver.mode {
+                Mode::Failed(_) => Result::Err(Clone::clone(&driver.mode.0)),
+                Mode::Running => Result::Err(Failure::Invariant),
+            },
+        },
         Mode::Running => handle active(requests, driver.session) {
             Result::Err(error) => failed(driver, error),
             Result::Ok(session) => handle database::check(& *core, session) {

@@ -400,6 +400,15 @@ impl Analyzer<'_> {
                     if let Some(refinement) = &clause.refinement {
                         let subject = self.value(refinement.subject);
                         self.bind_pattern_value(&refinement.pattern, subject);
+                        let mut types = vec![];
+                        let _ = crate::core::collect_pattern_binding_types(&refinement.pattern,
+                            &self.body.expression(refinement.subject).ty, &mut types);
+                        for (name, ty) in types {
+                            if crate::core::refinement_binding_type(ty.clone()) != ty {
+                                let borrowed = self.borrowed_value(refinement.subject);
+                                self.values.insert(name, borrowed);
+                            }
+                        }
                     }
                     exits.push(self.value(clause.body));
                 }
