@@ -13,12 +13,12 @@ fn keys(a: identity::Digest, b: identity::Digest) -> Keys {
         interface: Node::Interface(identity::ModuleKey { package: identity::PackageKey { value: Str::to_string("app") }, path: Str::to_string("src/lib") }),
         core: Node::Core(identity::DefKey { digest: a }), artifact: Node::Artifact(identity::PackageKey { value: Str::to_string("app") }) }
 }
-fn edges(a: Node, b: Node) -> Vec<Node> {
+fn edges(a: &Node, b: &Node) -> Vec<Node> {
     let values = Vec::new();
-    Vec::push(&mut values, b); Vec::push(&mut values, a); Vec::push(&mut values, b);
+    Vec::push(&mut values, Clone::clone(b)); Vec::push(&mut values, Clone::clone(a)); Vec::push(&mut values, Clone::clone(b));
     values
 }
-fn one(a: Node) -> Vec<Node> { let values = Vec::new(); Vec::push(&mut values, a); values }
+fn one(a: &Node) -> Vec<Node> { let values = Vec::new(); Vec::push(&mut values, Clone::clone(a)); values }
 fn drive(ledger: &dependency::Ledger, tx: &mut dependency::Transaction, controls: &mut operation::Controls, fuel: usize)
     -> Result<(), dependency::Failure> {
     handle fuel == 0 {
@@ -41,28 +41,28 @@ fn finish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, con
         },
     }
 }
-fn record_inputs(tx: &mut dependency::Transaction, controls: &mut operation::Controls, k: Keys,
+fn record_inputs(tx: &mut dependency::Transaction, controls: &mut operation::Controls, k: &Keys,
     stable: identity::Digest, changed: identity::Digest) -> Result<(), dependency::Failure> {
-    handle dependency::record(&mut *tx, &mut *controls, k.other, stable, Vec::new()) {
+    handle dependency::record(&mut *tx, &mut *controls, Clone::clone(&k.other), stable, Vec::new()) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => dependency::record(tx, controls, k.input, changed, Vec::new()),
+        Result::Ok(_) => dependency::record(tx, controls, Clone::clone(&k.input), changed, Vec::new()),
     }
 }
-fn record_products(tx: &mut dependency::Transaction, controls: &mut operation::Controls, k: Keys,
+fn record_products(tx: &mut dependency::Transaction, controls: &mut operation::Controls, k: &Keys,
     stable: identity::Digest, changed: identity::Digest) -> Result<(), dependency::Failure> {
-    handle dependency::record(&mut *tx, &mut *controls, k.artifact, changed, one(k.core)) {
+    handle dependency::record(&mut *tx, &mut *controls, Clone::clone(&k.artifact), changed, one(&k.core)) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => handle dependency::record(&mut *tx, &mut *controls, k.core, changed, edges(k.input, k.interface)) {
+        Result::Ok(_) => handle dependency::record(&mut *tx, &mut *controls, Clone::clone(&k.core), changed, edges(&k.input, &k.interface)) {
             Result::Err(error) => Result::Err(error),
-            Result::Ok(_) => dependency::record(tx, controls, k.interface, stable, edges(k.input, k.other)),
+            Result::Ok(_) => dependency::record(tx, controls, Clone::clone(&k.interface), stable, edges(&k.input, &k.other)),
         },
     }
 }
-fn publish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, k: Keys,
+fn publish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, k: &Keys,
     stable: identity::Digest, changed: identity::Digest) -> Result<(), dependency::Failure> {
     let controls = operation::create(10000, 10000);
     // Stage in noncanonical order, and replace a fact before sealing it.
-    handle dependency::record(&mut *tx, &mut controls, k.input, stable, one(k.input)) {
+    handle dependency::record(&mut *tx, &mut controls, Clone::clone(&k.input), stable, one(&k.input)) {
         Result::Err(error) => Result::Err(error),
         Result::Ok(_) => handle record_products(&mut *tx, &mut controls, k, stable, changed) {
             Result::Err(error) => Result::Err(error),
@@ -72,8 +72,8 @@ fn publish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, k:
         },
     }
 }
-fn green(ledger: &dependency::Ledger, rev: identity::RevisionId, key: Node, parent: identity::RevisionId) -> i64 {
-    handle dependency::trace(ledger, rev, &key) {
+fn green(ledger: &dependency::Ledger, rev: identity::RevisionId, key: &Node, parent: identity::RevisionId) -> i64 {
+    handle dependency::trace(ledger, rev, key) {
         Result::Ok(value) => handle value.status {
             dependency::Status::Green { parent: actual } => handle identity::same_revision(actual, parent) { true => 1, false => 0 },
             _ => 0,
@@ -81,21 +81,24 @@ fn green(ledger: &dependency::Ledger, rev: identity::RevisionId, key: Node, pare
         _ => 0,
     }
 }
-fn red(ledger: &dependency::Ledger, rev: identity::RevisionId, key: Node, changed: Node) -> i64 {
+fn red(ledger: &dependency::Ledger, rev: identity::RevisionId, key: &Node, changed: &Node) -> i64 {
     red_since(ledger, rev, key, changed, revision(0))
 }
-fn red_since(ledger: &dependency::Ledger, rev: identity::RevisionId, key: Node, changed: Node, parent: identity::RevisionId) -> i64 {
-    handle dependency::trace(ledger, rev, &key) {
-        Result::Ok(value) => handle value.status {
-            dependency::Status::Red { parent: actual, first_changed: first } => handle identity::same_revision(actual, parent) {
-                true => handle node::same(&first, &changed) { true => 1, false => 0 }, false => 0,
-            },
-            _ => 0,
+fn red_since(ledger: &dependency::Ledger, rev: identity::RevisionId, key: &Node, changed: &Node, parent: identity::RevisionId) -> i64 {
+    handle dependency::trace(ledger, rev, key) {
+        Result::Ok(value) => red_status(&value.status, changed, parent),
+        _ => 0,
+    }
+}
+fn red_status(status: &dependency::Status, changed: &Node, parent: identity::RevisionId) -> i64 {
+    handle *status {
+        dependency::Status::Red { parent: _, first_changed: _ } => handle identity::same_revision(status.parent, parent) {
+            true => handle node::same(&status.first_changed, changed) { true => 1, false => 0 }, false => 0,
         },
         _ => 0,
     }
 }
-fn shape(ledger: &dependency::Ledger, rev: identity::RevisionId, k: Keys) -> i64 {
+fn shape(ledger: &dependency::Ledger, rev: identity::RevisionId, k: &Keys) -> i64 {
     handle dependency::trace(ledger, rev, &k.interface) {
         Result::Ok(value) => handle Vec::len(&value.dependencies) == 2 {
             false => 0,
@@ -120,13 +123,13 @@ fn ordered(ledger: &dependency::Ledger, rev: identity::RevisionId, cursor: usize
         },
     }
 }
-fn verify(ledger: &dependency::Ledger, k: Keys) -> i64 {
-    let unchanged = green(ledger, revision(1), k.interface, revision(0)) + green(ledger, revision(1), k.other, revision(0));
-    let changed = red(ledger, revision(1), k.input, k.input) + red(ledger, revision(1), k.core, k.input) + red(ledger, revision(1), k.artifact, k.input);
+fn verify(ledger: &dependency::Ledger, k: &Keys) -> i64 {
+    let unchanged = green(ledger, revision(1), &k.interface, revision(0)) + green(ledger, revision(1), &k.other, revision(0));
+    let changed = red(ledger, revision(1), &k.input, &k.input) + red(ledger, revision(1), &k.core, &k.input) + red(ledger, revision(1), &k.artifact, &k.input);
     let canonical = shape(ledger, revision(0), k) + shape(ledger, revision(1), k) + ordered(ledger, revision(1), 1);
     handle unchanged == 2 { false => 1, true => handle changed == 3 { false => 2, true => handle canonical == 3 { false => 3, true => 42 } } }
 }
-fn child(ledger: &mut dependency::Ledger, k: Keys, stable: identity::Digest, changed: identity::Digest) -> i64 {
+fn child(ledger: &mut dependency::Ledger, k: &Keys, stable: identity::Digest, changed: identity::Digest) -> i64 {
     handle dependency::begin(& *ledger, revision(1), Result::Ok(revision(0)), dependency::Limits { nodes: 8, edges: 16 }) {
         Result::Err(_) => 4,
         Result::Ok(tx) => handle publish(&mut *ledger, &mut tx, k, stable, changed) {
@@ -137,13 +140,13 @@ fn child(ledger: &mut dependency::Ledger, k: Keys, stable: identity::Digest, cha
     }
 }
 fn shape_finish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, controls: &mut operation::Controls,
-    k: Keys, changed: identity::Digest) -> Result<(), dependency::Failure> {
+    k: &Keys, changed: identity::Digest) -> Result<(), dependency::Failure> {
     // Preserve the fingerprint and edge count, but replace one dependency identity.
-    handle dependency::record(&mut *tx, &mut *controls, k.core, changed, edges(k.other, k.interface)) {
+    handle dependency::record(&mut *tx, &mut *controls, Clone::clone(&k.core), changed, edges(&k.other, &k.interface)) {
         Result::Err(error) => Result::Err(error), Result::Ok(_) => finish(ledger, tx, controls),
     }
 }
-fn shape_publish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, k: Keys,
+fn shape_publish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, k: &Keys,
     stable: identity::Digest, changed: identity::Digest) -> Result<(), dependency::Failure> {
     let controls = operation::create(10000, 10000);
     handle record_products(&mut *tx, &mut controls, k, stable, changed) {
@@ -153,24 +156,24 @@ fn shape_publish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transacti
         },
     }
 }
-fn sibling(ledger: &mut dependency::Ledger, k: Keys, stable: identity::Digest) -> i64 {
+fn sibling(ledger: &mut dependency::Ledger, k: &Keys, stable: identity::Digest) -> i64 {
     handle dependency::begin(& *ledger, revision(3), Result::Ok(revision(0)), dependency::Limits { nodes: 8, edges: 16 }) {
         Result::Err(_) => 13,
         Result::Ok(tx) => handle publish(&mut *ledger, &mut tx, k, stable, stable) {
             Result::Err(_) => 14,
             Result::Ok(_) => {
-                let score = green(& *ledger, revision(3), k.input, revision(0)) + green(& *ledger, revision(3), k.core, revision(0)) + green(& *ledger, revision(3), k.artifact, revision(0));
+                let score = green(& *ledger, revision(3), &k.input, revision(0)) + green(& *ledger, revision(3), &k.core, revision(0)) + green(& *ledger, revision(3), &k.artifact, revision(0));
                 handle score == 3 { true => 42, false => 15 }
             },
         },
     }
 }
-fn verify_shape(ledger: &mut dependency::Ledger, k: Keys, stable: identity::Digest) -> i64 {
-    let score = green(& *ledger, revision(2), k.interface, revision(1)) + green(& *ledger, revision(2), k.artifact, revision(1))
-        + red_since(& *ledger, revision(2), k.core, k.core, revision(1));
+fn verify_shape(ledger: &mut dependency::Ledger, k: &Keys, stable: identity::Digest) -> i64 {
+    let score = green(& *ledger, revision(2), &k.interface, revision(1)) + green(& *ledger, revision(2), &k.artifact, revision(1))
+        + red_since(& *ledger, revision(2), &k.core, &k.core, revision(1));
     handle score == 3 { false => 12, true => sibling(ledger, k, stable) }
 }
-fn grandchild(ledger: &mut dependency::Ledger, k: Keys, stable: identity::Digest, changed: identity::Digest) -> i64 {
+fn grandchild(ledger: &mut dependency::Ledger, k: &Keys, stable: identity::Digest, changed: identity::Digest) -> i64 {
     handle dependency::begin(& *ledger, revision(2), Result::Ok(revision(1)), dependency::Limits { nodes: 8, edges: 16 }) {
         Result::Err(_) => 10,
         Result::Ok(tx) => handle shape_publish(&mut *ledger, &mut tx, k, stable, changed) {
@@ -183,8 +186,8 @@ fn start(stable: identity::Digest, changed: identity::Digest) -> i64 {
     let k = keys(stable, changed);
     handle dependency::begin(&ledger, revision(0), None, dependency::Limits { nodes: 8, edges: 16 }) {
         Result::Err(_) => 6,
-        Result::Ok(tx) => handle publish(&mut ledger, &mut tx, k, stable, stable) {
-            Result::Err(_) => 7, Result::Ok(_) => child(&mut ledger, k, stable, changed),
+        Result::Ok(tx) => handle publish(&mut ledger, &mut tx, &k, stable, stable) {
+            Result::Err(_) => 7, Result::Ok(_) => child(&mut ledger, &k, stable, changed),
         },
     }
 }

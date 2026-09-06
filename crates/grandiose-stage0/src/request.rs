@@ -95,10 +95,12 @@ pub struct CompilerBuildIdentity {
 /// static-view instructions and make the remaining Array element borrow shared-only.
 /// Language/interface three and cache twelve add direct inherent functions,
 /// their lexical Self/generic contracts, and type-owned member resolution.
+/// Cache thirteen aligns borrowed trait receivers across Core and executable
+/// instances and preserves scoped enum payload projection authority.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 3;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 3;
-pub const STAGE0_CACHE_GENERATION: u32 = 12;
+pub const STAGE0_CACHE_GENERATION: u32 = 13;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 53;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 12;
 

@@ -7,8 +7,8 @@ pub mod kernel;
 fn module(package: Str, path: Str) -> identity::ModuleKey {
     identity::ModuleKey { package: identity::PackageKey { value: Str::to_string(package) }, path: Str::to_string(path) }
 }
-fn less(a: Node, b: Node) -> i64 {
-    handle Ord::compare(&a, &b) { Ordering::Less => 1, _ => 0 }
+fn less(a: &Node, b: &Node) -> i64 {
+    handle Ord::compare(a, b) { Ordering::Less => 1, _ => 0 }
 }
 fn variants(digest: identity::Digest) -> Vec<Node> {
     let values = Vec::new();
@@ -25,7 +25,7 @@ fn variants(digest: identity::Digest) -> Vec<Node> {
 fn ordered(values: &Vec<Node>, cursor: usize) -> i64 {
     handle cursor == Vec::len(values) {
         true => 1,
-        false => handle less(*Vec::get_unchecked(values, cursor - 1), *Vec::get_unchecked(values, cursor)) {
+        false => handle less(Vec::get_unchecked(values, cursor - 1), Vec::get_unchecked(values, cursor)) {
             1 => ordered(values, cursor + 1), _ => 0,
         },
     }
@@ -35,11 +35,57 @@ fn hashes(values: &Vec<Node>, cursor: usize) -> i64 {
         true => 1,
         false => {
             let key = Vec::get_unchecked(values, cursor);
-            let copied = *key;
+            let copied = Clone::clone(key);
             let a = Hasher::new(); let b = Hasher::new();
             Hash::hash(key, &mut a); Hash::hash(&copied, &mut b);
             handle Hasher::finish(a) == Hasher::finish(b) {
                 false => 0, true => handle Eq::eq(key, &copied) { true => hashes(values, cursor + 1), false => 0 },
+            }
+        },
+    }
+}
+fn edit_text(value: &mut String) -> () {
+    String::pop(&mut *value);
+    String::push(value, 'x');
+}
+fn edit_module(value: &mut identity::ModuleKey) -> () {
+    edit_text(&mut value.package.value);
+    edit_text(&mut value.path);
+}
+fn edit_instance(value: &mut identity::InstanceKey) -> () {
+    handle Vec::get_mut(&mut value.canonical_substitution, 0) {
+        Result::Ok(byte) => { *byte = as<u8>(1); },
+        Result::Err(_) => (),
+    }
+}
+fn edit_file(value: &mut identity::FileKey, changed: identity::Digest) -> () { (*value).digest = changed; }
+fn edit_definition(value: &mut identity::DefKey, changed: identity::Digest) -> () { (*value).digest = changed; }
+fn edit_node(value: &mut Node, changed: identity::Digest) -> () {
+    handle *value {
+        Node::Input(_) => edit_file(&mut value.0, changed),
+        Node::Interface(_) => edit_module(&mut value.0),
+        Node::Fixity(_) => edit_module(&mut value.0),
+        Node::Body(_) => edit_definition(&mut value.0, changed),
+        Node::Core(_) => edit_definition(&mut value.0, changed),
+        Node::Instance(_) => edit_instance(&mut value.0),
+        Node::Mir(_) => edit_definition(&mut value.0, changed),
+        Node::Artifact(_) => edit_text(&mut value.0.value),
+    }
+}
+fn hashed(value: &Node) -> usize { let state = Hasher::new(); Hash::hash(value, &mut state); Hasher::finish(state) }
+fn independent(values: &Vec<Node>, cursor: usize, changed: identity::Digest) -> i64 {
+    handle cursor == Vec::len(values) {
+        true => 1,
+        false => {
+            let original = Vec::get_unchecked(values, cursor);
+            let before = hashed(original);
+            let copied = Clone::clone(original);
+            edit_node(&mut copied, changed);
+            handle Eq::eq(original, &copied) {
+                true => 0,
+                false => handle hashed(original) == before {
+                    false => 0, true => independent(values, cursor + 1, changed),
+                },
             }
         },
     }
@@ -63,18 +109,23 @@ fn instances(a: identity::Digest, b: identity::Digest) -> i64 {
     let lower = instance(a, b"\x01\x00\x00\x00\x00\x00\x00\x00\x03\x00\x01\x00\x00");
     let higher = instance(a, b"\x01\x00\x00\x00\x00\x00\x00\x00\x03\x01\x00\x00\x00");
     let other = instance(b, b"\x00\x00\x00\x00\x00\x00\x00\x00");
-    let same_callable = less(Node::Instance(lower), Node::Instance(higher));
-    let callable_first = less(Node::Instance(higher), Node::Instance(other));
-    handle same_callable + callable_first + fingerprint(&higher) == 3 { true => 42, false => 5 }
+    let witness = fingerprint(&higher);
+    let lower = Node::Instance(lower); let higher = Node::Instance(higher); let other = Node::Instance(other);
+    let same_callable = less(&lower, &higher);
+    let callable_first = less(&higher, &other);
+    handle same_callable + callable_first + witness == 3 { true => 42, false => 5 }
 }
 fn verify(a: identity::Digest, b: identity::Digest) -> i64 {
     // Canonical byte order is 00 01 ... < 01 00 ..., although LE words are 256 > 1.
-    let bytes = less(Node::Input(identity::FileKey { digest: a }), Node::Input(identity::FileKey { digest: b }));
-    let packages = less(Node::Interface(module("a", "z")), Node::Interface(module("b", "a")));
-    let paths = less(Node::Fixity(module("p", "a")), Node::Fixity(module("p", "aa")));
+    let input_a = Node::Input(identity::FileKey { digest: a }); let input_b = Node::Input(identity::FileKey { digest: b });
+    let bytes = less(&input_a, &input_b);
+    let package_a = Node::Interface(module("a", "z")); let package_b = Node::Interface(module("b", "a"));
+    let packages = less(&package_a, &package_b);
+    let path_a = Node::Fixity(module("p", "a")); let path_b = Node::Fixity(module("p", "aa"));
+    let paths = less(&path_a, &path_b);
     let values = variants(a);
-    let traits = ordered(&values, 1) + hashes(&values, 0);
-    handle bytes + packages + paths == 3 { false => 1, true => handle traits == 2 { true => instances(a, b), false => 2 } }
+    let traits = ordered(&values, 1) + hashes(&values, 0) + independent(&values, 0, b);
+    handle bytes + packages + paths == 3 { false => 1, true => handle traits == 3 { true => instances(a, b), false => 2 } }
 }
 pub fn main() -> i64 {
     handle identity::decode(b"\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00") {

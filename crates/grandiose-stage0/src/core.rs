@@ -3848,6 +3848,26 @@ fn callable(header: &ElaboratedHeader) -> Option<&crate::signature::CallableSign
     }
 }
 
+/// Recover `Self` from the declaration's receiver shape, not from whichever
+/// implementation happens to accept the entire source argument first. A
+/// `&Self` parameter borrows the subject; a `Self` parameter can itself be a
+/// reference. Unrelated first parameters do not establish this correspondence.
+pub(crate) fn declared_receiver_subject(parameter: &Type, argument: &Type) -> Option<Type> {
+    match (parameter, argument) {
+        (Type::Generic(crate::signature::TRAIT_SELF_GENERIC), argument) => Some(argument.clone()),
+        (
+            Type::Reference {
+                referent: parameter,
+                ..
+            },
+            Type::Reference {
+                referent: argument, ..
+            },
+        ) => declared_receiver_subject(parameter, argument),
+        _ => None,
+    }
+}
+
 fn unsafe_implementation_definitions(
     signatures: &ElaboratedInterface,
 ) -> std::collections::BTreeSet<DefKey> {
@@ -9770,23 +9790,46 @@ impl Elaborator<'_> {
                 }
                 let CorePattern::Enum {
                     definition: selected,
+                    variant,
                     field_types,
                     ..
                 } = pattern
                 else {
                     return None;
                 };
-                (*selected == definition).then(|| {
+                if *selected != definition {
+                    return None;
+                }
+                let Some(ElaboratedHeader::Nominal {
+                    layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
+                    ..
+                }) = self.signatures.definitions.get(&definition)
+                else {
+                    return None;
+                };
+                let payload = &variants.get(*variant as usize)?.payload;
+                Some(
                     field_types
                         .iter()
                         .enumerate()
-                        .map(|(index, ty)| crate::signature::NominalField {
-                            name: index.to_string(),
-                            ty: ty.clone(),
-                            private_authority: None,
+                        .map(|(index, ty)| {
+                            let declared = match payload {
+                                crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => {
+                                    fields.get(index)
+                                }
+                                _ => None,
+                            };
+                            crate::signature::NominalField {
+                                name: declared
+                                    .map(|field| field.name.clone())
+                                    .unwrap_or_else(|| index.to_string()),
+                                ty: ty.clone(),
+                                private_authority: declared
+                                    .and_then(|field| field.private_authority),
+                            }
                         })
-                        .collect()
-                })
+                        .collect(),
+                )
             })
     }
 
@@ -9934,14 +9977,20 @@ impl Elaborator<'_> {
         if variants.len() != 2 {
             return None;
         }
-        let (other_index, other) = variants
+        let (other_index, _) = variants
             .iter()
             .enumerate()
             .find(|(index, _)| *index as u32 != *variant)?;
-        let (_, field_types) = self
+        // A complement can be a record variant too. The constructor-specific
+        // tuple API rejects that layout before its field authority can be
+        // checked by ordinary projection elaboration.
+        let field_types = self
             .signatures
-            .instantiate_enum_variant_generic(*definition, arguments, &other.name)
-            .ok()?;
+            .instantiate_enum_fields_generic(*definition, arguments, other_index as u32)
+            .ok()?
+            .into_iter()
+            .map(|field| field.ty)
+            .collect::<Vec<_>>();
         Some(CorePattern::Enum {
             definition: *definition,
             variant: other_index as u32,
@@ -10934,6 +10983,18 @@ impl Elaborator<'_> {
             arguments: trait_arguments.clone(),
         };
         let mut subject = self.zonk_type(subject, span);
+        if let Some(declaration) = self.trait_query().declared_method_signature(
+            TraitGoal {
+                relation: relation.clone(),
+                subject: Type::Generic(crate::signature::TRAIT_SELF_GENERIC),
+            },
+            name,
+            &selection_method_arguments,
+        ) && let Some(parameter) = declaration.parameters.first()
+            && let Some(inferred) = declared_receiver_subject(parameter, &subject)
+        {
+            subject = inferred;
+        }
         let mut answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
                 relation: relation.clone(),
@@ -11173,18 +11234,16 @@ impl Elaborator<'_> {
         ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
-        let (receiver, subject, peeled_subject, remaining_arguments) = match supplied.split_first() {
+        let (receiver, subject, mut peeled_subject, remaining_arguments) = match supplied
+            .split_first()
+        {
             Some((receiver_source, remaining_arguments)) => {
                 let receiver = self.expression(*receiver_source);
                 let receiver_type =
                     self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
-                // The first source argument determines `Self`. Preserve its
-                // exact type first: a trait can be implemented for `&T`, and
-                // selecting on `T` would make that implementation
-                // unreachable. For the conventional static-qualified shape
-                // whose first parameter is `&Self`, retain a one-reference
-                // fallback below for compatibility with its existing call
-                // surface.
+                // Retain the legacy first-argument fallback for declarations
+                // whose first parameter does not mention Self. For Self and
+                // borrowed Self, the declaration determines the subject below.
                 let peeled_subject = match &receiver_type {
                     Type::Reference { referent, .. } => Some((**referent).clone()),
                     _ => None,
@@ -11226,6 +11285,21 @@ impl Elaborator<'_> {
             arguments: trait_arguments.clone(),
         };
         let mut selected_subject = subject.clone();
+        if receiver.is_some()
+            && let Some(declaration) = self.trait_query().declared_method_signature(
+                TraitGoal {
+                    relation: relation.clone(),
+                    subject: Type::Generic(crate::signature::TRAIT_SELF_GENERIC),
+                },
+                name,
+                &method_arguments,
+            )
+            && let Some(parameter) = declaration.parameters.first()
+            && let Some(inferred) = declared_receiver_subject(parameter, &subject)
+        {
+            selected_subject = inferred;
+            peeled_subject = None;
+        }
         let mut answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
                 relation: relation.clone(),
@@ -12223,6 +12297,16 @@ impl Elaborator<'_> {
             }
             let previous_refinement_bindings = self.active_refinement_bindings.clone();
             let previous_refinement_patterns = self.active_refinement_patterns.clone();
+            // A non-binding enum arm proves its subject's variant just as a
+            // successful `is Variant(_)` test does. This permits borrowing
+            // payload fields without first binding (and moving) their owners.
+            if matches!(&core_pattern, CorePattern::Enum { fields, .. }
+                if fields.iter().all(|field| matches!(field.pattern, CorePattern::Any)))
+                && let Some(place) = self.expression_place(subject)
+            {
+                self.active_refinement_patterns
+                    .push((place, core_pattern.clone()));
+            }
             if let Some(refinement) = &refinement {
                 self.active_refinement_bindings.extend(
                     refinement

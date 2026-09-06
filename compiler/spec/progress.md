@@ -19,20 +19,24 @@ and authenticated native safe exports are deferred, not prerequisite gates. Exis
 tests do not certify these new capabilities, and recording the decision closes
 no compiler milestone.
 
-The first shared raw-storage crate is now implemented and tested: 13 unit and
-two native embedding tests also pass Miri's strict-provenance checks. It provides
-aligned uninitialized allocations and explicit ownership handoff. U2 includes raw-pointer types,
-explicit unsafe scopes, unsafe callable/trait contracts, and source-independent
-Core/MIR checks, with 22 focused tests. Callable safety stays separate from the
-unsafe-execution requirement, including on lifted bodies. Stage0 schema 95 now
-executes 18 bodyless machine leaves over actual host memory, including native-backed
+The shared raw-storage crate provides aligned uninitialized allocations and
+explicit ownership handoff. Its earlier 13 unit and two native embedding tests
+also passed Miri's strict-provenance checks; no new Miri run is claimed here.
+U2 includes raw-pointer types, explicit unsafe scopes, unsafe callable/trait
+contracts, and source-independent Core/MIR checks. Callable safety stays separate
+from the unsafe-execution requirement, including on lifted bodies. Stage0 schema
+98 executes machine leaves over actual host memory, including native-backed
 checked references, with per-run byte budgets and explicit unsafe Rust execution
-entry points. Twelve source tests cover
-generic linear and zero-size residents, padded records/enums, movement, resizing,
-pointer provenance, projected mutation and returned safe owner loans. Full shared
-addressable value storage/calls, the independent G1 extension,
-source Vec and U4–U6 remain open; this is not a complete native/VM ABI.
-The preceding unsafe-contract workspace checkpoint passes 2,491 tests (two existing ignored
+entry points. Source Vec, slices and UTF-8/collection consumers now use that
+storage, with ordinary inherent functions and explicit Clone implementations.
+Compiler dependency/diagnostic owners have been migrated to borrowed inspection,
+explicit independent cloning and buffer transfer. This does not complete
+structural/generic destruction, native homes for ordinary frame residents and
+callables, actual VM/native calls, the independent G1 extension, or U4–U6.
+Current source-suite failures and measured costs are recorded in the prerequisite
+evidence, not hidden by narrowing the source closure or increasing its budgets.
+
+The historical unsafe-contract workspace checkpoint passed 2,491 tests (two existing ignored
 manual benchmarks), 122.429 seconds wall including build; all 48 source entries
 pass in 69.91 seconds. See the
 prerequisite evidence above for the exact checkpoint and generation changes.

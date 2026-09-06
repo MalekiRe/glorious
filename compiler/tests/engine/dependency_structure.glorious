@@ -8,7 +8,7 @@ pub mod kernel;
 
 pub struct Keys { left: Node, right: Node, missing: Node, top: Node }
 fn revision(ordinal: u64) -> identity::RevisionId { identity::RevisionId { database: 7, ordinal: ordinal } }
-fn one(node: Node) -> Vec<Node> { let values = Vec::new(); Vec::push(&mut values, node); values }
+fn one(node: &Node) -> Vec<Node> { let values = Vec::new(); Vec::push(&mut values, Clone::clone(node)); values }
 fn drive(ledger: &dependency::Ledger, tx: &mut dependency::Transaction, controls: &mut operation::Controls, fuel: usize)
     -> Result<(), dependency::Failure> {
     handle fuel == 0 {
@@ -31,17 +31,17 @@ fn finish(ledger: &mut dependency::Ledger, tx: &mut dependency::Transaction, con
         },
     }
 }
-fn record(tx: &mut dependency::Transaction, controls: &mut operation::Controls, k: Keys, fingerprint: identity::Digest,
+fn record(tx: &mut dependency::Transaction, controls: &mut operation::Controls, k: &Keys, fingerprint: identity::Digest,
     dependencies: Vec<Node>) -> Result<(), dependency::Failure> {
-    handle dependency::record(&mut *tx, &mut *controls, k.top, fingerprint, one(k.left)) {
+    handle dependency::record(&mut *tx, &mut *controls, Clone::clone(&k.top), fingerprint, one(&k.left)) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => handle dependency::record(&mut *tx, &mut *controls, k.right, fingerprint, one(k.left)) {
+        Result::Ok(_) => handle dependency::record(&mut *tx, &mut *controls, Clone::clone(&k.right), fingerprint, one(&k.left)) {
             Result::Err(error) => Result::Err(error),
-            Result::Ok(_) => dependency::record(tx, controls, k.left, fingerprint, dependencies),
+            Result::Ok(_) => dependency::record(tx, controls, Clone::clone(&k.left), fingerprint, dependencies),
         },
     }
 }
-fn publish(ledger: &mut dependency::Ledger, ordinal: u64, parent: Option<identity::RevisionId>, k: Keys,
+fn publish(ledger: &mut dependency::Ledger, ordinal: u64, parent: Option<identity::RevisionId>, k: &Keys,
     fingerprint: identity::Digest, dependencies: Vec<Node>) -> Result<(), dependency::Failure> {
     let controls = operation::create(10000, 10000);
     handle dependency::begin(& *ledger, revision(ordinal), parent, dependency::Limits { nodes: 4, edges: 8 }) {
@@ -57,35 +57,41 @@ fn same_parent(left: Option<identity::RevisionId>, right: Option<identity::Revis
         Result::Ok(a) => handle right { Result::Ok(b) => identity::same_revision(a, b), _ => false },
     }
 }
-fn cycle(ledger: &dependency::Ledger, ordinal: u64, parent: Option<identity::RevisionId>, key: Node, member: Node) -> i64 {
-    handle dependency::trace(ledger, revision(ordinal), &key) {
+fn cycle(ledger: &dependency::Ledger, ordinal: u64, parent: Option<identity::RevisionId>, key: &Node, member: &Node) -> i64 {
+    handle dependency::trace(ledger, revision(ordinal), key) {
         Result::Err(_) => 0,
-        Result::Ok(trace) => handle trace.status {
-            dependency::Status::Cycle { parent: actual, member: actual_member } => handle same_parent(actual, parent) {
-                false => 0, true => handle node::same(&member, &actual_member) { true => 1, false => 0 },
-            },
-            _ => 0,
-        },
+        Result::Ok(trace) => cycle_status(&trace.status, parent, member),
     }
 }
-fn incomplete(ledger: &dependency::Ledger, key: Node, missing: Node) -> i64 {
-    handle dependency::trace(ledger, revision(2), &key) {
-        Result::Err(_) => 0,
-        Result::Ok(trace) => handle trace.status {
-            dependency::Status::Incomplete { missing: actual } => handle node::same(&missing, &actual) { true => 1, false => 0 },
-            _ => 0,
+fn cycle_status(status: &dependency::Status, parent: Option<identity::RevisionId>, member: &Node) -> i64 {
+    handle *status {
+        dependency::Status::Cycle { parent: _, member: _ } => handle same_parent(status.parent, parent) {
+            false => 0, true => handle node::same(member, &status.member) { true => 1, false => 0 },
         },
+        _ => 0,
     }
 }
-fn verify(ledger: &dependency::Ledger, k: Keys) -> i64 {
-    let cold_cycles = cycle(ledger, 0, None, k.left, k.left) + cycle(ledger, 0, None, k.right, k.left) + cycle(ledger, 0, None, k.top, k.left);
-    let warm_cycles = cycle(ledger, 1, Result::Ok(revision(0)), k.left, k.left) + cycle(ledger, 1, Result::Ok(revision(0)), k.top, k.left);
-    let missing = incomplete(ledger, k.left, k.missing) + incomplete(ledger, k.top, k.missing);
+fn incomplete(ledger: &dependency::Ledger, key: &Node, missing: &Node) -> i64 {
+    handle dependency::trace(ledger, revision(2), key) {
+        Result::Err(_) => 0,
+        Result::Ok(trace) => incomplete_status(&trace.status, missing),
+    }
+}
+fn incomplete_status(status: &dependency::Status, missing: &Node) -> i64 {
+    handle *status {
+        dependency::Status::Incomplete { missing: _ } => handle node::same(missing, &status.missing) { true => 1, false => 0 },
+        _ => 0,
+    }
+}
+fn verify(ledger: &dependency::Ledger, k: &Keys) -> i64 {
+    let cold_cycles = cycle(ledger, 0, None, &k.left, &k.left) + cycle(ledger, 0, None, &k.right, &k.left) + cycle(ledger, 0, None, &k.top, &k.left);
+    let warm_cycles = cycle(ledger, 1, Result::Ok(revision(0)), &k.left, &k.left) + cycle(ledger, 1, Result::Ok(revision(0)), &k.top, &k.left);
+    let missing = incomplete(ledger, &k.left, &k.missing) + incomplete(ledger, &k.top, &k.missing);
     handle cold_cycles == 3 { false => 1, true => handle warm_cycles == 2 { false => 2, true => handle missing == 2 { false => 3, true => 42 } } }
 }
-fn missing(ledger: &mut dependency::Ledger, k: Keys, fingerprint: identity::Digest) -> i64 {
-    let edges = one(k.missing);
-    Vec::push(&mut edges, k.right);
+fn missing(ledger: &mut dependency::Ledger, k: &Keys, fingerprint: identity::Digest) -> i64 {
+    let edges = one(&k.missing);
+    Vec::push(&mut edges, Clone::clone(&k.right));
     // Missing Artifact sorts after the cycle's Mir edge, but must take precedence.
     handle publish(&mut *ledger, 2, Result::Ok(revision(1)), k, fingerprint, edges) {
         Result::Err(_) => 4, Result::Ok(_) => verify(& *ledger, k),
@@ -95,10 +101,10 @@ fn start(fingerprint: identity::Digest) -> i64 {
     let ledger = dependency::create(7, 4);
     let k = Keys { left: Node::Core(identity::DefKey { digest: fingerprint }), right: Node::Mir(identity::DefKey { digest: fingerprint }),
         missing: Node::Artifact(identity::PackageKey { value: Str::to_string("missing") }), top: Node::Artifact(identity::PackageKey { value: Str::to_string("top") }) };
-    handle publish(&mut ledger, 0, None, k, fingerprint, one(k.right)) {
+    handle publish(&mut ledger, 0, None, &k, fingerprint, one(&k.right)) {
         Result::Err(_) => 5,
-        Result::Ok(_) => handle publish(&mut ledger, 1, Result::Ok(revision(0)), k, fingerprint, one(k.right)) {
-            Result::Err(_) => 6, Result::Ok(_) => missing(&mut ledger, k, fingerprint),
+        Result::Ok(_) => handle publish(&mut ledger, 1, Result::Ok(revision(0)), &k, fingerprint, one(&k.right)) {
+            Result::Err(_) => 6, Result::Ok(_) => missing(&mut ledger, &k, fingerprint),
         },
     }
 }

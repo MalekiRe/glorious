@@ -59,6 +59,8 @@ def main():
         "capability_run_passed": exit_code == 0 and bool(records),
         "complete_current_suite_passed": not args.filter and exit_code == 0 and bool(records),
         "release_ready": False,
+        "execution_mode": "locally_compiled_source_with_trusted_unsafe_standard_library",
+        "in_process_memory_sandbox": False,
         "scope": "source kernel, source admission/products, and typed source-query registry histories; no language parity or self-host bootstrap certification",
         "allocation_scope": "charged VM budget elements, not a census of physical allocations",
         "unprofiled_counters": "empty, not zero; see each execution's profiled field",

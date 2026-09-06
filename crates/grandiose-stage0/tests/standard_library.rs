@@ -89,6 +89,70 @@ fn native_static_addresses_keep_exact_literal_bytes_after_the_leaf_returns() {
 }
 
 #[test]
+fn source_clones_create_independent_nested_collection_owners() {
+    let source = r#"
+        use std::*;
+        fn extend_first(values: &mut Vec<String>) -> () {
+            handle Vec::get_mut(values, 0) {
+                Result::Err(_) => (),
+                Result::Ok(value) => String::push_str(value, "b"),
+            }
+        }
+        pub fn main() -> i64 {
+            let original = Vec<String>::new();
+            Vec::push(&mut original, Str::to_string("a"));
+            let copied = Clone::clone(&original);
+            extend_first(&mut original);
+            Vec::push(&mut copied, Str::to_string("c"));
+            let expected_copy = Str::to_string("a");
+            let expected_original = Str::to_string("ab");
+            handle Eq::eq(Vec::get_unchecked(&copied, 0), &expected_copy) {
+                false => 0,
+                true => handle Eq::eq(Vec::get_unchecked(&original, 0), &expected_original) {
+                    false => 0,
+                    true => handle Vec::len(&original) == 1 {
+                        false => 0,
+                        true => handle Vec::len(&copied) == 2 { false => 0, true => 42 },
+                    },
+                },
+            }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.run_std_i64().unwrap(), 42);
+}
+
+#[test]
+fn source_result_clones_cover_owned_and_unrestricted_payloads() {
+    let source = r#"
+        use std::*;
+        pub fn main() -> i64 {
+            let scalar = Result<i64, ()>::Ok(42);
+            let scalar_copy = Clone::clone(&scalar);
+            let owned = Result<String, String>::Err(Str::to_string("failure"));
+            let owned_copy = Clone::clone(&owned);
+            handle owned_copy {
+                Result::Ok(_) => 0,
+                Result::Err(message) => handle String::len(&message) == 7 {
+                    false => 0,
+                    true => handle scalar_copy { Result::Ok(value) => value, Result::Err(_) => 0 },
+                },
+            }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.run_std_i64().unwrap(), 42);
+}
+
+#[test]
 fn standard_prelude_and_source_defined_control_are_importable() {
     let outcome = StageZeroCompiler::new()
         .compile(request(

@@ -39,6 +39,105 @@ fn request(source: &str) -> CompilationRequest {
 }
 
 #[test]
+fn qualified_trait_calls_infer_self_from_the_declared_borrow_shape() {
+    let source = r#"
+        trait Duplicate { duplicate(value: &Self) -> Self; }
+        impl<T> Duplicate for T where T: Use<[0, *]> {
+            duplicate(value: &T) -> T { *value }
+        }
+        fn copied<T>(value: &T) -> T where T: Duplicate { Duplicate::duplicate(value) }
+        pub fn main() -> i64 {
+            let value = 42;
+            copied(&value)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn qualified_trait_values_infer_self_from_the_declared_borrow_shape() {
+    let source = r#"
+        trait Duplicate { duplicate(value: &Self) -> Self; }
+        impl<T> Duplicate for T where T: Use<[0, *]> {
+            duplicate(value: &T) -> T { *value }
+        }
+        fn apply(duplicate: (&i64) -> i64) -> i64 {
+            let value = 42;
+            duplicate(&value)
+        }
+        pub fn main() -> i64 { apply(Duplicate::duplicate) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn qualified_trait_self_parameters_preserve_reference_implementations() {
+    let source = r#"
+        trait Identity { identity(value: Self) -> i64; }
+        impl Identity for &i64 {
+            identity(value: Self) -> i64 { *value }
+        }
+        pub fn main() -> i64 {
+            let value = 42;
+            Identity::identity(&value)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nonbinding_enum_completion_arms_prove_scoped_payload_borrows() {
+    let source = r#"
+        enum Value { One { payload: i64 }, Two(u64), Empty }
+        fn read(value: &Value) -> i64 {
+            handle *value {
+                Value::One { payload: _ } => { let payload = &value.payload; *payload },
+                Value::Two(_) => 0,
+                Value::Empty => 0,
+            }
+        }
+        pub fn main() -> i64 { let value = Value::One { payload: 42 }; read(&value) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    let invalid = source.replace("read(&value)", "read(&value); value.0");
+    let error = StageZeroCompiler::new()
+        .compile(request(&invalid))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G4128"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn enum_projection_refinement_preserves_private_payload_authority() {
+    for projection in ["token.value", "token.0"] {
+        let source = format!(
+            "pub mod api; use api::Token; fn read(token: &Token) -> i64 {{ handle *token is Token::Empty(_) {{ false => {projection}, true => 0 }} }} pub fn main() -> i64 {{ let token = api::make(); read(&token) }}"
+        );
+        let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+            &source,
+            &[("src/api/api.glorious", "pub enum Token { Secret { private value: i64 }, Empty(()) } pub fn make() -> Token { Token::Secret { value: 42 } }")],
+        )).unwrap_err();
+        assert!(
+            error.diagnostics().iter().any(|d| d.code == "G4140"),
+            "{:#?}",
+            error.diagnostics()
+        );
+        let public = StageZeroCompiler::new().compile(request_with_logical_sources(
+            &source,
+            &[("src/api/api.glorious", "pub enum Token { Secret { value: i64 }, Empty(()) } pub fn make() -> Token { Token::Secret { value: 42 } }")],
+        )).unwrap();
+        assert_eq!(public.artifact.unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
 fn inherent_impl_functions_execute_with_block_generics_and_self_signatures() {
     let source = r#"
         pub struct Cell<T> { value: T }

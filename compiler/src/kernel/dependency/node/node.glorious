@@ -12,6 +12,20 @@ pub enum Node {
     Input(FileKey), Interface(ModuleKey), Fixity(ModuleKey), Body(DefKey),
     Core(DefKey), Instance(InstanceKey), Mir(DefKey), Artifact(PackageKey),
 }
+pub impl Clone for Node {
+    clone(value: &Node) -> Node {
+        handle *value {
+            Node::Input(_) => Node::Input(value.0),
+            Node::Interface(_) => Node::Interface(Clone::clone(&value.0)),
+            Node::Fixity(_) => Node::Fixity(Clone::clone(&value.0)),
+            Node::Body(_) => Node::Body(value.0),
+            Node::Core(_) => Node::Core(value.0),
+            Node::Instance(_) => Node::Instance(Clone::clone(&value.0)),
+            Node::Mir(_) => Node::Mir(value.0),
+            Node::Artifact(_) => Node::Artifact(Clone::clone(&value.0)),
+        }
+    }
+}
 pub fn kind(value: &Node) -> usize {
     handle *value {
         Node::Input(_) => 0, Node::Interface(_) => 1, Node::Fixity(_) => 2,
@@ -22,14 +36,14 @@ pub fn kind(value: &Node) -> usize {
 fn payload_order(left: &Node, right: &Node) -> Ordering {
     // Nonmatching arms cannot be reached after compare's discriminator check.
     handle *left {
-        Node::Input(a) => handle *right { Node::Input(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
-        Node::Interface(a) => handle *right { Node::Interface(b) => identity::compare_module(&a, &b), _ => Ordering::Less },
-        Node::Fixity(a) => handle *right { Node::Fixity(b) => identity::compare_module(&a, &b), _ => Ordering::Less },
-        Node::Body(a) => handle *right { Node::Body(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
-        Node::Core(a) => handle *right { Node::Core(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
-        Node::Instance(a) => handle *right { Node::Instance(b) => identity::compare_instance(&a, &b), _ => Ordering::Less },
-        Node::Mir(a) => handle *right { Node::Mir(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
-        Node::Artifact(a) => handle *right { Node::Artifact(b) => identity::compare_package(&a, &b), _ => Ordering::Less },
+        Node::Input(_) => handle *right { Node::Input(_) => identity::compare_digest(left.0.digest, right.0.digest), _ => Ordering::Less },
+        Node::Interface(_) => handle *right { Node::Interface(_) => identity::compare_module(&left.0, &right.0), _ => Ordering::Less },
+        Node::Fixity(_) => handle *right { Node::Fixity(_) => identity::compare_module(&left.0, &right.0), _ => Ordering::Less },
+        Node::Body(_) => handle *right { Node::Body(_) => identity::compare_digest(left.0.digest, right.0.digest), _ => Ordering::Less },
+        Node::Core(_) => handle *right { Node::Core(_) => identity::compare_digest(left.0.digest, right.0.digest), _ => Ordering::Less },
+        Node::Instance(_) => handle *right { Node::Instance(_) => identity::compare_instance(&left.0, &right.0), _ => Ordering::Less },
+        Node::Mir(_) => handle *right { Node::Mir(_) => identity::compare_digest(left.0.digest, right.0.digest), _ => Ordering::Less },
+        Node::Artifact(_) => handle *right { Node::Artifact(_) => identity::compare_package(&left.0, &right.0), _ => Ordering::Less },
     }
 }
 pub fn compare(left: &Node, right: &Node) -> Ordering {
@@ -46,14 +60,14 @@ pub impl Hash for Node {
     hash(value: &Node, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, kind(value));
         handle *value {
-            Node::Input(key) => Hash::hash(&key.digest, state),
-            Node::Interface(key) => identity::hash_module(&key, state),
-            Node::Fixity(key) => identity::hash_module(&key, state),
-            Node::Body(key) => Hash::hash(&key.digest, state),
-            Node::Core(key) => Hash::hash(&key.digest, state),
-            Node::Instance(key) => identity::hash_instance(&key, state),
-            Node::Mir(key) => Hash::hash(&key.digest, state),
-            Node::Artifact(key) => identity::hash_package(&key, state),
+            Node::Input(_) => Hash::hash(&value.0.digest, state),
+            Node::Interface(_) => identity::hash_module(&value.0, state),
+            Node::Fixity(_) => identity::hash_module(&value.0, state),
+            Node::Body(_) => Hash::hash(&value.0.digest, state),
+            Node::Core(_) => Hash::hash(&value.0.digest, state),
+            Node::Instance(_) => identity::hash_instance(&value.0, state),
+            Node::Mir(_) => Hash::hash(&value.0.digest, state),
+            Node::Artifact(_) => identity::hash_package(&value.0, state),
         }
     }
 }

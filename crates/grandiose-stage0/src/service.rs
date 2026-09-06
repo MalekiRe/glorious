@@ -2347,6 +2347,15 @@ impl StageZeroCompiler {
                 // a trait-method executable identity, not merely an ABI
                 // operand discarded after type checking.
                 let trait_receiver = match &expression.kind {
+                    crate::core::CoreKind::TraitMethod { .. } => match &expression.ty {
+                        Type::Callable {
+                            parameters, result, ..
+                        } => Some(specialize_type(
+                            parameters.first().unwrap_or(result),
+                            &caller_arguments,
+                        )),
+                        _ => None,
+                    },
                     crate::core::CoreKind::Call {
                         callee, arguments, ..
                     } if matches!(
@@ -2481,6 +2490,7 @@ impl StageZeroCompiler {
                         };
                         let trait_receiver = trait_method_executable_receiver(
                             evidence,
+                            method,
                             trait_receiver.as_ref(),
                             &signatures,
                         )
@@ -2807,7 +2817,21 @@ fn materialize_concrete_instances(
                         .first()
                         .and_then(|local| function.locals.get(local.0 as usize))
                         .map(|local| local.ty.clone())
-                        .or_else(|| function.locals.get(dst.0 as usize).map(|local| local.ty.clone())),
+                        .or_else(|| {
+                            function
+                                .locals
+                                .get(dst.0 as usize)
+                                .map(|local| local.ty.clone())
+                        }),
+                    crate::MirInstruction::MakeCallable { dst, .. } => function
+                        .locals
+                        .get(dst.0 as usize)
+                        .and_then(|local| match &local.ty {
+                            Type::Callable {
+                                parameters, result, ..
+                            } => Some(parameters.first().unwrap_or(result).clone()),
+                            _ => None,
+                        }),
                     _ => None,
                 };
                 let (callee, generic_arguments, trait_instance) = match instruction {
@@ -2883,6 +2907,7 @@ fn materialize_concrete_instances(
                         &method_arguments,
                         trait_method_executable_receiver(
                             evidence,
+                            *callee,
                             receiver.as_ref(),
                             signatures,
                         )?
@@ -3369,14 +3394,12 @@ fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<
     Ok(())
 }
 
-/// Recover the `Self` type used by Core's successful method selection. A
-/// qualified call first tries its exact first-argument type, which is required
-/// for `impl Trait for &T`. It may then compatibly retry the referent for an
-/// older static-qualified shape whose first parameter is `&Self`. Instance
-/// materialization must make the same choice instead of unconditionally
-/// erasing one reference layer from the executable identity.
+/// Recover Core's selected Self using the same declaration-owned receiver
+/// shape. In particular, a blanket impl head matches both T and &T, so matching
+/// the implementation head alone cannot distinguish Self from a borrow of it.
 fn trait_method_executable_receiver(
     evidence: DefKey,
+    method: DefKey,
     receiver: Option<&Type>,
     signatures: &ElaboratedInterface,
 ) -> Result<Option<Type>, String> {
@@ -3396,6 +3419,29 @@ fn trait_method_executable_receiver(
         )
         .is_ok()
     };
+    let declaration = implementation
+        .methods
+        .keys()
+        .find(|name| crate::implementation_method_key(evidence, name) == method)
+        .and_then(|name| {
+            match signatures
+                .definitions
+                .get(&implementation.relation.definition)
+            {
+                Some(ElaboratedHeader::Trait(header)) => header.methods.get(name),
+                _ => None,
+            }
+        });
+    if let Some(parameter) = declaration.and_then(|method| method.parameters.first())
+        && let Some(subject) = crate::core::declared_receiver_subject(parameter, receiver)
+    {
+        return matches_head(&subject)
+            .then_some(Some(subject))
+            .ok_or_else(|| {
+                "selected trait implementation Self type does not match its declared receiver"
+                    .into()
+            });
+    }
     if matches_head(receiver) {
         return Ok(Some(receiver.clone()));
     }
@@ -3403,6 +3449,11 @@ fn trait_method_executable_receiver(
         && matches_head(referent)
     {
         return Ok(Some((**referent).clone()));
+    }
+    // A contextually selected monomorphic static method need not mention Self
+    // in its callable parameters. There are no impl slots to recover from it.
+    if implementation.generics == 0 {
+        return Ok(None);
     }
     Err("selected trait implementation Self type does not match its executable receiver".into())
 }

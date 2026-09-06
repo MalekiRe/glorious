@@ -65,7 +65,13 @@ after changing the source/test closure. `--release` remains fail-closed.
 For a focused run, use `tooling/compiler-check.sh --filter gsc2_registry`.
 Reports record the filters and mark this as selected-test evidence, never a
 complete-suite pass. A filter matching no executed fixtures fails closed.
-The latest full workspace run passes **2,469 tests in 126.214 seconds**, including
+The current ownership-migration checkpoint passes **46 of 48 source entries**
+in 198.97 seconds. Bootstrap-admission and the eight-history registry batch
+still exceed the unchanged VM allocation-element budget; the complete-suite
+report correctly fails (`run-b68ogeof`). All 1,841 selected Stage0 regression
+tests pass, and the workspace checks successfully. See the
+[ownership and allocation evidence](spec/unsafe-memory-progress.md#compiler-source-ownership-migration).
+The historical raw-storage foundation checkpoint passed **2,469 tests in 126.214 seconds**, including
 all **48 source test entries in 72.97 seconds** and all retained batched scenario
 comparators. Source audit passes before/after; see [raw-storage evidence](spec/unsafe-memory-progress.md).
 The preceding array-write optimization passed 2,455 tests in 84.670 seconds;

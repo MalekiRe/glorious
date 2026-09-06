@@ -5,8 +5,47 @@ use std::{collections::BTreeMap, fs, path::Path, sync::OnceLock};
 
 use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath, PackageKey,
-    SourceInput, StageZeroCompiler, decode_and_verify_program,
+    SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, decode_and_verify_program,
 };
+
+/// Only source_program constructs this capability, after compiling the local
+/// fixture plus the complete production closure and independently verifying
+/// its bytes. It never admits externally supplied bytecode. The trusted source
+/// stdlib uses unsafe storage internally, so these are not safe-only VM probes.
+struct SourceProgram(grandiose_stage0::VerifiedVmProgram);
+
+impl SourceProgram {
+    fn canonical_bytes(&self) -> Vec<u8> {
+        self.0.canonical_bytes()
+    }
+
+    fn run_i64(&self) -> Result<i64, VmArtifactError> {
+        self.run_i64_with_limits(Default::default())
+    }
+
+    fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
+        // SAFETY: the private constructor establishes local-source provenance;
+        // the checked-in stdlib owns the raw-storage invariants. Limits remain
+        // unchanged, and each execution creates its own native-memory domain.
+        unsafe { self.0.run_i64_with_unsafe(limits) }
+    }
+
+    fn run_i64_for_authoring(
+        &self,
+        limits: VmExecutionLimits,
+    ) -> Result<(i64, grandiose_stage0::vm_backend::VmAuthoringProfile), VmArtifactError> {
+        // SAFETY: same local-source invariant as run_i64_with_limits.
+        unsafe { self.0.run_i64_for_authoring_with_unsafe(limits) }
+    }
+
+    fn run_tuple_i64_for_authoring(
+        &self,
+        limits: VmExecutionLimits,
+    ) -> Result<(Vec<i64>, grandiose_stage0::vm_backend::VmAuthoringProfile), VmArtifactError> {
+        // SAFETY: same invariant; the entire batch retains one shared budget.
+        unsafe { self.0.run_tuple_i64_for_authoring_with_unsafe(limits) }
+    }
+}
 
 fn source_case(case: &str) -> i64 {
     source_case_with(case, &[])
@@ -61,7 +100,7 @@ fn source_batch<'a>(
 
 fn record_execution(
     case: &str,
-    program: &grandiose_stage0::VerifiedVmProgram,
+    program: &SourceProgram,
     result: i64,
     profile: Option<&grandiose_stage0::vm_backend::VmAuthoringProfile>,
 ) {
@@ -70,7 +109,7 @@ fn record_execution(
 
 fn record_execution_values(
     case: &str,
-    program: &grandiose_stage0::VerifiedVmProgram,
+    program: &SourceProgram,
     result: &str,
     tuple: &str,
     profile: Option<&grandiose_stage0::vm_backend::VmAuthoringProfile>,
@@ -106,7 +145,7 @@ fn record_execution_values(
 fn source_program(
     case: &str,
     replacements: &[(&str, String)],
-) -> grandiose_stage0::VerifiedVmProgram {
+) -> SourceProgram {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let package = PackageKey("gsc2@0.1.0".into());
     let mut application = fs::read_to_string(root.join("compiler/tests").join(case)).unwrap();
@@ -227,7 +266,10 @@ fn source_program(
     );
     let bytes = outcome.artifact.unwrap().canonical_bytes();
     assert_eq!(&bytes[..8], b"G0VP\r\n\x1a\n");
-    decode_and_verify_program(&bytes).expect("serialized source program must independently verify")
+    SourceProgram(
+        decode_and_verify_program(&bytes)
+            .expect("serialized source program must independently verify"),
+    )
 }
 
 #[test]

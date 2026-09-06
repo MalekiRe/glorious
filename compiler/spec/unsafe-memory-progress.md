@@ -407,10 +407,69 @@ identity. No instruction IDs are reassigned and no replacement collection
 intrinsics were introduced. Historical public-contract inventory rows remain
 historical audit records, not active runtime capabilities.
 
-Validation of this cleanup covers the bundled collection behavior and both
-Rust VM suites. The full-closure GSC2 manifest test currently fails during source
+Validation of this cleanup covered the bundled collection behavior and both
+Rust VM suites. At that checkpoint the full-closure GSC2 manifest test failed during source
 checking: compiler modules still duplicate moved Vec/String-backed values or
 request duplicable collection bounds after the source ownership rewrite. That
 compiler-source migration is not implemented by deleting VM instructions; the
 GSC2 test remains visible and failing rather than weakening its ownership checks
 or narrowing the tested production closure.
+
+## Compiler-source ownership migration
+
+The compiler closure now compiles with the pointer-backed standard library.
+An ordinary source `Clone` trait constructs independent Vec/String owners;
+PackageKey, ModuleKey, InstanceKey, dependency Node and diagnostic records supply
+explicit implementations. Dependency walks inspect borrowed frames/statuses;
+deduplication swaps residents, and freezing transfers dependency buffers and
+completed statuses into published traces. Retained indices own cloned keys.
+Diagnostic provenance uses explicit cloning and affine sorting/deduplication.
+Whole-diagnostic and identity cloning still require physical/copy accounting;
+these changes do not certify bounded work for every source step or finish Drop.
+
+Stage0 now derives a qualified trait operation's Self type from its declared
+parameter shape, consistently during direct/first-class selection and executable
+specialization. A blanket implementation no longer mistakes `&Self` for Self.
+Nonbinding enum completion arms permit scoped payload borrows. Record payloads
+retain field names and private authority, including when a negative test proves
+the sole alternative. Regressions reject out-of-scope/private projections and
+execute the corresponding public access. The cache generation is thirteen;
+language/interface three, bytecode 53, verifier twelve and schema 98 are unchanged.
+
+The GSC2 harness executes only its locally compiled, independently decoded and
+verified source closure through the existing explicit unsafe authoring APIs.
+It does not enable unsafe execution for external artifacts or weaken the safe
+APIs. Reports identify the trusted unsafe standard library and disclaim an
+in-process memory sandbox. Every fixture still compiles the complete production
+closure, and every batch retains one unchanged execution budget.
+
+The ownership regressions include all eight cloned dependency-key variants:
+mutating the clone changes its identity while the original remains unchanged,
+including in-place edits of nested String storage and substitution bytes.
+Dependency histories retain their canonical ordering, missing/cycle precedence,
+red/green behavior, cancellation, capacity and stale-parent assertions. Source
+admission now creates distinct inputs for independently consuming histories;
+namespace checks finish borrowed inspection before consuming the admitted value.
+
+Temporary allocation tracing of the two still-failing batches found cumulative
+VM value-element pressure, not exhaustion of the native-memory byte budget.
+At the unchanged 16,777,216-element ceiling, bootstrap admission had charged
+13,253,800 elements for 403,845 direct call frames (13,678,099 work ticks).
+The eight-history registry batch had charged 10,639,006 elements for 379,570
+direct call frames, plus 2,434,710 native-resident field elements
+(11,453,754 work ticks). These are partial measurements at failure, not completed
+profiles or live-byte counts. The tracing was removed; neither allocation
+accounting nor test ceilings were changed. Reducing actual call/materialization
+overhead remains open, alongside the ownership/ABI prerequisites above.
+
+Validation: 1,841 Stage0 regression tests pass across the library, body, Core,
+MIR, headers/interfaces/resolution/signatures/coherence, request, service,
+standard-library, trait solver, runtime-memory/manifest and VM-backend targets.
+`cargo check --workspace --all-targets` succeeds with existing G1 dead-code
+warnings. The unfiltered source suite finishes in 198.97 seconds with **46
+passed and two failed**, both allocation failures described above. Its closure
+audits pass before/after, with 30 locked source files and all 11,455 historical
+public contracts still open. `target/compiler-check/run-b68ogeof/report.json`
+correctly records failed complete-suite/capability status, not release readiness.
+Logs: `/tmp/grandiose-inherent-impl-wjVcSD/owned-regression2.log`,
+`compiler-check-owned2.log`, `owned-check.log`, and `allocation-trace.log`.

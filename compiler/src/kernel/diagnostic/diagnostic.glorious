@@ -14,6 +14,26 @@ pub struct CompileDiagnostic {
     code: String, class: Class, severity: Severity, message: String, primary: Option<Span>,
     input_fingerprint: Option<Digest>, related: Vec<Related>, facts: Vec<Fact>, explanation: Vec<Explanation>,
 }
+pub impl Clone for Related {
+    clone(value: &Related) -> Related { Related { label: Clone::clone(&value.label), span: value.span } }
+}
+pub impl Clone for Fact {
+    clone(value: &Fact) -> Fact { Fact { name: Clone::clone(&value.name), value: Clone::clone(&value.value) } }
+}
+pub impl Clone for Explanation {
+    clone(value: &Explanation) -> Explanation {
+        Explanation { kind: Clone::clone(&value.kind), message: Clone::clone(&value.message) }
+    }
+}
+pub impl Clone for CompileDiagnostic {
+    clone(value: &CompileDiagnostic) -> CompileDiagnostic {
+        CompileDiagnostic {
+            code: Clone::clone(&value.code), class: value.class, severity: value.severity,
+            message: Clone::clone(&value.message), primary: value.primary, input_fingerprint: value.input_fingerprint,
+            related: Clone::clone(&value.related), facts: Clone::clone(&value.facts), explanation: Clone::clone(&value.explanation),
+        }
+    }
+}
 pub struct Limits { diagnostics: usize, provenance: usize }
 pub struct Policy { validate_spans: Bool, error_limit: Option<usize>, input_fingerprint: Option<Digest> }
 pub enum Failure { Closed, Busy, Capacity, Invariant, Control(operation::Failure) }
@@ -325,14 +345,14 @@ fn merge(work: &mut Work, item: usize) -> Result<Event, Failure> {
         Result::Ok(value) => handle same_last(&work.output, value) {
             true => next(work, Phase::Appending { item: item, part: 0, edge: 0 }),
             false => {
-                Vec::push(&mut work.output, *value);
+                Vec::push(&mut work.output, Clone::clone(value));
                 next(work, Phase::Merge { item: item + 1 })
             },
         },
     }
 }
-fn append_one<T>(source: &Vec<T>, target: &mut Vec<T>, edge: usize) -> Bool where T: Use<[0, *]> {
-    handle Vec::get(source, edge) { Result::Err(_) => false, Result::Ok(value) => { Vec::push(target, *value); true } }
+fn append_one<T>(source: &Vec<T>, target: &mut Vec<T>, edge: usize) -> Bool where T: Clone {
+    handle Vec::get(source, edge) { Result::Err(_) => false, Result::Ok(value) => { Vec::push(target, Clone::clone(value)); true } }
 }
 fn append_part(source: &CompileDiagnostic, target: &mut CompileDiagnostic, part: usize, edge: usize) -> Bool {
     handle part {
@@ -357,7 +377,7 @@ fn append_provenance(work: &mut Work, item: usize, part: usize, edge: usize) -> 
 
 // The three typed provenance arrays share this bounded sorting/dedup cursor.
 // They never become an untyped payload array or a string-encoded semantic key.
-fn sort_step<T>(values: &mut Vec<T>, outer: usize, inner: usize) -> Cursor where T: Ord, T: Use<[0, *]> {
+fn sort_step<T>(values: &mut Vec<T>, outer: usize, inner: usize) -> Cursor where T: Ord {
     handle outer >= Vec::len(& *values) {
         true => handle Vec::len(& *values) { 0 => Cursor::Done, _ => Cursor::Dedup { read: 1, write: 1 } },
         false => handle inner == 0 {
@@ -369,22 +389,19 @@ fn sort_step<T>(values: &mut Vec<T>, outer: usize, inner: usize) -> Cursor where
         },
     }
 }
-fn dedup_step<T>(values: &mut Vec<T>, read: usize, write: usize) -> Cursor where T: Ord, T: Use<[0, *]> {
+fn dedup_step<T>(values: &mut Vec<T>, read: usize, write: usize) -> Cursor where T: Ord {
     handle read == Vec::len(& *values) {
         true => Cursor::Trim { length: write },
         false => handle Ord::compare(Vec::get_unchecked(& *values, read), Vec::get_unchecked(& *values, write - 1)) {
             Ordering::Equal => Cursor::Dedup { read: read + 1, write: write },
             _ => {
-                let value = *Vec::get_unchecked(& *values, read);
-                handle Vec::get_mut(values, write) {
-                    Result::Err(_) => Cursor::Invalid,
-                    Result::Ok(target) => { *target = value; Cursor::Dedup { read: read + 1, write: write + 1 } },
-                }
+                Vec::swap(values, read, write);
+                Cursor::Dedup { read: read + 1, write: write + 1 }
             },
         },
     }
 }
-fn canonical_step<T>(values: &mut Vec<T>, cursor: Cursor) -> Cursor where T: Ord, T: Use<[0, *]> {
+fn canonical_step<T>(values: &mut Vec<T>, cursor: Cursor) -> Cursor where T: Ord, T: Use<[0, 1]> {
     handle cursor {
         Cursor::Sort { outer: outer, inner: inner } => sort_step(values, outer, inner),
         Cursor::Dedup { read: read, write: write } => dedup_step(values, read, write),
@@ -453,13 +470,13 @@ fn limit_errors(work: &mut Work, item: usize, kept: usize, suppressed: usize) ->
         Result::Ok(value) => handle value.severity {
             Severity::Error => handle kept < error_limit(work.policy) - 1 {
                 true => {
-                    Vec::push(&mut work.output, *value);
+                    Vec::push(&mut work.output, Clone::clone(value));
                     next(work, Phase::Limit { item: item + 1, kept: kept + 1, suppressed: suppressed })
                 },
                 false => next(work, Phase::Limit { item: item + 1, kept: kept, suppressed: suppressed + 1 }),
             },
             _ => {
-                Vec::push(&mut work.output, *value);
+                Vec::push(&mut work.output, Clone::clone(value));
                 next(work, Phase::Limit { item: item + 1, kept: kept, suppressed: suppressed })
             },
         },

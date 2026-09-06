@@ -61,12 +61,12 @@ fn alias_queries(value: &namespace::Admitted, expected: &Vec<AliasWitness>, curs
         },
     }
 }
-fn ns_retained(value: namespace::Admitted, expected: &NamespaceExpected) -> i64 {
-    let root = namespace::root(&value);
-    let admitted = namespace::sources(&value);
+fn ns_borrowed(value: &namespace::Admitted, expected: &NamespaceExpected) -> i64 {
+    let root = namespace::root(value);
+    let admitted = namespace::sources(value);
     let inputs = sources::values(admitted);
-    let aliases = namespace::aliases(&value);
-    let caps = namespace::capabilities(&value);
+    let aliases = namespace::aliases(value);
+    let caps = namespace::capabilities(value);
     handle Slice::len(&aliases) == Vec::len(&expected.aliases) {
         false => 0,
         true => handle Slice::len(&caps) == Vec::len(&expected.capabilities) {
@@ -74,18 +74,21 @@ fn ns_retained(value: namespace::Admitted, expected: &NamespaceExpected) -> i64 
             true => {
                 let fields = same(Str::as_bytes(String::as_str(&root.value)), Vec::as_slice(&expected.root))
                     * retained(inputs, &expected.sources) * alias_rows(aliases, &expected.aliases, 0, 1)
-                    * cap_rows(caps, &expected.capabilities, 0, 1) * alias_queries(&value, &expected.aliases, 0, 1);
+                    * cap_rows(caps, &expected.capabilities, 0, 1) * alias_queries(value, &expected.aliases, 0, 1);
                 let missing = Str::to_string("definitely_absent_alias");
-                let absent = ns_absent(&value, &missing);
-                handle namespace::into_parts(value) {
-                    (root, sources, aliases, caps) => fields * absent
-                        * same(Str::as_bytes(String::as_str(&root.value)), Vec::as_slice(&expected.root))
-                        * retained(sources::values(&sources), &expected.sources)
-                        * alias_rows(Vec::as_slice(&aliases), &expected.aliases, 0, 1)
-                        * cap_rows(Vec::as_slice(&caps), &expected.capabilities, 0, 1),
-                }
+                fields * ns_absent(value, &missing)
             },
         },
+    }
+}
+fn ns_retained(value: namespace::Admitted, expected: &NamespaceExpected) -> i64 {
+    let borrowed = ns_borrowed(&value, expected);
+    handle namespace::into_parts(value) {
+        (root, sources, aliases, caps) => borrowed
+            * same(Str::as_bytes(String::as_str(&root.value)), Vec::as_slice(&expected.root))
+            * retained(sources::values(&sources), &expected.sources)
+            * alias_rows(Vec::as_slice(&aliases), &expected.aliases, 0, 1)
+            * cap_rows(Vec::as_slice(&caps), &expected.capabilities, 0, 1),
     }
 }
 fn ns_absent(value: &namespace::Admitted, key: &String) -> i64 {

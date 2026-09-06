@@ -197,16 +197,25 @@ fn source_failure(value: request::SourceInput, mode: usize) -> i64 {
     let fresh = operation::create(1000, 1000);
     failed + expect(request::finish_source(&mut builder, &fresh), 1)
 }
-fn source_cleanup(key: FileKey, fingerprint: Digest) -> i64 {
+// Each independently consumed builder input owns its strings and byte buffer.
+fn source_cleanup_case(key: FileKey, fingerprint: Digest, kind: usize, phase: usize, finishing: usize) -> i64 {
     handle input(key, fingerprint, b"a\n") {
         Result::Err(_) => 0,
-        Result::Ok(value) => {
-            let cancelled_steps = source_cancel(value, 0, 0) + source_cancel(value, 1, 0) + source_cancel(value, 2, 0) + source_cancel(value, 3, 0);
-            let cancelled_finish = source_cancel(value, 0, 1) + source_cancel(value, 1, 1) + source_cancel(value, 2, 1) + source_cancel(value, 3, 1);
-            let failures = source_failure(value, 0) + source_failure(value, 1) + source_failure(value, 2) + source_failure(value, 3) + source_failure(value, 4);
-            cancelled_steps + cancelled_finish + failures + source_finished(value)
+        Result::Ok(value) => handle kind {
+            0 => source_cancel(value, phase, finishing),
+            1 => source_failure(value, phase),
+            _ => source_finished(value),
         },
     }
+}
+fn source_cleanup(key: FileKey, fingerprint: Digest) -> i64 {
+    let cancelled_steps = source_cleanup_case(key, fingerprint, 0, 0, 0) + source_cleanup_case(key, fingerprint, 0, 1, 0)
+        + source_cleanup_case(key, fingerprint, 0, 2, 0) + source_cleanup_case(key, fingerprint, 0, 3, 0);
+    let cancelled_finish = source_cleanup_case(key, fingerprint, 0, 0, 1) + source_cleanup_case(key, fingerprint, 0, 1, 1)
+        + source_cleanup_case(key, fingerprint, 0, 2, 1) + source_cleanup_case(key, fingerprint, 0, 3, 1);
+    let failures = source_cleanup_case(key, fingerprint, 1, 0, 0) + source_cleanup_case(key, fingerprint, 1, 1, 0)
+        + source_cleanup_case(key, fingerprint, 1, 2, 0) + source_cleanup_case(key, fingerprint, 1, 3, 0) + source_cleanup_case(key, fingerprint, 1, 4, 0);
+    cancelled_steps + cancelled_finish + failures + source_cleanup_case(key, fingerprint, 2, 0, 0)
 }
 pub struct World { value: request::AdmittedSource }
 pub impl registry::World for World {

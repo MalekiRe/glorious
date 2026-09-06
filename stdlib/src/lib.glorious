@@ -1808,6 +1808,59 @@ pub fn swap<T>(left: &mut T, right: &mut T) -> () {
 
 pub trait Default { default() -> Self; }
 
+// Explicit cloning constructs a new owner without granting more uses of the
+// original. Scalar implementations copy; owning collections clone residents.
+// There is no blanket implementation for every unrestricted T: it would
+// overlap structural Clone implementations such as Result<A, E>.
+pub trait Clone { clone(value: &Self) -> Self; }
+pub impl Clone for () { clone(value: &()) -> () { *value } }
+pub impl Clone for u8 { clone(value: &u8) -> u8 { *value } }
+pub impl Clone for u16 { clone(value: &u16) -> u16 { *value } }
+pub impl Clone for u32 { clone(value: &u32) -> u32 { *value } }
+pub impl Clone for u64 { clone(value: &u64) -> u64 { *value } }
+pub impl Clone for u128 { clone(value: &u128) -> u128 { *value } }
+pub impl Clone for usize { clone(value: &usize) -> usize { *value } }
+pub impl Clone for i8 { clone(value: &i8) -> i8 { *value } }
+pub impl Clone for i16 { clone(value: &i16) -> i16 { *value } }
+pub impl Clone for i32 { clone(value: &i32) -> i32 { *value } }
+pub impl Clone for i64 { clone(value: &i64) -> i64 { *value } }
+pub impl Clone for i128 { clone(value: &i128) -> i128 { *value } }
+pub impl Clone for isize { clone(value: &isize) -> isize { *value } }
+pub impl Clone for f32 { clone(value: &f32) -> f32 { *value } }
+pub impl Clone for f64 { clone(value: &f64) -> f64 { *value } }
+pub impl Clone for char { clone(value: &char) -> char { *value } }
+fn vec_clone_from<T>(source: &Vec<T>, target: &mut Vec<T>, index: usize) -> () where T: Clone {
+    handle index < Vec::len(source) {
+        false => (),
+        true => {
+            Vec::push(&mut *target, Clone::clone(Vec::get_unchecked(source, index)));
+            vec_clone_from(source, target, index + 1)
+        },
+    }
+}
+pub impl<T> Clone for Vec<T> where T: Clone {
+    clone(value: &Vec<T>) -> Vec<T> {
+        let result = Vec::with_capacity(Vec::len(value));
+        vec_clone_from(value, &mut result, 0);
+        result
+    }
+}
+pub impl Clone for String {
+    clone(value: &String) -> String {
+        let storage = Vec::with_capacity(Vec::len(&value.storage));
+        Vec::extend_from_slice(&mut storage, Vec::as_slice(&value.storage));
+        String { storage: storage }
+    }
+}
+pub impl<A, E> Clone for Result<A, E> where A: Clone, E: Clone {
+    clone(value: &Result<A, E>) -> Result<A, E> {
+        handle *value is Result::Ok(_) {
+            true => Result::Ok(Clone::clone(&value.0)),
+            false => Result::Err(Clone::clone(&value.0)),
+        }
+    }
+}
+
 // Explicit, possibly lossy conversion. Implementations have no outward
 // effects and obey ordinary ownership rules; this trait grants no access to
 // private representations. Input-domain failure belongs in a checked API.

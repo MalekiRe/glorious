@@ -138,7 +138,7 @@ fn record_open(work: &mut Work, limits: Limits, node: Node, fingerprint: Digest,
                     false => Result::Err(Failure::Capacity),
                     true => {
                         let index = Vec::len(&work.facts);
-                        HashMap::insert(&mut work.index, node, index);
+                        HashMap::insert(&mut work.index, Clone::clone(&fact.node), index);
                         Vec::push(&mut work.facts, fact);
                         Vec::push(&mut work.roots, index);
                         Vec::push(&mut work.colors, Color::Unseen);
@@ -249,11 +249,9 @@ fn dedup(work: &mut Work, fact: usize, read: usize, write: usize) -> Result<Prog
             false => handle node::same(Vec::get_unchecked(&value.dependencies, read), Vec::get_unchecked(&value.dependencies, write - 1)) {
                 true => { (*work).phase = Phase::Dedup { fact: fact, read: read + 1, write: write }; continuing() },
                 false => {
-                    let key = *Vec::get_unchecked(&value.dependencies, read);
-                    handle write_at(&mut value.dependencies, write, key) {
-                        Result::Err(error) => Result::Err(error),
-                        Result::Ok(_) => { (*work).phase = Phase::Dedup { fact: fact, read: read + 1, write: write + 1 }; continuing() },
-                    }
+                    Vec::swap(&mut value.dependencies, read, write);
+                    (*work).phase = Phase::Dedup { fact: fact, read: read + 1, write: write + 1 };
+                    continuing()
                 },
             },
         },
@@ -291,11 +289,12 @@ fn walk(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work) -> Result<
             },
         },
         length => {
-            let frame = *Vec::get_unchecked(&work.stack, length - 1);
+            let frame = Vec::get_unchecked(&work.stack, length - 1);
+            let index = frame.fact;
             let fact = Vec::get_unchecked(&work.facts, frame.fact);
             handle Vec::get(&fact.dependencies, frame.cursor) {
-                Result::Err(_) => finish_node(ledger, parent, work, frame),
-                Result::Ok(child) => visit(work, parent, *child, length - 1),
+                Result::Err(_) => finish_node(ledger, parent, work, index),
+                Result::Ok(child) => { let child = Clone::clone(child); visit(work, parent, child, length - 1) },
             }
         },
     }
@@ -311,21 +310,30 @@ fn visit(work: &mut Work, parent: Option<RevisionId>, child: Node, top: usize) -
 }
 fn visit_child(work: &mut Work, parent: Option<RevisionId>, child: Node) -> Result<Progress, Failure> {
     handle index_of(& *work, &child) {
-        Result::Err(_) => observe(work, Status::Incomplete { missing: child }, child),
-        Result::Ok(index) => handle *Vec::get_unchecked(&work.colors, index) {
-            Color::Unseen => push(work, index),
-            Color::Active => observe(work, Status::Cycle { parent: parent, member: child }, child),
-            Color::Done(status) => observe(work, status, child),
+        Result::Err(_) => {
+            let status = Status::Incomplete { missing: Clone::clone(&child) };
+            observe(&mut work.stack, &status, &child)
+        },
+        Result::Ok(index) => {
+            let color = Vec::get_unchecked(&work.colors, index);
+            handle *color {
+                Color::Unseen => push(work, index),
+                Color::Active => {
+                    let status = Status::Cycle { parent: parent, member: Clone::clone(&child) };
+                    observe(&mut work.stack, &status, &child)
+                },
+                Color::Done(_) => observe(&mut work.stack, &color.0, &child),
+            }
         },
     }
 }
-fn first(target: &mut Option<Node>, incoming: Node) -> () {
-    handle Result::as_ref(& *target) { Result::Err(_) => { *target = Result::Ok(incoming); }, _ => () }
+fn first(target: &mut Option<Node>, incoming: &Node) -> () {
+    handle Result::as_ref(& *target) { Result::Err(_) => { *target = Result::Ok(Clone::clone(incoming)); }, _ => () }
 }
-fn observe(work: &mut Work, status: Status, child: Node) -> Result<Progress, Failure> {
-    handle Vec::len(&work.stack) {
+fn observe(stack: &mut Vec<Walk>, status: &Status, child: &Node) -> Result<Progress, Failure> {
+    handle Vec::len(& *stack) {
         0 => continuing(),
-        length => handle Vec::get_mut(&mut work.stack, length - 1) {
+        length => handle Vec::get_mut(stack, length - 1) {
             Result::Err(_) => Result::Err(Failure::Invariant),
             Result::Ok(frame) => {
                 observe_frame(frame, status, child);
@@ -334,32 +342,41 @@ fn observe(work: &mut Work, status: Status, child: Node) -> Result<Progress, Fai
         },
     }
 }
-fn observe_frame(frame: &mut Walk, status: Status, child: Node) -> () {
-    handle status {
+fn observe_frame(frame: &mut Walk, status: &Status, child: &Node) -> () {
+    handle *status {
         Status::Green { parent: _ } => (),
         Status::Cold => first(&mut frame.changed, child),
-        Status::Red { parent: _, first_changed: changed } => first(&mut frame.changed, changed),
-        Status::Cycle { parent: _, member: member } => { first(&mut frame.cycle, member); first(&mut frame.changed, member); },
-        Status::Incomplete { missing: missing } => { first(&mut frame.missing, missing); first(&mut frame.changed, missing); },
+        Status::Red { parent: _, first_changed: _ } => first(&mut frame.changed, &status.first_changed),
+        Status::Cycle { parent: _, member: _ } => { first(&mut frame.cycle, &status.member); first(&mut frame.changed, &status.member); },
+        Status::Incomplete { missing: _ } => { first(&mut frame.missing, &status.missing); first(&mut frame.changed, &status.missing); },
     }
 }
 fn complete_node(work: &mut Work, fact: usize, status: Status) -> Result<Progress, Failure> {
-    let child = Vec::get_unchecked(&work.facts, fact).node;
-    handle write_at(&mut work.colors, fact, Color::Done(status)) {
+    let child = &Vec::get_unchecked(&work.facts, fact).node;
+    Vec::pop(&mut work.stack);
+    handle observe(&mut work.stack, &status, child) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => {
-            Vec::pop(&mut work.stack);
-            (*work).phase = Phase::Walking;
-            observe(work, status, child)
+        Result::Ok(_) => handle write_at(&mut work.colors, fact, Color::Done(status)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => { (*work).phase = Phase::Walking; continuing() },
         },
     }
 }
-fn finish_node(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, frame: Walk) -> Result<Progress, Failure> {
-    handle frame.missing {
-        Result::Ok(node) => complete_node(work, frame.fact, Status::Incomplete { missing: node }),
-        Result::Err(_) => handle frame.cycle {
-            Result::Ok(node) => complete_node(work, frame.fact, Status::Cycle { parent: parent, member: node }),
-            Result::Err(_) => match_parent(ledger, parent, work, frame),
+fn terminal_status(frame: &Walk, parent: Option<RevisionId>) -> Option<Status> {
+    handle Result::as_ref(&frame.missing) {
+        Result::Ok(node) => Result::Ok(Status::Incomplete { missing: Clone::clone(node) }),
+        Result::Err(_) => handle Result::as_ref(&frame.cycle) {
+            Result::Ok(node) => Result::Ok(Status::Cycle { parent: parent, member: Clone::clone(node) }),
+            Result::Err(_) => None,
+        },
+    }
+}
+fn finish_node(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, fact: usize) -> Result<Progress, Failure> {
+    handle Vec::last(&work.stack) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(frame) => handle terminal_status(frame, parent) {
+            Result::Ok(status) => complete_node(work, fact, status),
+            Result::Err(_) => match_parent(ledger, parent, work, fact),
         },
     }
 }
@@ -389,24 +406,30 @@ fn changed_status(parent: Option<RevisionId>, node: Node, changed: Option<Node>)
         },
     }
 }
-fn reject_reuse(work: &mut Work, parent: Option<RevisionId>, frame: Walk) -> Result<Progress, Failure> {
-    let node = Vec::get_unchecked(&work.facts, frame.fact).node;
-    complete_node(work, frame.fact, changed_status(parent, node, frame.changed))
+fn reject_reuse(work: &mut Work, parent: Option<RevisionId>, fact: usize) -> Result<Progress, Failure> {
+    handle Vec::last(&work.stack) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(frame) => {
+            let changed = Clone::clone(&frame.changed);
+            let node = Clone::clone(&Vec::get_unchecked(&work.facts, fact).node);
+            complete_node(work, fact, changed_status(parent, node, changed))
+        },
+    }
 }
 fn same_shape(left: &Fact, right: &Trace) -> Bool {
     handle identity::equal(left.fingerprint, right.fingerprint) {
         false => false, true => Vec::len(&left.dependencies) == Vec::len(&right.dependencies),
     }
 }
-fn match_parent(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, frame: Walk) -> Result<Progress, Failure> {
-    let fact = Vec::get_unchecked(&work.facts, frame.fact);
+fn match_parent(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, index: usize) -> Result<Progress, Failure> {
+    let fact = Vec::get_unchecked(&work.facts, index);
     handle parent_index(ledger, parent, &fact.node) {
-        Result::Err(_) => complete_node(work, frame.fact, Status::Cold),
-        Result::Ok(index) => handle parent_trace(ledger, parent, index) {
+        Result::Err(_) => complete_node(work, index, Status::Cold),
+        Result::Ok(parent_index) => handle parent_trace(ledger, parent, parent_index) {
             Result::Err(_) => Result::Err(Failure::Invariant),
             Result::Ok(old) => handle same_shape(fact, old) {
-                false => reject_reuse(work, parent, frame),
-                true => { (*work).phase = Phase::Comparing { fact: frame.fact, parent_trace: index, cursor: 0 }; continuing() },
+                false => reject_reuse(work, parent, index),
+                true => { (*work).phase = Phase::Comparing { fact: index, parent_trace: parent_index, cursor: 0 }; continuing() },
             },
         },
     }
@@ -426,10 +449,7 @@ fn compare_edge(work: &mut Work, parent: RevisionId, fact: usize, old_index: usi
         true => complete_node(work, fact, Status::Green { parent: parent }),
         false => handle node::same(Vec::get_unchecked(&value.dependencies, cursor), Vec::get_unchecked(&old.dependencies, cursor)) {
             true => { (*work).phase = Phase::Comparing { fact: fact, parent_trace: old_index, cursor: cursor + 1 }; continuing() },
-            false => handle Vec::last(&work.stack) {
-                Result::Err(_) => Result::Err(Failure::Invariant),
-                Result::Ok(frame) => reject_reuse(work, Result::Ok(parent), *frame),
-            },
+            false => reject_reuse(work, Result::Ok(parent), fact),
         },
     }
 }
@@ -438,17 +458,40 @@ fn freeze(work: &mut Work, revision: RevisionId, cursor: usize) -> Result<Progre
         false => { (*work).phase = Phase::Complete; Result::Ok(Progress::Ready) },
         true => {
             let index = *Vec::get_unchecked(&work.roots, cursor);
-            let fact = Vec::get_unchecked(&work.facts, index);
-            handle *Vec::get_unchecked(&work.colors, index) {
-                Color::Done(status) => {
-                    let trace = Trace { revision: revision, node: fact.node, fingerprint: fact.fingerprint, dependencies: fact.dependencies, status: status };
-                    HashMap::insert(&mut work.output.index, fact.node, cursor);
-                    Vec::push(&mut work.output.traces, trace);
-                    (*work).phase = Phase::Freeze { cursor: cursor + 1 };
-                    continuing()
+            handle Vec::get_mut(&mut work.facts, index) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(value) => {
+                    let fact = drain_fact(value);
+                    handle take_status(&mut work.colors, index) {
+                        Result::Err(error) => Result::Err(error),
+                        Result::Ok(status) => {
+                            let key = Clone::clone(&fact.node);
+                            let trace = Trace { revision: revision, node: fact.node, fingerprint: fact.fingerprint, dependencies: fact.dependencies, status: status };
+                            HashMap::insert(&mut work.output.index, key, cursor);
+                            Vec::push(&mut work.output.traces, trace);
+                            (*work).phase = Phase::Freeze { cursor: cursor + 1 };
+                            continuing()
+                        },
+                    }
                 },
-                _ => Result::Err(Failure::Invariant),
             }
+        },
+    }
+}
+// Freezing transfers the dependency buffer and completed status into the
+// published trace. It never duplicates their owned residents through a borrow.
+fn drain_fact(value: &mut Fact) -> Fact {
+    let dependencies = value.dependencies;
+    (*value).dependencies = Vec::new();
+    Fact { node: Clone::clone(&value.node), fingerprint: value.fingerprint, dependencies: dependencies }
+}
+fn take_status(colors: &mut Vec<Color>, index: usize) -> Result<Status, Failure> {
+    handle Vec::get_mut(colors, index) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(value) => {
+            let previous = *value;
+            *value = Color::Unseen;
+            handle previous { Color::Done(status) => Result::Ok(status), _ => Result::Err(Failure::Invariant) }
         },
     }
 }

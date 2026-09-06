@@ -126,7 +126,7 @@ fn insert_package(registry: &mut Registry, key: PackageKey) -> Result<Event, Fai
             false => Result::Err(Failure::Capacity),
             true => {
                 let index = Vec::len(&registry.entries);
-                Vec::push(&mut registry.entries, Entry { key: key, status: Status::Open, active: 0, staged: 0 });
+                Vec::push(&mut registry.entries, Entry { key: Clone::clone(&key), status: Status::Open, active: 0, staged: 0 });
                 HashMap::insert(&mut registry.index, key, index);
                 (*registry).stats.active_packages = wrapping_add(registry.stats.active_packages, 1);
                 Result::Ok(Event::Done)

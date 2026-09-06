@@ -33,7 +33,7 @@ The initial standard library is limited to these groups from the review:
    never, checked and wrapping numeric operations, and the minimal trusted
    primitive bindings needed to implement them.
 4. **Fundamental traits and formatting.** A deliberately small trait surface:
-   `Eq`, `Ord`, `Hash`, `Default`, `Display`, and `Debug`, with their required
+   `Eq`, `Ord`, `Hash`, `Clone`, `Default`, `Display`, and `Debug`, with their required
    helpers and deterministic formatting support.
 6. **Collections and algorithms.** `Vec<T>`, generic borrowed slices,
    deterministic `HashMap`/`HashSet`, queues/work lists, sorting, binary
@@ -197,6 +197,7 @@ Keep the trait surface intentionally small:
 | `Eq` | result-based equality returning `Bool` |
 | `Ord` | total comparison returning `Ordering` |
 | `Hash` | append a deterministic representation to a caller-owned hasher |
+| `Clone` | explicitly construct an independent value from a shared borrow |
 | `Default` | create the conventional empty/default value |
 | `Display` | append user-facing output to a formatter |
 | `Debug` | append diagnostic output to a formatter |
@@ -206,6 +207,19 @@ reflection system. Formatting needs `Formatter`, `format`, and `format_debug`,
 with `Display`/`Debug` appending to the formatter rather than allocating a
 temporary string for every nested value. Formatting remains deterministic and
 locale-independent.
+
+`Clone::clone(value: &Self) -> Self` is an ordinary source trait, not an
+ownership intrinsic or a grant of additional uses of the original value.
+The bundled implementations cover unit, numeric scalars, `char`, `String`,
+`Vec<T>` when `T: Clone`, and `Result<T, E>` when both payloads implement
+`Clone` (including the `Option` and `Bool` aliases). String cloning copies
+the UTF-8 buffer; Vec cloning invokes element cloning into a distinct buffer.
+There is no blanket implementation for every unrestricted type, which would
+overlap structured implementations, and no automatic derivation for user
+records. Compiler identity and diagnostic records supply explicit implementations.
+Callers use the trait operation; there are no `Vec::clone` or `String::clone`
+forwarding aliases. Correct cloning does not substitute for the remaining
+structural/generic destruction work.
 
 ### 2.5 Category 6 — collections and algorithms
 

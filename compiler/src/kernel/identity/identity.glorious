@@ -11,6 +11,22 @@ pub struct ModuleKey { package: PackageKey, path: String }
 pub struct RevisionId { database: u64, ordinal: u64 }
 pub enum IdentityError { DigestLength, Capacity }
 
+// An index and a retained product own separate keys. The canonical bytes are
+// cloned explicitly; a key's String/Vec storage is never implicitly shared.
+pub impl Clone for PackageKey {
+    clone(value: &PackageKey) -> PackageKey { PackageKey { value: Clone::clone(&value.value) } }
+}
+pub impl Clone for ModuleKey {
+    clone(value: &ModuleKey) -> ModuleKey {
+        ModuleKey { package: Clone::clone(&value.package), path: Clone::clone(&value.path) }
+    }
+}
+pub impl Clone for InstanceKey {
+    clone(value: &InstanceKey) -> InstanceKey {
+        InstanceKey { callable: value.callable, canonical_substitution: Clone::clone(&value.canonical_substitution) }
+    }
+}
+
 pub fn same_revision(left: RevisionId, right: RevisionId) -> Bool {
     handle left.database == right.database { false => false, true => left.ordinal == right.ordinal }
 }
