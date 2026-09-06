@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use grandiose_stage0::{
     CandidateVmArtifact, CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest,
-    InferContext, LogicalPath, PackageKey, ScalarType, SourceInput, StageZeroCompiler, Type,
-    VmFunction, VmInstruction, VmType, STAGE0_VM_SCHEMA, decode_artifact, encode_artifact,
-    verify_vm,
+    InferContext, LogicalPath, PackageKey, STAGE0_VM_SCHEMA, ScalarType, SourceInput,
+    StageZeroCompiler, Type, VmFunction, VmInstruction, VmType, decode_and_verify_program,
+    decode_artifact, encode_artifact, verify_vm,
 };
 
 fn raw(tag: u128, alignment: u32) -> Type {
@@ -40,6 +40,21 @@ fn bundled_request(application: &str) -> CompilationRequest {
         capability_manifest: vec![],
         runtime_manifest: None,
     }
+}
+
+fn run_bundled_usize(source: &str) -> u64 {
+    let outcome = StageZeroCompiler::new()
+        .compile(bundled_request(source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    // SAFETY: only the local source above and the trusted bundled stdlib enter
+    // this runner, after independent decoding/verification. Static views retain
+    // their immutable backing for this one execution's native-memory domain.
+    let result = unsafe { program.run_display_with_unsafe(Default::default(), None) }.unwrap();
+    result
+        .parse()
+        .expect("usize fixture must return a decimal integer")
 }
 
 #[test]
@@ -97,10 +112,8 @@ fn bundled_standard_library_may_hide_static_data_behind_a_public_alias() {
 
 #[test]
 fn quoted_literal_lowers_to_sealed_static_data_through_str() {
-    let source = "use std::str_len; pub fn main() -> usize { str_len(\"sealed UTF-8\") }";
-    let outcome = StageZeroCompiler::new().compile(bundled_request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 12);
+    let source = "use std::Str; pub fn main() -> usize { Str::len(\"sealed UTF-8\") }";
+    assert_eq!(run_bundled_usize(source), 12);
 }
 
 #[test]
@@ -140,19 +153,15 @@ fn byte_literal_lowers_to_a_distinct_raw_static_data_tag() {
 }
 
 #[test]
-fn bundled_static_leaves_preserve_static_bounds_and_subslice_length() {
-    let source = "use std::{Result, str_len, str_subslice}; pub fn main() -> usize { handle str_subslice(\"sealed\", 1, 4) { Result::Ok(value) => str_len(value), Result::Err(_) => 0 } }";
-    let outcome = StageZeroCompiler::new().compile(bundled_request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 4);
+fn bundled_static_views_preserve_static_bounds_and_subslice_length() {
+    let source = "use std::{Result, Str}; pub fn main() -> usize { handle Str::subslice(\"sealed\", 1, 4) { Result::Ok(value) => Str::len(value), Result::Err(_) => 0 } }";
+    assert_eq!(run_bundled_usize(source), 4);
 }
 
 #[test]
 fn static_str_bytes_uses_the_same_public_slice_view_as_vec() {
-    let source = "use std::*; pub fn main() -> usize { let view = str_as_bytes(\"hi\"); Slice::len(&view) }";
-    let outcome = StageZeroCompiler::new().compile(bundled_request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
+    let source = "use std::*; pub fn main() -> usize { let view = Str::as_bytes(\"hi\"); Slice::len(&view) }";
+    assert_eq!(run_bundled_usize(source), 2);
 }
 
 #[test]
@@ -162,9 +171,7 @@ fn raw_byte_literal_lowers_to_the_public_static_slice_view() {
         pub fn byte_count(value: Slice<'static, u8>) -> usize { Slice::len(&value) }
         pub fn main() -> usize { byte_count(b"\x00\xffA") }
     "#;
-    let outcome = StageZeroCompiler::new().compile(bundled_request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(run_bundled_usize(source), 3);
 }
 
 

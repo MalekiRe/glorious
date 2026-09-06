@@ -473,3 +473,77 @@ public contracts still open. `target/compiler-check/run-b68ogeof/report.json`
 correctly records failed complete-suite/capability status, not release readiness.
 Logs: `/tmp/grandiose-inherent-impl-wjVcSD/owned-regression2.log`,
 `compiler-check-owned2.log`, `owned-check.log`, and `allocation-trace.log`.
+
+## Source call-frame costs
+
+The two allocation failures above are resolved by three standard-library source
+changes, with no VM, opcode, runtime manifest, accounting or resource-limit change:
+
+- `Vec::reserve` retains its checked required-length calculation and capacity
+  test, but moves the allocation/growth path into a private inherent helper.
+  A no-growth call now materializes 24 registers instead of 129. The growth
+  policy, overflow checks and failure behavior are unchanged.
+- `ByteCursor::u64` validates the entire eight-byte extent before entering a
+  private unsafe reader. That reader loads eight `u8` residents through the
+  existing raw-memory leaves and assembles little-endian bits with existing
+  integer leaves. It performs no unaligned native `u64` load. The source cursor
+  advances only after success, and retains its position on truncation.
+- The existing opaque BLAKE3 bridge reserves the fixed 32-byte output once,
+  writes its uninitialized slots directly, then publishes the initialized
+  length. It no longer calls Vec push/reserve separately for every output byte.
+  The opaque hash and three legacy Array leaves still serve its input/output
+  bridge; this is not source BLAKE3 or completion of the source hashing gate.
+
+The new byte-cursor regression checks all eight alignments and all nine available
+widths (zero through eight), on both literal and owned Vec-backed windows:
+144 checks against native little-endian expectations, including high-bit bytes
+and unchanged positions after failed reads. Existing hash regressions still
+compare all 32 digest bytes for empty, textual and binary input. The preallocated
+Vec probe rejects the old reserve body: the exact steady-state charge drops
+from 171 to 66 elements per push. Its independent physical meter records 47,646
+versus 34,206 requested bytes per push; see [runtime costs](runtime-costs.md).
+
+The unfiltered compiler-source suite passes **48/48** in 238.70 seconds, under
+the unchanged time/memory guards and one default budget per complete batch.
+The two formerly failing batches now finish with these uninstrumented profiles:
+
+| Batch | Complete result | Work ticks | Charged allocation elements | Peak call depth |
+| --- | --- | ---: | ---: | ---: |
+| Bootstrap admission | `[145, 80, 13]` | 17,059,970 | 15,234,206 | 68 |
+| Eight source registry histories | `[35, 96, 47, 235, 750, 466, 91, 91]` | 10,338,235 | 13,655,644 | 183 |
+
+Both are below the original 16,777,216-element ceiling. These are cumulative
+budget elements, not physical or live bytes. Temporary call tracing was removed
+before these runs. An intermediate diagnostic-only over-budget replay was not
+used as passing gate evidence; the normal harness has no retry or larger budget.
+No fixtures were split, removed or filtered, and all comparator assertions remain.
+
+`target/compiler-check/run-3jneul71/report.json` records 50 execution rows,
+empty test filters and a passing complete-current-suite status, with
+`release_ready: false`. Closure audits pass before/after with 30 source files
+and all 11,455 historical public contracts still open; source-lock SHA-256 is
+`9f6c2cc238d1cdd9da7c476d424d943509418c3254fdc8b4387b0e6f43207150`.
+This run overlapped the workspace check and is not a wall-clock speedup claim.
+
+The physical-storage and static-data harnesses now use the existing explicit
+unsafe runner only after compiling their local source and independently verifying
+the artifact. Static fixtures call the canonical inherent `Str` operations;
+obsolete free-function aliases are not restored. Assertions for sealed type/tag
+identity, private literal wrappers, byte counts and subslice length remain.
+All four physical-storage tests and all ten static-data boundary tests pass.
+
+The final full workspace/all-targets run passes **2,532 tests, zero failures**,
+with two existing ignored manual VM benchmarks, in 194.414 seconds wall
+including the incremental build. Its source entries pass 48/48 in 183.13
+seconds. All 50 source-execution TSVs exactly match the standalone report's
+artifact identities, results and recorded counters. The source audit still
+passes afterward, and `--release` still rejects missing full comparisons and
+verified C2/C3 bootstrap evidence. The first workspace run's four stale
+static-data fixture failures remain in `workspace.log`; the corrected full
+rerun is `workspace-final2.log`, with execution TSVs in `workspace-final/`.
+
+Logs are in `/tmp/grandiose-source-costs-ufMKJC/`, including
+`compiler-check.log`, `physical-final.log` and `static-boundaries.log`.
+The full semantic compiler, G1 emitter/service/bootstrap, structural/generic
+destruction and remaining native ABI work are still open. No new Miri run or
+self-hosting capability is claimed by this checkpoint.

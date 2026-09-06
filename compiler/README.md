@@ -65,12 +65,19 @@ after changing the source/test closure. `--release` remains fail-closed.
 For a focused run, use `tooling/compiler-check.sh --filter gsc2_registry`.
 Reports record the filters and mark this as selected-test evidence, never a
 complete-suite pass. A filter matching no executed fixtures fails closed.
-The current ownership-migration checkpoint passes **46 of 48 source entries**
-in 198.97 seconds. Bootstrap-admission and the eight-history registry batch
-still exceed the unchanged VM allocation-element budget; the complete-suite
-report correctly fails (`run-b68ogeof`). All 1,841 selected Stage0 regression
-tests pass, and the workspace checks successfully. See the
-[ownership and allocation evidence](spec/unsafe-memory-progress.md#compiler-source-ownership-migration).
+The current source-cost checkpoint passes **all 48 source entries** in 238.70
+seconds (`run-3jneul71`), including bootstrap admission and the complete
+eight-history registry batch under their unchanged allocation-element limits.
+Private source growth separation, checked byte-window reads and direct
+initialization of the fixed digest output reduce actual call-frame work;
+neither the VM nor its accounting changed. See the
+[source call-frame evidence](spec/unsafe-memory-progress.md#source-call-frame-costs).
+The final workspace/all-targets run passes **2,532 tests** with zero failures
+and two existing ignored manual benchmarks in 194.414 seconds including build;
+its 48 source entries pass in 183.13 seconds.
+The preceding ownership-migration checkpoint passed 46 of 48 entries in 198.97
+seconds; its two allocation failures and 1,841 passing selected Stage0
+regressions remain recorded as [historical evidence](spec/unsafe-memory-progress.md#compiler-source-ownership-migration).
 The historical raw-storage foundation checkpoint passed **2,469 tests in 126.214 seconds**, including
 all **48 source test entries in 72.97 seconds** and all retained batched scenario
 comparators. Source audit passes before/after; see [raw-storage evidence](spec/unsafe-memory-progress.md).

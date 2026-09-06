@@ -85,10 +85,10 @@
     "crates/grandiose-stage0/tests/resolution.rs": "3e35f16fc63047e622cabfc71ed503d90670d1c2b355fbc2d29872ca73a730d5",
     "crates/grandiose-stage0/tests/runtime_manifest.rs": "20648ac79b9d09ca6ff54e51ab2a929013d00c5c08b5867d17ed6c7cf7ea2c6d",
     "crates/grandiose-stage0/tests/runtime_memory.rs": "830197e3da4b8c8cc73c0a96c72092506d2a6e575cf05bbe6a91af3579211393",
-    "crates/grandiose-stage0/tests/runtime_storage.rs": "5dff8ef915641573a9b9ef4b4f09652e0936cec1cd4f1e2063c481ba119e64fc",
+    "crates/grandiose-stage0/tests/runtime_storage.rs": "f0af5093febd6d7057ceed3393a852b6d4ce24fd26c6bb3df6636f8850d0d95a",
     "crates/grandiose-stage0/tests/service.rs": "0b67521d43379fa329def2673d31d04ca547a6a5da8a5ce07cd6e1d350dad5e0",
     "crates/grandiose-stage0/tests/signature.rs": "39dcc87938b0f40f87f8cfd7d8a357822e83b847234307dc6dda70df551a7fc0",
-    "crates/grandiose-stage0/tests/standard_library.rs": "bae4cf75d7b38e288b4507168235d9f9424ac061f5212591f7f7ad993224ca2b",
+    "crates/grandiose-stage0/tests/standard_library.rs": "340d54783d74de2edc1440c99395a74253e3460543315d120529d39b54bb263e",
     "crates/grandiose-stage0/tests/trait_solver.rs": "df3f6ddf65f862ec4cc679a55ac4ed20da279569e923d27c69e7b62a3217dbae",
     "crates/grandiose-stage0/tests/unsafe_memory.rs": "5ad97f24ff003517e00bf1a11fc02ffb9c87178799731d1a0c7801cd58c9e817",
     "crates/grandiose-stage0/tests/vm_backend.rs": "d2a0da1124bab4a05719a9942a498dd003e92d76e8a720e7f5762805a119e33c",
@@ -124,7 +124,7 @@
     "compiler/src/runtime_manifest/runtime_manifest.glorious": "79f0aedddccf8187213a21225ba276a7f3a38f041979743c5c7d37fd495a7257",
     "compiler/src/source/source.glorious": "53a1dc51c4d36eed536603b1b5b992085fe2e228bda1416647269a604af9efa2",
     "compiler/src/types/types.glorious": "c31d836b1b9051d2f642d952b056d1f1fac9be716ddb701e301266ecb384e197",
-    "stdlib/src/lib.glorious": "26ca0876c95f4dcf0092b5908c8f69b7dec2b8a453e9a7417d1985e70064e106"
+    "stdlib/src/lib.glorious": "0653093706c1d2c79cae969020112b49fc171f7fa24ae0d0383bc3413e67ca7e"
   },
   "inventories": {
     "compiler/spec/acceptance.tsv": "fb4d2b708ed06fc13d48e58b9698dbb0009cdfd90ef1bb6cc3aa8db765fbb3a4",

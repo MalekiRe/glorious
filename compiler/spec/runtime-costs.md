@@ -109,6 +109,56 @@ subdirectory above. The source audit passes before and after, with lock SHA-256
 This is a local run, not a clean-checkout CI timing or an assertion of a
 wall-clock speedup relative to earlier noisy workspace measurements.
 
+## Source capacity checks after the raw-Vec migration
+
+Measured September 5, 2026 (America/New_York), with the optimized authoring
+test profile and the same thread-local meter. These measurements use the
+pointer-backed source Vec, not the legacy array representation measured above.
+`Vec::reserve` now calls a private source growth helper only when capacity is
+insufficient. Overflow, growth and allocation-failure policy are unchanged.
+Its common path materializes 24 registers instead of 129; growth-only registers
+are allocated only on actual growth calls. There is no VM or accounting change.
+
+The new `source_vec_pushes_with_capacity_do_not_materialize_growth_only_registers`
+probe reserves 1,024 `usize` slots, fills different prefixes, and checks length,
+capacity and the last element. The before run restores only the old reserve
+body; both runs retain the other source changes and use identical limits.
+
+| Pushes | Before: charged elements | After: charged elements | Before: requested bytes | After: requested bytes |
+| ---: | ---: | ---: | ---: | ---: |
+| 64 | 11,260 | 4,546 | 3,175,250 | 2,321,650 |
+| 256 | 44,092 | 17,218 | 12,323,282 | 8,889,202 |
+| 1,024 | 175,420 | 67,906 | 48,915,410 | 35,159,410 |
+
+The exact steady-state cost is **66 charged elements and 34,206 requested bytes
+per push**, down from 171 and 47,646. The regression checks identical integral
+slopes across both size intervals and a logical slope below 100; the old reserve
+body fails that bound. It does not require the current physical magnitude to
+remain unchanged. Peak call depth changes from five to six. The cold helper
+adds 18 allocation and three reallocation requests per whole run; the reduction
+is in requested bytes, not the number of allocator calls.
+
+The retained indexing probes now use the existing explicit unsafe authoring
+API after locally compiling and independently decoding/verifying their source
+closure. Their assertions and limits are unchanged. With native-backed Vec,
+sixteen element writes request an additional 373,440 bytes at 8, 64 and 512
+elements; sixteen hash lookups add 2,265,066 bytes and 6,355 work ticks at both
+8 and 64 entries. These remain size-independent for the measured workloads,
+but their absolute costs are higher than the earlier array-backed checkpoint.
+All four allocation-meter tests pass on the uninstrumented runtime. Reproduce:
+
+```sh
+CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=2 \
+  tooling/test-with-budget.sh tooling/ram-gate.sh \
+  cargo test -p grandiose-stage0 --test runtime_storage -- --nocapture
+```
+
+Logs: `/tmp/grandiose-source-costs-ufMKJC/vec-profile-baseline.log` and
+`physical-final.log`. The baseline source body was restored to the optimized
+version before the final run. The related byte-cursor and digest-output source
+changes and compiler batch evidence are recorded in
+[source call-frame costs](unsafe-memory-progress.md#source-call-frame-costs).
+
 ## Measurement scope and remaining work
 
 Requested bytes are cumulative successful allocation requests, with each
@@ -125,13 +175,14 @@ Source inspection identifies concrete remaining work in
   transfer and `rebase_caller_references` can still rebuild backing objects.
   `freeze_frame_value` remains necessary at independently retained capture
   boundaries and can recursively copy aggregates there.
-- Length-changing array operations still use `to_vec()` and reconstruct
-  backing arrays. Fixed-size mutation and projected-owner updates now detach
-  only when shared; retained aliases still require copy-on-write detachment.
-- Tail-call eligibility traverses entire surviving owners. The construction
-  runs inspected 1,237 and 69,711 argument/owner elements respectively. This
-  conservatively protects nested loans and frame-branded values, but its cost
-  needs improvement without weakening those safety checks.
+- The surviving legacy `ArrayPushMove` still uses `to_vec()` and reconstructs
+  backing arrays. The canonical Vec no longer uses it; the opaque BLAKE3 input
+  bridge still does. Most old array algorithm instructions have been retired.
+- Tail-call eligibility traverses surviving owners. The original A09
+  construction runs inspected 1,237 and 69,711 argument/owner elements;
+  the native-backed 8/64-entry runs now inspect 619 and 6,933. This
+  conservatively protects nested loans and frame-branded values; changing
+  representation lowers these measured costs but does not remove the scan.
 
 This is evidence of a remaining scaling problem, not proof that these sites
 account for every allocation. Larger workloads, collision-heavy costs, full

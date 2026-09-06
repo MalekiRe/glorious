@@ -141,9 +141,14 @@ fn projected_array_updates_do_not_copy_unique_backing_as_arrays_grow() {
                 .replace("@UPDATE@", if update { "1" } else { "0" });
             let program = compile_source(&source);
             let digest = Digest::of_bytes(&program.canonical_bytes());
-            let (result, allocation) = measured(|| program.run_i64_for_authoring(VmExecutionLimits {
-                max_call_depth: 64, ..Default::default()
-            }));
+            // SAFETY: compile_source compiles the local fixture and trusted
+            // pointer-backed stdlib, then independently decodes/verifies it.
+            let (result, allocation) = measured(|| unsafe {
+                program.run_i64_for_authoring_with_unsafe(VmExecutionLimits {
+                    max_call_depth: 64,
+                    ..Default::default()
+                })
+            });
             let (value, profile) = result.unwrap();
             assert_eq!(value, 42);
             eprintln!("physical array size={size}, update={update}, artifact={digest:?}: {allocation:?}; {profile:?}");
@@ -179,6 +184,82 @@ fn allocation_meter_is_thread_local_and_counts_only_its_scope() {
 }
 
 #[test]
+fn source_vec_pushes_with_capacity_do_not_materialize_growth_only_registers() {
+    let mut profiles = Vec::new();
+    for count in [64, 256, 1024] {
+        let source = format!(
+            r#"
+            use std::*;
+            fn fill(values: &mut Vec<usize>, index: usize) -> () {{
+                handle index == {count} {{
+                    true => (),
+                    false => {{ Vec::push(&mut *values, index); fill(values, index + 1) }},
+                }}
+            }}
+            pub fn main() -> i64 {{
+                let values = Vec<usize>::with_capacity(1024);
+                fill(&mut values, 0);
+                handle Vec::len(&values) == {count} {{
+                    false => 0,
+                    true => handle Vec::capacity(&values) == 1024 {{
+                        false => 0, true => handle *Vec::get_unchecked(&values, as<usize>({count}) - 1) == as<usize>({count}) - 1 {{ true => 42, false => 0 }},
+                    }},
+                }}
+            }}
+        "#
+        );
+        let program = compile_source(&source);
+        // SAFETY: freshly compiled source plus the trusted stdlib, under one
+        // execution domain and the same finite instruction/allocation limits.
+        let (result, allocation) = measured(|| unsafe {
+            program.run_i64_for_authoring_with_unsafe(VmExecutionLimits {
+                max_call_depth: 64,
+                ..Default::default()
+            })
+        });
+        let (value, profile) = result.unwrap();
+        assert_eq!(value, 42);
+        assert!(profile.peak_call_depth < 64);
+        eprintln!("physical preallocated Vec pushes={count}: {allocation:?}; {profile:?}");
+        profiles.push((count, allocation, profile));
+    }
+    // Once capacity is available, every additional push has the same source
+    // path. Both logical charges and physical requests must stay linear.
+    let slopes: Vec<_> = profiles
+        .windows(2)
+        .map(|pair| {
+            let count = (pair[1].0 - pair[0].0) as u64;
+            let bytes = pair[1].1.requested_bytes - pair[0].1.requested_bytes;
+            let elements =
+                pair[1].2.charged_allocation_elements - pair[0].2.charged_allocation_elements;
+            assert_eq!(
+                bytes % count,
+                0,
+                "physical requests must have an exact steady-state slope"
+            );
+            assert_eq!(
+                elements % count,
+                0,
+                "logical charges must have an exact steady-state slope"
+            );
+            (bytes / count, elements / count)
+        })
+        .collect();
+    assert_eq!(slopes[0], slopes[1], "steady-state push costs: {slopes:?}");
+    // The old reserve routine materialized 129 registers even when it did
+    // nothing, taking this whole source path above 170 charged elements/push.
+    // Keep headroom above the measured 66 without allowing that regression.
+    assert!(
+        slopes[0].1 < 100,
+        "growth-only temporaries reached the steady-state path: {slopes:?}"
+    );
+    eprintln!(
+        "preallocated Vec per-push (physical requested bytes, charged elements): {:?}",
+        slopes[0]
+    );
+}
+
+#[test]
 fn hash_table_physical_allocation_requests_are_measured_separately_from_vm_work() {
     let mut lookup_work = Vec::new();
     let mut lookup_bytes = Vec::new();
@@ -187,10 +268,14 @@ fn hash_table_physical_allocation_requests_are_measured_separately_from_vm_work(
         for read in [false, true] {
             let program = program(size, read);
             let (result, allocation) = measured(|| {
-                program.run_i64_for_authoring(VmExecutionLimits {
-                    max_call_depth: 64,
-                    ..Default::default()
-                })
+                // SAFETY: this is the same locally compiled/verified source
+                // path as the projected-update probe, not external bytecode.
+                unsafe {
+                    program.run_i64_for_authoring_with_unsafe(VmExecutionLimits {
+                        max_call_depth: 64,
+                        ..Default::default()
+                    })
+                }
             });
             let (value, profile) = result.unwrap();
             assert_eq!(value, 42);

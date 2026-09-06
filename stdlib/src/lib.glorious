@@ -728,7 +728,10 @@ pub fn blake3(input: Slice<u8>) -> Vec<u8> {
     blake3_copy_input(&mut input_array, input, 0);
     let digest = __g1_bytes_to_array(__g1_blake3(__g1_bytes_from_array_move(input_array)));
     let output = Vec<u8>::with_capacity(32);
-    blake3_copy_output(&mut output, &digest, 0);
+    // The complete output extent is reserved once. Populate its uninitialized
+    // bytes directly, then publish the initialized length after all writes.
+    unsafe { blake3_copy_output(output.pointer, &digest, 0); };
+    output.length = as<usize>(32);
     output
 }
 fn blake3_copy_input(value: &mut Array<u8>, input: Slice<u8>, index: usize) -> () {
@@ -737,12 +740,17 @@ fn blake3_copy_input(value: &mut Array<u8>, input: Slice<u8>, index: usize) -> (
         true => { __g1_array_push_move(&mut *value, *Slice::get_unchecked(input, index)); blake3_copy_input(&mut *value, input, index + 1) },
     }
 }
-fn blake3_copy_output(value: &mut Vec<u8>, digest: &Array<u8>, index: usize) -> () {
+// Safety: value names 32 writable u8 slots and index is at most 32. This
+// helper is used only by blake3's freshly reserved, still-empty result owner.
+unsafe fn blake3_copy_output(value: *mut u8, digest: &Array<u8>, index: usize) -> () {
     // The hash leaf returns the fixed 256-bit BLAKE3 digest. This bridge
     // consumes that exact contract, not a dynamic collection-length query.
     handle index < 32 {
         false => (),
-        true => { Vec::push(&mut *value, *__g1_array_get_borrow_shared(digest, index)); blake3_copy_output(&mut *value, digest, index + 1) },
+        true => unsafe {
+            __g1_memory_write(__g1_memory_offset(value, index), *__g1_array_get_borrow_shared(digest, index));
+            blake3_copy_output(value, digest, index + 1)
+        },
     }
 }
 
@@ -834,7 +842,8 @@ impl ByteCursor {
         handle byte_cursor_has(& *cursor, bytes, 8) {
             false => Result::Err(ByteError::Truncated),
             true => {
-                let value = byte_cursor_word(bytes, cursor.position);
+                // The complete eight-byte extent was checked once above.
+                let value = unsafe { byte_cursor_word(bytes, cursor.position) };
                 (*cursor).position = cursor.position + 8;
                 Result::Ok(value)
             },
@@ -850,18 +859,26 @@ fn byte_cursor_has(cursor: &ByteCursor, bytes: Slice<u8>, width: usize) -> Bool 
     }
 }
 
-fn byte_cursor_word(bytes: Slice<u8>, offset: usize) -> u64 {
-    let b0 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset));
-    let b1 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 1));
-    let b2 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 2));
-    let b3 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 3));
-    let b4 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 4));
-    let b5 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 5));
-    let b6 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 6));
-    let b7 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 7));
-    let low = bit_or(bit_or(b0, bit_shl(b1, 8)), bit_or(bit_shl(b2, 16), bit_shl(b3, 24)));
-    let high = bit_or(bit_or(bit_shl(b4, 32), bit_shl(b5, 40)), bit_or(bit_shl(b6, 48), bit_shl(b7, 56)));
-    bit_or(low, high)
+// Safety: offset..offset+8 is inside the live borrowed byte window. Its sole
+// caller proves this before entering and advances the cursor only on success.
+// Read u8 residents, not an unaligned/endian-dependent native u64.
+unsafe fn byte_cursor_word(bytes: Slice<u8>, offset: usize) -> u64 {
+    unsafe {
+        let pointer = __g1_memory_offset_const(
+            __g1_memory_cast_const<(), u8>(__g1_memory_as_raw_shared(bytes.storage)), offset,
+        );
+        let b0 = __g1_int_convert_checked_to_u64(__g1_memory_read(pointer));
+        let b1 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 1)));
+        let b2 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 2)));
+        let b3 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 3)));
+        let b4 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 4)));
+        let b5 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 5)));
+        let b6 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 6)));
+        let b7 = __g1_int_convert_checked_to_u64(__g1_memory_read(__g1_memory_offset_const(pointer, 7)));
+        let low = __g1_int_bit_or(__g1_int_bit_or(b0, __g1_int_shl(b1, 8)), __g1_int_bit_or(__g1_int_shl(b2, 16), __g1_int_shl(b3, 24)));
+        let high = __g1_int_bit_or(__g1_int_bit_or(__g1_int_shl(b4, 32), __g1_int_shl(b5, 40)), __g1_int_bit_or(__g1_int_shl(b6, 48), __g1_int_shl(b7, 56)));
+        __g1_int_bit_or(low, high)
+    }
 }
 
 pub struct VecIntoIter<T> { private remaining: Vec<T> }
@@ -893,32 +910,37 @@ impl<T> Vec<T> {
         let required = value.length + additional;
         handle required > value.capacity {
             false => (),
-            true => {
-                let size = __g1_memory_size_of<T>();
-                let maximum = 9223372036854775807 / size;
-                handle required > maximum {
-                    true => __g1_abort(),
-                    false => {
-                        let doubled = handle value.capacity > maximum / 2 {
-                            true => maximum,
-                            false => handle value.capacity { 0 => as<usize>(4), _ => value.capacity * 2 },
-                        };
-                        let capacity = handle doubled < required { true => required, false => doubled };
-                        unsafe {
-                            let pointer = __g1_memory_reallocate(
-                                __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
-                                __g1_memory_align_of<T>(), capacity * size,
-                            );
-                            let typed = __g1_memory_cast<u8, T>(pointer);
-                            handle __g1_memory_is_null(pointer) {
-                                0 => {
-                                    (*value).pointer = typed;
-                                    (*value).capacity = capacity;
-                                },
-                                _ => __g1_abort(),
-                            }
-                        }
-                    },
+            true => Vec::grow(value, required),
+        }
+    }
+
+    // Keep the common capacity check small. Concrete bytecode allocates a
+    // function's register frame at entry, so the growth-only layout and
+    // allocator temporaries must not be materialized by every push/append.
+    fn grow(value: &mut Self, required: usize) -> () {
+        let size = __g1_memory_size_of<T>();
+        let maximum = 9223372036854775807 / size;
+        handle required > maximum {
+            true => __g1_abort(),
+            false => {
+                let doubled = handle value.capacity > maximum / 2 {
+                    true => maximum,
+                    false => handle value.capacity { 0 => as<usize>(4), _ => value.capacity * 2 },
+                };
+                let capacity = handle doubled < required { true => required, false => doubled };
+                unsafe {
+                    let pointer = __g1_memory_reallocate(
+                        __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
+                        __g1_memory_align_of<T>(), capacity * size,
+                    );
+                    let typed = __g1_memory_cast<u8, T>(pointer);
+                    handle __g1_memory_is_null(pointer) {
+                        0 => {
+                            (*value).pointer = typed;
+                            (*value).capacity = capacity;
+                        },
+                        _ => __g1_abort(),
+                    }
                 }
             },
         }

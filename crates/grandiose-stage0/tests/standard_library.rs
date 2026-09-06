@@ -127,6 +127,73 @@ fn source_clones_create_independent_nested_collection_owners() {
 }
 
 #[test]
+fn byte_cursor_fixed_width_reads_preserve_unaligned_windows_and_failed_positions() {
+    let bytes: Vec<u8> = (0..16).map(|index| 0xf0 + index).collect();
+    let literal: String = bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect();
+    let mut checks = String::new();
+    for offset in 0..8 {
+        for width in 0..=8 {
+            let expected = if width == 8 {
+                u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+            } else {
+                0
+            };
+            for input in ["literal", "Vec::as_slice(&owned)"] {
+                checks.push_str(&format!(
+                    "score = score + check({input}, {offset}, {width}, {expected});\n"
+                ));
+            }
+        }
+    }
+    let source = format!(
+        r#"
+        use std::*;
+        fn advance(cursor: &mut ByteCursor, bytes: Slice<u8>, count: usize) -> () {{
+            handle count == 0 {{
+                true => (),
+                false => {{ ByteCursor::u8(&mut *cursor, bytes); advance(cursor, bytes, count - 1) }},
+            }}
+        }}
+        fn read(cursor: &mut ByteCursor, bytes: Slice<u8>, offset: usize, width: usize, expected: u64) -> i64 {{
+            advance(&mut *cursor, bytes, offset);
+            handle ByteCursor::u64(&mut *cursor, bytes) {{
+                Result::Ok(value) => handle width == 8 {{
+                    false => 0,
+                    true => handle value == expected {{
+                        false => 0, true => handle ByteCursor::position(& *cursor) == offset + 8 {{ true => 1, false => 0 }},
+                    }},
+                }},
+                Result::Err(ByteError::Truncated) => handle width < 8 {{
+                    false => 0, true => handle ByteCursor::position(& *cursor) == offset {{ true => 1, false => 0 }},
+                }},
+                _ => 0,
+            }}
+        }}
+        fn check(bytes: Slice<u8>, offset: usize, width: usize, expected: u64) -> i64 {{
+            handle Slice::slice(bytes, Range<usize> {{ start: 0, end: offset + width }}) {{
+                Result::Err(_) => 0,
+                Result::Ok(window) => {{ let cursor = ByteCursor::new(); read(&mut cursor, window, offset, width, expected) }},
+            }}
+        }}
+        fn sample() -> Slice<'static, u8> {{ b"{literal}" }}
+        pub fn main() -> i64 {{
+            let literal = sample();
+            let owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, literal);
+            let score = as<i64>(0);
+            {checks}
+            score
+        }}
+    "#
+    );
+    let program = StageZeroCompiler::new()
+        .compile(request(&source))
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert_eq!(program.run_std_i64().unwrap(), 144);
+}
+
+#[test]
 fn source_result_clones_cover_owned_and_unrestricted_payloads() {
     let source = r#"
         use std::*;

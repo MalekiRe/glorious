@@ -33,8 +33,11 @@ Compiler dependency/diagnostic owners have been migrated to borrowed inspection,
 explicit independent cloning and buffer transfer. This does not complete
 structural/generic destruction, native homes for ordinary frame residents and
 callables, actual VM/native calls, the independent G1 extension, or U4–U6.
-Current source-suite failures and measured costs are recorded in the prerequisite
-evidence, not hidden by narrowing the source closure or increasing its budgets.
+The source-cost checkpoint now passes all 48 source entries, including the two
+previously allocation-limited batches, after reducing source call-frame work.
+The complete production closure, comparator batches and VM budgets are unchanged.
+This does not certify full self-hosting or bounded physical work; current and
+historical costs are recorded in the prerequisite evidence.
 
 The historical unsafe-contract workspace checkpoint passed 2,491 tests (two existing ignored
 manual benchmarks), 122.429 seconds wall including build; all 48 source entries
