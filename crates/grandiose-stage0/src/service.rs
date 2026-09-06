@@ -881,7 +881,6 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 PrimitiveRole::BytesFromArrayMove,
                 PrimitiveRole::BytesToArray,
                 PrimitiveRole::Blake3,
-                PrimitiveRole::ArrayLen,
                 PrimitiveRole::ArrayGetBorrowShared,
                 PrimitiveRole::ArrayEmpty,
                 PrimitiveRole::ArrayPushMove,

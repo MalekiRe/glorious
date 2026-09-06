@@ -2678,6 +2678,50 @@ fn empty_string_views_survive_nested_vector_extraction_and_calls() {
 }
 
 #[test]
+fn blake3_copies_its_fixed_digest_without_a_legacy_array_length_binding() {
+    use grandiose_stage0::{PrimitiveRole, VmInstruction};
+    let source = r#"
+        use std::*;
+        fn check(value: &Vec<u8>, expected: Slice<u8>, index: usize) -> i64 {
+            handle index < Slice::len(&expected) {
+                false => 42,
+                true => handle *vec_get_unchecked(value, index) == *slice_get_unchecked(expected, index) {
+                    false => 0,
+                    true => check(value, expected, index + 1),
+                },
+            }
+        }
+        pub fn main() -> i64 {
+            let digest = blake3(@INPUT@);
+            handle Vec::len(&digest) == 32 {
+                false => 0,
+                true => check(&digest, @EXPECTED@, 0),
+            }
+        }
+    "#;
+    let bytes_literal = |bytes: &[u8]| {
+        format!("b\"{}\"", bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>())
+    };
+    for input in [b"".as_slice(), b"abc", b"\x00\xff\xc3\xa9"] {
+        let expected = blake3::hash(input);
+        assert_eq!(expected.as_bytes().len(), 32);
+        let application = source.replace("@INPUT@", &bytes_literal(input))
+            .replace("@EXPECTED@", &bytes_literal(expected.as_bytes()));
+        let compiler = StageZeroCompiler::new();
+        let revision = compiler.import_revision(request(&application), None).unwrap();
+        let session = compiler.open_session(revision).unwrap();
+        let manifest = session.snapshot().world().runtime_manifest.as_ref().unwrap();
+        assert!(!manifest.selectors.iter().any(|selector| selector.role == PrimitiveRole::ArrayLen));
+        let program = compiler.compile_session(&session).unwrap().artifact.unwrap();
+        let decoded = grandiose_stage0::decode_program(&program.canonical_bytes()).unwrap();
+        assert!(decoded.functions.values().flat_map(|function| &function.instructions)
+            .all(|instruction| !matches!(instruction, VmInstruction::ArrayLen { .. })));
+        assert_eq!(program.run_std_i64().unwrap(), 42);
+    }
+    assert!(!include_str!("../../../stdlib/src/lib.glorious").contains("__g1_array_len"));
+}
+
+#[test]
 fn string_borrow_coerces_to_an_elided_str_parameter() {
     let source = r#"
         use std::*;

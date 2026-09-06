@@ -16,7 +16,7 @@
     "crates/grandiose-stage0/src/resolution.rs": "704ffd8025d93d4bd2176283376e46cd61ec92da91e7946882e3e7cab5b8d19c",
     "crates/grandiose-stage0/src/runtime_manifest.rs": "229ce4cae8ea1c1ff13dd5c1af9ecbcce805eb2011128f3a83ad2f0bb62db36c",
     "crates/grandiose-stage0/src/scanner.rs": "fccc6eca667c4d72c198cd308c1553f9e8d9028c689e5cc92ab5c05f323d8adf",
-    "crates/grandiose-stage0/src/service.rs": "9170f849597fc221cd88c3f240868270d87ee6a4b6b5614a7498245018156f57",
+    "crates/grandiose-stage0/src/service.rs": "c4b4bd58b64ad09d0b2076e9f7f6026c1864fba245e44ea1988588ee9371c888",
     "crates/grandiose-stage0/src/signature.rs": "8264ea73af1fcaf617508240086f8c66fb8da5d7e1dcdf5bb265f50a2a3bd5b8",
     "crates/grandiose-stage0/src/source.rs": "77ea9679f866c2419ba4f70e901eb72f79a6f6372593208c86b639a04c49ddef",
     "crates/grandiose-stage0/src/trait_solver.rs": "6d134638fc833daae558882fb80a722f95128a9eb36ba7f04592df6c108f12dc",
@@ -84,7 +84,7 @@
     "crates/grandiose-stage0/tests/runtime_storage.rs": "5dff8ef915641573a9b9ef4b4f09652e0936cec1cd4f1e2063c481ba119e64fc",
     "crates/grandiose-stage0/tests/service.rs": "c63b3e9f9affba02139e804efacbccd315c0fc7bf859772bc6857e25d608407d",
     "crates/grandiose-stage0/tests/signature.rs": "de2de5f3d9f3ff251b60a98fc55505bacb60bacf2ec59dc5d618269634bf8ba8",
-    "crates/grandiose-stage0/tests/standard_library.rs": "3eccf9f48203aeda0c8a764669681a7f2bdb923746df842526c1d4037c2ba58d",
+    "crates/grandiose-stage0/tests/standard_library.rs": "def14dea56af55cea5f30308333c952c6af08adff5fcc09fd7b3ed955600d1dd",
     "crates/grandiose-stage0/tests/trait_solver.rs": "df3f6ddf65f862ec4cc679a55ac4ed20da279569e923d27c69e7b62a3217dbae",
     "crates/grandiose-stage0/tests/unsafe_memory.rs": "5ad97f24ff003517e00bf1a11fc02ffb9c87178799731d1a0c7801cd58c9e817",
     "crates/grandiose-stage0/tests/vm_backend.rs": "728d76b235890a51aa6e79f1c264f7f39dfab19e89a399a2b86993df2bb29d41",
@@ -120,7 +120,7 @@
     "compiler/src/runtime_manifest/runtime_manifest.glorious": "fe7e0b9a7f954bf4079348842469331654658b3c5344b52c20d338e95beb33b7",
     "compiler/src/source/source.glorious": "53a1dc51c4d36eed536603b1b5b992085fe2e228bda1416647269a604af9efa2",
     "compiler/src/types/types.glorious": "c31d836b1b9051d2f642d952b056d1f1fac9be716ddb701e301266ecb384e197",
-    "stdlib/src/lib.glorious": "d52192727eddf322b97624050cf0c311518e2d3ba5c66e8daa9eff451cdfd963"
+    "stdlib/src/lib.glorious": "70e90c70d4f366de4f399aa9c8932e788a5d3d16c09b5623943edf876103d7ed"
   },
   "inventories": {
     "compiler/spec/acceptance.tsv": "fb4d2b708ed06fc13d48e58b9698dbb0009cdfd90ef1bb6cc3aa8db765fbb3a4",

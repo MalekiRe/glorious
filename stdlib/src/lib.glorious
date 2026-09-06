@@ -43,7 +43,6 @@ __g1_memory_static_bytes_len(value: __StaticData<u8>) -> usize;
 
 // Temporary legacy byte bridge for the opaque BLAKE3 leaf only. None of the
 // Vec, Slice, String or hash-table storage algorithms use Array anymore.
-__g1_array_len<T>(value: &Array<T>) -> usize;
 __g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T;
 __g1_array_empty<T>() -> Array<T>;
 __g1_array_push_move<T>(value: &mut Array<T>, item: T) -> ();
@@ -718,7 +717,9 @@ fn blake3_copy_input(value: &mut Array<u8>, input: Slice<u8>, index: usize) -> (
     }
 }
 fn blake3_copy_output(value: &mut Vec<u8>, digest: &Array<u8>, index: usize) -> () {
-    handle index < __g1_array_len(digest) {
+    // The hash leaf returns the fixed 256-bit BLAKE3 digest. This bridge
+    // consumes that exact contract, not a dynamic collection-length query.
+    handle index < 32 {
         false => (),
         true => { vec_push(&mut *value, *__g1_array_get_borrow_shared(digest, index)); blake3_copy_output(&mut *value, digest, index + 1) },
     }

@@ -387,3 +387,11 @@ Two further general leaves provide unsafe `forget<T>` (caller discharges the
 logical obligations; no Drop hook runs) and sealed raw-literal length. Authority
 tags 206–207 extend the shared inventory to 208. Stage0 schema/cache/bytecode/
 verifier generations are 97/ten/52/eleven.
+
+The final bundled `__g1_array_len` dependency has subsequently been removed.
+It queried only the BLAKE3 result, whose exact 32-byte output is already part
+of the hash leaf's contract. The declaration and default runtime binding are
+gone; three legacy Array leaves remain for that byte bridge. Regression tests
+compare all digest bytes with the hash oracle and assert that neither the
+default manifest nor the emitted hashing program requests ArrayLen. The legacy
+ArrayLen opcode remains in the separately retained compatibility runtime.
