@@ -72,6 +72,7 @@ pub use header::{
     FixityForm, FixityHeader, GenericParameters, HeaderDiagnostic, HeaderGenericArgument,
     HeaderParameter, HeaderParse, HeaderStructuralConst, HeaderStructuralU32Expr, HeaderType,
     ImplementationHeader, ImplementationMethodHeader, ImportBindingHeader, ImportHeader,
+    InherentImplementationHeader, InherentMethodHeader,
     NominalFieldHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitMethodHeader,
     TraitRefHeader, WhereBoundHeader,
 };

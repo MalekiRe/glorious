@@ -258,24 +258,10 @@ impl InterfaceSet {
         };
         let mut definitions = vec![];
         let mut diagnostics = vec![];
-        let mut occupied = BTreeMap::<(DefinitionNamespace, String), Span>::new();
 
         for (ordinal, shell) in scan.declarations.iter().enumerate() {
             let namespace = namespace(shell.kind);
             let name = shell.name.clone();
-            if let (Some(namespace), Some(name)) = (namespace, &name)
-                && namespace != DefinitionNamespace::Operator
-                && let Some(previous) = occupied.insert((namespace, name.clone()), shell.span)
-            {
-                diagnostics.push(InterfaceDiagnostic {
-                    code: "G3001",
-                    span: shell.span,
-                    message: format!(
-                        "duplicate {namespace:?} definition `{name}`; the first declaration starts at byte {}",
-                        previous.start
-                    ),
-                });
-            }
             let fingerprint_range = match shell.kind {
                 DeclarationKind::Struct
                 | DeclarationKind::Enum
@@ -317,6 +303,12 @@ impl InterfaceSet {
                         message: diagnostic.message.to_owned(),
                     }),
             );
+            if let ParsedHeader::InherentImplementation(implementation) = &syntax.header {
+                let (methods, method_diagnostics) =
+                    collect_inherent_methods(&module, lexed, source, shell.header, implementation);
+                definitions.extend(methods);
+                diagnostics.extend(method_diagnostics);
+            }
             if shell.kind == DeclarationKind::Constant && shell.body.is_none() {
                 diagnostics.push(InterfaceDiagnostic {
                     code: "G3003",
@@ -340,6 +332,22 @@ impl InterfaceSet {
                 constant_value_fingerprint,
                 syntax,
             });
+        }
+        let mut occupied = BTreeMap::<(DefinitionNamespace, String), Span>::new();
+        for definition in &definitions {
+            if let (Some(namespace), Some(name)) = (definition.namespace, &definition.name)
+                && namespace != DefinitionNamespace::Operator
+                && let Some(previous) = occupied.insert((namespace, name.clone()), definition.span)
+            {
+                diagnostics.push(InterfaceDiagnostic {
+                    code: "G3001",
+                    span: definition.span,
+                    message: format!(
+                        "duplicate {namespace:?} definition `{name}`; the first declaration starts at byte {}",
+                        previous.start
+                    ),
+                });
+            }
         }
         let mut fixities = BTreeMap::new();
         for definition in &definitions {
@@ -384,9 +392,100 @@ impl Definition {
     pub fn callable_header(&self) -> Option<&crate::header::CallableHeader> {
         match &self.syntax.header {
             ParsedHeader::Function(header) => Some(header),
+            ParsedHeader::InherentMethod(header) => Some(&header.signature),
             _ => None,
         }
     }
+}
+
+fn collect_inherent_methods(
+    module: &ModuleKey,
+    lexed: &LexedFile,
+    source: &str,
+    block_header: TokenRange,
+    implementation: &crate::header::InherentImplementationHeader,
+) -> (Vec<Definition>, Vec<InterfaceDiagnostic>) {
+    use crate::header::{HeaderType, InherentMethodHeader};
+    let mut definitions = vec![];
+    let mut diagnostics = vec![];
+    let owner = match &implementation.self_ty {
+        HeaderType::Path(path) => path,
+        HeaderType::Application(base, _) => match base.as_ref() {
+            HeaderType::Path(path) => path,
+            _ => return (definitions, diagnostics),
+        },
+        _ => return (definitions, diagnostics),
+    };
+    for method in &implementation.methods {
+        let name = format!("{}::{}", owner.join("::"), method.name);
+        let mut signature = method.signature.clone();
+        let mut generics = implementation.generics.clone();
+        for name in &signature.generics.names {
+            if generics.names.contains(name) {
+                diagnostics.push(InterfaceDiagnostic {
+                    code: "G3301",
+                    span: method.span,
+                    message: format!("method generic parameter `{name}` shadows an impl parameter"),
+                });
+            }
+        }
+        generics.names.extend(signature.generics.names);
+        generics.effect_rows.extend(signature.generics.effect_rows);
+        generics.lifetimes.extend(signature.generics.lifetimes);
+        generics.consts.extend(signature.generics.consts);
+        generics
+            .const_defaults
+            .extend(signature.generics.const_defaults);
+        signature.generics = generics;
+        let mut where_bounds = implementation.where_bounds.clone();
+        where_bounds.extend(signature.where_bounds);
+        signature.where_bounds = where_bounds;
+        let start = lexed
+            .tokens
+            .partition_point(|token| token.start < method.span.start);
+        let end = method.body.map_or(start, |body| body.start);
+        let header = TokenRange { start, end };
+        let header_fingerprint = Digest::of_parts([
+            b"grandiose-stage0-inherent-method-v1".as_slice(),
+            header_fingerprint(lexed, source, block_header)
+                .as_bytes()
+                .as_slice(),
+            header_fingerprint(lexed, source, header)
+                .as_bytes()
+                .as_slice(),
+            &[u8::from(method.public)],
+        ]);
+        definitions.push(Definition {
+            key: definition_key(
+                module,
+                DeclarationKind::Function,
+                Some(&name),
+                header_fingerprint,
+                0,
+            ),
+            kind: DeclarationKind::Function,
+            namespace: Some(DefinitionNamespace::Value),
+            name: Some(name),
+            public: method.public,
+            module: module.clone(),
+            span: method.span,
+            header,
+            body: method.body,
+            host_capability: None,
+            header_fingerprint,
+            constant_value_fingerprint: None,
+            syntax: HeaderParse {
+                header: ParsedHeader::InherentMethod(InherentMethodHeader {
+                    self_ty: implementation.self_ty.clone(),
+                    impl_generics: implementation.generics.len() as u32,
+                    signature,
+                }),
+                diagnostics: vec![],
+                recovered: false,
+            },
+        });
+    }
+    (definitions, diagnostics)
 }
 
 fn namespace(kind: DeclarationKind) -> Option<DefinitionNamespace> {

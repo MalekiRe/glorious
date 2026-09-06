@@ -62,11 +62,11 @@
         },
         {
           "name": "keyword.declaration.grandiose",
-          "match": "\\b(let|struct|enum|trait|impl|effect|type|where)\\b"
+          "match": "\\b(fn|let|struct|enum|trait|impl|effect|type|where)\\b"
         },
         {
           "name": "storage.modifier.contextual.grandiose",
-          "match": "\\b(for|with|mut|move|cases|private|const|infinity|infix|infixl|infixr|prefix)\\b"
+          "match": "\\b(for|with|mut|move|unsafe|cases|private|const|infinity|infix|infixl|infixr|prefix)\\b"
         }
       ]
     },

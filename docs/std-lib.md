@@ -29,6 +29,14 @@ capability import mechanism; a runtime declaration does not itself select a C AB
 or grant host authority.
 The compiler must not recognize its control names or operator spellings.
 
+Ordinary type operations are declared directly in inherent `impl` blocks, for
+example `impl<T> Vec<T> { pub fn push(value: &mut Self, item: T) { ... } }`.
+Callers use `Vec::push(&mut value, item)`; generic owner and function arguments
+are written separately, as in `HashMap<K, V>::get<'a>(...)`. There is no parallel
+public `vec_push` implementation name. The few remaining qualified aliases are
+intentional re-exports: `Option` shares operations with its transparent `Result`
+representation, and `Str::len_bytes` is a synonym for `Str::len`.
+
 The result-based control model is adapted from Justin Pombrio's
 [“Imagining a Language without Booleans”](https://justinpombrio.net/2025/09/22/imagining-a-language-without-booleans.html).
 Grandiose adopts the semantic ideas, not the post's hypothetical `T ? E` syntax.

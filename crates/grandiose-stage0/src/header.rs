@@ -317,6 +317,7 @@ pub struct AssociatedConstDefinitionHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImplementationMethodHeader {
     pub name: String,
+    pub public: bool,
     pub signature: CallableHeader,
     /// Exact brace-delimited source range of the method body. The
     /// implementation declaration itself remains an interface fact, while
@@ -357,6 +358,24 @@ pub struct ImplementationHeader {
     pub associated_types: Vec<AssociatedTypeDefinitionHeader>,
     pub associated_consts: Vec<AssociatedConstDefinitionHeader>,
     pub methods: Vec<ImplementationMethodHeader>,
+}
+
+/// Inherent members are direct associated functions, not trait evidence or
+/// value aliases. Interface collection gives each member its own definition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InherentImplementationHeader {
+    pub generics: GenericParameters,
+    pub self_ty: HeaderType,
+    pub where_bounds: Vec<WhereBoundHeader>,
+    pub methods: Vec<ImplementationMethodHeader>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InherentMethodHeader {
+    pub self_ty: HeaderType,
+    pub impl_generics: u32,
+    /// Block binders precede method binders in the ordinary callable ABI.
+    pub signature: CallableHeader,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -473,6 +492,8 @@ pub enum ParsedHeader {
     Fixity(FixityHeader),
     Trait(TraitHeader),
     Implementation(ImplementationHeader),
+    InherentImplementation(InherentImplementationHeader),
+    InherentMethod(InherentMethodHeader),
     Effect(EffectHeader),
     Nominal {
         generics: GenericParameters,
@@ -627,9 +648,7 @@ impl HeaderParse {
                 ParsedHeader::Trait(value)
             }
             DeclarationKind::Implementation => {
-                let mut implementation = parser.implementation(shell.body);
-                implementation.safety = shell.safety;
-                ParsedHeader::Implementation(implementation)
+                parser.implementation(shell.body, shell.safety, shell.visibility_public)
             }
             DeclarationKind::Effect => {
                 parser.identifier();
@@ -865,12 +884,22 @@ impl Parser<'_> {
             methods,
         }
     }
-    fn implementation(&mut self, body: Option<TokenRange>) -> ImplementationHeader {
+    fn implementation(
+        &mut self,
+        body: Option<TokenRange>,
+        safety: Safety,
+        public: bool,
+    ) -> ParsedHeader {
         let generics = self.generics();
         let negative = self.operator("!");
+        let head_start = self.position;
         let relation = self.trait_ref();
-        if self.word() != Some("for") {
-            self.error("G3240", "expected `for` after implementation trait");
+        let inherent = self.word() != Some("for");
+        if inherent {
+            self.position = head_start;
+            if negative || safety == Safety::Unsafe || public {
+                self.error("G3270", "inherent impl blocks cannot be negative, unsafe, or public; put visibility and safety on their functions");
+            }
         } else {
             self.position += 1;
         }
@@ -897,12 +926,23 @@ impl Parser<'_> {
         if body_parser.punctuation('{') {
             let mut names = BTreeSet::new();
             while body_parser.current().is_some() && !body_parser.at_punctuation('}') {
+                let public = body_parser.word() == Some("pub");
+                if public {
+                    body_parser.position += 1;
+                }
+                if public && !inherent {
+                    body_parser.error(
+                        "G3271",
+                        "trait implementation members inherit trait visibility",
+                    );
+                }
                 if body_parser.word() != Some("type")
                     && body_parser.word() != Some("const")
                     && body_parser.word() != Some("fn")
                     && body_parser.word() != Some("unsafe")
                     && !body_parser.callable_member_ahead()
                 {
+                    body_parser.error("G3272", "expected an implementation member");
                     body_parser.skip_item_body();
                     continue;
                 }
@@ -1035,6 +1075,7 @@ impl Parser<'_> {
                     let end = body_parser.previous().unwrap_or(start);
                     methods.push(ImplementationMethodHeader {
                         name,
+                        public,
                         signature,
                         body,
                         span: body_parser.span(start, end),
@@ -1050,8 +1091,22 @@ impl Parser<'_> {
         }
         self.diagnostics.extend(body_parser.diagnostics);
         self.recovered |= body_parser.recovered;
-        ImplementationHeader {
-            safety: Safety::Safe,
+        if inherent {
+            if !associated_types.is_empty() || !associated_consts.is_empty() {
+                self.error(
+                    "G3273",
+                    "inherent impl blocks currently contain functions only",
+                );
+            }
+            return ParsedHeader::InherentImplementation(InherentImplementationHeader {
+                generics,
+                self_ty,
+                where_bounds,
+                methods,
+            });
+        }
+        ParsedHeader::Implementation(ImplementationHeader {
+            safety,
             generics,
             negative,
             relation,
@@ -1060,7 +1115,7 @@ impl Parser<'_> {
             associated_types,
             associated_consts,
             methods,
-        }
+        })
     }
     fn effect_header(&mut self, generics: GenericParameters) -> EffectHeader {
         let mut operations = vec![];
@@ -2171,15 +2226,27 @@ impl Parser<'_> {
             // normal tuple/callable type has commas or an arrow, never one of
             // these structural operators.  Keep parenthesized `N + 1` in the
             // const parser while leaving ordinary `(T, U)` syntax untouched.
-            return self.tokens[self.position + 1..]
-                .iter()
-                .take_while(|next| self.lexed.tokens[**next].kind != TokenKind::Punctuation(','))
-                .any(|next| {
-                    matches!(
-                        self.lexed.text(self.source, &self.lexed.tokens[*next]),
-                        "+" | "-" | "*" | "/" | "%"
-                    )
-                });
+            let mut depth = 1;
+            let mut arithmetic = false;
+            for next in &self.tokens[self.position + 1..] {
+                let token = &self.lexed.tokens[*next];
+                match token.kind {
+                    TokenKind::Punctuation('(') => depth += 1,
+                    TokenKind::Punctuation(')') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return arithmetic;
+                        }
+                    }
+                    TokenKind::Punctuation(',') => return false,
+                    _ => {}
+                }
+                arithmetic |= matches!(
+                    self.lexed.text(self.source, token),
+                    "+" | "-" | "*" | "/" | "%"
+                );
+            }
+            return false;
         }
         token.kind == TokenKind::Identifier
             && self.tokens.get(self.position + 1).is_some_and(|next| {

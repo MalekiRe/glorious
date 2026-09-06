@@ -51,6 +51,7 @@ def main():
                        "crates/grandiose-stage0/src/signature.rs", "crates/grandiose-stage0/src/trait_solver.rs",
                        "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs",
                        "crates/grandiose-stage0/src/types.rs", "crates/grandiose-stage0/src/header.rs",
+                       "crates/grandiose-stage0/src/interface.rs", "crates/grandiose-stage0/src/lib.rs",
                        "crates/grandiose-stage0/src/body.rs", "crates/grandiose-stage0/src/instance.rs",
                        "crates/grandiose-stage0/src/escape.rs", "crates/grandiose-stage0/src/pattern.rs",
                        "crates/grandiose-stage0/src/scanner.rs", "crates/grandiose-stage0/src/useflow.rs"]
@@ -70,6 +71,8 @@ def main():
         ROOT / "crates/grandiose-stage0/tests/conversions.rs",
         ROOT / "crates/grandiose-stage0/tests/coherence.rs",
         ROOT / "crates/grandiose-stage0/tests/resolution.rs",
+        ROOT / "crates/grandiose-stage0/tests/header.rs",
+        ROOT / "crates/grandiose-stage0/tests/interface.rs",
         ROOT / "crates/grandiose-stage0/tests/signature.rs",
         ROOT / "crates/grandiose-stage0/tests/trait_solver.rs",
         ROOT / "crates/grandiose-stage0/tests/core.rs",

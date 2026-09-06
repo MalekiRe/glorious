@@ -234,12 +234,31 @@ normalization or case folding occurs. Distinct namespaces exist for:
 - fixity declarations.
 
 Nominal types and type aliases own a value subnamespace containing constructors
-and explicitly declared associated bindings such as `String::len` and
+and directly declared inherent functions and associated bindings such as `String::len` and
 `Option::Some`. A top-level qualified value declaration may add a binding only
 to an already declared type or type alias. Named modules add a separate lexical
 namespace. Every definition is resolved to a structured `(ModuleId, namespace,
 local definition id)` identity; textual qualification and imports never become
 the authoritative identity.
+
+An inherent `impl<T> Vec<T> { pub fn push(value: &mut Self, item: T) { ... } }`
+declares `Vec::push` directly. It creates neither an unqualified `vec_push`
+definition nor a forwarding alias. The head must name a type or type alias
+declared in the same package. Multiple blocks are allowed, including blocks in
+other modules of that package, but a member name may be defined only once per
+owning type; disjoint-head overloading is not provided. Type, const, and effect
+impl parameters must occur in the self type; function-only parameters belong on
+the function. Method parameters cannot shadow block parameters.
+
+`Self` denotes the fully applied impl head in signatures, body annotations,
+constructors, patterns, and associated paths. Block bounds apply to every
+member. `Vec<T>::method<U>` supplies owner and method arguments separately;
+omitted arguments use ordinary inference. Specialized heads are checked even
+for receiver-less functions. Functions have ordinary per-member visibility,
+safety, effects, and first-class callable behavior. Importing or renaming a type
+preserves its members, and exported type interfaces include public member
+contracts. Inherent blocks currently contain functions only and do not add
+implicit receivers or dot-call syntax. Trait implementations remain separate.
 
 `mod name;` declares an external child. If the declaring module's logical
 directory is `D`, its source is exactly `D/name/name.glorious`. `mod name { ... }`
@@ -869,7 +888,8 @@ double-ending the source loan.
 
 A monomorphic ordinary function used in value position forms a capture-free
 typed callable carrying the function's exact parameter, result, and outward
-effect signature. Qualified associated aliases are normalized to that ordinary
+effect signature. Inherent functions already have that ordinary identity.
+Qualified associated aliases are normalized to that ordinary
 function identity before callable formation, so `let f = Namespace::member`
 and an unqualified function item have identical first-class behavior. A generic
 function item also forms a callable when an enclosing `Fn` context supplies its

@@ -58,7 +58,7 @@
  "mod" "use" "as" "self" "type" "cases" "let"
  "struct" "enum" "trait" "impl" "effect" "where" "for" "const"
  "handle" "perform" "resume" "cancel" "tail" "is" "match"
- "with" "move" "mut"
+ "with" "move" "mut" "fn" "unsafe"
 ] @keyword
 
 [(word_operator) (builtin_operator) (operator)] @operator

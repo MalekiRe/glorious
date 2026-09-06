@@ -1,0 +1,152 @@
+==================
+Inherent implementation blocks
+==================
+
+impl<T> Vec<T> {
+  pub fn len(value: &Self) -> usize { value.length }
+  pub fn choose<U>(value: U) -> U { value }
+}
+impl Vec<i64> {
+  answer() -> i64 { 42 }
+}
+
+---
+
+(source_file
+  (inherent_impl_declaration
+    (generic_parameters
+      (generic_parameter
+        (identifier)))
+    (type_path
+      (type_identifier
+        (type_identifier))
+      (generic_arguments
+        (generic_argument
+          (type_path
+            (type_identifier
+              (type_identifier))))))
+    (function_declaration
+      (visibility_modifier)
+      (identifier)
+      (parameters
+        (parameter
+          (identifier)
+          (reference_type
+            (type_path
+              (type_identifier
+                (type_identifier))))))
+      (type_path
+        (type_identifier
+          (type_identifier)))
+      (block
+        (field_expression
+          (path_expression
+            (identifier))
+          (identifier))))
+    (function_declaration
+      (visibility_modifier)
+      (identifier)
+      (generic_parameters
+        (generic_parameter
+          (identifier)))
+      (parameters
+        (parameter
+          (identifier)
+          (type_path
+            (type_identifier
+              (type_identifier)))))
+      (type_path
+        (type_identifier
+          (type_identifier)))
+      (block
+        (path_expression
+          (identifier)))))
+  (inherent_impl_declaration
+    (type_path
+      (type_identifier
+        (type_identifier))
+      (generic_arguments
+        (generic_argument
+          (type_path
+            (type_identifier
+              (type_identifier))))))
+    (function_declaration
+      (identifier)
+      (parameters)
+      (type_path
+        (type_identifier
+          (type_identifier)))
+      (block
+        (literal
+          (integer_literal))))))
+
+==================
+Qualified generic associated calls and comparisons
+==================
+
+fn main() -> i64 {
+  let value = Cell<i64>::new(42);
+  let chosen = crate::model::Cell<i64>::choose<u64>(7);
+  let less = value < chosen;
+  value
+}
+
+---
+
+(source_file
+  (function_declaration
+    (identifier)
+    (parameters)
+    (type_path
+      (type_identifier
+        (type_identifier)))
+    (block
+      (statement
+        (let_statement
+          (identifier)
+          (call_expression
+            (path_expression
+              (identifier)
+              (generic_arguments
+                (generic_argument
+                  (type_path
+                    (type_identifier
+                      (type_identifier)))))
+              (identifier))
+            (arguments
+              (literal
+                (integer_literal))))))
+      (statement
+        (let_statement
+          (identifier)
+          (call_expression
+            (path_expression
+              (identifier)
+              (identifier)
+              (identifier)
+              (generic_arguments
+                (generic_argument
+                  (type_path
+                    (type_identifier
+                      (type_identifier)))))
+              (identifier)
+              (generic_arguments
+                (generic_argument
+                  (type_path
+                    (type_identifier
+                      (type_identifier))))))
+            (arguments
+              (literal
+                (integer_literal))))))
+      (statement
+        (let_statement
+          (identifier)
+          (binary_expression
+            (path_expression
+              (identifier))
+            (operator_sequence
+              (builtin_operator))
+            (path_expression
+              (identifier)))))
+      (path_expression
+        (identifier)))))

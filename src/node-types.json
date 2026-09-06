@@ -36,6 +36,10 @@
         "named": true
       },
       {
+        "type": "inherent_impl_declaration",
+        "named": true
+      },
+      {
         "type": "module_declaration",
         "named": true
       },
@@ -1409,6 +1413,40 @@
     }
   },
   {
+    "type": "inherent_impl_declaration",
+    "named": true,
+    "fields": {
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "type_path",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "function_declaration",
+          "named": true
+        },
+        {
+          "type": "generic_parameters",
+          "named": true
+        },
+        {
+          "type": "where_clause",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "label_binder_expression",
     "named": true,
     "fields": {
@@ -1781,6 +1819,10 @@
       "multiple": true,
       "required": true,
       "types": [
+        {
+          "type": "generic_arguments",
+          "named": true
+        },
         {
           "type": "identifier",
           "named": true
@@ -2742,6 +2784,10 @@
   },
   {
     "type": "u32",
+    "named": false
+  },
+  {
+    "type": "unsafe",
     "named": false
   },
   {

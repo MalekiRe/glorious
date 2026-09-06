@@ -178,6 +178,9 @@ pub struct DefinitionIndex {
     imports: BTreeMap<ModuleKey, Vec<ImportBinding>>,
     owners: BTreeMap<DefKey, ModuleKey>,
     definition_contracts: BTreeMap<DefKey, DefinitionContract>,
+    inherent_declarations: BTreeMap<DefKey, IndexedInherentMethod>,
+    inherent_members: BTreeMap<(DefKey, String), Vec<IndexedDefinition>>,
+    enum_variant_names: BTreeMap<DefKey, BTreeSet<String>>,
     type_generic_arities: BTreeMap<DefKey, u32>,
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     /// Structural defaults are frozen by binder position, not source name, so
@@ -206,6 +209,14 @@ struct IndexedDefinition {
     key: DefKey,
     module: ModuleKey,
     public: bool,
+}
+
+#[derive(Clone, Debug)]
+struct IndexedInherentMethod {
+    header: crate::header::InherentMethodHeader,
+    name: String,
+    span: Span,
+    definition: IndexedDefinition,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -370,6 +381,18 @@ impl DefinitionIndex {
                 self.type_generic_defaults.insert(definition.key, defaults);
             }
             match &definition.syntax.header {
+                ParsedHeader::Nominal {
+                    layout: crate::header::NominalLayoutHeader::Enum(variants),
+                    ..
+                } => {
+                    self.enum_variant_names.insert(
+                        definition.key,
+                        variants
+                            .iter()
+                            .map(|variant| variant.name.clone())
+                            .collect(),
+                    );
+                }
                 ParsedHeader::Trait(header) => {
                     self.trait_generic_arities
                         .insert(definition.key, header.generics.len() as u32);
@@ -425,6 +448,24 @@ impl DefinitionIndex {
                 }
             }
             if let (Some(namespace), Some(name)) = (definition.namespace, &definition.name) {
+                if let ParsedHeader::InherentMethod(header) = &definition.syntax.header {
+                    self.inherent_declarations.insert(
+                        definition.key,
+                        IndexedInherentMethod {
+                            header: header.clone(),
+                            name: name.rsplit("::").next().unwrap().to_owned(),
+                            span: definition.span,
+                            definition: IndexedDefinition {
+                                key: definition.key,
+                                module: definition.module.clone(),
+                                public: definition.public,
+                            },
+                        },
+                    );
+                    // Associated lookup follows the owning type identity, so
+                    // importing or renaming the type preserves its members.
+                    continue;
+                }
                 let entry = IndexedDefinition {
                     key: definition.key,
                     module: definition.module.clone(),
@@ -446,6 +487,15 @@ impl DefinitionIndex {
     /// checks. Duplicate keys retain their first canonical owner.
     pub fn owner(&self, key: DefKey) -> Option<&ModuleKey> {
         self.owners.get(&key)
+    }
+
+    pub(crate) fn inherent_method(
+        &self,
+        key: DefKey,
+    ) -> Option<&crate::header::InherentMethodHeader> {
+        self.inherent_declarations
+            .get(&key)
+            .map(|method| &method.header)
     }
 
     fn canonicalize(&mut self) {
@@ -475,6 +525,27 @@ impl DefinitionIndex {
         for roots in self.package_roots.values_mut() {
             roots.sort();
             roots.dedup();
+        }
+        self.inherent_members.clear();
+        for method in self.inherent_declarations.values() {
+            use crate::header::HeaderType;
+            let path = match &method.header.self_ty {
+                HeaderType::Path(path) => path,
+                HeaderType::Application(base, _) => match base.as_ref() {
+                    HeaderType::Path(path) => path,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let module = &method.definition.module;
+            if let ResolutionState::Resolved(owner) =
+                self.resolve_path(DefinitionNamespace::Type, module, path)
+            {
+                self.inherent_members
+                    .entry((owner, method.name.clone()))
+                    .or_default()
+                    .push(method.definition.clone());
+            }
         }
         // Projection parsing needs an associated item's binder kinds before
         // trait solving can select the parent implementation.  Flatten only
@@ -708,6 +779,15 @@ impl DefinitionIndex {
         {
             dependencies.insert(owner.clone());
         }
+        for ((owner, _), members) in &self.inherent_members {
+            if *owner == key {
+                for member in members.iter().filter(|member| member.public) {
+                    if &member.module != origin {
+                        dependencies.insert(member.module.clone());
+                    }
+                }
+            }
+        }
     }
 
     fn public_module_surface(
@@ -797,6 +877,15 @@ impl DefinitionIndex {
             }
             None => append_surface(bytes, b"no-constant-value"),
         }
+        for ((owner, name), members) in &self.inherent_members {
+            if *owner == key {
+                for member in members.iter().filter(|member| member.public) {
+                    append_surface(bytes, b"inherent-member");
+                    append_surface(bytes, name.as_bytes());
+                    self.append_definition_contract(bytes, member.key);
+                }
+            }
+        }
     }
 
     /// Binder arity is an interface fact, not a property recovered from a
@@ -880,6 +969,12 @@ impl DefinitionIndex {
         let Some(name) = path.last() else {
             return ResolutionState::Unresolved;
         };
+        if namespace == DefinitionNamespace::Value && path.len() > 1 {
+            let associated = self.resolve_inherent_path(owner, owner, path, &mut BTreeSet::new());
+            if !matches!(associated, ResolutionState::Unresolved) {
+                return associated;
+            }
+        }
         // Top-level value aliases may deliberately occupy a qualified
         // receiver spelling (`Vec::len`) without declaring a module named
         // `Vec`. Prefer that exact interface-owned binding before treating
@@ -948,6 +1043,22 @@ impl DefinitionIndex {
     /// after an unrelated edit starts using it.
     pub fn validate_imports(&self) -> Vec<ResolutionDiagnostic> {
         let mut diagnostics = vec![];
+        for ((owner, name), members) in &self.inherent_members {
+            if members.len() > 1
+                || self
+                    .enum_variant_names
+                    .get(owner)
+                    .is_some_and(|names| names.contains(name))
+            {
+                diagnostics.push(ResolutionDiagnostic {
+                    code: "G3275",
+                    span: self.inherent_declarations[&members.last().unwrap().key].span,
+                    message: format!(
+                        "duplicate associated name `{name}` across impl blocks or enum constructors"
+                    ),
+                });
+            }
+        }
         for imports in self.imports.values() {
             for import in imports {
                 // Exported edges have a stricter requester (a dependency
@@ -1492,6 +1603,12 @@ impl DefinitionIndex {
         let Some(name) = path.last() else {
             return ResolutionState::Unresolved;
         };
+        if namespace == DefinitionNamespace::Value && path.len() > 1 {
+            let associated = self.resolve_inherent_path(lexical_owner, requester, path, visited);
+            if !matches!(associated, ResolutionState::Unresolved) {
+                return associated;
+            }
+        }
         if path.len() == 1 {
             // Imports are source occurrences with the same lexical lookup
             // authority as bodies. A nested module may therefore import a
@@ -1532,6 +1649,32 @@ impl DefinitionIndex {
             !requester_has_lexical_authority(requester, &module),
             visited,
         )
+    }
+
+    fn resolve_inherent_path(
+        &self,
+        lexical_owner: &ModuleKey,
+        requester: &ModuleKey,
+        path: &[String],
+        visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
+    ) -> ResolutionState {
+        let owner = self.resolve_direct_path(
+            DefinitionNamespace::Type,
+            lexical_owner,
+            requester,
+            &path[..path.len() - 1],
+            visited,
+        );
+        match owner {
+            ResolutionState::Resolved(owner) => self.classify(
+                self.inherent_members
+                    .get(&(owner, path.last().unwrap().clone())),
+                Some(requester),
+            ),
+            ResolutionState::Inaccessible(keys) => ResolutionState::Inaccessible(keys),
+            ResolutionState::Ambiguous(keys) => ResolutionState::Ambiguous(keys),
+            _ => ResolutionState::Unresolved,
+        }
     }
 
     fn classify(

@@ -49,7 +49,7 @@ fn version(ledger: &Ledger, parent: Option<RevisionId>) -> Option<u64> {
     }
 }
 fn row<'a>(ledger: &'a Ledger, revision: RevisionId) -> Option<&'a Row> {
-    handle HashMap::get<'a, RevisionId, Option<Row>>(&ledger.revisions, &revision) {
+    handle HashMap<RevisionId, Option<Row>>::get<'a>(&ledger.revisions, &revision) {
         Result::Err(_) => None,
         Result::Ok(slot) => handle Result::as_ref(slot) { Result::Err(_) => None, Result::Ok(value) => Result::Ok(value) },
     }

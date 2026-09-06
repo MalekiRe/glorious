@@ -698,6 +698,52 @@ fn sealed_public_interfaces_include_transitive_module_alias_and_glob_surfaces() 
 }
 
 #[test]
+fn reexported_type_interfaces_include_inherent_members_and_their_owner_dependencies() {
+    let package = PackageKey("resolution-inherent-surface@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod api; mod methods; pub mod facade;");
+    let facade = collect("crate::facade", "pub use crate::api::Cell as Public;");
+    let api = collect("crate::api", "pub struct Cell {}");
+    let methods = collect(
+        "crate::methods",
+        "use crate::api::Cell; impl Cell { pub fn answer() -> i64 { 1 } fn private() {} }",
+    );
+    let changed = collect(
+        "crate::methods",
+        "use crate::api::Cell; impl Cell { pub fn answer() -> u64 { 1 } fn private() {} }",
+    );
+    let body_changed = collect(
+        "crate::methods",
+        "use crate::api::Cell; impl Cell { pub fn answer() -> i64 { 2 } fn renamed_private() {} }",
+    );
+    let index = DefinitionIndex::from_interfaces([&root, &facade, &api, &methods]);
+    let after = DefinitionIndex::from_interfaces([&root, &facade, &api, &changed]);
+    let bodies = DefinitionIndex::from_interfaces([&root, &facade, &api, &body_changed]);
+    assert!(
+        index.validate_imports().is_empty(),
+        "{:#?}",
+        index.validate_imports()
+    );
+    assert_ne!(
+        index.sealed_public_fingerprint(&facade),
+        after.sealed_public_fingerprint(&facade)
+    );
+    assert_eq!(
+        index.sealed_public_fingerprint(&facade),
+        bodies.sealed_public_fingerprint(&facade)
+    );
+    assert_eq!(
+        index.sealed_public_dependencies(&facade),
+        vec![api.module.clone(), methods.module.clone()]
+    );
+}
+
+#[test]
 fn sealed_public_dependencies_follow_only_resolved_public_surface_contracts() {
     let package = PackageKey("resolution-sealed-public-dependencies@0.1.0".into());
     let collect = |module: &str, source: &str| {

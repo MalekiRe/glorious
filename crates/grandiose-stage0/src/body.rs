@@ -90,8 +90,9 @@ pub enum ExprKind {
     /// another generic entity; the parser must not guess from its spelling.
     GenericPath {
         path: Vec<String>,
-        /// Generic arguments applied to the leading protocol or trait path,
-        /// before `::`: `Effect<Args>::operation`.
+        /// Generic arguments applied to the type or protocol owner, before
+        /// `::`: `Effect<Args>::operation` or `module::Cell<Args>::new`.
+        /// Direct calls and constructors also use this slot: `f<Args>(...)`.
         effect_arguments: Vec<HeaderGenericArgument>,
         /// Generic arguments applied to the final operation or method path,
         /// after `::`: `Effect::operation<Args>`.
@@ -1267,6 +1268,22 @@ impl Parser<'_> {
                 while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
                     self.position += 2;
                     path.push(self.expect_identifier()?);
+                    // A generic owner can follow a module prefix, as in
+                    // `crate::model::Cell<T>::new<U>(...)`. Keep its arguments
+                    // separate from the final callable's arguments.
+                    if self.generic_path_ahead() && !self.operation_generic_ahead() {
+                        if !effect_arguments.is_empty() {
+                            self.error_current(
+                                "G4026",
+                                "a path can apply only one type or protocol owner",
+                            );
+                            return None;
+                        }
+                        effect_arguments = self.parse_generic_arguments(
+                            "G4026",
+                            "expected `>` in type or protocol application",
+                        )?;
+                    }
                 }
                 let operation_arguments = if path.len() > 1 && self.operation_generic_ahead() {
                     self.parse_generic_arguments("G4026", "expected `>` in operation application")?

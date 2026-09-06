@@ -3104,6 +3104,10 @@ impl TypedBody {
         fixities: &FixityTable,
         trait_solver: TraitSolver,
     ) -> Self {
+        let scoped_body = index
+            .inherent_method(definition.key)
+            .map(|method| bind_inherent_self_paths(body, &method.self_ty));
+        let body = scoped_body.as_ref().unwrap_or(body);
         let generic_parameters = definition
             .callable_header()
             .map(|header| {
@@ -3769,6 +3773,71 @@ impl TypedBody {
     }
 }
 
+/// Resolve the lexical `Self` constructor namespace using the impl head.
+/// This changes only the body-local syntax product, never source text or
+/// definition identity; original expression and pattern spans are preserved.
+fn bind_inherent_self_paths(body: &BodySyntax, self_ty: &crate::header::HeaderType) -> BodySyntax {
+    use crate::header::{HeaderGenericArgument, HeaderType};
+    let (owner, owner_arguments) = match self_ty {
+        HeaderType::Path(path) => (path, &[][..]),
+        HeaderType::Application(base, arguments) => match base.as_ref() {
+            HeaderType::Path(path) => (path, arguments.as_slice()),
+            _ => return body.clone(),
+        },
+        _ => return body.clone(),
+    };
+    let bind = |path: &mut Vec<String>, arguments: &mut Vec<HeaderGenericArgument>| {
+        if path.first().is_some_and(|name| name == "Self") && arguments.is_empty() {
+            let mut expanded = owner.clone();
+            expanded.extend_from_slice(&path[1..]);
+            *path = expanded;
+            *arguments = owner_arguments.to_vec();
+        }
+    };
+    let mut body = body.clone();
+    for expression in &mut body.expressions {
+        match &mut expression.kind {
+            ExprKind::Path(path) if path.first().is_some_and(|name| name == "Self") => {
+                let mut arguments = vec![];
+                bind(path, &mut arguments);
+                if !arguments.is_empty() {
+                    expression.kind = ExprKind::GenericPath {
+                        path: path.clone(),
+                        effect_arguments: arguments,
+                        operation_arguments: vec![],
+                    };
+                }
+            }
+            ExprKind::GenericPath {
+                path,
+                effect_arguments,
+                ..
+            } => bind(path, effect_arguments),
+            ExprKind::Record {
+                path, arguments, ..
+            } => bind(path, arguments),
+            ExprKind::Handle { clauses, .. } => {
+                for clause in clauses {
+                    bind(&mut clause.path, &mut clause.effect_arguments);
+                }
+            }
+            _ => {}
+        }
+    }
+    for pattern in &mut body.patterns {
+        match &mut pattern.kind {
+            crate::body::PatternKind::Enum {
+                path, arguments, ..
+            }
+            | crate::body::PatternKind::Record {
+                path, arguments, ..
+            } => bind(path, arguments),
+            _ => {}
+        }
+    }
+    body
+}
+
 fn callable(header: &ElaboratedHeader) -> Option<&crate::signature::CallableSignature> {
     match header {
         ElaboratedHeader::Callable(value)
@@ -3986,6 +4055,16 @@ impl Elaborator<'_> {
 
     fn expression(&mut self, id: ExprId) -> CoreId {
         let expression = self.body.expression(id).clone();
+        if let ExprKind::GenericPath {
+            path,
+            effect_arguments,
+            operation_arguments,
+        } = &expression.kind
+            && let Some(value) =
+                self.inherent_path(path, effect_arguments, operation_arguments, expression.span)
+        {
+            return value;
+        }
         match expression.kind {
             ExprKind::Literal(text) => self.alloc(
                 CoreKind::Literal(text.clone()),
@@ -5168,7 +5247,7 @@ impl Elaborator<'_> {
     }
 
     /// Materialize the documented `&String -> Str` view coercion through the
-    /// standard library's own ordinary `string_as_str` function.  This is not
+    /// standard library's own ordinary `String::as_str` function. This is not
     /// a second string representation or an application-callable compiler
     /// leaf: it merely inserts the same source-level view call a programmer
     /// could spell explicitly when an elided `Str` parameter is expected.
@@ -5209,7 +5288,7 @@ impl Elaborator<'_> {
         let ResolutionState::Resolved(definition) = self.index.resolve_path(
             DefinitionNamespace::Value,
             &standard_module,
-            &["string_as_str".into()],
+            &["String".into(), "as_str".into()],
         ) else {
             return None;
         };
@@ -6964,6 +7043,12 @@ impl Elaborator<'_> {
             return Type::Error;
         };
         if path.len() == 1 {
+            if name == "Self"
+                && arguments.is_empty()
+                && let Some(self_ty) = self.signatures.inherent_self_types.get(&self.definition)
+            {
+                return self.signatures.normalize_type_aliases(self_ty.clone());
+            }
             if let Some(index) = self.generic_parameters.get(name) {
                 return if arguments.is_empty() {
                     Type::Generic(*index)
@@ -8769,6 +8854,141 @@ impl Elaborator<'_> {
         ))
     }
 
+    /// Inherent applications keep owner arguments separate from method
+    /// arguments. Unifying the actual owner with the declared impl head also
+    /// enforces specialized heads, even for static functions with no receiver.
+    fn inherent_path(
+        &mut self,
+        path: &[String],
+        owner_arguments: &[crate::header::HeaderGenericArgument],
+        method_arguments: &[crate::header::HeaderGenericArgument],
+        span: Span,
+    ) -> Option<CoreId> {
+        let ResolutionState::Resolved(definition) =
+            self.index
+                .resolve_path(DefinitionNamespace::Value, self.module, path)
+        else {
+            return None;
+        };
+        let header = self.index.inherent_method(definition)?;
+        let base = header.impl_generics as usize;
+        let kinds = self
+            .signatures
+            .definitions
+            .get(&definition)
+            .and_then(callable)?
+            .generic_kinds
+            .clone();
+        if method_arguments.len() > kinds.len() - base {
+            return Some(self.fail(
+                span,
+                "G4184",
+                "inherent function generic arguments do not match its method binders",
+            ));
+        }
+        let mut arguments = self.inferred_method_generic_arguments(&kinds);
+        let Some(explicit) = self.body_generic_arguments(
+            method_arguments,
+            &kinds[base..base + method_arguments.len()],
+            span,
+            "G4184",
+            "inherent function generic arguments have the wrong kind",
+        ) else {
+            return Some(self.fail(span, "G4184", "invalid inherent function generic arguments"));
+        };
+        arguments[base..base + explicit.len()].clone_from_slice(&explicit);
+        if !owner_arguments.is_empty() {
+            let declared = self
+                .signatures
+                .instantiate_inherent_self_type(definition, &arguments)?;
+            let Type::Nominal {
+                definition: owner, ..
+            } = &declared
+            else {
+                return Some(self.fail(span, "G4184", "inherent function has no nominal owner"));
+            };
+            let Some(provided) = self.nominal_arguments(*owner, owner_arguments, span) else {
+                return Some(self.fail(
+                    span,
+                    "G4184",
+                    "inherent owner generic arguments do not match its declaration",
+                ));
+            };
+            let provided = Type::Nominal {
+                definition: *owner,
+                arguments: provided,
+            };
+            let declared = self.signatures.normalize_type_aliases(declared);
+            let provided = self.signatures.normalize_type_aliases(provided);
+            let mut lifetimes = CallLifetimeSubstitution::default();
+            let declared = match align_lifetime_types(
+                &declared,
+                &provided,
+                &mut lifetimes,
+                LifetimeMode::Instantiate,
+                0,
+            ) {
+                Ok(declared) => declared,
+                Err(_) => {
+                    return Some(self.fail(
+                        span,
+                        "G4184",
+                        "owner lifetimes do not match the inherent impl head",
+                    ));
+                }
+            };
+            // Bind only the impl's region slots. Method lifetime arguments
+            // already name caller regions and must not be reinterpreted as
+            // impl-local binders merely because their numeric slots coincide.
+            for (index, argument) in arguments[..base].iter_mut().enumerate() {
+                if kinds[index] == crate::GenericKind::Lifetime
+                    && let Some(lifetime) = lifetimes.generics.get(&(index as u32))
+                {
+                    *argument = GenericArgument::Lifetime(*lifetime);
+                }
+            }
+            if self.inference.unify(declared, provided).is_err() {
+                return Some(self.fail(
+                    span,
+                    "G4184",
+                    "type arguments do not match the inherent impl head",
+                ));
+            }
+        }
+        let signature = match self
+            .signatures
+            .instantiate_callable_generic(definition, &arguments)
+        {
+            Ok(signature) => signature,
+            Err(_) => {
+                return Some(self.fail(span, "G4184", "invalid inherent callable substitution"));
+            }
+        };
+        let parameters = signature
+            .parameters
+            .into_iter()
+            .map(|ty| self.normalize_concrete_type_projections(ty))
+            .collect();
+        let result = self.normalize_concrete_type_projections(signature.result);
+        let effects = self.normalize_concrete_effect_row(signature.effects);
+        Some(self.alloc(
+            CoreKind::Function {
+                definition,
+                arguments,
+                host_import: None,
+            },
+            Type::Callable {
+                safety: signature.safety,
+                lifetime_binders: 0,
+                parameters,
+                result: Box::new(result),
+                effects,
+                invocation: signature.invocation,
+            },
+            span,
+        ))
+    }
+
     /// Resolve an explicitly applied direct callable.  Body syntax keeps the
     /// arguments source-kinded until this value lookup establishes the frozen
     /// callable contract; the resulting Core function retains precisely that
@@ -9781,9 +10001,9 @@ impl Elaborator<'_> {
         if !matches!(
             self.signatures.definitions.get(&definition),
             Some(ElaboratedHeader::Nominal {
-                layout: crate::signature::ElaboratedNominalLayout::Enum(_),
+                layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
                 ..
-            })
+            }) if variants.iter().any(|variant| variant.name == *variant_name)
         ) {
             return None;
         }

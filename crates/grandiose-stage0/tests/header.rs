@@ -5,6 +5,26 @@ use grandiose_stage0::{
 };
 
 #[test]
+fn inherent_method_unit_type_arguments_do_not_scan_into_method_bodies() {
+    let package = PackageKey("header-inherent@0.1.0".into());
+    let source =
+        "impl Cell { pub fn replace(value: &mut Self) -> Option<()> { *value = other(); } }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::InherentImplementation(header) = parsed.header else {
+        panic!("expected inherent impl")
+    };
+    assert!(header.methods[0].public);
+    assert!(
+        matches!(header.methods[0].signature.result, Some(HeaderType::Application(_, ref args))
+        if matches!(args.as_slice(), [HeaderGenericArgument::Type(HeaderType::Tuple(values))] if values.is_empty()))
+    );
+}
+
+#[test]
 fn callable_headers_share_generic_and_type_grammar_without_parsing_the_body() {
     let package = PackageKey("header@0.1.0".into());
     let source = "pub fn map<T>(value: &mut Array<T>, fallback: T) -> Result<T, ()> { body }";

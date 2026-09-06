@@ -38,6 +38,361 @@ fn request(source: &str) -> CompilationRequest {
     }
 }
 
+#[test]
+fn inherent_impl_functions_execute_with_block_generics_and_self_signatures() {
+    let source = r#"
+        pub struct Cell<T> { value: T }
+        impl<T> Cell<T> {
+            pub fn new(value: T) -> Self { Self { value: value } }
+            pub fn get(value: &Self) -> &T { &value.value }
+            pub fn forwarded(value: T) -> Self { Self::new(value) }
+        }
+        pub fn main() -> i64 {
+            let value = Cell<i64>::forwarded(42);
+            *Cell::get(&value)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_members_follow_imported_type_identity() {
+    let source = r#"
+        mod model {
+            pub struct Cell { value: i64 }
+            impl Cell { pub fn new(value: i64) -> Self { Cell { value: value } } }
+        }
+        use model::Cell as Renamed;
+        pub fn main() -> i64 { Renamed::new(42).value }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_private_members_are_not_exported_with_the_type() {
+    let source = r#"
+        mod model {
+            pub struct Cell {}
+            impl Cell { fn secret() -> i64 { 42 } }
+        }
+        use model::Cell;
+        pub fn main() -> i64 { Cell::secret() }
+    "#;
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("private")),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_duplicate_members_are_rejected_without_a_call() {
+    let source = r#"
+        struct Cell {}
+        impl Cell { pub fn new() -> i64 { 1 } }
+        impl Cell { pub fn new() -> i64 { 2 } }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == "G3001" || d.code == "G3275"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_owner_and_method_generics_are_distinct() {
+    let source = r#"
+        struct Cell<T> { value: T }
+        impl<T> Cell<T> {
+            pub fn choose<U>(value: Self, other: U) -> U where T: Use<[0, 1]> { other }
+        }
+        pub fn main() -> i64 { Cell<u64>::choose<i64>(Cell<u64> { value: 7 }, 42) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_generic_owners_can_follow_module_prefixes() {
+    let source = r#"
+        mod model {
+            pub struct Cell<T> { value: T }
+            impl<T> Cell<T> {
+                pub fn new(value: T) -> Self { Self { value: value } }
+                pub fn choose<U>(value: Self, other: U) -> U where T: Use<[0, 1]> { other }
+            }
+        }
+        pub fn main() -> i64 {
+            let first = crate::model::Cell<u64>::new(7);
+            let second = model::Cell<u64> { value: first.value };
+            crate::model::Cell<u64>::choose<i64>(second, 42)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_block_bounds_are_checked_at_calls() {
+    let prefix = r#"
+        trait Allowed {}
+        impl Allowed for i64 {}
+        struct Cell<T> { value: T }
+        impl<T> Cell<T> where T: Allowed {
+            pub fn new(value: T) -> Self { Self { value: value } }
+        }
+    "#;
+    let source = format!("{prefix} pub fn main() -> i64 {{ Cell<i64>::new(42).value }}");
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    let source = format!("{prefix} pub fn main() -> u64 {{ Cell<u64>::new(42).value }}");
+    let error = StageZeroCompiler::new()
+        .compile(request(&source))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G4143"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_specialized_heads_constrain_static_calls() {
+    let prefix = r#"
+        struct Cell<T> { value: T }
+        impl Cell<i64> { pub fn answer() -> i64 { 42 } }
+    "#;
+    let source = format!("{prefix} pub fn main() -> i64 {{ Cell<i64>::answer() }}");
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    let source = format!("{prefix} pub fn main() -> i64 {{ Cell<u64>::answer() }}");
+    let error = StageZeroCompiler::new()
+        .compile(request(&source))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G4184"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_members_can_be_imported_as_first_class_functions() {
+    let source = r#"
+        mod model {
+            pub struct Cell {}
+            impl Cell { pub fn answer(value: i64) -> i64 { value } }
+        }
+        use model::Cell::answer as imported;
+        pub fn main() -> i64 { let function = imported; function(42) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_cannot_extend_a_dependency_type() {
+    let input = request_with_dependency(
+        "impl lib::Cell { pub fn answer() -> i64 { 42 } } pub fn main() -> i64 { 42 }",
+        "lib@0.1.0",
+        "pub struct Cell {}",
+    );
+    let error = StageZeroCompiler::new().compile(input).unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G3274"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_self_supports_enum_constructors_patterns_and_annotations() {
+    let source = r#"
+        enum Choice<T> { Item(T), Empty }
+        impl<T> Choice<T> {
+            pub fn new(value: T) -> Self { Self::Item(value) }
+            pub fn unwrap(value: Self, fallback: T) -> T where T: Use<[0, 1]> {
+                handle value { Self::Item(item) => item, Self::Empty => fallback }
+            }
+            pub fn forwarded(value: T) -> Self {
+                let build = (item: T) -> Self { Self::new(item) };
+                build(value)
+            }
+        }
+        pub fn main() -> i64 { Choice::unwrap(Choice<i64>::forwarded(42), 0) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_rejects_unconstrained_and_shadowed_generic_parameters() {
+    for source in [
+        "struct Cell {} impl<T> Cell { pub fn answer(value: T) -> T { value } } pub fn main() -> i64 { 42 }",
+        "struct Cell<T> { value: T } impl<T> Cell<T> { pub fn answer<T>(value: T) -> T { value } } pub fn main() -> i64 { 42 }",
+        "struct Cell<T> { value: T } impl<Self> Cell<Self> {} pub fn main() -> i64 { 42 }",
+    ] {
+        let error = StageZeroCompiler::new()
+            .compile(request(source))
+            .unwrap_err();
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == "G3276" || d.code == "G3301"),
+            "{:#?}",
+            error.diagnostics()
+        );
+    }
+}
+
+#[test]
+fn inherent_impl_members_cannot_replace_enum_constructors() {
+    let source = "enum Choice { Item } impl Choice { pub fn Item() -> i64 { 42 } } pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G3275"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_heads_normalize_aliases_when_matching_owner_arguments() {
+    let source = r#"
+        struct Cell<T> { value: T }
+        type Number = i64;
+        impl Cell<Number> { pub fn answer() -> i64 { 42 } }
+        pub fn main() -> i64 { Cell<i64>::answer() }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn inherent_impl_preserves_lifetime_and_const_owner_arguments() {
+    let source = r#"
+        struct View<'a, T, n: u32> { value: &'a T }
+        impl<'a, T, n: u32> View<'a, T, n> {
+            pub fn new(value: &'a T) -> Self { Self { value: value } }
+            pub fn get(value: Self) -> &'a T { value.value }
+        }
+        pub fn main() -> i64 {
+            let value = 42;
+            let view = View<'_, i64, 7>::new(&value);
+            *View::get(view)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    let forged_static = source.replace("View<'_, i64, 7>", "View<'static, i64, 7>");
+    let error = StageZeroCompiler::new()
+        .compile(request(&forged_static))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G5017"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_self_cannot_be_reapplied_to_other_type_arguments() {
+    let source = r#"
+        struct Cell<T> { value: T }
+        impl<T> Cell<T> {
+            pub fn answer() -> i64 { 42 }
+            pub fn wrong() -> i64 { Self<u64>::answer() }
+        }
+        pub fn main() -> i64 { Cell<i64>::wrong() }
+    "#;
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G4184"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
+#[test]
+fn inherent_impl_keeps_function_safety_and_effect_contracts() {
+    let source = r#"
+        struct Cell {}
+        effect Read { read() -> i64; }
+        impl Cell {
+            pub unsafe fn raw() -> i64 { 42 }
+            pub fn read() -> i64 / Read { Read::read() }
+        }
+        pub fn main() -> i64 { unsafe { Cell::raw() } }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(
+        unsafe {
+            outcome
+                .artifact
+                .unwrap()
+                .run_i64_with_unsafe(VmExecutionLimits::default())
+        }
+        .unwrap(),
+        42
+    );
+    for invalid in [
+        source.replace("unsafe { Cell::raw() }", "Cell::raw()"),
+        source.replace("unsafe { Cell::raw() }", "Cell::read()"),
+    ] {
+        assert!(StageZeroCompiler::new().compile(request(&invalid)).is_err());
+    }
+}
+
+#[test]
+fn inherent_impl_can_be_in_another_module_of_the_owning_package() {
+    let source = r#"
+        mod model { pub struct Cell { value: i64 } }
+        mod methods {
+            use crate::model::Cell;
+            impl Cell { pub fn new(value: i64) -> Self { Self { value: value } } }
+        }
+        use model::Cell;
+        pub fn main() -> i64 { Cell::new(42).value }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    let duplicate = source.replace(
+        "use model::Cell;",
+        "use model::Cell; impl Cell { pub fn new(value: i64) -> Self { Self { value: value } } }",
+    );
+    let error = StageZeroCompiler::new()
+        .compile(request(&duplicate))
+        .unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|d| d.code == "G3275"),
+        "{:#?}",
+        error.diagnostics()
+    );
+}
+
 fn request_with_module(root: &str, child: &str) -> CompilationRequest {
     let package = PackageKey("app@0.1.0".into());
     let mut request = request(root);

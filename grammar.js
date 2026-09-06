@@ -25,6 +25,7 @@ module.exports = grammar({
     [$._pattern, $._expression],
     [$._pattern, $.type_identifier],
     [$.generic_arguments, $.binary_expression],
+    [$._expression_path_segment],
   ],
 
   rules: {
@@ -41,6 +42,7 @@ module.exports = grammar({
       $.enum_declaration,
       $.trait_declaration,
       $.impl_declaration,
+      $.inherent_impl_declaration,
       $.effect_declaration,
       $.function_declaration,
       $.empty_statement,
@@ -78,6 +80,7 @@ module.exports = grammar({
     trait_declaration: $ => seq(optional($.visibility_modifier), 'trait', field('name', $.type_identifier), optional($.generic_parameters), optional(seq(':', sep1($.trait_reference, '+'))), '{', repeat(choice($.associated_type_declaration, $.function_signature)), '}'),
     associated_type_declaration: $ => seq('type', field('name', $.type_identifier), optional($.generic_parameters), optional(seq(':', 'EffectRow')), ';'),
     impl_declaration: $ => seq(optional($.visibility_modifier), 'impl', optional($.generic_parameters), optional('!'), $.trait_reference, 'for', $._type, optional($.where_clause), '{', repeat(choice($.associated_type_definition, $.function_declaration)), '}'),
+    inherent_impl_declaration: $ => seq('impl', optional($.generic_parameters), field('type', $.type_path), optional($.where_clause), '{', repeat($.function_declaration), '}'),
     associated_type_definition: $ => seq('type', field('name', $.type_identifier), optional($.generic_parameters), '=', choice($._type, $.effect_row), ';'),
 
     effect_declaration: $ => seq(optional($.visibility_modifier), 'effect', field('name', $.effect_identifier), optional($.generic_parameters), optional($.where_clause), '{', repeat($.effect_operation), '}'),
@@ -92,7 +95,7 @@ module.exports = grammar({
     )),
     quantity: $ => seq('[', $.integer_literal, ',', choice($.integer_literal, 'infinity', '*'), ']'),
 
-    function_declaration: $ => seq(optional($.visibility_modifier), field('name', choice($.identifier, $.operator_sequence)), optional($.generic_parameters), $.parameters, optional(seq('->', optional($._type))), optional(seq('/', $.effect_row)), optional($.where_clause), field('body', $.block)),
+    function_declaration: $ => seq(optional($.visibility_modifier), optional('unsafe'), optional('fn'), field('name', choice($.identifier, $.operator_sequence)), optional($.generic_parameters), $.parameters, optional(seq('->', optional($._type))), optional(seq('/', $.effect_row)), optional($.where_clause), field('body', $.block)),
     function_signature: $ => seq(field('name', choice($.identifier, $.operator_sequence)), optional($.generic_parameters), $.parameters, optional(seq('->', optional($._type))), optional(seq('/', $.effect_row)), optional($.where_clause), ';'),
     parameters: $ => seq('(', commaSep($.parameter), ')'),
     parameter: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
@@ -171,7 +174,8 @@ module.exports = grammar({
       $.label_binder_expression,
       $.label_reference_expression,
     ),
-    path_expression: $ => prec(1, path($)),
+    path_expression: $ => prec(1, seq($._expression_path_segment, repeat(seq('::', $._expression_path_segment)))),
+    _expression_path_segment: $ => seq($.identifier, optional($.generic_arguments)),
     function_reference_expression: $ => prec(15, seq(
       '$',
       field('function', seq(

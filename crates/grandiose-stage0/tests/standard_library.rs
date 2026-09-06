@@ -1006,19 +1006,19 @@ fn nested_map_vector_views_preserve_the_explicit_owner_lifetime() {
         pub struct Row { values: Vec<i64> }
         pub struct Store { rows: HashMap<u32, Row> }
         pub fn item<'a>(store: &'a Store, key: u32) -> Option<&'a i64> {
-            handle HashMap::get<'a, u32, Row>(&store.rows, &key) {
+            handle HashMap<u32, Row>::get<'a>(&store.rows, &key) {
                 Result::Err(_) => None,
                 Result::Ok(row) => Vec::get(&row.values, 0),
             }
         }
         pub fn view<'a>(store: &'a Store, key: u32) -> Option<Slice<'a, i64>> {
-            handle HashMap::get<'a, u32, Row>(&store.rows, &key) {
+            handle HashMap<u32, Row>::get<'a>(&store.rows, &key) {
                 Result::Err(_) => None,
                 Result::Ok(row) => Result::Ok(Vec::as_slice(&row.values)),
             }
         }
         pub fn item_mut<'a>(store: &'a mut Store, key: u32) -> Option<&'a mut i64> {
-            handle HashMap::get_mut<'a, u32, Row>(&mut store.rows, &key) {
+            handle HashMap<u32, Row>::get_mut<'a>(&mut store.rows, &key) {
                 Result::Err(_) => None,
                 Result::Ok(row) => Vec::get_mut(&mut row.values, 0),
             }
@@ -1931,8 +1931,8 @@ fn bundled_vec_exposes_borrowed_element_access_through_library_functions() {
                 use std::*;
                 pub fn main() -> i64 {
                     let values = Vec::new();
-                    vec_push(&mut values, 40);
-                    *vec_get_unchecked(&values, 0) + 2
+                    Vec::push(&mut values, 40);
+                    *Vec::get_unchecked(&values, 0) + 2
                 }
             "#,
         ))
@@ -1947,8 +1947,8 @@ fn bundled_vec_uses_source_capacity_helper() {
         use std::*;
         pub fn main() -> usize {
             let values = Vec::with_capacity(4);
-            vec_push(&mut values, 17);
-            vec_capacity(&values)
+            Vec::push(&mut values, 17);
+            Vec::capacity(&values)
         }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -1962,7 +1962,7 @@ fn bundled_vec_exposes_an_ordinary_borrowed_slice_view() {
         use std::*;
         pub fn main() -> usize {
             let values = Vec::new();
-            vec_push(&mut values, 17);
+            Vec::push(&mut values, 17);
             let view = Vec::as_slice(&values);
             Slice::len(&view)
         }
@@ -1978,7 +1978,7 @@ fn bundled_slice_get_checks_its_window_and_preserves_the_borrow() {
         use std::*;
         pub fn main() -> i64 {
             let values = Vec::new();
-            vec_push(&mut values, 40);
+            Vec::push(&mut values, 40);
             let view = Vec::as_slice(&values);
             handle Slice::get(view, 0) {
                 Result::Ok(value) => *value + 2,
@@ -2087,7 +2087,7 @@ fn bundled_vec_get_is_checked() {
         use std::*;
         pub fn main() -> i64 {
             let values = Vec::new();
-            vec_push(&mut values, 40);
+            Vec::push(&mut values, 40);
             handle Vec::get(&values, 1) {
                 Result::Ok(value) => *value,
                 Result::Err(_) => 42,
@@ -2684,7 +2684,7 @@ fn blake3_returns_the_complete_digest_for_empty_text_and_binary_input() {
         fn check(value: &Vec<u8>, expected: Slice<u8>, index: usize) -> i64 {
             handle index < Slice::len(&expected) {
                 false => 42,
-                true => handle *vec_get_unchecked(value, index) == *slice_get_unchecked(expected, index) {
+                true => handle *Vec::get_unchecked(value, index) == *Slice::get_unchecked(expected, index) {
                     false => 0,
                     true => check(value, expected, index + 1),
                 },

@@ -16,6 +16,43 @@ fn collect(source: &str) -> InterfaceSet {
 }
 
 #[test]
+fn inherent_member_interfaces_exclude_bodies_and_private_members() {
+    let first = collect(
+        "pub struct Cell<T> { value: T } impl<T> Cell<T> { pub fn new(value: T) -> Self { first } fn helper() { a } }",
+    );
+    let body_changed = collect(
+        "pub struct Cell<T> { value: T } impl<T> Cell<T> { pub fn new(value: T) -> Self { different_body } fn renamed() { b } }",
+    );
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(
+        body_changed.diagnostics.is_empty(),
+        "{:#?}",
+        body_changed.diagnostics
+    );
+    let member = |interface: &InterfaceSet| {
+        interface
+            .interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some("Cell::new"))
+            .unwrap()
+            .key
+    };
+    assert_eq!(member(&first), member(&body_changed));
+    assert_eq!(
+        first.interface.public_fingerprint,
+        body_changed.interface.public_fingerprint
+    );
+    let bounds_changed = collect(
+        "pub struct Cell<T> { value: T } impl<T> Cell<T> where T: Allowed { pub fn new(value: T) -> Self { first } }",
+    );
+    assert_ne!(
+        first.interface.public_fingerprint,
+        bounds_changed.interface.public_fingerprint
+    );
+}
+
+#[test]
 fn named_definition_identity_and_public_interface_ignore_body_only_edits() {
     let first = collect("pub fn answer() -> i64 { 1 }");
     let second = collect("pub fn answer() -> i64 { 2 }");

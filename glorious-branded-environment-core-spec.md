@@ -180,6 +180,39 @@ effects, captures, and `RunsIn` evidence through the ordinary constraint
 system. Thus library functions may acquire block-taking syntax without a new
 grammar production or a compiler-known list of control-flow functions.
 
+### 2.3.1 Inherent function blocks
+
+An inherent block declares functions directly in a type's associated namespace:
+
+```glorious
+impl<T> Vec<T> {
+    pub fn push(value: &mut Self, item: T) -> () {
+        // source implementation
+    }
+}
+```
+
+The head names a type or type alias declared in the same package. Each member
+is one ordinary function definition, not a trait implementation or a generated
+function-and-alias pair. Block generics and `where` bounds are in scope for every
+member; members may add their own non-shadowing generic parameters and bounds.
+Type, const, and effect parameters on the block must be constrained by its self
+type. `Self` is the fully applied head, including within body annotations,
+constructors, patterns, and `Self::member` paths; it cannot be reapplied to new
+type arguments.
+
+`Vec<T>::member<U>` separates owner arguments from function arguments. Ordinary
+inference applies when arguments are omitted. A specialized head such as
+`impl Vec<i64>` constrains explicit owner applications even when a member takes
+no receiver. Multiple blocks may extend a type within its defining package,
+but duplicate member names are rejected across all blocks, without overloading
+by specialization. Visibility and safety are declared on functions, not on the
+block. Type imports and renames retain their associated members.
+
+These blocks currently contain functions only. Calls remain explicit, such as
+`Vec::push(&mut value, item)`; implicit receiver parameters and dot-call syntax
+are not introduced. Existing `impl Trait for Type` blocks retain trait semantics.
+
 ### 2.4 Labels
 
 A typed label destination is introduced with:

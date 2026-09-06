@@ -152,7 +152,6 @@ __g1_f64_to_i32_checked(value: f64) -> i32;
 __g1_f64_to_i128_checked(value: f64) -> i128;
 __g1_f64_to_isize_checked(value: f64) -> isize;
 
-
 pub enum Result<T, E> { Ok(T), Err(E) }
 
 // Option has Result's representation; it is the ordinary ownership-aware
@@ -170,24 +169,51 @@ pub enum Ordering { Less, Equal, Greater }
 pub struct Range<T> { start: T, end: T }
 pub enum SliceRangeError { Reversed, OutOfBounds }
 
-// Public ranges can be constructed with either endpoint.  Keep their query
-// operations total: a reversed range is empty rather than relying on a
-// wrapping `usize` subtraction.
-pub fn range_len(value: &Range<usize>) -> usize {
-    handle value.end < value.start {
-        true => 0,
-        false => value.end - value.start,
+impl Range<usize> {
+    // Public ranges can be constructed with either endpoint.  Keep their query
+    // operations total: a reversed range is empty rather than relying on a
+    // wrapping `usize` subtraction.
+    pub fn len(value: &Self) -> usize {
+        handle value.end < value.start {
+            true => 0,
+            false => value.end - value.start,
+        }
+    }
+
+    pub fn is_empty(value: &Self) -> Bool {
+        handle value.end > value.start { true => false, false => true }
+    }
+
+    pub fn contains(value: &Self, index: usize) -> Bool {
+        handle index < value.start {
+            true => false,
+            false => handle index < value.end { true => true, false => false },
+        }
+    }
+
+    pub fn intersection(left: &Self, right: &Self) -> Option<Self> {
+        handle left.start > right.start {
+            true => range_intersection_with_start(left.start, left.end, right.end),
+            false => range_intersection_with_start(right.start, left.end, right.end),
+        }
+    }
+
+    // Offset both endpoints without ever forming an overflowing ordinary sum.
+    // The wrapping operation is a private-machine-policy wrapper; the comparison
+    // turns its overflow signal back into the public checked `Option` result.
+    pub fn checked_offset(value: &Self, offset: usize) -> Option<Self> {
+        let start = wrapping_add(value.start, offset);
+        let end = wrapping_add(value.end, offset);
+        handle start < value.start {
+            true => None,
+            false => handle end < value.end {
+                true => None,
+                false => Result::Ok(Range { start: start, end: end }),
+            },
+        }
     }
 }
-pub fn range_is_empty(value: &Range<usize>) -> Bool {
-    handle value.end > value.start { true => false, false => true }
-}
-pub fn range_contains(value: &Range<usize>, index: usize) -> Bool {
-    handle index < value.start {
-        true => false,
-        false => handle index < value.end { true => true, false => false },
-    }
-}
+
 fn range_intersection_finish(start: usize, end: usize) -> Option<Range<usize>> {
     handle start < end {
         true => Result::Ok(Range { start: start, end: end }),
@@ -200,31 +226,6 @@ fn range_intersection_with_start(start: usize, left_end: usize, right_end: usize
         false => range_intersection_finish(start, right_end),
     }
 }
-pub fn range_intersection(left: &Range<usize>, right: &Range<usize>) -> Option<Range<usize>> {
-    handle left.start > right.start {
-        true => range_intersection_with_start(left.start, left.end, right.end),
-        false => range_intersection_with_start(right.start, left.end, right.end),
-    }
-}
-// Offset both endpoints without ever forming an overflowing ordinary sum.
-// The wrapping operation is a private-machine-policy wrapper; the comparison
-// turns its overflow signal back into the public checked `Option` result.
-pub fn range_checked_offset(value: &Range<usize>, offset: usize) -> Option<Range<usize>> {
-    let start = wrapping_add(value.start, offset);
-    let end = wrapping_add(value.end, offset);
-    handle start < value.start {
-        true => None,
-        false => handle end < value.end {
-            true => None,
-            false => Result::Ok(Range { start: start, end: end }),
-        },
-    }
-}
-pub let Range::len = range_len;
-pub let Range::is_empty = range_is_empty;
-pub let Range::contains = range_contains;
-pub let Range::intersection = range_intersection;
-pub let Range::checked_offset = range_checked_offset;
 
 // Two-word source views. The zero-sized checked referent carries the owner
 // loan and the actual data address; the length bounds the initialized window.
@@ -248,153 +249,206 @@ pub struct SliceIter<'a, T> {
     private position: usize,
 }
 
-
 // The UTF-8 invariant belongs to `Str`, not to the general byte slice. Its
 // sole field is private, so only standard-library constructors can establish
 // a `Str` value.
 pub struct Str<'a> { private bytes: Slice<'a, u8> }
 
-pub fn slice_len<'a, T>(value: &Slice<'a, T>) -> usize { value.length }
-pub fn slice_is_empty<'a, T>(value: &Slice<'a, T>) -> Bool {
-    handle value.length { 0 => true, _ => false }
-}
-pub fn slice_mut_len<'a, T>(value: &SliceMut<'a, T>) -> usize { value.length }
-pub fn slice_mut_is_empty<'a, T>(value: &SliceMut<'a, T>) -> Bool {
-    handle value.length { 0 => true, _ => false }
-}
-pub fn slice_get_unchecked<'a, T>(value: Slice<'a, T>, index: usize) -> &'a T {
-    // Historical spelling is retained, but this is a SAFE export: invalid
-    // indexes abort before pointer arithmetic or reference construction.
-    handle index < value.length {
-        false => __g1_abort(),
-        true => unsafe {
-            __g1_memory_borrow_shared(__g1_memory_offset_const(
-                __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage)), index,
-            ))
-        },
+impl<'a, T> Slice<'a, T> {
+    pub fn len(value: &Self) -> usize { value.length }
+
+    pub fn is_empty(value: &Self) -> Bool {
+        handle value.length { 0 => true, _ => false }
+    }
+
+    pub fn get_unchecked(value: Self, index: usize) -> &'a T {
+        // Historical spelling is retained, but this is a SAFE export: invalid
+        // indexes abort before pointer arithmetic or reference construction.
+        handle index < value.length {
+            false => __g1_abort(),
+            true => unsafe {
+                __g1_memory_borrow_shared(__g1_memory_offset_const(
+                    __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage)), index,
+                ))
+            },
+        }
+    }
+
+    pub fn get(value: Self, index: usize) -> Option<&'a T> {
+        handle index < value.length {
+            true => Result::Ok(Slice::get_unchecked(value, index)),
+            false => Result::Err(()),
+        }
     }
 }
-pub fn slice_get<'a, T>(value: Slice<'a, T>, index: usize) -> Option<&'a T> {
-    handle index < value.length {
-        true => Result::Ok(slice_get_unchecked(value, index)),
-        false => Result::Err(()),
+
+impl<'a, T> SliceMut<'a, T> {
+    pub fn len(value: &Self) -> usize { value.length }
+
+    pub fn is_empty(value: &Self) -> Bool {
+        handle value.length { 0 => true, _ => false }
     }
 }
-pub fn slice_mut_get_unchecked<T>(value: SliceMut<'_, T>, index: usize) -> &mut T {
-    handle index < value.length {
-        false => __g1_abort(),
-        true => unsafe {
-            __g1_memory_borrow_unique(__g1_memory_offset(
-                __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage)), index,
-            ))
-        },
+
+impl<T> SliceMut<'_, T> {
+    pub fn get_unchecked(value: Self, index: usize) -> &mut T {
+        handle index < value.length {
+            false => __g1_abort(),
+            true => unsafe {
+                __g1_memory_borrow_unique(__g1_memory_offset(
+                    __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage)), index,
+                ))
+            },
+        }
     }
-}
-pub fn slice_mut_get<T>(value: SliceMut<'_, T>, index: usize) -> Option<&mut T> {
-    handle index < value.length {
-        true => Result::Ok(slice_mut_get_unchecked(value, index)),
-        false => Result::Err(()),
+
+    pub fn get(value: Self, index: usize) -> Option<&mut T> {
+        handle index < value.length {
+            true => Result::Ok(SliceMut::get_unchecked(value, index)),
+            false => Result::Err(()),
+        }
     }
-}
-// Unique subviews consume their parent and retain only the checked window.
-pub fn slice_mut_slice<T>(value: SliceMut<'_, T>, range: Range<usize>) -> Result<SliceMut<'_, T>, SliceRangeError> {
-    handle range.start > range.end {
-        true => Result::Err(SliceRangeError::Reversed),
-        false => handle range.end > value.length {
+
+    // Unique subviews consume their parent and retain only the checked window.
+    pub fn slice(value: Self, range: Range<usize>) -> Result<Self, SliceRangeError> {
+        handle range.start > range.end {
+            true => Result::Err(SliceRangeError::Reversed),
+            false => handle range.end > value.length {
+                true => Result::Err(SliceRangeError::OutOfBounds),
+                false => unsafe {
+                    let pointer = __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage));
+                    Result::Ok(SliceMut {
+                        storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(
+                            __g1_memory_offset(pointer, range.start),
+                        )),
+                        length: range.end - range.start,
+                    })
+                },
+            },
+        }
+    }
+
+    pub fn split_at(value: Self, index: usize) -> Result<(Self, Self), SliceRangeError> {
+        handle index > value.length {
             true => Result::Err(SliceRangeError::OutOfBounds),
             false => unsafe {
                 let pointer = __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage));
-                Result::Ok(SliceMut {
-                    storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(
-                        __g1_memory_offset(pointer, range.start),
-                    )),
-                    length: range.end - range.start,
-                })
+                Result::Ok((
+                    SliceMut {
+                        storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(pointer)),
+                        length: index,
+                    },
+                    SliceMut {
+                        storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(__g1_memory_offset(pointer, index))),
+                        length: value.length - index,
+                    },
+                ))
             },
-        },
+        }
+    }
+
+    // Iterating a mutable window as shared references consumes the unique view.
+    // This is an ordinary reborrow into the existing lending iterator: no element
+    // is copied, and the caller cannot mutate through the original SliceMut while
+    // any yielded reference may still be live.
+    pub fn iter(value: Self) -> SliceIter<'_, T> {
+        SliceIter {
+            slice: Slice {
+                // Spell out the shared reborrow.  A `SliceMut` owns its unique
+                // view, and the iterator takes a shared view of precisely that
+                // backing storage for the duration of the iterator lifetime.
+                storage: &(*value.storage),
+                length: value.length,
+            },
+            position: 0,
+        }
     }
 }
-pub fn slice_mut_split_at<T>(value: SliceMut<'_, T>, index: usize) -> Result<(SliceMut<'_, T>, SliceMut<'_, T>), SliceRangeError> {
-    handle index > value.length {
-        true => Result::Err(SliceRangeError::OutOfBounds),
-        false => unsafe {
-            let pointer = __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage));
-            Result::Ok((
-                SliceMut {
-                    storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(pointer)),
-                    length: index,
+
+impl<T> Slice<'_, T> {
+    pub fn slice(value: Self, range: Range<usize>) -> Result<Self, SliceRangeError> {
+        handle range.start > range.end {
+            true => Result::Err(SliceRangeError::Reversed),
+            false => handle range.end > value.length {
+                true => Result::Err(SliceRangeError::OutOfBounds),
+                false => unsafe {
+                    let pointer = __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage));
+                    Result::Ok(Slice {
+                        storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(
+                            __g1_memory_offset_const(pointer, range.start),
+                        )),
+                        length: range.end - range.start,
+                    })
                 },
-                SliceMut {
-                    storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(__g1_memory_offset(pointer, index))),
-                    length: value.length - index,
-                },
-            ))
-        },
+            },
+        }
     }
-}
-pub fn slice_slice<T>(value: Slice<'_, T>, range: Range<usize>) -> Result<Slice<'_, T>, SliceRangeError> {
-    handle range.start > range.end {
-        true => Result::Err(SliceRangeError::Reversed),
-        false => handle range.end > value.length {
+
+    pub fn split_at(value: Self, index: usize) -> Result<(Self, Self), SliceRangeError> {
+        handle index > value.length {
             true => Result::Err(SliceRangeError::OutOfBounds),
             false => unsafe {
                 let pointer = __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage));
-                Result::Ok(Slice {
-                    storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(
-                        __g1_memory_offset_const(pointer, range.start),
-                    )),
-                    length: range.end - range.start,
-                })
+                Result::Ok((
+                    Slice { storage: value.storage, length: index },
+                    Slice {
+                        storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(
+                            __g1_memory_offset_const(pointer, index),
+                        )),
+                        length: value.length - index,
+                    },
+                ))
             },
-        },
+        }
+    }
+
+    pub fn iter(value: Self) -> SliceIter<'_, T> {
+        SliceIter { slice: value, position: 0 }
+    }
+
+    pub fn lower_bound(value: Slice<T>, needle: &T) -> usize
+        where T: Ord {
+        slice_lower_bound_from(value, needle, 0, value.length)
+    }
+
+    pub fn upper_bound(value: Slice<T>, needle: &T) -> usize
+        where T: Ord {
+        slice_upper_bound_from(value, needle, 0, value.length)
+    }
+
+    pub fn binary_search(value: Slice<T>, needle: &T) -> Result<usize, usize>
+        where T: Ord {
+        let index = Slice::lower_bound(value, needle);
+        handle index < value.length {
+            false => Result::Err(index),
+            true => handle Ord::compare(
+                Slice::get_unchecked(value, index),
+                needle,
+            ) {
+                Ordering::Equal => Result::Ok(index),
+                _ => Result::Err(index),
+            },
+        }
+    }
+
+    pub fn lex_compare(left: Slice<T>, right: Slice<T>) -> Ordering
+        where T: Ord {
+        slice_lex_compare_from(left, right, 0)
     }
 }
-pub fn slice_split_at<T>(value: Slice<'_, T>, index: usize) -> Result<(Slice<'_, T>, Slice<'_, T>), SliceRangeError> {
-    handle index > value.length {
-        true => Result::Err(SliceRangeError::OutOfBounds),
-        false => unsafe {
-            let pointer = __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage));
-            Result::Ok((
-                Slice { storage: value.storage, length: index },
-                Slice {
-                    storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(
-                        __g1_memory_offset_const(pointer, index),
-                    )),
-                    length: value.length - index,
-                },
-            ))
-        },
-    }
-}
-pub fn slice_iter<T>(value: Slice<'_, T>) -> SliceIter<'_, T> {
-    SliceIter { slice: value, position: 0 }
-}
-// Iterating a mutable window as shared references consumes the unique view.
-// This is an ordinary reborrow into the existing lending iterator: no element
-// is copied, and the caller cannot mutate through the original SliceMut while
-// any yielded reference may still be live.
-pub fn slice_mut_iter<T>(value: SliceMut<'_, T>) -> SliceIter<'_, T> {
-    SliceIter {
-        slice: Slice {
-            // Spell out the shared reborrow.  A `SliceMut` owns its unique
-            // view, and the iterator takes a shared view of precisely that
-            // backing storage for the duration of the iterator lifetime.
-            storage: &(*value.storage),
-            length: value.length,
-        },
-        position: 0,
-    }
-}
-pub fn slice_iter_next<T>(value: &mut SliceIter<'_, T>) -> Option<&T> {
-    handle value.position < value.slice.length {
-        false => Result::Err(()),
-        true => {
-            let index = value.position;
-            (*value).position = index + 1;
-            Result::Ok(slice_get_unchecked(Slice {
-                storage: value.slice.storage, length: value.slice.length,
-            }, index))
-        },
+
+impl<T> SliceIter<'_, T> {
+    pub fn next(value: &mut Self) -> Option<&T> {
+        handle value.position < value.slice.length {
+            false => Result::Err(()),
+            true => {
+                let index = value.position;
+                (*value).position = index + 1;
+                Result::Ok(Slice::get_unchecked(Slice {
+                    storage: value.slice.storage, length: value.slice.length,
+                }, index))
+            },
+        }
     }
 }
 fn slice_lower_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usize) -> usize
@@ -403,7 +457,7 @@ fn slice_lower_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         false => start,
         true => {
             let middle = start + ((end - start) / 2);
-            let item = slice_get_unchecked(value, middle);
+            let item = Slice::get_unchecked(value, middle);
             handle Ord::compare(item, needle) {
                 Ordering::Less => slice_lower_bound_from(value, needle, middle + 1, end),
                 _ => slice_lower_bound_from(value, needle, start, middle),
@@ -411,17 +465,14 @@ fn slice_lower_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         },
     }
 }
-pub fn slice_lower_bound<T>(value: Slice<T>, needle: &T) -> usize
-    where T: Ord {
-    slice_lower_bound_from(value, needle, 0, value.length)
-}
+
 fn slice_upper_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usize) -> usize
     where T: Ord {
     handle start < end {
         false => start,
         true => {
             let middle = start + ((end - start) / 2);
-            let item = slice_get_unchecked(value, middle);
+            let item = Slice::get_unchecked(value, middle);
             handle Ord::compare(item, needle) {
                 Ordering::Greater => slice_upper_bound_from(value, needle, start, middle),
                 _ => slice_upper_bound_from(value, needle, middle + 1, end),
@@ -429,24 +480,7 @@ fn slice_upper_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         },
     }
 }
-pub fn slice_upper_bound<T>(value: Slice<T>, needle: &T) -> usize
-    where T: Ord {
-    slice_upper_bound_from(value, needle, 0, value.length)
-}
-pub fn slice_binary_search<T>(value: Slice<T>, needle: &T) -> Result<usize, usize>
-    where T: Ord {
-    let index = slice_lower_bound(value, needle);
-    handle index < value.length {
-        false => Result::Err(index),
-        true => handle Ord::compare(
-            slice_get_unchecked(value, index),
-            needle,
-        ) {
-            Ordering::Equal => Result::Ok(index),
-            _ => Result::Err(index),
-        },
-    }
-}
+
 fn slice_lex_compare_from<T>(left: Slice<T>, right: Slice<T>, index: usize) -> Ordering
     where T: Ord {
     handle index >= left.length {
@@ -457,8 +491,8 @@ fn slice_lex_compare_from<T>(left: Slice<T>, right: Slice<T>, index: usize) -> O
         false => handle index >= right.length {
             true => Ordering::Greater,
             false => handle Ord::compare(
-                slice_get_unchecked(left, index),
-                slice_get_unchecked(right, index),
+                Slice::get_unchecked(left, index),
+                Slice::get_unchecked(right, index),
             ) {
                 Ordering::Equal => slice_lex_compare_from(left, right, index + 1),
                 value => value,
@@ -466,30 +500,6 @@ fn slice_lex_compare_from<T>(left: Slice<T>, right: Slice<T>, index: usize) -> O
         },
     }
 }
-pub fn slice_lex_compare<T>(left: Slice<T>, right: Slice<T>) -> Ordering
-    where T: Ord {
-    slice_lex_compare_from(left, right, 0)
-}
-
-pub let Slice::len = slice_len;
-pub let Slice::is_empty = slice_is_empty;
-pub let Slice::get = slice_get;
-pub let Slice::get_unchecked = slice_get_unchecked;
-pub let Slice::slice = slice_slice;
-pub let Slice::split_at = slice_split_at;
-pub let Slice::iter = slice_iter;
-pub let SliceMut::len = slice_mut_len;
-pub let SliceMut::is_empty = slice_mut_is_empty;
-pub let SliceMut::get = slice_mut_get;
-pub let SliceMut::get_unchecked = slice_mut_get_unchecked;
-pub let SliceMut::slice = slice_mut_slice;
-pub let SliceMut::split_at = slice_mut_split_at;
-pub let SliceMut::iter = slice_mut_iter;
-pub let SliceIter::next = slice_iter_next;
-pub let Slice::lower_bound = slice_lower_bound;
-pub let Slice::upper_bound = slice_upper_bound;
-pub let Slice::binary_search = slice_binary_search;
-pub let Slice::lex_compare = slice_lex_compare;
 
 // Literal elaboration calls this ordinary standard-library wrapper after the
 // compiler has emitted a sealed UTF-8 static-data handle. It is public only
@@ -537,7 +547,7 @@ fn utf8_decode_tail(value: Slice<u8>, index: usize, remaining: usize, code: u32,
             },
         },
         _ => {
-            let byte = as<u32>(*slice_get_unchecked(value, index));
+            let byte = as<u32>(*Slice::get_unchecked(value, index));
             handle byte >= 128 {
                 false => None,
                 true => handle byte < 192 {
@@ -558,7 +568,7 @@ fn utf8_decode(value: Slice<u8>, index: usize) -> Option<(char, usize)> {
     handle index < value.length {
         false => None,
         true => {
-            let first = as<u32>(*slice_get_unchecked(value, index));
+            let first = as<u32>(*Slice::get_unchecked(value, index));
             handle first < 128 {
                 true => Result::Ok((__g1_char_from_u32_checked(first), 1)),
                 false => handle first < 194 {
@@ -588,102 +598,113 @@ fn utf8_valid_up_to(value: Slice<u8>, index: usize) -> usize {
     }
 }
 
-pub fn str_len(value: Str) -> usize { value.bytes.length }
-pub fn str_is_empty(value: Str) -> Bool {
-    handle str_len(value) { 0 => true, _ => false }
-}
-// A UTF-8 continuation byte is never a character boundary. Index zero and
-// the exclusive end are boundaries by construction; an out-of-range offset
-// is not a boundary and is rejected by `str_slice` before its result escapes.
-pub fn str_is_char_boundary(value: Str, index: usize) -> Bool {
-    handle index > str_len(value) {
-        true => false,
-        false => handle index {
-            0 => true,
-            _ => handle index == str_len(value) {
-                true => true,
-                false => handle slice_get(value.bytes, index) {
-                    Result::Ok(byte) => handle *byte < 128 {
-                        true => true,
-                        false => handle *byte >= 192 {
+impl Str {
+    pub fn len(value: Self) -> usize { value.bytes.length }
+
+    pub fn is_empty(value: Self) -> Bool {
+        handle Str::len(value) { 0 => true, _ => false }
+    }
+
+    // A UTF-8 continuation byte is never a character boundary. Index zero and
+    // the exclusive end are boundaries by construction; an out-of-range offset
+    // is not a boundary and is rejected by `Str::slice` before its result escapes.
+    pub fn is_char_boundary(value: Self, index: usize) -> Bool {
+        handle index > Str::len(value) {
+            true => false,
+            false => handle index {
+                0 => true,
+                _ => handle index == Str::len(value) {
+                    true => true,
+                    false => handle Slice::get(value.bytes, index) {
+                        Result::Ok(byte) => handle *byte < 128 {
                             true => true,
-                            false => false,
+                            false => handle *byte >= 192 {
+                                true => true,
+                                false => false,
+                            },
+                        },
+                        Result::Err(_) => false,
+                    },
+                },
+            },
+        }
+    }
+
+    pub fn slice(value: Self, range: Range<usize>) -> Result<Self, StringRangeError> {
+        handle range.start > range.end {
+            true => Result::Err(StringRangeError::Reversed),
+            false => handle range.end > Str::len(value) {
+                true => Result::Err(StringRangeError::OutOfBounds),
+                false => handle Str::is_char_boundary(value, range.start) {
+                    false => Result::Err(StringRangeError::NotCharBoundary),
+                    true => handle Str::is_char_boundary(value, range.end) {
+                        false => Result::Err(StringRangeError::NotCharBoundary),
+                        true => handle Slice::slice(value.bytes, range) {
+                            Result::Ok(bytes) => Result::Ok(Str { bytes: bytes }),
+                            Result::Err(_) => __g1_abort(),
                         },
                     },
-                    Result::Err(_) => false,
                 },
             },
-        },
+        }
     }
-}
-pub fn str_slice(value: Str, range: Range<usize>) -> Result<Str, StringRangeError> {
-    handle range.start > range.end {
-        true => Result::Err(StringRangeError::Reversed),
-        false => handle range.end > str_len(value) {
-            true => Result::Err(StringRangeError::OutOfBounds),
-            false => handle str_is_char_boundary(value, range.start) {
-                false => Result::Err(StringRangeError::NotCharBoundary),
-                true => handle str_is_char_boundary(value, range.end) {
-                    false => Result::Err(StringRangeError::NotCharBoundary),
-                    true => handle slice_slice(value.bytes, range) {
-                        Result::Ok(bytes) => Result::Ok(Str { bytes: bytes }),
-                        Result::Err(_) => __g1_abort(),
-                    },
-                },
-            },
-        },
-    }
-}
-pub fn str_subslice(value: Str, start: usize, length: usize) -> Result<Str, StringRangeError> {
-    // Check before forming `start + length`: otherwise a caller-supplied
-    // oversized offset could overflow before the ordinary range validation
-    // has a chance to return OutOfBounds.
-    handle start > str_len(value) {
-        true => Result::Err(StringRangeError::OutOfBounds),
-        false => handle length > str_len(value) - start {
-            true => Result::Err(StringRangeError::OutOfBounds),
-            false => str_slice(value, Range { start: start, end: start + length }),
-        },
-    }
-}
-pub fn str_as_bytes<'a>(value: Str<'a>) -> Slice<'a, u8> {
-    value.bytes
-}
-// Byte-indexed scalar access for stepped UTF-8 consumers. The scalar is
-// owned: no borrowed substring or iterator escapes through the result.
-pub fn str_char_at(value: Str, index: usize) -> Result<char, StringRangeError> {
-    handle index >= str_len(value) {
-        true => Result::Err(StringRangeError::OutOfBounds),
-        false => handle str_is_char_boundary(value, index) {
-            false => Result::Err(StringRangeError::NotCharBoundary),
-            true => handle utf8_decode(value.bytes, index) {
-                Result::Err(_) => Result::Err(StringRangeError::OutOfBounds),
-                Result::Ok((character, _)) => Result::Ok(character),
-            },
-        },
-    }
-}
-pub fn str_chars(value: Str) -> Chars { Chars { text: value, position: 0 } }
-pub fn chars_next(value: &mut Chars) -> Option<char> {
-    handle utf8_decode(value.text.bytes, value.position) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok((character, width)) => {
-            (*value).position = (*value).position + width;
-            Result::Ok(character)
-        },
-    }
-}
-pub let Str::len = str_len;
-pub let Str::len_bytes = str_len;
-pub let Str::is_empty = str_is_empty;
-pub let Str::is_char_boundary = str_is_char_boundary;
-pub let Str::slice = str_slice;
-pub let Str::subslice = str_subslice;
-pub let Str::as_bytes = str_as_bytes;
-pub let Str::chars = str_chars;
-pub let Str::char_at = str_char_at;
-pub let Chars::next = chars_next;
 
+    pub fn subslice(value: Self, start: usize, length: usize) -> Result<Self, StringRangeError> {
+        // Check before forming `start + length`: otherwise a caller-supplied
+        // oversized offset could overflow before the ordinary range validation
+        // has a chance to return OutOfBounds.
+        handle start > Str::len(value) {
+            true => Result::Err(StringRangeError::OutOfBounds),
+            false => handle length > Str::len(value) - start {
+                true => Result::Err(StringRangeError::OutOfBounds),
+                false => Str::slice(value, Range { start: start, end: start + length }),
+            },
+        }
+    }
+
+    // Byte-indexed scalar access for stepped UTF-8 consumers. The scalar is
+    // owned: no borrowed substring or iterator escapes through the result.
+    pub fn char_at(value: Self, index: usize) -> Result<char, StringRangeError> {
+        handle index >= Str::len(value) {
+            true => Result::Err(StringRangeError::OutOfBounds),
+            false => handle Str::is_char_boundary(value, index) {
+                false => Result::Err(StringRangeError::NotCharBoundary),
+                true => handle utf8_decode(value.bytes, index) {
+                    Result::Err(_) => Result::Err(StringRangeError::OutOfBounds),
+                    Result::Ok((character, _)) => Result::Ok(character),
+                },
+            },
+        }
+    }
+
+    pub fn chars(value: Self) -> Chars { Chars { text: value, position: 0 } }
+
+    pub fn to_string(source: Self) -> String {
+        let value = String::new();
+        String::push_str(&mut value, source);
+        value
+    }
+}
+
+impl<'a> Str<'a> {
+    pub fn as_bytes(value: Self) -> Slice<'a, u8> {
+        value.bytes
+    }
+}
+
+impl Chars {
+    pub fn next(value: &mut Self) -> Option<char> {
+        handle utf8_decode(value.text.bytes, value.position) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok((character, width)) => {
+                (*value).position = (*value).position + width;
+                Result::Ok(character)
+            },
+        }
+    }
+}
+// An intentional API synonym, not a separate implementation name.
+pub let Str::len_bytes = Str::len;
 
 // The allocation, initialized prefix and capacity policy are all source-owned.
 // Pointer copies do not copy ownership. The two zero-sized markers make an
@@ -706,14 +727,14 @@ pub fn blake3(input: Slice<u8>) -> Vec<u8> {
     let input_array = __g1_array_empty<u8>();
     blake3_copy_input(&mut input_array, input, 0);
     let digest = __g1_bytes_to_array(__g1_blake3(__g1_bytes_from_array_move(input_array)));
-    let output = vec_with_capacity<u8>(32);
+    let output = Vec<u8>::with_capacity(32);
     blake3_copy_output(&mut output, &digest, 0);
     output
 }
 fn blake3_copy_input(value: &mut Array<u8>, input: Slice<u8>, index: usize) -> () {
     handle index < input.length {
         false => (),
-        true => { __g1_array_push_move(&mut *value, *slice_get_unchecked(input, index)); blake3_copy_input(&mut *value, input, index + 1) },
+        true => { __g1_array_push_move(&mut *value, *Slice::get_unchecked(input, index)); blake3_copy_input(&mut *value, input, index + 1) },
     }
 }
 fn blake3_copy_output(value: &mut Vec<u8>, digest: &Array<u8>, index: usize) -> () {
@@ -721,7 +742,7 @@ fn blake3_copy_output(value: &mut Vec<u8>, digest: &Array<u8>, index: usize) -> 
     // consumes that exact contract, not a dynamic collection-length query.
     handle index < 32 {
         false => (),
-        true => { vec_push(&mut *value, *__g1_array_get_borrow_shared(digest, index)); blake3_copy_output(&mut *value, digest, index + 1) },
+        true => { Vec::push(&mut *value, *__g1_array_get_borrow_shared(digest, index)); blake3_copy_output(&mut *value, digest, index + 1) },
     }
 }
 
@@ -730,360 +751,497 @@ fn blake3_copy_output(value: &mut Vec<u8>, digest: &Array<u8>, index: usize) -> 
 pub struct ByteBuf { private bytes: Vec<u8>, private limit: usize }
 pub enum ByteError { Limit, Truncated }
 
-pub fn byte_buf_new(limit: usize) -> ByteBuf {
-    ByteBuf { bytes: vec_new(), limit: limit }
-}
-pub fn byte_buf_len(buffer: &ByteBuf) -> usize { vec_len(&buffer.bytes) }
-pub fn byte_buf_view(buffer: &ByteBuf) -> Slice<u8> { vec_as_slice(&buffer.bytes) }
-pub fn byte_buf_finish(buffer: ByteBuf) -> Vec<u8> { move buffer.bytes }
-pub fn byte_buf_push(buffer: &mut ByteBuf, value: u8) -> Result<(), ByteError> {
-    handle vec_len(&buffer.bytes) < buffer.limit {
-        true => { vec_push(&mut buffer.bytes, value); Result::Ok(()) },
-        false => Result::Err(ByteError::Limit),
+impl ByteBuf {
+    pub fn new(limit: usize) -> Self {
+        ByteBuf { bytes: Vec::new(), limit: limit }
+    }
+
+    pub fn len(buffer: &Self) -> usize { Vec::len(&buffer.bytes) }
+
+    pub fn view(buffer: &Self) -> Slice<u8> { Vec::as_slice(&buffer.bytes) }
+
+    pub fn finish(buffer: Self) -> Vec<u8> { move buffer.bytes }
+
+    pub fn push(buffer: &mut Self, value: u8) -> Result<(), ByteError> {
+        handle Vec::len(&buffer.bytes) < buffer.limit {
+            true => { Vec::push(&mut buffer.bytes, value); Result::Ok(()) },
+            false => Result::Err(ByteError::Limit),
+        }
+    }
+
+    pub fn put_u64(buffer: &mut Self, word: u64) -> Result<(), ByteError> {
+        handle byte_buf_has_room(& *buffer, 8) {
+            true => { byte_buf_push_word(&mut buffer.bytes, word); Result::Ok(()) },
+            false => Result::Err(ByteError::Limit),
+        }
+    }
+
+    pub fn append(buffer: &mut Self, bytes: Slice<u8>) -> Result<(), ByteError> {
+        handle byte_buf_has_room(& *buffer, Slice::len(&bytes)) {
+            true => { Vec::extend_from_slice(&mut buffer.bytes, bytes); Result::Ok(()) },
+            false => Result::Err(ByteError::Limit),
+        }
+    }
+
+    pub fn patch(buffer: &mut Self, offset: usize, value: u8) -> Result<(), ByteError> {
+        handle Vec::get_mut(&mut buffer.bytes, offset) {
+            Result::Ok(byte) => { *byte = value; Result::Ok(()) },
+            Result::Err(_) => Result::Err(ByteError::Truncated),
+        }
     }
 }
+
 fn byte_buf_has_room(buffer: &ByteBuf, width: usize) -> Bool {
-    let length = vec_len(&buffer.bytes);
+    let length = Vec::len(&buffer.bytes);
     handle length <= buffer.limit {
         false => false,
         true => width <= buffer.limit - length,
     }
 }
 fn byte_buf_push_word(bytes: &mut Vec<u8>, word: u64) -> () {
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(word));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 8)));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 16)));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 24)));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 32)));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 40)));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 48)));
-    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 56)))
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(word));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 8)));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 16)));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 24)));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 32)));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 40)));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 48)));
+    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 56)))
 }
-pub fn byte_buf_put_u64(buffer: &mut ByteBuf, word: u64) -> Result<(), ByteError> {
-    handle byte_buf_has_room(& *buffer, 8) {
-        true => { byte_buf_push_word(&mut buffer.bytes, word); Result::Ok(()) },
-        false => Result::Err(ByteError::Limit),
-    }
-}
-pub fn byte_buf_append(buffer: &mut ByteBuf, bytes: Slice<u8>) -> Result<(), ByteError> {
-    handle byte_buf_has_room(& *buffer, slice_len(&bytes)) {
-        true => { vec_extend_from_slice(&mut buffer.bytes, bytes); Result::Ok(()) },
-        false => Result::Err(ByteError::Limit),
-    }
-}
-pub fn byte_buf_patch(buffer: &mut ByteBuf, offset: usize, value: u8) -> Result<(), ByteError> {
-    handle vec_get_mut(&mut buffer.bytes, offset) {
-        Result::Ok(byte) => { *byte = value; Result::Ok(()) },
-        Result::Err(_) => Result::Err(ByteError::Truncated),
-    }
-}
-pub let ByteBuf::new = byte_buf_new;
-pub let ByteBuf::len = byte_buf_len;
-pub let ByteBuf::view = byte_buf_view;
-pub let ByteBuf::finish = byte_buf_finish;
-pub let ByteBuf::push = byte_buf_push;
-pub let ByteBuf::put_u64 = byte_buf_put_u64;
-pub let ByteBuf::append = byte_buf_append;
-pub let ByteBuf::patch = byte_buf_patch;
 
 // A cursor owns positions, not a borrowed view. Callers lend the immutable
 // input for each operation, so a suspended work frame need not retain a loan.
 pub struct ByteCursor { private position: usize }
-pub fn byte_cursor_new() -> ByteCursor {
-    ByteCursor { position: 0 }
+impl ByteCursor {
+    pub fn new() -> Self {
+        ByteCursor { position: 0 }
+    }
+
+    pub fn position(cursor: &Self) -> usize { cursor.position }
+
+    pub fn u8(cursor: &mut Self, bytes: Slice<u8>) -> Result<u8, ByteError> {
+        handle byte_cursor_has(& *cursor, bytes, 1) {
+            false => Result::Err(ByteError::Truncated),
+            true => {
+                let value = *Slice::get_unchecked(bytes, cursor.position);
+                (*cursor).position = cursor.position + 1;
+                Result::Ok(value)
+            },
+        }
+    }
+
+    pub fn u64(cursor: &mut Self, bytes: Slice<u8>) -> Result<u64, ByteError> {
+        handle byte_cursor_has(& *cursor, bytes, 8) {
+            false => Result::Err(ByteError::Truncated),
+            true => {
+                let value = byte_cursor_word(bytes, cursor.position);
+                (*cursor).position = cursor.position + 8;
+                Result::Ok(value)
+            },
+        }
+    }
 }
-pub fn byte_cursor_position(cursor: &ByteCursor) -> usize { cursor.position }
+
 fn byte_cursor_has(cursor: &ByteCursor, bytes: Slice<u8>, width: usize) -> Bool {
-    let length = slice_len(&bytes);
+    let length = Slice::len(&bytes);
     handle cursor.position <= length {
         false => false,
         true => width <= length - cursor.position,
     }
 }
-pub fn byte_cursor_u8(cursor: &mut ByteCursor, bytes: Slice<u8>) -> Result<u8, ByteError> {
-    handle byte_cursor_has(& *cursor, bytes, 1) {
-        false => Result::Err(ByteError::Truncated),
-        true => {
-            let value = *slice_get_unchecked(bytes, cursor.position);
-            (*cursor).position = cursor.position + 1;
-            Result::Ok(value)
-        },
-    }
-}
+
 fn byte_cursor_word(bytes: Slice<u8>, offset: usize) -> u64 {
-    let b0 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset));
-    let b1 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 1));
-    let b2 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 2));
-    let b3 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 3));
-    let b4 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 4));
-    let b5 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 5));
-    let b6 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 6));
-    let b7 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 7));
+    let b0 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset));
+    let b1 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 1));
+    let b2 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 2));
+    let b3 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 3));
+    let b4 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 4));
+    let b5 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 5));
+    let b6 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 6));
+    let b7 = __g1_int_convert_checked_to_u64(*Slice::get_unchecked(bytes, offset + 7));
     let low = bit_or(bit_or(b0, bit_shl(b1, 8)), bit_or(bit_shl(b2, 16), bit_shl(b3, 24)));
     let high = bit_or(bit_or(bit_shl(b4, 32), bit_shl(b5, 40)), bit_or(bit_shl(b6, 48), bit_shl(b7, 56)));
     bit_or(low, high)
 }
-pub fn byte_cursor_u64(cursor: &mut ByteCursor, bytes: Slice<u8>) -> Result<u64, ByteError> {
-    handle byte_cursor_has(& *cursor, bytes, 8) {
-        false => Result::Err(ByteError::Truncated),
-        true => {
-            let value = byte_cursor_word(bytes, cursor.position);
-            (*cursor).position = cursor.position + 8;
-            Result::Ok(value)
-        },
-    }
-}
-pub let ByteCursor::new = byte_cursor_new;
-pub let ByteCursor::position = byte_cursor_position;
-pub let ByteCursor::u8 = byte_cursor_u8;
-pub let ByteCursor::u64 = byte_cursor_u64;
 
 pub struct VecIntoIter<T> { private remaining: Vec<T> }
 
-pub fn vec_new<T>() -> Vec<T> {
-    unsafe {
-        Vec {
-            pointer: __g1_memory_dangling(),
-            length: 0,
-            capacity: handle __g1_memory_size_of<T>() { 0 => 18446744073709551615, _ => 0 },
-            ownership: PhantomData {},
-            unique: VecOwner {},
+impl<T> Vec<T> {
+    pub fn new() -> Self {
+        unsafe {
+            Vec {
+                pointer: __g1_memory_dangling(),
+                length: 0,
+                capacity: handle __g1_memory_size_of<T>() { 0 => 18446744073709551615, _ => 0 },
+                ownership: PhantomData {},
+                unique: VecOwner {},
+            }
         }
     }
-}
-pub fn vec_with_capacity<T>(capacity: usize) -> Vec<T> {
-    let value = vec_new();
-    vec_reserve(&mut value, capacity);
-    value
-}
-pub fn vec_len<T>(value: &Vec<T>) -> usize { value.length }
-pub fn vec_capacity<T>(value: &Vec<T>) -> usize { value.capacity }
-pub fn vec_reserve<T>(value: &mut Vec<T>, additional: usize) -> () {
-    let required = value.length + additional;
-    handle required > value.capacity {
-        false => (),
-        true => {
-            let size = __g1_memory_size_of<T>();
-            let maximum = 9223372036854775807 / size;
-            handle required > maximum {
-                true => __g1_abort(),
-                false => {
-                    let doubled = handle value.capacity > maximum / 2 {
-                        true => maximum,
-                        false => handle value.capacity { 0 => as<usize>(4), _ => value.capacity * 2 },
-                    };
-                    let capacity = handle doubled < required { true => required, false => doubled };
-                    unsafe {
-                        let pointer = __g1_memory_reallocate(
-                            __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
-                            __g1_memory_align_of<T>(), capacity * size,
-                        );
-                        let typed = __g1_memory_cast<u8, T>(pointer);
-                        handle __g1_memory_is_null(pointer) {
-                            0 => {
-                                (*value).pointer = typed;
-                                (*value).capacity = capacity;
-                            },
-                            _ => __g1_abort(),
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let value = Vec::new();
+        Vec::reserve(&mut value, capacity);
+        value
+    }
+
+    pub fn len(value: &Self) -> usize { value.length }
+
+    pub fn capacity(value: &Self) -> usize { value.capacity }
+
+    pub fn reserve(value: &mut Self, additional: usize) -> () {
+        let required = value.length + additional;
+        handle required > value.capacity {
+            false => (),
+            true => {
+                let size = __g1_memory_size_of<T>();
+                let maximum = 9223372036854775807 / size;
+                handle required > maximum {
+                    true => __g1_abort(),
+                    false => {
+                        let doubled = handle value.capacity > maximum / 2 {
+                            true => maximum,
+                            false => handle value.capacity { 0 => as<usize>(4), _ => value.capacity * 2 },
+                        };
+                        let capacity = handle doubled < required { true => required, false => doubled };
+                        unsafe {
+                            let pointer = __g1_memory_reallocate(
+                                __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
+                                __g1_memory_align_of<T>(), capacity * size,
+                            );
+                            let typed = __g1_memory_cast<u8, T>(pointer);
+                            handle __g1_memory_is_null(pointer) {
+                                0 => {
+                                    (*value).pointer = typed;
+                                    (*value).capacity = capacity;
+                                },
+                                _ => __g1_abort(),
+                            }
                         }
+                    },
+                }
+            },
+        }
+    }
+
+    pub fn push(value: &mut Self, item: T) -> () {
+        Vec::reserve(&mut *value, 1);
+        unsafe { __g1_memory_write(__g1_memory_offset(value.pointer, value.length), item); };
+        (*value).length = value.length + 1;
+    }
+
+    pub fn extend_from_slice(value: &mut Self, source: Slice<T>) -> ()
+        where T: Use<[0, *]> {
+        Vec::reserve(&mut *value, source.length);
+        unsafe {
+            __g1_memory_copy_nonoverlapping(
+                __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(source.storage)),
+                __g1_memory_offset(value.pointer, value.length), source.length,
+            );
+        };
+        (*value).length = value.length + source.length;
+    }
+
+    pub fn resize(value: &mut Self, length: usize, fill: T) -> ()
+        where T: Use<[0, *]> {
+        handle length < Vec::len(& *value) {
+            true => Vec::truncate(&mut *value, length),
+            false => vec_resize_grow(&mut *value, length, &fill),
+        }
+    }
+
+    pub fn is_empty(value: &Self) -> Bool {
+        handle Vec::len(value) { 0 => true, _ => false }
+    }
+
+    pub fn pop(value: &mut Self) -> Option<T> {
+        let length = value.length;
+        handle length {
+            0 => Result::Err(()),
+            _ => {
+                (*value).length = length - 1;
+                unsafe { Result::Ok(__g1_memory_read(__g1_memory_as_const(__g1_memory_offset(value.pointer, length - 1)))) }
+            },
+        }
+    }
+
+    pub fn get_unchecked<'a>(value: &'a Self, index: usize) -> &'a T {
+        handle index < value.length {
+            false => __g1_abort(),
+            true => unsafe {
+                __g1_memory_borrow_shared(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)))
+            },
+        }
+    }
+
+    pub fn get<'a>(value: &'a Self, index: usize) -> Option<&'a T> {
+        handle index < Vec::len(value) {
+            true => Result::Ok(Vec::get_unchecked(value, index)),
+            false => Result::Err(()),
+        }
+    }
+
+    pub fn first<'a>(value: &'a Self) -> Option<&'a T> { Vec::get(value, 0) }
+
+    pub fn last<'a>(value: &'a Self) -> Option<&'a T> {
+        let length = Vec::len(value);
+        handle length {
+            0 => Result::Err(()),
+            _ => Vec::get(value, length - 1),
+        }
+    }
+
+    pub fn get_mut<'a>(value: &'a mut Self, index: usize) -> Option<&'a mut T> {
+        let length = value.length;
+        handle index < length {
+            true => unsafe { Result::Ok(__g1_memory_borrow_unique(__g1_memory_offset(value.pointer, index))) },
+            false => Result::Err(()),
+        }
+    }
+
+    pub fn swap(value: &mut Self, left: usize, right: usize) -> () {
+        handle left < value.length {
+            false => __g1_abort(),
+            true => handle right < value.length {
+                false => __g1_abort(),
+                true => handle left == right {
+                    true => (),
+                    false => unsafe {
+                        let a = __g1_memory_offset(value.pointer, left);
+                        let b = __g1_memory_offset(value.pointer, right);
+                        let first = __g1_memory_read(__g1_memory_as_const(a));
+                        let second = __g1_memory_read(__g1_memory_as_const(b));
+                        __g1_memory_write(a, second);
+                        __g1_memory_write(b, first)
+                    },
+                },
+            },
+        }
+    }
+
+    pub fn swap_remove(value: &mut Self, index: usize) -> Option<T> {
+        let length = value.length;
+        handle index < length {
+            false => Result::Err(()),
+            true => {
+                let last = length - 1;
+                Vec::swap(&mut *value, index, last);
+                Vec::pop(&mut *value)
+            },
+        }
+    }
+
+    pub fn insert(value: &mut Self, index: usize, item: T) -> Option<()> {
+        handle index <= value.length {
+            true => {
+                Vec::reserve(&mut *value, 1);
+                unsafe {
+                    let pointer = __g1_memory_offset(value.pointer, index);
+                    __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, 1), value.length - index);
+                    __g1_memory_write(pointer, item);
+                };
+                (*value).length = value.length + 1;
+                Result::Ok(())
+            },
+            false => Result::Err(()),
+        }
+    }
+
+    pub fn insert_from_slice(value: &mut Self, index: usize, source: Slice<T>) -> Option<()>
+        where T: Use<[0, *]> {
+        handle index <= value.length {
+            false => Result::Err(()),
+            true => {
+                Vec::reserve(&mut *value, source.length);
+                unsafe {
+                    let pointer = __g1_memory_offset(value.pointer, index);
+                    __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, source.length), value.length - index);
+                    __g1_memory_copy_nonoverlapping(
+                        __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(source.storage)), pointer, source.length,
+                    );
+                };
+                (*value).length = value.length + source.length;
+                Result::Ok(())
+            },
+        }
+    }
+
+    pub fn remove(value: &mut Self, index: usize) -> Option<T> {
+        handle index < value.length {
+            true => unsafe {
+                let pointer = __g1_memory_offset(value.pointer, index);
+                let removed = __g1_memory_read(__g1_memory_as_const(pointer));
+                (*value).length = value.length - 1;
+                __g1_memory_copy(__g1_memory_as_const(__g1_memory_offset(pointer, 1)), pointer, value.length - index);
+                Result::Ok(removed)
+            },
+            false => Result::Err(()),
+        }
+    }
+
+    pub fn append(value: &mut Self, source: Self) -> () {
+        Vec::reserve(&mut *value, source.length);
+        unsafe {
+            __g1_memory_copy_nonoverlapping(__g1_memory_as_const(source.pointer),
+                __g1_memory_offset(value.pointer, value.length), source.length);
+        };
+        (*value).length = value.length + source.length;
+        source.length = as<usize>(0);
+        unsafe { vec_release_empty(source); }
+    }
+
+    pub fn truncate(value: &mut Self, length: usize) -> ()
+        where T: Use<[0, 1]> {
+        handle length < value.length {
+            true => {
+                handle Vec::pop(&mut *value) { Result::Ok(item) => discard(item), Result::Err(_) => () };
+                Vec::truncate(&mut *value, length)
+            },
+            false => (),
+        }
+    }
+
+    pub fn clear(value: &mut Self) -> ()
+        where T: Use<[0, 1]> {
+        Vec::truncate(&mut *value, 0)
+    }
+
+    pub fn reverse(value: &mut Self) -> () {
+        vec_reverse_from(&mut *value, 0, value.length)
+    }
+
+    pub fn split_off(value: &mut Self, index: usize) -> Option<Self> {
+        handle index <= value.length {
+            false => Result::Err(()),
+            true => {
+                let output = Vec<T>::with_capacity(value.length - index);
+                unsafe {
+                    __g1_memory_copy_nonoverlapping(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)),
+                        output.pointer, value.length - index);
+                };
+                output.length = value.length - index;
+                (*value).length = index;
+                Result::Ok(output)
+            },
+        }
+    }
+
+    // Draining transfers the selected residents into the existing owned iterator
+    // representation. The suffix is moved out and restored, so no resident is
+    // silently discarded and exact-linear elements remain valid.
+    pub fn drain(value: &mut Self, range: Range<usize>) -> Option<VecIntoIter<T>> {
+        handle range.start > range.end {
+            true => Result::Err(()),
+            false => handle range.end > value.length {
+                true => Result::Err(()),
+                false => {
+                    handle Vec::split_off(&mut *value, range.end) {
+                        Result::Err(_) => __g1_abort(),
+                        Result::Ok(tail) => handle Vec::split_off(&mut *value, range.start) {
+                            Result::Err(_) => __g1_abort(),
+                            Result::Ok(drained) => {
+                                Vec::append(value, tail);
+                                Result::Ok(VecIntoIter { remaining: drained })
+                            },
+                        },
                     }
                 },
+            },
+        }
+    }
+
+    pub fn sort_unstable(value: &mut Self) -> ()
+        where T: Ord {
+        vec_sort_unstable_from(&mut *value, 0)
+    }
+
+    pub fn sort_stable(value: &mut Self) -> ()
+        where T: Ord {
+        let scratch = Vec::with_capacity(Vec::len(& *value));
+        vec_sort_stable_into_scratch(&mut *value, &mut scratch);
+        Vec::append(&mut *value, scratch)
+    }
+
+    pub fn partition_by<F>(value: &mut Self, predicate: F) -> usize
+        where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
+        vec_partition_by_from(&mut *value, predicate, 0, Vec::len(& *value))
+    }
+
+    pub fn dedup(value: &mut Self) -> ()
+        where T: Eq, T: Use<[0, 1]> {
+        vec_dedup_from(&mut *value, 0)
+    }
+
+    pub fn as_slice<'a>(value: &'a Self) -> Slice<'a, T> {
+        unsafe {
+            Slice<'a, T> {
+                storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(__g1_memory_as_const(value.pointer))),
+                length: value.length,
             }
-        },
+        }
+    }
+
+    pub fn as_mut_slice<'a>(value: &'a mut Self) -> SliceMut<'a, T> {
+        unsafe {
+            SliceMut<'a, T> {
+                storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(value.pointer)),
+                length: value.length,
+            }
+        }
+    }
+
+    pub fn iter(value: &Self) -> SliceIter<'_, T> { Slice::iter(Vec::as_slice(value)) }
+
+    pub fn into_iter(value: Self) -> VecIntoIter<T> {
+        VecIntoIter { remaining: value }
     }
 }
-pub fn vec_push<T>(value: &mut Vec<T>, item: T) -> () {
-    vec_reserve(&mut *value, 1);
-    unsafe { __g1_memory_write(__g1_memory_offset(value.pointer, value.length), item); };
-    (*value).length = value.length + 1;
-}
-pub fn vec_extend_from_slice<T>(value: &mut Vec<T>, source: Slice<T>) -> ()
-    where T: Use<[0, *]> {
-    vec_reserve(&mut *value, source.length);
-    unsafe {
-        __g1_memory_copy_nonoverlapping(
-            __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(source.storage)),
-            __g1_memory_offset(value.pointer, value.length), source.length,
-        );
-    };
-    (*value).length = value.length + source.length;
-}
+
 // Growing duplicates the supplied fill value. Shrinking is also valid under
 // this stronger bound because duplicable values may be discarded.
 fn vec_resize_grow<T>(value: &mut Vec<T>, length: usize, fill: &T) -> ()
     where T: Use<[0, *]> {
-    handle vec_len(& *value) < length {
+    handle Vec::len(& *value) < length {
         false => (),
         true => {
-            vec_push(&mut *value, *fill);
+            Vec::push(&mut *value, *fill);
             vec_resize_grow(&mut *value, length, fill)
         },
     }
 }
-pub fn vec_resize<T>(value: &mut Vec<T>, length: usize, fill: T) -> ()
-    where T: Use<[0, *]> {
-    handle length < vec_len(& *value) {
-        true => vec_truncate(&mut *value, length),
-        false => vec_resize_grow(&mut *value, length, &fill),
-    }
-}
+
 // This deliberately remains a private leaf: `String` owns the UTF-8 policy,
 // while `Vec<u8>` only supplies the backing storage.
 fn vec_push_utf8_char(value: &mut Vec<u8>, character: char) -> () {
     let code = char_to_u32(character);
     handle code < 128 {
-        true => vec_push(&mut *value, as<u8>(code)),
+        true => Vec::push(&mut *value, as<u8>(code)),
         false => handle code < 2048 {
             true => {
-                vec_push(&mut *value, as<u8>(192 + code / 64));
-                vec_push(&mut *value, as<u8>(128 + code % 64))
+                Vec::push(&mut *value, as<u8>(192 + code / 64));
+                Vec::push(&mut *value, as<u8>(128 + code % 64))
             },
             false => handle code < 65536 {
                 true => {
-                    vec_push(&mut *value, as<u8>(224 + code / 4096));
-                    vec_push(&mut *value, as<u8>(128 + (code / 64) % 64));
-                    vec_push(&mut *value, as<u8>(128 + code % 64))
+                    Vec::push(&mut *value, as<u8>(224 + code / 4096));
+                    Vec::push(&mut *value, as<u8>(128 + (code / 64) % 64));
+                    Vec::push(&mut *value, as<u8>(128 + code % 64))
                 },
                 false => {
-                    vec_push(&mut *value, as<u8>(240 + code / 262144));
-                    vec_push(&mut *value, as<u8>(128 + (code / 4096) % 64));
-                    vec_push(&mut *value, as<u8>(128 + (code / 64) % 64));
-                    vec_push(&mut *value, as<u8>(128 + code % 64))
+                    Vec::push(&mut *value, as<u8>(240 + code / 262144));
+                    Vec::push(&mut *value, as<u8>(128 + (code / 4096) % 64));
+                    Vec::push(&mut *value, as<u8>(128 + (code / 64) % 64));
+                    Vec::push(&mut *value, as<u8>(128 + code % 64))
                 },
             },
         },
     }
 }
-pub fn vec_is_empty<T>(value: &Vec<T>) -> Bool {
-    handle vec_len(value) { 0 => true, _ => false }
-}
-pub fn vec_pop<T>(value: &mut Vec<T>) -> Option<T> {
-    let length = value.length;
-    handle length {
-        0 => Result::Err(()),
-        _ => {
-            (*value).length = length - 1;
-            unsafe { Result::Ok(__g1_memory_read(__g1_memory_as_const(__g1_memory_offset(value.pointer, length - 1)))) }
-        },
-    }
-}
-pub fn vec_get_unchecked<'a, T>(value: &'a Vec<T>, index: usize) -> &'a T {
-    handle index < value.length {
-        false => __g1_abort(),
-        true => unsafe {
-            __g1_memory_borrow_shared(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)))
-        },
-    }
-}
-pub fn vec_get<'a, T>(value: &'a Vec<T>, index: usize) -> Option<&'a T> {
-    handle index < vec_len(value) {
-        true => Result::Ok(vec_get_unchecked(value, index)),
-        false => Result::Err(()),
-    }
-}
-pub fn vec_first<'a, T>(value: &'a Vec<T>) -> Option<&'a T> { vec_get(value, 0) }
-pub fn vec_last<'a, T>(value: &'a Vec<T>) -> Option<&'a T> {
-    let length = vec_len(value);
-    handle length {
-        0 => Result::Err(()),
-        _ => vec_get(value, length - 1),
-    }
-}
-pub fn vec_get_mut<'a, T>(value: &'a mut Vec<T>, index: usize) -> Option<&'a mut T> {
-    let length = value.length;
-    handle index < length {
-        true => unsafe { Result::Ok(__g1_memory_borrow_unique(__g1_memory_offset(value.pointer, index))) },
-        false => Result::Err(()),
-    }
-}
+
 fn vec_get_mut_unchecked<'a, T>(value: &'a mut Vec<T>, index: usize) -> &'a mut T {
-    handle vec_get_mut(value, index) { Result::Ok(item) => item, Result::Err(_) => __g1_abort() }
+    handle Vec::get_mut(value, index) { Result::Ok(item) => item, Result::Err(_) => __g1_abort() }
 }
-pub fn vec_swap<T>(value: &mut Vec<T>, left: usize, right: usize) -> () {
-    handle left < value.length {
-        false => __g1_abort(),
-        true => handle right < value.length {
-            false => __g1_abort(),
-            true => handle left == right {
-                true => (),
-                false => unsafe {
-                    let a = __g1_memory_offset(value.pointer, left);
-                    let b = __g1_memory_offset(value.pointer, right);
-                    let first = __g1_memory_read(__g1_memory_as_const(a));
-                    let second = __g1_memory_read(__g1_memory_as_const(b));
-                    __g1_memory_write(a, second);
-                    __g1_memory_write(b, first)
-                },
-            },
-        },
-    }
-}
-pub fn vec_swap_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
-    let length = value.length;
-    handle index < length {
-        false => Result::Err(()),
-        true => {
-            let last = length - 1;
-            vec_swap(&mut *value, index, last);
-            vec_pop(&mut *value)
-        },
-    }
-}
-pub fn vec_insert<T>(value: &mut Vec<T>, index: usize, item: T) -> Option<()> {
-    handle index <= value.length {
-        true => {
-            vec_reserve(&mut *value, 1);
-            unsafe {
-                let pointer = __g1_memory_offset(value.pointer, index);
-                __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, 1), value.length - index);
-                __g1_memory_write(pointer, item);
-            };
-            (*value).length = value.length + 1;
-            Result::Ok(())
-        },
-        false => Result::Err(()),
-    }
-}
-pub fn vec_insert_from_slice<T>(value: &mut Vec<T>, index: usize, source: Slice<T>) -> Option<()>
-    where T: Use<[0, *]> {
-    handle index <= value.length {
-        false => Result::Err(()),
-        true => {
-            vec_reserve(&mut *value, source.length);
-            unsafe {
-                let pointer = __g1_memory_offset(value.pointer, index);
-                __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, source.length), value.length - index);
-                __g1_memory_copy_nonoverlapping(
-                    __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(source.storage)), pointer, source.length,
-                );
-            };
-            (*value).length = value.length + source.length;
-            Result::Ok(())
-        },
-    }
-}
-pub fn vec_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
-    handle index < value.length {
-        true => unsafe {
-            let pointer = __g1_memory_offset(value.pointer, index);
-            let removed = __g1_memory_read(__g1_memory_as_const(pointer));
-            (*value).length = value.length - 1;
-            __g1_memory_copy(__g1_memory_as_const(__g1_memory_offset(pointer, 1)), pointer, value.length - index);
-            Result::Ok(removed)
-        },
-        false => Result::Err(()),
-    }
-}
-pub fn vec_append<T>(value: &mut Vec<T>, source: Vec<T>) -> () {
-    vec_reserve(&mut *value, source.length);
-    unsafe {
-        __g1_memory_copy_nonoverlapping(__g1_memory_as_const(source.pointer),
-            __g1_memory_offset(value.pointer, value.length), source.length);
-    };
-    (*value).length = value.length + source.length;
-    source.length = as<usize>(0);
-    unsafe { vec_release_empty(source); }
-}
+
 // Caller has moved every initialized resident elsewhere. Release the exact
 // allocation and suppress this empty owner's hook without moving any field.
 unsafe fn vec_release_empty<T>(value: Vec<T>) -> () {
@@ -1094,72 +1252,19 @@ unsafe fn vec_release_empty<T>(value: Vec<T>) -> () {
     }
 }
 fn discard<T>(value: T) -> () where T: Use<[0, 1]> { () }
-pub fn vec_truncate<T>(value: &mut Vec<T>, length: usize) -> ()
-    where T: Use<[0, 1]> {
-    handle length < value.length {
-        true => {
-            handle vec_pop(&mut *value) { Result::Ok(item) => discard(item), Result::Err(_) => () };
-            vec_truncate(&mut *value, length)
-        },
-        false => (),
-    }
-}
-pub fn vec_clear<T>(value: &mut Vec<T>) -> ()
-    where T: Use<[0, 1]> {
-    vec_truncate(&mut *value, 0)
-}
-pub fn vec_reverse<T>(value: &mut Vec<T>) -> () {
-    vec_reverse_from(&mut *value, 0, value.length)
-}
+
 fn vec_reverse_from<T>(value: &mut Vec<T>, start: usize, end: usize) -> () {
     handle start < end {
         false => (),
-        true => { vec_swap(&mut *value, start, end - 1); vec_reverse_from(&mut *value, start + 1, end - 1) },
+        true => { Vec::swap(&mut *value, start, end - 1); vec_reverse_from(&mut *value, start + 1, end - 1) },
     }
 }
-pub fn vec_split_off<T>(value: &mut Vec<T>, index: usize) -> Option<Vec<T>> {
-    handle index <= value.length {
-        false => Result::Err(()),
-        true => {
-            let output = vec_with_capacity<T>(value.length - index);
-            unsafe {
-                __g1_memory_copy_nonoverlapping(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)),
-                    output.pointer, value.length - index);
-            };
-            output.length = value.length - index;
-            (*value).length = index;
-            Result::Ok(output)
-        },
-    }
-}
-// Draining transfers the selected residents into the existing owned iterator
-// representation. The suffix is moved out and restored, so no resident is
-// silently discarded and exact-linear elements remain valid.
-pub fn vec_drain<T>(value: &mut Vec<T>, range: Range<usize>) -> Option<VecIntoIter<T>> {
-    handle range.start > range.end {
-        true => Result::Err(()),
-        false => handle range.end > value.length {
-            true => Result::Err(()),
-            false => {
-                handle vec_split_off(&mut *value, range.end) {
-                    Result::Err(_) => __g1_abort(),
-                    Result::Ok(tail) => handle vec_split_off(&mut *value, range.start) {
-                        Result::Err(_) => __g1_abort(),
-                        Result::Ok(drained) => {
-                            vec_append(value, tail);
-                            Result::Ok(VecIntoIter { remaining: drained })
-                        },
-                    },
-                }
-            },
-        },
-    }
-}
+
 fn vec_selection_min<T>(value: &Vec<T>, best: usize, index: usize) -> usize
     where T: Ord {
-    handle index >= vec_len(value) {
+    handle index >= Vec::len(value) {
         true => best,
-        false => handle Ord::compare(vec_get_unchecked(value, index), vec_get_unchecked(value, best)) {
+        false => handle Ord::compare(Vec::get_unchecked(value, index), Vec::get_unchecked(value, best)) {
             Ordering::Less => vec_selection_min(value, index, index + 1),
             _ => vec_selection_min(value, best, index + 1),
         },
@@ -1167,45 +1272,37 @@ fn vec_selection_min<T>(value: &Vec<T>, best: usize, index: usize) -> usize
 }
 fn vec_sort_unstable_from<T>(value: &mut Vec<T>, index: usize) -> ()
     where T: Ord {
-    handle index >= vec_len(& *value) {
+    handle index >= Vec::len(& *value) {
         true => (),
         false => {
             let smallest = vec_selection_min(& *value, index, index + 1);
-            vec_swap(&mut *value, index, smallest);
+            Vec::swap(&mut *value, index, smallest);
             vec_sort_unstable_from(&mut *value, index + 1)
         },
     }
 }
-pub fn vec_sort_unstable<T>(value: &mut Vec<T>) -> ()
-    where T: Ord {
-    vec_sort_unstable_from(&mut *value, 0)
-}
+
 // A stable sort owns one reusable scratch buffer. Removing the first minimum
 // shifts later equal elements left, so equal values enter `scratch` in their
 // original order. Every resident is moved exactly once into the buffer and
 // once back, which also admits exact-linear element types.
 fn vec_sort_stable_into_scratch<T>(value: &mut Vec<T>, scratch: &mut Vec<T>) -> ()
     where T: Ord {
-    handle vec_len(& *value) {
+    handle Vec::len(& *value) {
         0 => (),
         _ => {
             let smallest = vec_selection_min(& *value, 0, 1);
-            handle vec_remove(&mut *value, smallest) {
+            handle Vec::remove(&mut *value, smallest) {
                 Result::Err(_) => (),
                 Result::Ok(item) => {
-                    vec_push(&mut *scratch, item);
+                    Vec::push(&mut *scratch, item);
                     vec_sort_stable_into_scratch(&mut *value, &mut *scratch)
                 },
             }
         },
     }
 }
-pub fn vec_sort_stable<T>(value: &mut Vec<T>) -> ()
-    where T: Ord {
-    let scratch = vec_with_capacity(vec_len(& *value));
-    vec_sort_stable_into_scratch(&mut *value, &mut scratch);
-    vec_append(&mut *value, scratch)
-}
+
 // `partition_by` is deliberately in-place and makes no stability promise.
 // The predicate is explicitly duplicable because it is evaluated once per
 // examined resident; capture-free named functions and closures with
@@ -1215,29 +1312,26 @@ fn vec_partition_by_from<T, F>(value: &mut Vec<T>, predicate: F, left: usize, en
     where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
     handle left >= end {
         true => left,
-        false => handle predicate(vec_get_unchecked(& *value, left)) {
+        false => handle predicate(Vec::get_unchecked(& *value, left)) {
             true => vec_partition_by_from(&mut *value, predicate, left + 1, end),
             false => {
                 let last = end - 1;
-                vec_swap(&mut *value, left, last);
+                Vec::swap(&mut *value, left, last);
                 vec_partition_by_from(&mut *value, predicate, left, last)
             },
         },
     }
 }
-pub fn vec_partition_by<T, F>(value: &mut Vec<T>, predicate: F) -> usize
-    where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
-    vec_partition_by_from(&mut *value, predicate, 0, vec_len(& *value))
-}
+
 fn vec_dedup_from<T>(value: &mut Vec<T>, index: usize) -> ()
     where T: Eq, T: Use<[0, 1]> {
-    handle index + 1 >= vec_len(& *value) {
+    handle index + 1 >= Vec::len(& *value) {
         true => (),
         false => handle Eq::eq(
-            vec_get_unchecked(& *value, index),
-            vec_get_unchecked(& *value, index + 1),
+            Vec::get_unchecked(& *value, index),
+            Vec::get_unchecked(& *value, index + 1),
         ) {
-            true => handle vec_remove(&mut *value, index + 1) {
+            true => handle Vec::remove(&mut *value, index + 1) {
                 Result::Err(_) => (),
                 Result::Ok(_) => vec_dedup_from(&mut *value, index),
             },
@@ -1245,76 +1339,19 @@ fn vec_dedup_from<T>(value: &mut Vec<T>, index: usize) -> ()
         },
     }
 }
-pub fn vec_dedup<T>(value: &mut Vec<T>) -> ()
-    where T: Eq, T: Use<[0, 1]> {
-    vec_dedup_from(&mut *value, 0)
-}
-pub fn vec_as_slice<'a, T>(value: &'a Vec<T>) -> Slice<'a, T> {
-    unsafe {
-        Slice<'a, T> {
-            storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(__g1_memory_as_const(value.pointer))),
-            length: value.length,
-        }
-    }
-}
-pub fn vec_as_mut_slice<'a, T>(value: &'a mut Vec<T>) -> SliceMut<'a, T> {
-    unsafe {
-        SliceMut<'a, T> {
-            storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(value.pointer)),
-            length: value.length,
-        }
-    }
-}
-pub fn vec_iter<T>(value: &Vec<T>) -> SliceIter<'_, T> { slice_iter(vec_as_slice(value)) }
-pub fn vec_into_iter<T>(value: Vec<T>) -> VecIntoIter<T> {
-    VecIntoIter { remaining: value }
-}
-pub fn vec_into_iter_next<T>(value: &mut VecIntoIter<T>) -> Option<T> {
-    vec_remove(&mut value.remaining, 0)
-}
-// An explicitly abandoned iterator has the same affine-erasure requirement
-// as `Vec::clear`; an exact-linear resident must be iterated to completion.
-pub fn vec_into_iter_discard<T>(value: VecIntoIter<T>) -> ()
-    where T: Use<[0, 1]> {
-    vec_clear(&mut value.remaining)
-}
 
-pub let Vec::new = vec_new;
-pub let Vec::with_capacity = vec_with_capacity;
-pub let Vec::len = vec_len;
-pub let Vec::capacity = vec_capacity;
-pub let Vec::reserve = vec_reserve;
-pub let Vec::push = vec_push;
-pub let Vec::extend_from_slice = vec_extend_from_slice;
-pub let Vec::resize = vec_resize;
-pub let Vec::is_empty = vec_is_empty;
-pub let Vec::pop = vec_pop;
-pub let Vec::get = vec_get;
-pub let Vec::first = vec_first;
-pub let Vec::last = vec_last;
-pub let Vec::get_unchecked = vec_get_unchecked;
-pub let Vec::get_mut = vec_get_mut;
-pub let Vec::swap = vec_swap;
-pub let Vec::swap_remove = vec_swap_remove;
-pub let Vec::insert = vec_insert;
-pub let Vec::insert_from_slice = vec_insert_from_slice;
-pub let Vec::remove = vec_remove;
-pub let Vec::append = vec_append;
-pub let Vec::truncate = vec_truncate;
-pub let Vec::clear = vec_clear;
-pub let Vec::reverse = vec_reverse;
-pub let Vec::split_off = vec_split_off;
-pub let Vec::drain = vec_drain;
-pub let Vec::sort_unstable = vec_sort_unstable;
-pub let Vec::sort_stable = vec_sort_stable;
-pub let Vec::partition_by = vec_partition_by;
-pub let Vec::dedup = vec_dedup;
-pub let Vec::as_slice = vec_as_slice;
-pub let Vec::as_mut_slice = vec_as_mut_slice;
-pub let Vec::iter = vec_iter;
-pub let Vec::into_iter = vec_into_iter;
-pub let VecIntoIter::next = vec_into_iter_next;
-pub let VecIntoIter::discard = vec_into_iter_discard;
+impl<T> VecIntoIter<T> {
+    pub fn next(value: &mut Self) -> Option<T> {
+        Vec::remove(&mut value.remaining, 0)
+    }
+
+    // An explicitly abandoned iterator has the same affine-erasure requirement
+    // as `Vec::clear`; an exact-linear resident must be iterated to completion.
+    pub fn discard(value: Self) -> ()
+        where T: Use<[0, 1]> {
+        Vec::clear(&mut value.remaining)
+    }
+}
 
 // Open addressing is entirely library-owned. Buckets contain 0 for empty,
 // 1 for deleted, or a dense entry index + 2. Cached hashes and reverse bucket
@@ -1331,9 +1368,9 @@ struct HashMapIndex { fingerprint: usize, bucket: usize }
 
 fn hash_key<K>(key: &K) -> usize
     where K: Hash {
-    let state = hasher_new();
+    let state = Hasher::new();
     Hash::hash(key, &mut state);
-    hasher_finish(state)
+    Hasher::finish(state)
 }
 fn hash_bucket(fingerprint: usize, capacity: usize) -> usize {
     bit_and(fingerprint, capacity - 1)
@@ -1345,26 +1382,26 @@ fn hash_map_matches<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize, sl
     where K: Eq {
     handle slot < 2 {
         true => false,
-        false => handle vec_get_unchecked(&(*value).indices, slot - 2).fingerprint == fingerprint {
+        false => handle Vec::get_unchecked(&(*value).indices, slot - 2).fingerprint == fingerprint {
             false => false,
-            true => Eq::eq(&vec_get_unchecked(&(*value).entries, slot - 2).key, key),
+            true => Eq::eq(&Vec::get_unchecked(&(*value).entries, slot - 2).key, key),
         },
     }
 }
 fn hash_map_find_from<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize, bucket: usize) -> Option<usize>
     where K: Eq {
-    let slot = *vec_get_unchecked(&(*value).buckets, bucket);
+    let slot = *Vec::get_unchecked(&(*value).buckets, bucket);
     handle slot == 0 {
         true => Result::Err(()),
         false => handle hash_map_matches(value, key, fingerprint, slot) {
             true => Result::Ok(slot - 2),
-            false => hash_map_find_from(value, key, fingerprint, hash_bucket(bucket + 1, vec_len(&(*value).buckets))),
+            false => hash_map_find_from(value, key, fingerprint, hash_bucket(bucket + 1, Vec::len(&(*value).buckets))),
         },
     }
 }
 fn hash_map_find_hashed<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize) -> Option<usize>
     where K: Eq {
-    handle vec_len(&(*value).buckets) {
+    handle Vec::len(&(*value).buckets) {
         0 => Result::Err(()),
         capacity => hash_map_find_from(value, key, fingerprint, hash_bucket(fingerprint, capacity)),
     }
@@ -1377,17 +1414,17 @@ fn hash_map_find<K, V>(value: &HashMap<K, V>, key: &K) -> Option<usize>
 // at an empty bucket. Insertion may also reuse a deleted bucket, but only
 // after the complete lookup has established that no equal resident exists.
 fn hash_map_vacant(buckets: &Vec<usize>, bucket: usize) -> usize {
-    handle *vec_get_unchecked(buckets, bucket) < 2 {
+    handle *Vec::get_unchecked(buckets, bucket) < 2 {
         true => bucket,
-        false => hash_map_vacant(buckets, hash_bucket(bucket + 1, vec_len(buckets))),
+        false => hash_map_vacant(buckets, hash_bucket(bucket + 1, Vec::len(buckets))),
     }
 }
 fn hash_map_reindex(buckets: &mut Vec<usize>, indices: &mut Vec<HashMapIndex>, index: usize) -> () {
-    handle index < vec_len(& *indices) {
+    handle index < Vec::len(& *indices) {
         false => (),
         true => {
-            let fingerprint = vec_get_unchecked(& *indices, index).fingerprint;
-            let bucket = hash_map_vacant(& *buckets, hash_bucket(fingerprint, vec_len(& *buckets)));
+            let fingerprint = Vec::get_unchecked(& *indices, index).fingerprint;
+            let bucket = hash_map_vacant(& *buckets, hash_bucket(fingerprint, Vec::len(& *buckets)));
             hash_bucket_set(&mut *buckets, bucket, index + 2);
             let entry = vec_get_mut_unchecked(&mut *indices, index);
             (*entry).bucket = bucket;
@@ -1396,19 +1433,19 @@ fn hash_map_reindex(buckets: &mut Vec<usize>, indices: &mut Vec<HashMapIndex>, i
     }
 }
 fn hash_map_rehash<K, V>(value: &mut HashMap<K, V>, capacity: usize) -> () {
-    let buckets = vec_new<usize>();
-    vec_resize(&mut buckets, capacity, 0);
+    let buckets = Vec<usize>::new();
+    Vec::resize(&mut buckets, capacity, 0);
     hash_map_reindex(&mut buckets, &mut (*value).indices, 0);
     (*value).buckets = buckets;
     (*value).deleted = as<usize>(0);
 }
 fn hash_map_prepare_insert<K, V>(value: &mut HashMap<K, V>) -> () {
-    let capacity = vec_len(&(*value).buckets);
+    let capacity = Vec::len(&(*value).buckets);
     handle capacity {
         0 => hash_map_rehash(&mut *value, 8),
-        _ => handle vec_len(&(*value).entries) + (*value).deleted >= capacity - bit_shr(capacity, 3) {
+        _ => handle Vec::len(&(*value).entries) + (*value).deleted >= capacity - bit_shr(capacity, 3) {
             false => (),
-            true => handle vec_len(&(*value).entries) < bit_shr(capacity, 1) {
+            true => handle Vec::len(&(*value).entries) < bit_shr(capacity, 1) {
                 true => hash_map_rehash(&mut *value, capacity),
                 // Overflow is a checked resource failure, never a wrapped
                 // zero capacity that could make probing non-terminating.
@@ -1419,85 +1456,116 @@ fn hash_map_prepare_insert<K, V>(value: &mut HashMap<K, V>) -> () {
 }
 fn hash_map_append<K, V>(value: &mut HashMap<K, V>, key: K, item: V, fingerprint: usize) -> () {
     hash_map_prepare_insert(&mut *value);
-    let capacity = vec_len(&(*value).buckets);
+    let capacity = Vec::len(&(*value).buckets);
     let bucket = hash_map_vacant(&(*value).buckets, hash_bucket(fingerprint, capacity));
-    handle *vec_get_unchecked(&(*value).buckets, bucket) == 1 {
+    handle *Vec::get_unchecked(&(*value).buckets, bucket) == 1 {
         false => (),
         true => { (*value).deleted = (*value).deleted - 1; },
     };
-    let index = vec_len(&(*value).entries);
-    vec_push(&mut (*value).entries, HashMapEntry { key: key, value: item });
-    vec_push(&mut (*value).indices, HashMapIndex { fingerprint: fingerprint, bucket: bucket });
+    let index = Vec::len(&(*value).entries);
+    Vec::push(&mut (*value).entries, HashMapEntry { key: key, value: item });
+    Vec::push(&mut (*value).indices, HashMapIndex { fingerprint: fingerprint, bucket: bucket });
     hash_bucket_set(&mut (*value).buckets, bucket, index + 2)
 }
-pub fn hash_map_new<K, V>() -> HashMap<K, V> {
-    HashMap { entries: vec_new(), indices: vec_new(), buckets: vec_new(), deleted: 0 }
-}
-pub fn hash_map_len<K, V>(value: &HashMap<K, V>) -> usize { vec_len(&(*value).entries) }
-pub fn hash_map_is_empty<K, V>(value: &HashMap<K, V>) -> Bool { vec_is_empty(&(*value).entries) }
-// Dense residents can be inspected without copying keys/values or probing
-// buckets. Their order is unspecified and may change after any mutation.
-// Only shared views are exposed: mutating a resident key would break the index.
-pub fn hash_map_entries<'a, K, V>(value: &'a HashMap<K, V>) -> Slice<'a, HashMapEntry<K, V>> {
-    vec_as_slice(&value.entries)
-}
-pub fn hash_map_entry_key<'a, K, V>(value: &'a HashMapEntry<K, V>) -> &'a K { &value.key }
-pub fn hash_map_entry_value<'a, K, V>(value: &'a HashMapEntry<K, V>) -> &'a V { &value.value }
-pub fn hash_map_contains_key<K, V>(value: &HashMap<K, V>, key: &K) -> Bool
-    where K: Eq, K: Hash {
-    handle hash_map_find(value, key) {
-        Result::Ok(_) => true,
-        Result::Err(_) => false,
+impl<K, V> HashMap<K, V> {
+    pub fn new() -> Self {
+        HashMap { entries: Vec::new(), indices: Vec::new(), buckets: Vec::new(), deleted: 0 }
+    }
+
+    pub fn len(value: &Self) -> usize { Vec::len(&(*value).entries) }
+
+    pub fn is_empty(value: &Self) -> Bool { Vec::is_empty(&(*value).entries) }
+
+    // Dense residents can be inspected without copying keys/values or probing
+    // buckets. Their order is unspecified and may change after any mutation.
+    // Only shared views are exposed: mutating a resident key would break the index.
+    pub fn entries<'a>(value: &'a Self) -> Slice<'a, HashMapEntry<K, V>> {
+        Vec::as_slice(&value.entries)
+    }
+
+    pub fn contains_key(value: &Self, key: &K) -> Bool
+        where K: Eq, K: Hash {
+        handle hash_map_find(value, key) {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    // The result is tied only to `value`; `key` is consulted during lookup and
+    // cannot be the storage behind the returned reference. Its input lifetime is
+    // therefore elided, while the output's provenance stays explicit.
+    pub fn get<'a>(value: &'a Self, key: &K) -> Option<&'a V>
+        where K: Eq, K: Hash {
+        handle hash_map_find(value, key) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(index) => {
+                let entry = Vec::get_unchecked(&(*value).entries, index);
+                Result::Ok(&(*entry).value)
+            },
+        }
+    }
+
+    pub fn get_mut<'a>(value: &'a mut Self, key: &K) -> Option<&'a mut V>
+        where K: Eq, K: Hash {
+        handle hash_map_find(& *value, key) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(index) => {
+                let entry = vec_get_mut_unchecked(&mut (*value).entries, index);
+                Result::Ok(&mut (*entry).value)
+            },
+        }
+    }
+
+    pub fn insert(value: &mut Self, key: K, item: V) -> Option<V>
+        where K: Eq, K: Hash, K: Use<[0, 1]> {
+        let fingerprint = hash_key(&key);
+        handle hash_map_find_hashed(& *value, &key, fingerprint) {
+            Result::Err(_) => {
+                hash_map_append(&mut *value, key, item, fingerprint);
+                Result::Err(())
+            },
+            Result::Ok(index) => {
+                let entry = vec_get_mut_unchecked(&mut (*value).entries, index);
+                // Preserve the canonical resident key. Only the value changes;
+                // discarding the equal incoming key needs the bound above.
+                Result::Ok(replace(&mut (*entry).value, item))
+            },
+        }
+    }
+
+    pub fn remove(value: &mut Self, key: &K) -> Option<V>
+        where K: Eq, K: Hash, K: Use<[0, 1]> {
+        handle hash_map_remove_resident(value, key) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(previous) => Result::Ok(previous.value),
+        }
+    }
+
+    // Transfer both fields; neither key nor value needs erasure evidence.
+    pub fn remove_entry(value: &mut Self, key: &K) -> Option<(K, V)>
+        where K: Eq, K: Hash {
+        handle hash_map_remove_resident(value, key) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(previous) => Result::Ok((previous.key, previous.value)),
+        }
     }
 }
-// The result is tied only to `value`; `key` is consulted during lookup and
-// cannot be the storage behind the returned reference. Its input lifetime is
-// therefore elided, while the output's provenance stays explicit.
-pub fn hash_map_get<'a, K, V>(value: &'a HashMap<K, V>, key: &K) -> Option<&'a V>
-    where K: Eq, K: Hash {
-    handle hash_map_find(value, key) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(index) => {
-            let entry = vec_get_unchecked(&(*value).entries, index);
-            Result::Ok(&(*entry).value)
-        },
-    }
+
+impl<K, V> HashMapEntry<K, V> {
+    pub fn key<'a>(value: &'a Self) -> &'a K { &value.key }
+
+    pub fn value<'a>(value: &'a Self) -> &'a V { &value.value }
 }
-pub fn hash_map_get_mut<'a, K, V>(value: &'a mut HashMap<K, V>, key: &K) -> Option<&'a mut V>
-    where K: Eq, K: Hash {
-    handle hash_map_find(& *value, key) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(index) => {
-            let entry = vec_get_mut_unchecked(&mut (*value).entries, index);
-            Result::Ok(&mut (*entry).value)
-        },
-    }
-}
-pub fn hash_map_insert<K, V>(value: &mut HashMap<K, V>, key: K, item: V) -> Option<V>
-    where K: Eq, K: Hash, K: Use<[0, 1]> {
-    let fingerprint = hash_key(&key);
-    handle hash_map_find_hashed(& *value, &key, fingerprint) {
-        Result::Err(_) => {
-            hash_map_append(&mut *value, key, item, fingerprint);
-            Result::Err(())
-        },
-        Result::Ok(index) => {
-            let entry = vec_get_mut_unchecked(&mut (*value).entries, index);
-            // Preserve the canonical resident key. Only the value changes;
-            // discarding the equal incoming key needs the bound above.
-            Result::Ok(replace(&mut (*entry).value, item))
-        },
-    }
-}
+
 fn hash_map_unindex<K, V>(value: &mut HashMap<K, V>, index: usize) -> () {
-    let bucket = vec_get_unchecked(&(*value).indices, index).bucket;
+    let bucket = Vec::get_unchecked(&(*value).indices, index).bucket;
     hash_bucket_set(&mut (*value).buckets, bucket, 1);
     (*value).deleted = (*value).deleted + 1;
-    vec_swap_remove(&mut (*value).indices, index);
-    handle index < vec_len(&(*value).indices) {
+    Vec::swap_remove(&mut (*value).indices, index);
+    handle index < Vec::len(&(*value).indices) {
         false => (),
         true => {
-            let moved_bucket = vec_get_unchecked(&(*value).indices, index).bucket;
+            let moved_bucket = Vec::get_unchecked(&(*value).indices, index).bucket;
             hash_bucket_set(&mut (*value).buckets, moved_bucket, index + 2)
         },
     }
@@ -1508,139 +1576,113 @@ fn hash_map_remove_resident<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<
         Result::Err(_) => Result::Err(()),
         Result::Ok(index) => {
             hash_map_unindex(&mut *value, index);
-            vec_swap_remove(&mut (*value).entries, index)
+            Vec::swap_remove(&mut (*value).entries, index)
         },
     }
 }
-pub fn hash_map_remove<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<V>
-    where K: Eq, K: Hash, K: Use<[0, 1]> {
-    handle hash_map_remove_resident(value, key) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(previous) => Result::Ok(previous.value),
-    }
-}
-// Transfer both fields; neither key nor value needs erasure evidence.
-pub fn hash_map_remove_entry<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<(K, V)>
-    where K: Eq, K: Hash {
-    handle hash_map_remove_resident(value, key) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(previous) => Result::Ok((previous.key, previous.value)),
-    }
-}
-pub let HashMap::new = hash_map_new;
-pub let HashMap::len = hash_map_len;
-pub let HashMap::is_empty = hash_map_is_empty;
-pub let HashMap::entries = hash_map_entries;
-pub let HashMapEntry::key = hash_map_entry_key;
-pub let HashMapEntry::value = hash_map_entry_value;
-pub let HashMap::contains_key = hash_map_contains_key;
-pub let HashMap::get = hash_map_get;
-pub let HashMap::get_mut = hash_map_get_mut;
-pub let HashMap::insert = hash_map_insert;
-pub let HashMap::remove = hash_map_remove;
-pub let HashMap::remove_entry = hash_map_remove_entry;
 
 // The set shares the map index while retaining the original resident on a
 // duplicate insertion and returning ownership of that resident on removal.
 pub struct HashSet<T> { private map: HashMap<T, ()> }
-pub fn hash_set_new<T>() -> HashSet<T> { HashSet { map: hash_map_new() } }
-pub fn hash_set_len<T>(value: &HashSet<T>) -> usize { hash_map_len(&(*value).map) }
-pub fn hash_set_is_empty<T>(value: &HashSet<T>) -> Bool { hash_map_is_empty(&(*value).map) }
-pub fn hash_set_contains<T>(value: &HashSet<T>, item: &T) -> Bool
-    where T: Eq, T: Hash {
-    hash_map_contains_key(&(*value).map, item)
-}
-// A duplicate consumes `item` without storing it, so affine-erasure evidence
-// is required. `true` means a new resident was inserted.
-pub fn hash_set_insert<T>(value: &mut HashSet<T>, item: T) -> Bool
-    where T: Eq, T: Hash, T: Use<[0, 1]> {
-    let fingerprint = hash_key(&item);
-    handle hash_map_find_hashed(&(*value).map, &item, fingerprint) {
-        Result::Ok(_) => false,
-        Result::Err(_) => {
-            hash_map_append(&mut (*value).map, item, (), fingerprint);
-            true
-        },
+impl<T> HashSet<T> {
+    pub fn new() -> Self { HashSet { map: HashMap::new() } }
+
+    pub fn len(value: &Self) -> usize { HashMap::len(&(*value).map) }
+
+    pub fn is_empty(value: &Self) -> Bool { HashMap::is_empty(&(*value).map) }
+
+    pub fn contains(value: &Self, item: &T) -> Bool
+        where T: Eq, T: Hash {
+        HashMap::contains_key(&(*value).map, item)
+    }
+
+    // A duplicate consumes `item` without storing it, so affine-erasure evidence
+    // is required. `true` means a new resident was inserted.
+    pub fn insert(value: &mut Self, item: T) -> Bool
+        where T: Eq, T: Hash, T: Use<[0, 1]> {
+        let fingerprint = hash_key(&item);
+        handle hash_map_find_hashed(&(*value).map, &item, fingerprint) {
+            Result::Ok(_) => false,
+            Result::Err(_) => {
+                hash_map_append(&mut (*value).map, item, (), fingerprint);
+                true
+            },
+        }
+    }
+
+    // Removal returns the resident, preserving its complete ownership contract.
+    pub fn remove(value: &mut Self, item: &T) -> Option<T>
+        where T: Eq, T: Hash {
+        handle hash_map_remove_resident(&mut (*value).map, item) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(entry) => Result::Ok(entry.key),
+        }
     }
 }
-// Removal returns the resident, preserving its complete ownership contract.
-pub fn hash_set_remove<T>(value: &mut HashSet<T>, item: &T) -> Option<T>
-    where T: Eq, T: Hash {
-    handle hash_map_remove_resident(&mut (*value).map, item) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(entry) => Result::Ok(entry.key),
-    }
-}
-pub let HashSet::new = hash_set_new;
-pub let HashSet::len = hash_set_len;
-pub let HashSet::is_empty = hash_set_is_empty;
-pub let HashSet::contains = hash_set_contains;
-pub let HashSet::insert = hash_set_insert;
-pub let HashSet::remove = hash_set_remove;
 
 // Queue and compiler-work-list shapes are ordinary wrappers over `Vec`; no
 // separate VM collection representation is needed.
 pub struct VecDeque<T> { private storage: Vec<T> }
-pub fn vec_deque_new<T>() -> VecDeque<T> { VecDeque { storage: vec_new() } }
-pub fn vec_deque_len<T>(value: &VecDeque<T>) -> usize { vec_len(&value.storage) }
-pub fn vec_deque_is_empty<T>(value: &VecDeque<T>) -> Bool { vec_is_empty(&value.storage) }
-pub fn vec_deque_push_back<T>(value: &mut VecDeque<T>, item: T) -> () {
-    vec_push(&mut value.storage, item)
-}
-pub fn vec_deque_push_front<T>(value: &mut VecDeque<T>, item: T) -> () {
-    handle vec_insert(&mut value.storage, 0, item) {
-        Result::Ok(_) => (),
-        Result::Err(_) => (),
-    }
-}
-pub fn vec_deque_pop_back<T>(value: &mut VecDeque<T>) -> Option<T> {
-    vec_pop(&mut value.storage)
-}
-pub fn vec_deque_pop_front<T>(value: &mut VecDeque<T>) -> Option<T> {
-    vec_remove(&mut value.storage, 0)
-}
-pub fn vec_deque_front<T>(value: &VecDeque<T>) -> Option<&T> { vec_first(&value.storage) }
-pub fn vec_deque_back<T>(value: &VecDeque<T>) -> Option<&T> { vec_last(&value.storage) }
+impl<T> VecDeque<T> {
+    pub fn new() -> Self { VecDeque { storage: Vec::new() } }
 
-pub let VecDeque::new = vec_deque_new;
-pub let VecDeque::len = vec_deque_len;
-pub let VecDeque::is_empty = vec_deque_is_empty;
-pub let VecDeque::push_back = vec_deque_push_back;
-pub let VecDeque::push_front = vec_deque_push_front;
-pub let VecDeque::pop_back = vec_deque_pop_back;
-pub let VecDeque::pop_front = vec_deque_pop_front;
-pub let VecDeque::front = vec_deque_front;
-pub let VecDeque::back = vec_deque_back;
+    pub fn len(value: &Self) -> usize { Vec::len(&value.storage) }
+
+    pub fn is_empty(value: &Self) -> Bool { Vec::is_empty(&value.storage) }
+
+    pub fn push_back(value: &mut Self, item: T) -> () {
+        Vec::push(&mut value.storage, item)
+    }
+
+    pub fn push_front(value: &mut Self, item: T) -> () {
+        handle Vec::insert(&mut value.storage, 0, item) {
+            Result::Ok(_) => (),
+            Result::Err(_) => (),
+        }
+    }
+
+    pub fn pop_back(value: &mut Self) -> Option<T> {
+        Vec::pop(&mut value.storage)
+    }
+
+    pub fn pop_front(value: &mut Self) -> Option<T> {
+        Vec::remove(&mut value.storage, 0)
+    }
+
+    pub fn front(value: &Self) -> Option<&T> { Vec::first(&value.storage) }
+
+    pub fn back(value: &Self) -> Option<&T> { Vec::last(&value.storage) }
+}
 
 pub struct Stack<T> { private storage: Vec<T> }
-pub fn stack_new<T>() -> Stack<T> { Stack { storage: vec_new() } }
-pub fn stack_len<T>(value: &Stack<T>) -> usize { vec_len(&value.storage) }
-pub fn stack_is_empty<T>(value: &Stack<T>) -> Bool { vec_is_empty(&value.storage) }
-pub fn stack_push<T>(value: &mut Stack<T>, item: T) -> () { vec_push(&mut value.storage, item) }
-pub fn stack_pop<T>(value: &mut Stack<T>) -> Option<T> { vec_pop(&mut value.storage) }
-pub fn stack_peek<T>(value: &Stack<T>) -> Option<&T> { vec_last(&value.storage) }
+impl<T> Stack<T> {
+    pub fn new() -> Self { Stack { storage: Vec::new() } }
 
-pub let Stack::new = stack_new;
-pub let Stack::len = stack_len;
-pub let Stack::is_empty = stack_is_empty;
-pub let Stack::push = stack_push;
-pub let Stack::pop = stack_pop;
-pub let Stack::peek = stack_peek;
+    pub fn len(value: &Self) -> usize { Vec::len(&value.storage) }
+
+    pub fn is_empty(value: &Self) -> Bool { Vec::is_empty(&value.storage) }
+
+    pub fn push(value: &mut Self, item: T) -> () { Vec::push(&mut value.storage, item) }
+
+    pub fn pop(value: &mut Self) -> Option<T> { Vec::pop(&mut value.storage) }
+
+    pub fn peek(value: &Self) -> Option<&T> { Vec::last(&value.storage) }
+}
 
 // WorkList is explicitly LIFO: it is the cheap deterministic building block
 // needed by compiler passes that schedule newly discovered work.
 pub struct WorkList<T> { private storage: Vec<T> }
-pub fn work_list_new<T>() -> WorkList<T> { WorkList { storage: vec_new() } }
-pub fn work_list_len<T>(value: &WorkList<T>) -> usize { vec_len(&value.storage) }
-pub fn work_list_is_empty<T>(value: &WorkList<T>) -> Bool { vec_is_empty(&value.storage) }
-pub fn work_list_push<T>(value: &mut WorkList<T>, item: T) -> () { vec_push(&mut value.storage, item) }
-pub fn work_list_pop<T>(value: &mut WorkList<T>) -> Option<T> { vec_pop(&mut value.storage) }
+impl<T> WorkList<T> {
+    pub fn new() -> Self { WorkList { storage: Vec::new() } }
 
-pub let WorkList::new = work_list_new;
-pub let WorkList::len = work_list_len;
-pub let WorkList::is_empty = work_list_is_empty;
-pub let WorkList::push = work_list_push;
-pub let WorkList::pop = work_list_pop;
+    pub fn len(value: &Self) -> usize { Vec::len(&value.storage) }
+
+    pub fn is_empty(value: &Self) -> Bool { Vec::is_empty(&value.storage) }
+
+    pub fn push(value: &mut Self, item: T) -> () { Vec::push(&mut value.storage, item) }
+
+    pub fn pop(value: &mut Self) -> Option<T> { Vec::pop(&mut value.storage) }
+}
 
 // `String` owns an ordinary byte vector. Its constructors and mutators are
 // responsible for the UTF-8 invariant; `Str` is the immutable borrowed view
@@ -1651,59 +1693,89 @@ pub struct Utf8Error {
     private valid_up_to: usize,
 }
 
-pub fn string_new() -> String { String { storage: vec_new() } }
-pub fn string_from_utf8(value: Vec<u8>) -> Result<String, Utf8Error> {
-    let valid_up_to = utf8_valid_up_to(vec_as_slice(&value), 0);
-    handle valid_up_to == vec_len(&value) {
-        true => Result::Ok(String { storage: value }),
-        false => Result::Err(Utf8Error {
-            bytes: value,
-            valid_up_to: valid_up_to,
-        }),
+impl String {
+    pub fn new() -> Self { String { storage: Vec::new() } }
+
+    pub fn from_utf8(value: Vec<u8>) -> Result<Self, Utf8Error> {
+        let valid_up_to = utf8_valid_up_to(Vec::as_slice(&value), 0);
+        handle valid_up_to == Vec::len(&value) {
+            true => Result::Ok(String { storage: value }),
+            false => Result::Err(Utf8Error {
+                bytes: value,
+                valid_up_to: valid_up_to,
+            }),
+        }
+    }
+
+    pub fn len(value: &Self) -> usize { Vec::len(&value.storage) }
+
+    pub fn is_empty(value: &Self) -> Bool {
+        handle String::len(value) { 0 => true, _ => false }
+    }
+
+    pub fn push(value: &mut Self, character: char) -> () {
+        vec_push_utf8_char(&mut value.storage, character)
+    }
+
+    pub fn push_str(value: &mut Self, source: Str) -> () {
+        Vec::extend_from_slice(&mut value.storage, source.bytes)
+    }
+
+    pub fn insert(value: &mut Self, index: usize, source: Str) -> Result<(), StringRangeError> {
+        handle Str::is_char_boundary(String::as_str(& *value), index) {
+            false => Result::Err(StringRangeError::NotCharBoundary),
+            true => handle Vec::insert_from_slice(&mut value.storage, index, source.bytes) {
+                Result::Ok(_) => Result::Ok(()),
+                Result::Err(_) => __g1_abort(),
+            },
+        }
+    }
+
+    pub fn pop(value: &mut Self) -> Option<char> {
+        handle String::len(& *value) {
+            0 => None,
+            length => {
+                let index = string_last_boundary(String::as_str(& *value), length - 1);
+                handle String::remove(&mut *value, index) {
+                    Result::Ok(character) => Result::Ok(character),
+                    Result::Err(_) => __g1_abort(),
+                }
+            },
+        }
+    }
+
+    pub fn remove(value: &mut Self, index: usize) -> Result<char, StringRangeError> {
+        handle string_remove_character_info(&value.storage, index) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok((character, width)) => {
+                unsafe {
+                    let pointer = __g1_memory_offset(value.storage.pointer, index);
+                    __g1_memory_copy(__g1_memory_as_const(__g1_memory_offset(pointer, width)), pointer,
+                        value.storage.length - index - width);
+                };
+                (*value).storage.length = value.storage.length - width;
+                Result::Ok(character)
+            },
+        }
+    }
+
+    pub fn as_str<'a>(value: &'a Self) -> Str<'a> {
+        Str<'a> { bytes: Vec::as_slice(&value.storage) }
     }
 }
-pub fn string_len(value: &String) -> usize { vec_len(&value.storage) }
-pub fn string_is_empty(value: &String) -> Bool {
-    handle string_len(value) { 0 => true, _ => false }
-}
-pub fn string_push(value: &mut String, character: char) -> () {
-    vec_push_utf8_char(&mut value.storage, character)
-}
-pub fn string_push_str(value: &mut String, source: Str) -> () {
-    vec_extend_from_slice(&mut value.storage, source.bytes)
-}
-pub fn string_insert(value: &mut String, index: usize, source: Str) -> Result<(), StringRangeError> {
-    handle str_is_char_boundary(string_as_str(& *value), index) {
-        false => Result::Err(StringRangeError::NotCharBoundary),
-        true => handle vec_insert_from_slice(&mut value.storage, index, source.bytes) {
-            Result::Ok(_) => Result::Ok(()),
-            Result::Err(_) => __g1_abort(),
-        },
-    }
-}
+
 fn string_last_boundary(value: Str, index: usize) -> usize {
-    handle str_is_char_boundary(value, index) {
+    handle Str::is_char_boundary(value, index) {
         true => index,
         false => string_last_boundary(value, index - 1),
     }
 }
-pub fn string_pop(value: &mut String) -> Option<char> {
-    handle string_len(& *value) {
-        0 => None,
-        length => {
-            let index = string_last_boundary(string_as_str(& *value), length - 1);
-            handle string_remove(&mut *value, index) {
-                Result::Ok(character) => Result::Ok(character),
-                Result::Err(_) => __g1_abort(),
-            }
-        },
-    }
-}
+
 fn string_remove_character_info(storage: &Vec<u8>, index: usize) -> Result<(char, usize), StringRangeError> {
-    let view = Str { bytes: vec_as_slice(storage) };
-    handle index > str_len(view) {
+    let view = Str { bytes: Vec::as_slice(storage) };
+    handle index > Str::len(view) {
         true => Result::Err(StringRangeError::OutOfBounds),
-        false => handle str_is_char_boundary(view, index) {
+        false => handle Str::is_char_boundary(view, index) {
             false => Result::Err(StringRangeError::NotCharBoundary),
             true => handle utf8_decode(view.bytes, index) {
                 Result::Err(_) => Result::Err(StringRangeError::OutOfBounds),
@@ -1712,44 +1784,12 @@ fn string_remove_character_info(storage: &Vec<u8>, index: usize) -> Result<(char
         },
     }
 }
-pub fn string_remove(value: &mut String, index: usize) -> Result<char, StringRangeError> {
-    handle string_remove_character_info(&value.storage, index) {
-        Result::Err(error) => Result::Err(error),
-        Result::Ok((character, width)) => {
-            unsafe {
-                let pointer = __g1_memory_offset(value.storage.pointer, index);
-                __g1_memory_copy(__g1_memory_as_const(__g1_memory_offset(pointer, width)), pointer,
-                    value.storage.length - index - width);
-            };
-            (*value).storage.length = value.storage.length - width;
-            Result::Ok(character)
-        },
-    }
-}
-pub fn str_to_string(source: Str) -> String {
-    let value = string_new();
-    string_push_str(&mut value, source);
-    value
-}
-pub fn string_as_str<'a>(value: &'a String) -> Str<'a> {
-    Str<'a> { bytes: vec_as_slice(&value.storage) }
-}
-pub fn utf8_error_valid_up_to(value: &Utf8Error) -> usize { value.valid_up_to }
-pub fn utf8_error_into_bytes(value: Utf8Error) -> Vec<u8> { value.bytes }
 
-pub let String::new = string_new;
-pub let String::from_utf8 = string_from_utf8;
-pub let String::insert = string_insert;
-pub let String::len = string_len;
-pub let String::is_empty = string_is_empty;
-pub let String::push = string_push;
-pub let String::push_str = string_push_str;
-pub let String::pop = string_pop;
-pub let String::remove = string_remove;
-pub let String::as_str = string_as_str;
-pub let Str::to_string = str_to_string;
-pub let Utf8Error::valid_up_to = utf8_error_valid_up_to;
-pub let Utf8Error::into_bytes = utf8_error_into_bytes;
+impl Utf8Error {
+    pub fn valid_up_to(value: &Self) -> usize { value.valid_up_to }
+
+    pub fn into_bytes(value: Self) -> Vec<u8> { value.bytes }
+}
 
 pub fn identity<T>(value: T) -> T { value }
 
@@ -2133,13 +2173,13 @@ pub impl Default for f32 { default() -> f32 { 0.0 } }
 pub impl Default for f64 { default() -> f64 { 0.0 } }
 pub impl Default for char { default() -> char { '\u{0}' } }
 pub impl<T> Default for Option<T> { default() -> Option<T> { None } }
-pub impl<T> Default for Vec<T> { default() -> Vec<T> { vec_new() } }
-pub impl<K, V> Default for HashMap<K, V> { default() -> HashMap<K, V> { hash_map_new() } }
-pub impl<T> Default for HashSet<T> { default() -> HashSet<T> { hash_set_new() } }
-pub impl<T> Default for VecDeque<T> { default() -> VecDeque<T> { vec_deque_new() } }
-pub impl<T> Default for Stack<T> { default() -> Stack<T> { stack_new() } }
-pub impl<T> Default for WorkList<T> { default() -> WorkList<T> { work_list_new() } }
-pub impl Default for String { default() -> String { string_new() } }
+pub impl<T> Default for Vec<T> { default() -> Vec<T> { Vec::new() } }
+pub impl<K, V> Default for HashMap<K, V> { default() -> HashMap<K, V> { HashMap::new() } }
+pub impl<T> Default for HashSet<T> { default() -> HashSet<T> { HashSet::new() } }
+pub impl<T> Default for VecDeque<T> { default() -> VecDeque<T> { VecDeque::new() } }
+pub impl<T> Default for Stack<T> { default() -> Stack<T> { Stack::new() } }
+pub impl<T> Default for WorkList<T> { default() -> WorkList<T> { WorkList::new() } }
+pub impl Default for String { default() -> String { String::new() } }
 
 pub trait Eq { eq(left: &Self, right: &Self) -> Bool; }
 pub trait Ord { compare(left: &Self, right: &Self) -> Ordering; }
@@ -2153,36 +2193,40 @@ pub trait Debug { debug(value: &Self, formatter: &mut Formatter) -> (); }
 pub struct Hasher { private state: usize }
 pub struct Formatter { private output: String }
 
-pub fn hasher_new() -> Hasher { Hasher { state: 5381 } }
-pub fn hasher_write_usize(value: &mut Hasher, input: usize) -> () {
-    // Hash accumulation is deliberately wrapping.  A deterministic hasher
-    // must remain total for every sequence of caller-provided words rather
-    // than exposing arithmetic overflow as a collection operation failure.
-    (*value).state = __g1_int_wrapping_add((*value).state * 33, input);
-}
-pub fn hasher_finish(value: Hasher) -> usize { value.state }
-pub fn formatter_new() -> Formatter { Formatter { output: string_new() } }
-pub fn formatter_write_str(value: &mut Formatter, text: Str) -> () {
-    string_push_str(&mut value.output, text)
-}
-pub fn formatter_into_string(value: Formatter) -> String { value.output }
-pub fn format_value<T>(value: &T) -> String where T: Display {
-    let formatter = formatter_new();
-    Display::display(value, &mut formatter);
-    formatter_into_string(formatter)
-}
-pub fn format_debug_value<T>(value: &T) -> String where T: Debug {
-    let formatter = formatter_new();
-    Debug::debug(value, &mut formatter);
-    formatter_into_string(formatter)
+impl Hasher {
+    pub fn new() -> Self { Hasher { state: 5381 } }
+
+    pub fn write_usize(value: &mut Self, input: usize) -> () {
+        // Hash accumulation is deliberately wrapping.  A deterministic hasher
+        // must remain total for every sequence of caller-provided words rather
+        // than exposing arithmetic overflow as a collection operation failure.
+        (*value).state = __g1_int_wrapping_add((*value).state * 33, input);
+    }
+
+    pub fn finish(value: Self) -> usize { value.state }
 }
 
-pub let Hasher::new = hasher_new;
-pub let Hasher::write_usize = hasher_write_usize;
-pub let Hasher::finish = hasher_finish;
-pub let Formatter::new = formatter_new;
-pub let Formatter::write_str = formatter_write_str;
-pub let Formatter::into_string = formatter_into_string;
+impl Formatter {
+    pub fn new() -> Self { Formatter { output: String::new() } }
+
+    pub fn write_str(value: &mut Self, text: Str) -> () {
+        String::push_str(&mut value.output, text)
+    }
+
+    pub fn into_string(value: Self) -> String { value.output }
+}
+
+pub fn format_value<T>(value: &T) -> String where T: Display {
+    let formatter = Formatter::new();
+    Display::display(value, &mut formatter);
+    Formatter::into_string(formatter)
+}
+pub fn format_debug_value<T>(value: &T) -> String where T: Debug {
+    let formatter = Formatter::new();
+    Debug::debug(value, &mut formatter);
+    Formatter::into_string(formatter)
+}
+
 pub let format = format_value;
 pub let format_debug = format_debug_value;
 
@@ -2190,9 +2234,9 @@ pub impl Eq for i64 { eq(left: &i64, right: &i64) -> Bool { *left == *right } }
 pub impl Eq for usize { eq(left: &usize, right: &usize) -> Bool { *left == *right } }
 pub impl Ord for String {
     compare(left: &String, right: &String) -> Ordering {
-        let left_view = string_as_str(left);
-        let right_view = string_as_str(right);
-        slice_lex_compare(str_as_bytes(left_view), str_as_bytes(right_view))
+        let left_view = String::as_str(left);
+        let right_view = String::as_str(right);
+        Slice::lex_compare(Str::as_bytes(left_view), Str::as_bytes(right_view))
     }
 }
 pub impl Eq for String {
@@ -2201,42 +2245,42 @@ pub impl Eq for String {
     }
 }
 fn hash_string_bytes(bytes: Slice<u8>, state: &mut Hasher, cursor: usize) -> () {
-    handle cursor < slice_len(&bytes) {
+    handle cursor < Slice::len(&bytes) {
         false => (),
         true => {
-            hasher_write_usize(&mut *state, as<usize>(*slice_get_unchecked(bytes, cursor)));
+            Hasher::write_usize(&mut *state, as<usize>(*Slice::get_unchecked(bytes, cursor)));
             hash_string_bytes(bytes, state, cursor + 1)
         },
     }
 }
 pub impl Hash for String {
     hash(value: &String, state: &mut Hasher) -> () {
-        hasher_write_usize(&mut *state, string_len(value));
-        let view = string_as_str(value);
-        hash_string_bytes(str_as_bytes(view), state, 0)
+        Hasher::write_usize(&mut *state, String::len(value));
+        let view = String::as_str(value);
+        hash_string_bytes(Str::as_bytes(view), state, 0)
     }
 }
 pub impl Hash for usize {
-    hash(value: &usize, state: &mut Hasher) -> () { hasher_write_usize(state, *value) }
+    hash(value: &usize, state: &mut Hasher) -> () { Hasher::write_usize(state, *value) }
 }
 pub impl Hash for i64 {
     hash(value: &i64, state: &mut Hasher) -> () {
-        hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value))
+        Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value))
     }
 }
-pub impl Hash for u8 { hash(value: &u8, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for u16 { hash(value: &u16, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for u32 { hash(value: &u32, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for u64 { hash(value: &u64, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for u128 { hash(value: &u128, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for i8 { hash(value: &i8, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for i16 { hash(value: &i16, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for i32 { hash(value: &i32, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for i128 { hash(value: &i128, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
-pub impl Hash for isize { hash(value: &isize, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u8 { hash(value: &u8, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u16 { hash(value: &u16, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u32 { hash(value: &u32, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u64 { hash(value: &u64, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u128 { hash(value: &u128, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i8 { hash(value: &i8, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i16 { hash(value: &i16, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i32 { hash(value: &i32, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i128 { hash(value: &i128, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for isize { hash(value: &isize, state: &mut Hasher) -> () { Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
 pub impl Hash for char {
     hash(value: &char, state: &mut Hasher) -> () {
-        hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(char_to_u32(*value)))
+        Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(char_to_u32(*value)))
     }
 }
 pub impl Eq for u8 { eq(left: &u8, right: &u8) -> Bool { *left == *right } }
@@ -2252,7 +2296,7 @@ pub impl Eq for isize { eq(left: &isize, right: &isize) -> Bool { *left == *righ
 pub impl Eq for char { eq(left: &char, right: &char) -> Bool { *left == *right } }
 pub impl Display for String {
     display(value: &String, formatter: &mut Formatter) -> () {
-        formatter_write_str(formatter, string_as_str(value))
+        Formatter::write_str(formatter, String::as_str(value))
     }
 }
 // At most twenty recursive frames on the current 64-bit usize ABI. The
@@ -2264,14 +2308,14 @@ fn display_usize_decimal(value: usize, formatter: &mut Formatter) -> () {
         true => (), false => display_usize_decimal(quotient, &mut *formatter),
     };
     let digit = value - quotient * 10;
-    vec_push(&mut formatter.output.storage, as<u8>(48 + digit));
+    Vec::push(&mut formatter.output.storage, as<u8>(48 + digit));
 }
 pub impl Display for usize {
     display(value: &usize, formatter: &mut Formatter) -> () { display_usize_decimal(*value, formatter) }
 }
 pub impl Debug for String {
     debug(value: &String, formatter: &mut Formatter) -> () {
-        formatter_write_str(formatter, string_as_str(value))
+        Formatter::write_str(formatter, String::as_str(value))
     }
 }
 
@@ -2557,165 +2601,155 @@ pub fn clamp<T>(value: T, lower: T, upper: T) -> T
     }
 }
 
-// Result/Option inspection discards the unselected payload, so both payloads
-// must permit affine erasure. `[0,0]` is intentionally not a public bound.
-pub fn result_is_ok<A, E>(value: Result<A, E>) -> Bool
-    where A: Use<[0, 1]>, E: Use<[0, 1]> {
-    handle value {
-        Result::Ok(_) => true,
-        Result::Err(_) => false,
+impl<A, E> Result<A, E> {
+    // Result/Option inspection discards the unselected payload, so both payloads
+    // must permit affine erasure. `[0,0]` is intentionally not a public bound.
+    pub fn is_ok(value: Self) -> Bool
+        where A: Use<[0, 1]>, E: Use<[0, 1]> {
+        handle value {
+            Result::Ok(_) => true,
+            Result::Err(_) => false,
+        }
+    }
+
+    pub fn is_err(value: Self) -> Bool
+        where A: Use<[0, 1]>, E: Use<[0, 1]> {
+        not(Result::is_ok(value))
+    }
+
+    pub fn map<B, F>(value: Self, transform: F) -> Result<B, E>
+        where F: Fn<(A), Output = B> {
+        handle value {
+            Result::Ok(item) => Result::Ok(transform(item)),
+            Result::Err(error) => Result::Err(error),
+        }
+    }
+
+    pub fn map_err<E2, F>(value: Self, transform: F) -> Result<A, E2>
+        where F: Fn<(E), Output = E2> {
+        handle value {
+            Result::Ok(item) => Result::Ok(item),
+            Result::Err(error) => Result::Err(transform(error)),
+        }
+    }
+
+    pub fn and_then<B, F>(value: Self, transform: F) -> Result<B, E>
+        where F: Fn<(A), Output = Result<B, E>> {
+        handle value {
+            Result::Ok(item) => transform(item),
+            Result::Err(error) => Result::Err(error),
+        }
+    }
+
+    pub fn or_else<E2, F>(value: Self, transform: F) -> Result<A, E2>
+        where F: Fn<(E), Output = Result<A, E2>> {
+        handle value {
+            Result::Ok(item) => Result::Ok(item),
+            Result::Err(error) => transform(error),
+        }
+    }
+
+    pub fn unwrap_or(value: Self, fallback: A) -> A
+        where A: Use<[0, 1]>, E: Use<[0, 1]> {
+        handle value {
+            Result::Ok(item) => item,
+            Result::Err(_) => fallback,
+        }
+    }
+
+    pub fn as_ref<'a>(value: &'a Self) -> Result<&'a A, &'a E> {
+        handle *value is Result::Ok(_) {
+            true => Result::Ok(&value.0),
+            false => Result::Err(&value.0),
+        }
+    }
+
+    pub fn as_mut<'a>(value: &'a mut Self) -> Result<&'a mut A, &'a mut E> {
+        handle *value is Result::Ok(_) {
+            true => Result::Ok(&mut value.0),
+            false => Result::Err(&mut value.0),
+        }
     }
 }
 
-pub fn result_is_err<A, E>(value: Result<A, E>) -> Bool
-    where A: Use<[0, 1]>, E: Use<[0, 1]> {
-    not(result_is_ok(value))
-}
+impl<T> Option<T> {
+    // `Option` is the standard temporary slot. Moving its old representation out
+    // before storing `None` transfers a present payload exactly once and leaves a
+    // valid empty occupant regardless of whether `T` has a Default value.
+    pub fn take(target: &mut Self) -> Self {
+        let previous = move *target;
+        *target = None;
+        previous
+    }
 
-pub fn result_map<A, E, B, F>(value: Result<A, E>, transform: F) -> Result<B, E>
-    where F: Fn<(A), Output = B> {
-    handle value {
-        Result::Ok(item) => Result::Ok(transform(item)),
-        Result::Err(error) => Result::Err(error),
+    // Replacing an optional resident returns the complete previous state. This is
+    // the primitive ownership-preserving insertion operation; callers that only
+    // need the old payload can inspect the resulting Option normally.
+    pub fn insert(target: &mut Self, value: T) -> Self {
+        let previous = move *target;
+        *target = Some(value);
+        previous
+    }
+
+    // `replace` is the same ownership-preserving transition as insertion; the
+    // distinct spelling makes the returned previous option explicit at callsites.
+    pub fn replace(target: &mut Self, value: T) -> Self {
+        Option::insert(target, value)
+    }
+
+    // When already occupied, the supplied replacement is erased, so this uses
+    // the public affine contract. The returned reference borrows the resident.
+    pub fn get_or_insert<'a>(target: &'a mut Self, value: T) -> &'a mut T
+        where T: Use<[0, 1]> {
+        handle *target is Result::Ok(_) {
+            true => &mut target.0,
+            false => {
+                *target = Some(value);
+                &mut target.0
+            },
+        }
+    }
+
+    // These variants defer construction until the empty branch.  In particular,
+    // no candidate T is constructed and then erased when the option is already
+    // occupied.  The closure itself is affine because that occupied branch does
+    // not invoke it.
+    pub fn get_or_insert_with<'a, F>(target: &'a mut Self, make: F) -> &'a mut T
+        where F: Fn<(), Output = T>, F: Use<[0, 1]> {
+        handle *target is Result::Ok(_) {
+            true => &mut target.0,
+            false => {
+                *target = Some(make());
+                &mut target.0
+            },
+        }
+    }
+
+    // Default construction is deferred to the vacant branch just like the
+    // closure-based variant.  Unlike `get_or_insert`, there is no supplied value
+    // to erase on the occupied path, so `T` needs only its normal Default bound.
+    pub fn get_or_insert_default<'a>(target: &'a mut Self) -> &'a mut T
+        where T: Default {
+        handle *target is Result::Ok(_) {
+            true => &mut target.0,
+            false => {
+                *target = Some(default_value<T>());
+                &mut target.0
+            },
+        }
     }
 }
 
-pub fn result_map_err<A, E, E2, F>(value: Result<A, E>, transform: F) -> Result<A, E2>
-    where F: Fn<(E), Output = E2> {
-    handle value {
-        Result::Ok(item) => Result::Ok(item),
-        Result::Err(error) => Result::Err(transform(error)),
-    }
-}
-
-pub fn result_and_then<A, E, B, F>(value: Result<A, E>, transform: F) -> Result<B, E>
-    where F: Fn<(A), Output = Result<B, E>> {
-    handle value {
-        Result::Ok(item) => transform(item),
-        Result::Err(error) => Result::Err(error),
-    }
-}
-
-pub fn result_or_else<A, E, E2, F>(value: Result<A, E>, transform: F) -> Result<A, E2>
-    where F: Fn<(E), Output = Result<A, E2>> {
-    handle value {
-        Result::Ok(item) => Result::Ok(item),
-        Result::Err(error) => transform(error),
-    }
-}
-
-pub fn result_unwrap_or<A, E>(value: Result<A, E>, fallback: A) -> A
-    where A: Use<[0, 1]>, E: Use<[0, 1]> {
-    handle value {
-        Result::Ok(item) => item,
-        Result::Err(_) => fallback,
-    }
-}
-
-// `Option` is the standard temporary slot. Moving its old representation out
-// before storing `None` transfers a present payload exactly once and leaves a
-// valid empty occupant regardless of whether `T` has a Default value.
-pub fn option_take<T>(target: &mut Option<T>) -> Option<T> {
-    let previous = move *target;
-    *target = None;
-    previous
-}
-
-// Replacing an optional resident returns the complete previous state. This is
-// the primitive ownership-preserving insertion operation; callers that only
-// need the old payload can inspect the resulting Option normally.
-pub fn option_insert<T>(target: &mut Option<T>, value: T) -> Option<T> {
-    let previous = move *target;
-    *target = Some(value);
-    previous
-}
-
-// `replace` is the same ownership-preserving transition as insertion; the
-// distinct spelling makes the returned previous option explicit at callsites.
-pub fn option_replace<T>(target: &mut Option<T>, value: T) -> Option<T> {
-    option_insert(target, value)
-}
-
-// When already occupied, the supplied replacement is erased, so this uses
-// the public affine contract. The returned reference borrows the resident.
-pub fn option_get_or_insert<'a, T>(target: &'a mut Option<T>, value: T) -> &'a mut T
-    where T: Use<[0, 1]> {
-    handle *target is Result::Ok(_) {
-        true => &mut target.0,
-        false => {
-            *target = Some(value);
-            &mut target.0
-        },
-    }
-}
-
-// These variants defer construction until the empty branch.  In particular,
-// no candidate T is constructed and then erased when the option is already
-// occupied.  The closure itself is affine because that occupied branch does
-// not invoke it.
-pub fn option_get_or_insert_with<'a, T, F>(target: &'a mut Option<T>, make: F) -> &'a mut T
-    where F: Fn<(), Output = T>, F: Use<[0, 1]> {
-    handle *target is Result::Ok(_) {
-        true => &mut target.0,
-        false => {
-            *target = Some(make());
-            &mut target.0
-        },
-    }
-}
-
-// Default construction is deferred to the vacant branch just like the
-// closure-based variant.  Unlike `get_or_insert`, there is no supplied value
-// to erase on the occupied path, so `T` needs only its normal Default bound.
-pub fn option_get_or_insert_default<'a, T>(target: &'a mut Option<T>) -> &'a mut T
-    where T: Default {
-    handle *target is Result::Ok(_) {
-        true => &mut target.0,
-        false => {
-            *target = Some(default_value<T>());
-            &mut target.0
-        },
-    }
-}
-
-
-pub fn result_as_ref<'a, A, E>(value: &'a Result<A, E>) -> Result<&'a A, &'a E> {
-    handle *value is Result::Ok(_) {
-        true => Result::Ok(&value.0),
-        false => Result::Err(&value.0),
-    }
-}
-
-pub fn result_as_mut<'a, A, E>(value: &'a mut Result<A, E>) -> Result<&'a mut A, &'a mut E> {
-    handle *value is Result::Ok(_) {
-        true => Result::Ok(&mut value.0),
-        false => Result::Err(&mut value.0),
-    }
-}
-
-pub let Result::is_ok = result_is_ok;
-pub let Result::is_err = result_is_err;
-pub let Result::map = result_map;
-pub let Result::map_err = result_map_err;
-pub let Result::and_then = result_and_then;
-pub let Result::or_else = result_or_else;
-pub let Result::unwrap_or = result_unwrap_or;
-pub let Result::as_ref = result_as_ref;
-pub let Result::as_mut = result_as_mut;
-pub let Option::is_some = result_is_ok;
-pub let Option::is_none = result_is_err;
-pub let Option::map = result_map;
-pub let Option::and_then = result_and_then;
-pub let Option::or_else = result_or_else;
-pub let Option::unwrap_or = result_unwrap_or;
-pub let Option::as_ref = result_as_ref;
-pub let Option::as_mut = result_as_mut;
-pub let Option::take = option_take;
-pub let Option::insert = option_insert;
-pub let Option::replace = option_replace;
-pub let Option::get_or_insert = option_get_or_insert;
-pub let Option::get_or_insert_with = option_get_or_insert_with;
-pub let Option::get_or_insert_default = option_get_or_insert_default;
+// Option is a transparent Result alias. These deliberately re-export the
+// shared Result operations; Option's own slot operations live in its impl.
+pub let Option::is_some = Result::is_ok;
+pub let Option::is_none = Result::is_err;
+pub let Option::map = Result::map;
+pub let Option::and_then = Result::and_then;
+pub let Option::or_else = Result::or_else;
+pub let Option::unwrap_or = Result::unwrap_or;
+pub let Option::as_ref = Result::as_ref;
+pub let Option::as_mut = Result::as_mut;
 
 // These fixities are declaration-owned, never compiler keywords.
 pub infixr 1 else;

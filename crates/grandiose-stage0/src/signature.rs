@@ -384,6 +384,8 @@ pub enum InstantiationError {
 #[derive(Clone, Debug, Default)]
 pub struct ElaboratedInterface {
     pub definitions: BTreeMap<DefKey, ElaboratedHeader>,
+    /// Source-owned inherent heads in the member's callable generic slots.
+    pub inherent_self_types: BTreeMap<DefKey, Type>,
     /// Host imports are interface facts rather than an ambient service map.
     /// Core snapshots this record into every direct host call before MIR.
     pub host_imports: BTreeMap<DefKey, HostImport>,
@@ -882,6 +884,13 @@ impl ElaboratedInterface {
                 diagnostics: vec![],
             };
             let header = elaborator.definition(definition);
+            if matches!(definition.syntax.header, ParsedHeader::InherentMethod(_))
+                && let Some(self_ty) = &elaborator.self_type
+            {
+                result
+                    .inherent_self_types
+                    .insert(definition.key, self_ty.clone());
+            }
             result.definitions.insert(definition.key, header);
             if let Some(capability) = &definition.host_capability {
                 let Some(symbol) = &definition.name else {
@@ -917,6 +926,7 @@ impl ElaboratedInterface {
         let mut merged = Self::default();
         for part in parts {
             merged.definitions.extend(part.definitions);
+            merged.inherent_self_types.extend(part.inherent_self_types);
             merged.host_imports.extend(part.host_imports);
             merged.diagnostics.extend(part.diagnostics);
         }
@@ -938,6 +948,16 @@ impl ElaboratedInterface {
     /// for aliases written inside a body.
     pub fn normalize_type_aliases(&self, value: Type) -> Type {
         normalize_alias_type(value, &self.definitions, &mut vec![], &mut vec![])
+    }
+
+    pub(crate) fn instantiate_inherent_self_type(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+    ) -> Option<Type> {
+        self.inherent_self_types
+            .get(&definition)
+            .map(|ty| substitute_alias_generic_identity(ty.clone(), arguments))
     }
 
     pub fn value_alias_target(&self, definition: DefKey) -> Option<DefKey> {
@@ -1319,6 +1339,7 @@ impl ElaboratedInterface {
     fn validate_owned_nominal_layout_recursion(&mut self) {
         let signatures = ElaboratedInterface {
             definitions: self.definitions.clone(),
+            inherent_self_types: self.inherent_self_types.clone(),
             host_imports: self.host_imports.clone(),
             diagnostics: vec![],
         };
@@ -4319,6 +4340,33 @@ impl Elaborator<'_> {
     fn definition(&mut self, definition: &Definition) -> ElaboratedHeader {
         match &definition.syntax.header {
             ParsedHeader::Function(header) => ElaboratedHeader::Callable(self.callable(header)),
+            ParsedHeader::InherentMethod(header) => {
+                self.bind_generics(&header.signature.generics);
+                self.self_type = Some(self.ty(&header.self_ty));
+                ElaboratedHeader::Callable(self.callable_bound(&header.signature))
+            }
+            ParsedHeader::InherentImplementation(header) => {
+                self.bind_generics(&header.generics);
+                self.self_type = Some(self.ty(&header.self_ty));
+                self.inherent_owner(&header.self_ty);
+                for ((name, kind), argument) in header
+                    .generics
+                    .iter()
+                    .zip(header.generics.kinds())
+                    .zip(nominal_identity_arguments(&header.generics.kinds()))
+                {
+                    if kind != GenericKind::Lifetime
+                        && !type_contains_generic_argument(
+                            self.self_type.as_ref().unwrap(),
+                            &argument,
+                        )
+                    {
+                        self.error("G3276", format!("impl generic parameter `{name}` is not constrained by its self type; declare it on the function instead"));
+                    }
+                }
+                self.callable_where_bounds(&header.where_bounds);
+                ElaboratedHeader::Opaque
+            }
             ParsedHeader::TypeAlias { generics, target } => {
                 self.bind_generics(generics);
                 ElaboratedHeader::Alias {
@@ -4353,6 +4401,45 @@ impl Elaborator<'_> {
     }
     fn callable(&mut self, header: &CallableHeader) -> CallableSignature {
         self.bind_generics(&header.generics);
+        self.callable_bound(header)
+    }
+    fn inherent_owner(&mut self, ty: &HeaderType) {
+        let path = match ty {
+            HeaderType::Path(path) => path,
+            HeaderType::Application(base, _) => match base.as_ref() {
+                HeaderType::Path(path) => path,
+                _ => {
+                    self.error(
+                        "G3274",
+                        "inherent impl requires a named type declared in this package".into(),
+                    );
+                    return;
+                }
+            },
+            _ => {
+                self.error(
+                    "G3274",
+                    "inherent impl requires a named type declared in this package".into(),
+                );
+                return;
+            }
+        };
+        match self
+            .index
+            .resolve_path(DefinitionNamespace::Type, self.module, path)
+        {
+            ResolutionState::Resolved(owner)
+                if self
+                    .index
+                    .owner(owner)
+                    .is_some_and(|module| module.package == self.module.package) => {}
+            _ => self.error(
+                "G3274",
+                "inherent impl requires a named type declared in this package".into(),
+            ),
+        }
+    }
+    fn callable_bound(&mut self, header: &CallableHeader) -> CallableSignature {
         let (where_bounds, where_associated_type_bindings, where_associated_effect_bindings) =
             self.callable_where_bounds(&header.where_bounds);
         let parameters = header
@@ -5378,6 +5465,13 @@ impl Elaborator<'_> {
         self.lifetime_generics.clear();
         self.const_generics.clear();
         for (index, name) in parameters.iter().enumerate() {
+            if name == "Self" {
+                self.error(
+                    "G3301",
+                    "`Self` is reserved for the enclosing type and cannot be a generic parameter"
+                        .into(),
+                );
+            }
             if self.generics.contains_key(name)
                 || self.effect_row_generics.contains_key(name)
                 || self.lifetime_generics.contains_key(name)
