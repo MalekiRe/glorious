@@ -25,14 +25,19 @@ also passed Miri's strict-provenance checks; no new Miri run is claimed here.
 U2 includes raw-pointer types, explicit unsafe scopes, unsafe callable/trait
 contracts, and source-independent Core/MIR checks. Callable safety stays separate
 from the unsafe-execution requirement, including on lifted bodies. Stage0 schema
-98 executes machine leaves over actual host memory, including native-backed
+99 executes machine leaves over actual host memory, including native-backed
 checked references, with per-run byte budgets and explicit unsafe Rust execution
 entry points. Source Vec, slices and UTF-8/collection consumers now use that
 storage, with ordinary inherent functions and explicit Clone implementations.
 Compiler dependency/diagnostic owners have been migrated to borrowed inspection,
-explicit independent cloning and buffer transfer. This does not complete
-structural/generic destruction, native homes for ordinary frame residents and
-callables, actual VM/native calls, the independent G1 extension, or U4–U6.
+explicit independent cloning and buffer transfer. Concrete destruction now
+specializes generic owned parameters and traverses records, tuples and active
+enum payloads, with initialized-field guards and ordinary source Drop calls.
+Replacement, shadowed owners, destructor-held loans, constructor lifetime
+inference and multi-origin reference returns have focused regressions. This
+does not complete array/pattern/capture cleanup, source Vec destruction, native
+homes for ordinary frame residents and callables, actual VM/native calls,
+the independent G1 extension, or U4–U6.
 The source-cost checkpoint now passes all 48 source entries, including the two
 previously allocation-limited batches, after reducing source call-frame work.
 The complete production closure, comparator batches and VM budgets are unchanged.

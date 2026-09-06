@@ -97,12 +97,15 @@ pub struct CompilerBuildIdentity {
 /// their lexical Self/generic contracts, and type-owned member resolution.
 /// Cache thirteen aligns borrowed trait receivers across Core and executable
 /// instances and preserves scoped enum payload projection authority.
+/// Cache fourteen adds body-local constructor lifetime inference and union
+/// caller-loan provenance. Bytecode 54 and verifier thirteen add concrete
+/// destruction glue and explicit projected/resident initialization state.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 3;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 3;
-pub const STAGE0_CACHE_GENERATION: u32 = 13;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 53;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 12;
+pub const STAGE0_CACHE_GENERATION: u32 = 14;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 54;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 13;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

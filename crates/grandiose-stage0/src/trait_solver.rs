@@ -4006,7 +4006,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstU32Expr(_) => false,
         GenericArgument::ConstProjection { .. } => false,
-        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. } | crate::Lifetime::Infer(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
@@ -4040,7 +4040,7 @@ fn generic_argument_is_concrete_in_hrtb_scope(
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstProjection { .. }
-        | GenericArgument::Lifetime(crate::Lifetime::Generic(_))
+        | GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }

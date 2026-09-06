@@ -439,6 +439,13 @@ impl PlaceFlow {
             body,
             signatures,
             states: BTreeMap::new(),
+            destructor_paths: BTreeSet::new(),
+            drop_solver: None,
+            has_drop_implementations: signatures.is_some_and(|signatures|
+                signatures.definitions.values().any(|header| matches!(header,
+                    crate::ElaboratedHeader::Implementation(implementation)
+                        if !implementation.negative && implementation.relation.definition
+                            == crate::resolution::language_drop_trait_definition()))),
             projection_loans: vec![],
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
@@ -462,7 +469,7 @@ impl PlaceFlow {
             refinements: vec![],
             diagnostics: vec![],
         };
-        for (index, (name, _)) in parameters.iter().enumerate() {
+        for (index, (name, ty)) in parameters.iter().enumerate() {
             let binding = a.bindings.intern(
                 name,
                 name,
@@ -474,6 +481,7 @@ impl PlaceFlow {
             a.record_storage_binding(binding);
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
+            a.record_destructor_paths(name, ty);
         }
         // Parameters are caller-owned values, but reference-typed parameter
         // projections still name a stable external loan.  Seed those frozen
@@ -539,16 +547,22 @@ struct Analyzer<'a> {
     body: &'a TypedBody,
     signatures: Option<&'a ElaboratedInterface>,
     states: BTreeMap<String, LocalState>,
+    /// Places whose eventual source Drop hook can still observe their owned
+    /// reference leaves. They add implicit uses at lexical destruction;
+    /// moved-out subplaces no longer retain those loans.
+    destructor_paths: BTreeSet<Projection>,
+    drop_solver: Option<crate::TraitSolver>,
+    has_drop_implementations: bool,
     /// Every precise source loan, including a whole-local loan.  Whole-local
     /// entries are mirrored in `states` for the legacy compact summary.
     projection_loans: Vec<ProjectionLoan>,
     /// Child reference binding -> suspended parent binding.  This is kept
     /// separate from the loan identity because a child may end nonlexically
     /// while the parent loan remains available again.
-    reborrow_parents: BTreeMap<String, String>,
+    reborrow_parents: BTreeMap<String, BTreeSet<String>>,
     /// Provenance outlives one compact active-loan entry.  It is consulted
     /// only when a live descendant proves the parent region remains open.
-    reference_origins: BTreeMap<String, ProjectionLoan>,
+    reference_origins: BTreeMap<String, BTreeSet<ProjectionLoan>>,
     /// A direct `move *reference` leaves its unique referent uninitialized
     /// while retaining the reference handle.  The key is the exact lexical
     /// reference binding, never the referent root: a parameter reference may
@@ -594,12 +608,99 @@ type HandlerExit = (
     BTreeMap<String, LocalState>,
     Vec<ProjectionLoan>,
     BTreeSet<Projection>,
-    BTreeMap<String, String>,
-    BTreeMap<String, ProjectionLoan>,
+    BTreeMap<String, BTreeSet<String>>,
+    BTreeMap<String, BTreeSet<ProjectionLoan>>,
     BTreeMap<String, Span>,
 );
 
 impl Analyzer<'_> {
+    fn record_destructor_paths(&mut self, owner: &str, ty: &Type) {
+        let paths = self.drop_observation_paths(ty, &mut BTreeSet::new());
+        self.destructor_paths.extend(paths.into_iter().map(|fields| Projection {
+            root: owner.to_owned(), fields,
+        }));
+    }
+
+    fn drop_observation_paths(&mut self, ty: &Type, active: &mut BTreeSet<crate::DefKey>) -> Vec<Vec<u32>> {
+        if !self.has_drop_implementations { return vec![]; }
+        let Some(signatures) = self.signatures else { return vec![]; };
+        let layouts = match ty {
+            Type::Reference { .. } | Type::RawPointer { .. } | Type::Callable { .. } => return vec![],
+            Type::Generic(_) | Type::Projection { .. } => return vec![vec![]],
+            Type::Nominal { definition, arguments } => {
+                if !active.insert(*definition) { return vec![vec![]]; }
+                let answer = self.drop_solver.get_or_insert_with(|| crate::TraitSolver::new(signatures))
+                    .solve(crate::TraitGoal {
+                        relation: crate::ElaboratedTraitReference {
+                            definition: crate::resolution::language_drop_trait_definition(), arguments: vec![],
+                        },
+                        subject: ty.clone(),
+                    });
+                if !matches!(answer, crate::TraitAnswer::NoSolution | crate::TraitAnswer::Refuted { .. }) {
+                    active.remove(definition);
+                    return vec![vec![]];
+                }
+                let layouts = match signatures.definitions.get(definition) {
+                    Some(crate::ElaboratedHeader::Nominal { layout, .. }) =>
+                        crate::mir::instantiate_nominal_copy_layout(layout, arguments).unwrap_or_default(),
+                    _ => vec![],
+                };
+                layouts
+            }
+            Type::Tuple(fields) => vec![fields.clone()],
+            Type::Array(element) => return if self.drop_observation_paths(element, active).is_empty() {
+                vec![]
+            } else { vec![vec![]] },
+            _ => return vec![],
+        };
+        let mut paths = BTreeSet::new();
+        for fields in layouts {
+            for (index, ty) in fields.iter().enumerate() {
+                for mut path in self.drop_observation_paths(ty, active) {
+                    path.insert(0, index as u32);
+                    paths.insert(path);
+                }
+            }
+        }
+        if let Type::Nominal { definition, .. } = ty { active.remove(definition); }
+        paths.into_iter().collect()
+    }
+
+    fn loan_is_used_by_destruction(&self, owner: &str) -> bool {
+        self.destructor_paths.iter().any(|place| {
+            let key = projection_key(&place.root, &place.fields);
+            self.states.contains_key(&place.root)
+                && (owner == key || owner.starts_with(&(key + ".")))
+                && !self.origin_has_been_moved(owner)
+        })
+    }
+
+    fn origin_has_been_moved(&self, owner: &str) -> bool {
+        self.moved_places.iter().any(|moved| {
+            let moved = projection_key(&moved.root, &moved.fields);
+            owner == moved || owner.starts_with(&(moved + "."))
+        })
+    }
+
+    fn origin_loans(&self, owner: &str) -> BTreeSet<ProjectionLoan> {
+        let active = self.projection_loans.iter()
+            .filter(|loan| loan.owner.as_deref() == Some(owner)).cloned().collect::<BTreeSet<_>>();
+        if active.is_empty() { self.reference_origins.get(owner).cloned().unwrap_or_default() }
+        else { active }
+    }
+
+    fn reference_ancestors(&self, owner: &str) -> BTreeSet<String> {
+        let mut pending = vec![owner.to_owned()];
+        let mut seen = BTreeSet::new();
+        while let Some(owner) = pending.pop() {
+            if !seen.insert(owner.clone()) { continue; }
+            if let Some(parents) = self.reborrow_parents.get(&owner) {
+                pending.extend(parents.iter().cloned());
+            }
+        }
+        seen
+    }
+
     fn record_parameter_reference_origins(&mut self, abi: &[(String, Type)]) {
         // A wrapper may forward a hidden reference field without projecting
         // that field in this body at all (Slice::get_unchecked is one such
@@ -621,11 +722,11 @@ impl Analyzer<'_> {
                     unreachable!("reference layout traversal only yields references");
                 };
                 let key = projection_key(name, &fields);
-                self.reference_origins.entry(key).or_insert_with(|| ProjectionLoan {
+                self.reference_origins.entry(key).or_insert_with(|| BTreeSet::from([ProjectionLoan {
                     place: Projection { root: name.clone(), fields },
                     unique: matches!(mutability, crate::types::Mutability::Unique),
                     owner: None,
-                });
+                }]));
             }
         }
         let parameters = abi
@@ -646,11 +747,11 @@ impl Analyzer<'_> {
             let key = projection_key(&place.root, &place.fields);
             self.reference_origins
                 .entry(key)
-                .or_insert_with(|| ProjectionLoan {
+                .or_insert_with(|| BTreeSet::from([ProjectionLoan {
                     place,
                     unique: matches!(mutability, crate::types::Mutability::Unique),
                     owner: None,
-                });
+                }]));
         }
     }
 
@@ -732,16 +833,20 @@ impl Analyzer<'_> {
     }
 
     fn end_scope(&mut self, span: Span) {
-        self.active_storage_scopes
+        let storage_scope = self.active_storage_scopes
             .pop()
             .expect("nested PlaceFlow source-storage scope");
-        let scope = self.scopes.pop().expect("nested PlaceFlow scope");
+        self.scopes.pop().expect("nested PlaceFlow scope");
         let refinement_start = self
             .scope_refinement_starts
             .pop()
             .expect("refinement journal follows PlaceFlow scopes");
         self.refinements.truncate(refinement_start);
-        let locals = scope.into_values().collect::<BTreeSet<_>>();
+        // The spelling map keeps only the newest shadow. Cleanup must end
+        // every binding in this scope, including hidden earlier owners.
+        let locals = self.bindings.ids.iter().filter(|(_, binding)|
+            self.binding_scopes[binding.0 as usize] == storage_scope)
+            .map(|(identity, _)| identity.clone()).collect::<BTreeSet<_>>();
         let holes = self
             .open_referent_holes
             .keys()
@@ -769,6 +874,7 @@ impl Analyzer<'_> {
             self.release_owner_loans(&owner, span);
         }
         self.states.retain(|name, _| !locals.contains(name));
+        self.destructor_paths.retain(|place| !locals.contains(&place.root));
         self.projection_loans.retain(|loan| {
             !locals.contains(&loan.place.root)
                 && !loan
@@ -778,16 +884,16 @@ impl Analyzer<'_> {
         });
         self.moved_places
             .retain(|place| !locals.contains(&place.root));
-        self.reborrow_parents.retain(|child, parent| {
-            !belongs_to_scope(&locals, child) && !belongs_to_scope(&locals, parent)
+        self.reborrow_parents.retain(|child, parents| {
+            parents.retain(|parent| !belongs_to_scope(&locals, parent));
+            !belongs_to_scope(&locals, child) && !parents.is_empty()
         });
-        self.reference_origins.retain(|name, loan| {
-            !belongs_to_scope(&locals, name)
-                && !locals.contains(&loan.place.root)
-                && !loan
+        self.reference_origins.retain(|name, loans| {
+            loans.retain(|loan| !locals.contains(&loan.place.root) && !loan
                     .owner
                     .as_ref()
-                    .is_some_and(|owner| belongs_to_scope(&locals, owner))
+                    .is_some_and(|owner| belongs_to_scope(&locals, owner)));
+            !belongs_to_scope(&locals, name) && !loans.is_empty()
         });
     }
 
@@ -798,13 +904,14 @@ impl Analyzer<'_> {
         mut origin: impl FnMut(u32) -> PlaceBindingOrigin,
         resumption_origin: Option<PlaceBindingOrigin>,
     ) {
-        for (index, (name, _)) in bindings.into_iter().enumerate() {
+        for (index, (name, ty)) in bindings.into_iter().enumerate() {
             let identity = self.fresh_binding(name);
             self.activate_binding(
                 name,
                 identity.clone(),
                 origin(u32::try_from(index).expect("branch binder index exceeded identity space")),
             );
+            self.record_destructor_paths(&identity, ty);
             self.states.insert(identity, LocalState::Initialized);
         }
         if let Some(name) = resumption {
@@ -820,7 +927,7 @@ impl Analyzer<'_> {
 
     fn visit_scoped_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
         self.begin_scope();
-        self.visit_sequence(values, live_after);
+        self.visit_sequence_with_discarded_prefix(values, live_after, true);
         self.end_scope(self.body.expression(self.body.root).span);
     }
 
@@ -931,13 +1038,16 @@ impl Analyzer<'_> {
                 } else {
                     self.visit_with_live_after(value, live_after);
                 }
+                // Resolve initializer origins in the old lexical environment:
+                // `let value = value` must refer to the hidden previous owner.
+                self.record_aggregate_reference_origins(&binding, value);
                 self.activate_binding(
                     &name,
                     binding.clone(),
                     PlaceBindingOrigin::Let { expression: id },
                 );
+                self.record_destructor_paths(&binding, &self.body.expression(value).ty.clone());
                 self.states.insert(binding.clone(), LocalState::Initialized);
-                self.record_aggregate_reference_origins(&binding, value);
                 self.event(FlowEventKind::Initialize(binding), e.span)
             }
             CoreKind::Assign { place, value } => {
@@ -1268,7 +1378,7 @@ impl Analyzer<'_> {
                 });
             }
             CoreKind::Block(values) if id == self.body.root => {
-                self.visit_sequence(&values, live_after)
+                self.visit_sequence_with_discarded_prefix(&values, live_after, true)
             }
             CoreKind::Block(values) => self.visit_scoped_sequence(&values, live_after),
         }
@@ -1276,6 +1386,10 @@ impl Analyzer<'_> {
     }
 
     fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
+        self.visit_sequence_with_discarded_prefix(values, live_after, false);
+    }
+
+    fn visit_sequence_with_discarded_prefix(&mut self, values: &[CoreId], live_after: &BTreeSet<String>, discard_prefix: bool) {
         // A strict child which cannot normally complete leaves the current
         // lexical continuation. Core retains the syntactic suffix for
         // diagnostics and IDE tools, but ownership must not treat that dead
@@ -1304,8 +1418,23 @@ impl Analyzer<'_> {
             suffixes[index] = future.clone();
             self.collect_local_uses(*value, &mut future);
         }
-        for (value, future) in reachable.iter().zip(suffixes) {
-            self.visit_with_live_after(*value, &future);
+        for (index, (value, mut future)) in reachable.iter().zip(suffixes).enumerate() {
+            // Strict operands remain owned by their parent operation. Only
+            // a non-tail block expression discards its result at this point;
+            // give that temporary an exact statement-long loan owner. Unit
+            // lets/assignments introduce or update other owners, not one
+            // whose initializer loans may be retired with their Unit result.
+            if discard_prefix && index + 1 < values.len()
+                && !matches!(self.body.expression(*value).ty, Type::Unit | Type::Never) {
+                let owner = format!("<temporary-statement-{}>", value.0);
+                let previous = self.ephemeral_borrow_owner.replace(owner.clone());
+                future.insert(owner.clone());
+                self.visit_with_live_after(*value, &future);
+                self.release_owner_loans(&owner, self.body.expression(*value).span);
+                self.ephemeral_borrow_owner = previous;
+            } else {
+                self.visit_with_live_after(*value, &future);
+            }
         }
     }
 
@@ -1479,7 +1608,8 @@ impl Analyzer<'_> {
                 // preserve the active branch identity when a branch-local
                 // spelling is used later in the same arm. The arm scope
                 // itself releases the latter before the dynamic join.
-                !live_after.contains(*owner)
+                !self.loan_is_used_by_destruction(owner)
+                    && !live_after.contains(*owner)
                     && !live_after
                         .iter()
                         .any(|name| self.resolve_name(name) == **owner)
@@ -2045,7 +2175,7 @@ impl Analyzer<'_> {
                     owner,
                 };
                 if let Some(owner) = &loan.owner {
-                    self.reference_origins.insert(owner.clone(), loan.clone());
+                    self.reference_origins.insert(owner.clone(), BTreeSet::from([loan.clone()]));
                 }
                 self.projection_loans.push(loan);
             }
@@ -2084,7 +2214,7 @@ impl Analyzer<'_> {
             owner,
         };
         if let Some(owner) = &loan.owner {
-            self.reference_origins.insert(owner.clone(), loan.clone());
+            self.reference_origins.insert(owner.clone(), BTreeSet::from([loan.clone()]));
         }
         self.projection_loans.push(loan);
         self.place_event(
@@ -2109,33 +2239,12 @@ impl Analyzer<'_> {
         let Some(parent) = self.reference_origin_key(reference) else {
             return false;
         };
-        let parent_loan = self
-            .projection_loans
-            .iter()
-            .find(|loan| loan.owner.as_deref() == Some(parent.as_str()))
-            .cloned()
-            .or_else(|| self.reference_origins.get(&parent).cloned())
-            .or_else(|| {
-                self.projection_loans
-                    .iter()
-                    .any(|loan| {
-                        let mut owner = loan.owner.as_deref();
-                        while let Some(current) = owner {
-                            if current == parent {
-                                return true;
-                            }
-                            owner = self.reborrow_parents.get(current).map(String::as_str);
-                        }
-                        false
-                    })
-                    .then(|| self.reference_origins.get(&parent).cloned())
-                    .flatten()
-            });
-        let Some(parent_loan) = parent_loan else {
+        let parents = self.origin_loans(&parent);
+        if parents.is_empty() {
             self.error(span, "G5006", "reborrow has no live parent loan".into());
             return true;
-        };
-        if unique && !parent_loan.unique {
+        }
+        if unique && parents.iter().any(|parent| !parent.unique) {
             self.error(
                 span,
                 "G5006",
@@ -2143,19 +2252,16 @@ impl Analyzer<'_> {
             );
             return true;
         }
-        self.place_event(
-            FlowEventKind::Reborrow(parent_loan.place.root.clone()),
-            parent_loan.place.clone(),
-            span,
-        );
-        let loan = ProjectionLoan {
-            place: parent_loan.place,
-            unique,
-            owner: Some(owner.clone()),
-        };
-        self.reference_origins.insert(owner.clone(), loan.clone());
-        self.projection_loans.push(loan);
-        self.reborrow_parents.insert(owner, parent);
+        let mut aliases = BTreeSet::new();
+        for parent_loan in parents {
+            self.place_event(FlowEventKind::Reborrow(parent_loan.place.root.clone()),
+                parent_loan.place.clone(), span);
+            let loan = ProjectionLoan { place: parent_loan.place, unique, owner: Some(owner.clone()) };
+            aliases.insert(loan.clone());
+            self.projection_loans.push(loan);
+        }
+        self.reference_origins.insert(owner.clone(), aliases);
+        self.reborrow_parents.insert(owner, BTreeSet::from([parent]));
         true
     }
 
@@ -2185,6 +2291,19 @@ impl Analyzer<'_> {
 
     fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
         match self.body.expression(id).kind.clone() {
+            CoreKind::Move(value) => self.record_aggregate_reference_origins(name, value),
+            CoreKind::Local(_) | CoreKind::Field { .. } => {
+                if let Some(source) = self.reference_origin_key(id) {
+                    let prefix = source.clone() + ".";
+                    let aliases = self.reference_origins.iter()
+                        .filter(|(key, _)| **key == source || key.starts_with(&prefix))
+                        .map(|(key, _)| (format!("{name}{}", &key[source.len()..]), self.origin_loans(key)))
+                        .collect::<Vec<_>>();
+                    for (destination, parents) in aliases {
+                        for parent in parents { self.install_reference_alias(&destination, parent, id); }
+                    }
+                }
+            }
             // A reference stored inside an aggregate is owned by that
             // aggregate's lexical storage just as `let r = &mut value` is
             // owned by `r`.  The initial borrow was necessarily visited
@@ -2199,7 +2318,7 @@ impl Analyzer<'_> {
                         unique,
                         owner: Some(name.to_owned()),
                     };
-                    self.reference_origins.insert(name.to_owned(), loan.clone());
+                    self.reference_origins.insert(name.to_owned(), BTreeSet::from([loan.clone()]));
                     if !self.projection_loans.contains(&loan) {
                         self.projection_loans.push(loan);
                     }
@@ -2225,15 +2344,10 @@ impl Analyzer<'_> {
                     // aggregate itself as ordinary storage; a later
                     // `&*slot` creates the child reborrow that owns an NLL
                     // region.
-                    if let Some(parent) = self.reference_loan_from_value(field) {
-                        self.reference_origins.insert(
-                            key.clone(),
-                            ProjectionLoan {
-                                place: parent.place,
-                                unique: parent.unique,
-                                owner: None,
-                            },
-                        );
+                    let parents = self.reference_loans_from_value(field);
+                    if !parents.is_empty() {
+                        self.reference_origins.insert(key.clone(), parents.into_iter().map(|parent|
+                            ProjectionLoan { place: parent.place, unique: parent.unique, owner: None }).collect());
                     }
                     self.record_aggregate_reference_origins(&key, field);
                 }
@@ -2274,8 +2388,8 @@ impl Analyzer<'_> {
                 );
                 continue;
             };
-            let Some(parent) = self.reference_loan_from_value_path(argument, &path.argument_fields)
-            else {
+            let parents = self.reference_loans_from_value_path(argument, &path.argument_fields);
+            if parents.is_empty() {
                 // A call classified as `External` has proved that all of its
                 // reference leaves are static/external.  Forwarding one of
                 // those leaves needs no caller loan to keep alive; in
@@ -2291,24 +2405,9 @@ impl Analyzer<'_> {
                         .into(),
                 );
                 continue;
-            };
+            }
             let result = projection_key(result, &path.result_fields);
-            let alias = ProjectionLoan {
-                place: parent.place.clone(),
-                unique: parent.unique,
-                owner: Some(result.clone()),
-            };
-            self.reference_origins.insert(result.clone(), alias.clone());
-            if !self.projection_loans.contains(&alias) {
-                self.projection_loans.push(alias);
-            }
-            if let Some(owner) = parent.owner {
-                self.reborrow_parents.insert(result, owner);
-            }
-            self.event(
-                FlowEventKind::Reborrow(parent.place.root),
-                self.body.expression(argument).span,
-            );
+            for parent in parents { self.install_reference_alias(&result, parent, argument); }
         }
     }
 
@@ -2330,44 +2429,22 @@ impl Analyzer<'_> {
         }
     }
 
-    fn reference_loan_from_value(&self, id: CoreId) -> Option<ProjectionLoan> {
+    fn reference_loans_from_value(&self, id: CoreId) -> BTreeSet<ProjectionLoan> {
         match &self.body.expression(id).kind {
             CoreKind::Borrow { unique, value } => {
-                self.projection(*value)
-                    .map(|place| ProjectionLoan {
-                        place,
-                        unique: *unique,
-                        owner: None,
-                    })
-                    .or_else(|| {
-                        // `&(*incoming).field` is not a new borrow of a
-                        // body-local place: it is a reborrow whose backing
-                        // region is carried by `incoming`.  Keeping that
-                        // provenance lets ordinary library wrappers forward
-                        // references into fields of borrowed structs (for
-                        // example a HashMap's entry vector) without making
-                        // the resulting reference outlive its caller.
-                        let reference = self.reborrow_reference(*value)?;
-                        let key = self.reference_origin_key(reference)?;
-                        self.projection_loans
-                            .iter()
-                            .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
-                            .cloned()
-                            .or_else(|| self.reference_origins.get(&key).cloned())
-                            .map(|parent| ProjectionLoan {
-                                place: parent.place,
-                                unique: *unique,
-                                owner: parent.owner,
-                            })
-                    })
+                if let Some(place) = self.projection(*value) {
+                    BTreeSet::from([ProjectionLoan { place, unique: *unique, owner: None }])
+                } else if let Some(key) = self.reborrow_reference(*value)
+                    .and_then(|reference| self.reference_origin_key(reference)) {
+                    // A projected reborrow retains every possible backing
+                    // region of its incoming reference, not a selected one.
+                    self.origin_loans(&key).into_iter().map(|parent| ProjectionLoan {
+                        place: parent.place, unique: *unique, owner: parent.owner,
+                    }).collect()
+                } else { BTreeSet::new() }
             }
             CoreKind::Local(_) | CoreKind::Field { .. } => {
-                let key = self.reference_origin_key(id)?;
-                self.projection_loans
-                    .iter()
-                    .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
-                    .cloned()
-                    .or_else(|| self.reference_origins.get(&key).cloned())
+                self.reference_origin_key(id).map(|key| self.origin_loans(&key)).unwrap_or_default()
             }
             CoreKind::Call {
                 arguments,
@@ -2380,19 +2457,18 @@ impl Analyzer<'_> {
                 ..
             } => paths
                 .iter()
-                .find(|path| path.result_fields.is_empty())
-                .and_then(|path| {
-                    arguments.get(path.argument as usize).and_then(|argument| {
-                        self.reference_loan_from_value_path(*argument, &path.argument_fields)
-                    })
-                }),
-            _ => None,
+                .filter(|path| path.result_fields.is_empty())
+                .flat_map(|path| arguments.get(path.argument as usize).map(|argument|
+                    self.reference_loans_from_value_path(*argument, &path.argument_fields)).unwrap_or_default())
+                .collect(),
+            CoreKind::Move(value) => self.reference_loans_from_value(*value),
+            _ => BTreeSet::new(),
         }
     }
 
-    fn reference_loan_from_value_path(&self, id: CoreId, fields: &[u32]) -> Option<ProjectionLoan> {
+    fn reference_loans_from_value_path(&self, id: CoreId, fields: &[u32]) -> BTreeSet<ProjectionLoan> {
         if fields.is_empty() {
-            return self.reference_loan_from_value(id);
+            return self.reference_loans_from_value(id);
         }
         // A call can return a nominal aggregate which carries a reference in
         // one of its fields (for example `Vec::as_mut_slice` and then
@@ -2411,18 +2487,19 @@ impl Analyzer<'_> {
                 reference_origin: CallReferenceOrigin::Paths(paths),
                 ..
             } => {
+                let mut loans = BTreeSet::new();
                 for path in paths {
                     if !fields.starts_with(&path.result_fields) {
                         continue;
                     }
-                    let argument = *arguments.get(path.argument as usize)?;
+                    let Some(argument) = arguments.get(path.argument as usize).copied() else { continue; };
                     let mut argument_fields = path.argument_fields.clone();
                     argument_fields.extend_from_slice(&fields[path.result_fields.len()..]);
-                    if let Some(loan) = self.reference_loan_from_value_path(argument, &argument_fields) {
-                        return Some(loan);
-                    }
+                    loans.extend(self.reference_loans_from_value_path(argument, &argument_fields));
                 }
+                return loans;
             }
+            CoreKind::Move(value) => return self.reference_loans_from_value_path(*value, fields),
             _ => {}
         }
         let mut value = id;
@@ -2439,19 +2516,15 @@ impl Analyzer<'_> {
                     // single lexical origin. Looking up only the first
                     // projection loses nested reference carriers such as
                     // `Str { bytes: Slice { storage: &Array<_>, .. } }`.
-                    let key = projection_key(&self.reference_origin_key(value)?, remaining);
-                    return self
-                        .projection_loans
-                        .iter()
-                        .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
-                        .cloned()
-                        .or_else(|| self.reference_origins.get(&key).cloned());
+                    let Some(key) = self.reference_origin_key(value) else { return BTreeSet::new(); };
+                    return self.origin_loans(&projection_key(&key, remaining));
                 }
             };
-            value = *fields.get(*field as usize)?;
+            let Some(next) = fields.get(*field as usize).copied() else { return BTreeSet::new(); };
+            value = next;
             remaining = tail;
         }
-        self.reference_loan_from_value(value)
+        self.reference_loans_from_value(value)
     }
 
     fn external_reference_path(&self, id: CoreId) -> bool {
@@ -2515,19 +2588,11 @@ impl Analyzer<'_> {
         let mut bindings = Vec::new();
         collect_pattern_binders(pattern, &mut Vec::new(), &mut bindings);
         for (name, result_fields) in bindings {
-            let Some(path) = paths
-                .iter()
-                .find(|path| path.result_fields == result_fields)
-            else {
-                continue;
-            };
-            let Some(argument) = arguments.get(path.argument as usize).copied() else {
-                continue;
-            };
-            if let Some(parent) =
-                self.reference_loan_from_value_path(argument, &path.argument_fields)
-            {
-                self.install_reference_alias(&self.resolve_name(&name), parent, argument);
+            for path in paths.iter().filter(|path| path.result_fields == result_fields) {
+                let Some(argument) = arguments.get(path.argument as usize).copied() else { continue; };
+                for parent in self.reference_loans_from_value_path(argument, &path.argument_fields) {
+                    self.install_reference_alias(&self.resolve_name(&name), parent, argument);
+                }
             }
         }
     }
@@ -2557,7 +2622,7 @@ impl Analyzer<'_> {
     ) {
         match pattern {
             CorePattern::Bind { name } => {
-                if let Some(parent) = self.reference_loan_from_value_path(value, fields) {
+                for parent in self.reference_loans_from_value_path(value, fields) {
                     self.install_reference_alias(&self.resolve_name(name), parent, value);
                 }
             }
@@ -2598,12 +2663,21 @@ impl Analyzer<'_> {
             owner: Some(result.to_owned()),
         };
         self.reference_origins
-            .insert(result.to_owned(), alias.clone());
+            .entry(result.to_owned()).or_default().insert(alias.clone());
         if !self.projection_loans.contains(&alias) {
             self.projection_loans.push(alias);
         }
         if let Some(owner) = parent.owner {
-            self.reborrow_parents.insert(result.to_owned(), owner);
+            if self.origin_has_been_moved(&owner) {
+                // Moving a reference-bearing owner transfers its backing
+                // loans; it must not suspend the now-vacant source slot.
+                // Retain any external ancestor that was already suspended.
+                let parents = self.reference_ancestors(&owner).into_iter()
+                    .filter(|parent| !self.origin_has_been_moved(parent)).collect::<BTreeSet<_>>();
+                self.reborrow_parents.entry(result.to_owned()).or_default().extend(parents);
+            } else {
+                self.reborrow_parents.entry(result.to_owned()).or_default().insert(owner);
+            }
         }
         self.event(
             FlowEventKind::Reborrow(parent.place.root),
@@ -2615,21 +2689,41 @@ impl Analyzer<'_> {
         let Some(key) = self.place_origin_key(place) else {
             return;
         };
-        self.reference_origins
-            .retain(|existing, _| existing != &key && !existing.starts_with(&(key.clone() + ".")));
-        if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind
-            && let Some(place) = self.projection(value)
-        {
-            self.reference_origins.insert(
-                key.clone(),
-                ProjectionLoan {
-                    place,
-                    unique,
-                    owner: None,
-                },
-            );
+        // Evaluate provenance before ending the old resident: self-assignment
+        // and projected moves can read precisely the origin being replaced.
+        // This transient namespace snapshots the RHS's ordinary frozen facts;
+        // it is removed before publishing the new destination's aliases.
+        let temporary = format!("<assignment-value-{}>", value.0);
+        self.record_aggregate_reference_origins(&temporary, value);
+        let under = |candidate: &str, root: &str| candidate == root
+            || candidate.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('.'));
+        let replacement = self.reference_origins.iter()
+            .filter(|(origin, _)| under(origin, &temporary))
+            .map(|(origin, _)| (
+                format!("{key}{}", &origin[temporary.len()..]),
+                self.origin_loans(origin),
+                self.reborrow_parents.get(origin).cloned().unwrap_or_default(),
+            )).collect::<Vec<_>>();
+        let old_owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
+            .filter(|owner| under(owner, &key)).cloned().collect::<BTreeSet<_>>();
+        for owner in old_owners { self.release_owner_loans(&owner, self.body.expression(value).span); }
+        self.reference_origins.retain(|origin, _| !under(origin, &key));
+        self.reborrow_parents.retain(|origin, _| !under(origin, &key));
+        for (destination, loans, parents) in replacement {
+            for mut loan in loans {
+                loan.owner = Some(destination.clone());
+                self.reference_origins.entry(destination.clone()).or_default().insert(loan.clone());
+                if !self.projection_loans.contains(&loan) { self.projection_loans.push(loan); }
+            }
+            // A transferred old resident is not a reborrow of its new self.
+            let parents = parents.into_iter().filter(|parent| !under(parent, &key)).collect::<BTreeSet<_>>();
+            if !parents.is_empty() { self.reborrow_parents.insert(destination, parents); }
         }
-        self.record_aggregate_reference_origins(&key, value);
+        let temporary_owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
+            .filter(|owner| under(owner, &temporary)).cloned().collect::<BTreeSet<_>>();
+        for owner in temporary_owners { self.release_owner_loans(&owner, self.body.expression(value).span); }
+        self.reference_origins.retain(|origin, _| !under(origin, &temporary));
+        self.reborrow_parents.retain(|origin, _| !under(origin, &temporary));
     }
 
     fn place_origin_key(&self, place: &CorePlace) -> Option<String> {
@@ -2770,32 +2864,20 @@ impl Analyzer<'_> {
             );
             return;
         }
-        let Some(parent) = self
-            .projection_loans
-            .iter()
-            .find(|loan| loan.owner.as_deref() == Some(name.as_str()))
-            .cloned()
-            .or_else(|| self.reference_origins.get(&name).cloned())
-        else {
+        let parents = self.origin_loans(&name);
+        if parents.is_empty() {
             return;
-        };
+        }
         // A dereference may name a reference stored in an aggregate rather
         // than a standalone local (`*holder.0`).  Follow the reborrow chain
         // by identity and admit the exact frozen backing loan for each
         // ancestor.  This permits a child reborrow to use its own suspended
         // parent while still rejecting access through that parent while the
         // child is live.
-        let mut allowed_owners = BTreeSet::from([name.clone()]);
-        let mut cursor = name.clone();
-        while let Some(parent) = self.reborrow_parents.get(&cursor) {
-            if !allowed_owners.insert(parent.clone()) {
-                break;
-            }
-            cursor = parent.clone();
-        }
+        let allowed_owners = self.reference_ancestors(&name);
         let allowed_origin_loans = allowed_owners
             .iter()
-            .filter_map(|owner| self.reference_origins.get(owner))
+            .flat_map(|owner| self.reference_origins.get(owner).into_iter().flatten())
             .cloned()
             .collect::<BTreeSet<_>>();
         let conflicts = self.projection_loans.iter().any(|loan| {
@@ -2804,8 +2886,8 @@ impl Analyzer<'_> {
                 .as_ref()
                 .is_some_and(|owner| allowed_owners.contains(owner))
                 && !allowed_origin_loans.contains(loan)
-                && loan.place.overlaps(&parent.place)
-                && (mutation || parent.unique || loan.unique)
+                && parents.iter().any(|parent| loan.place.overlaps(&parent.place)
+                    && (mutation || parent.unique || loan.unique))
         });
         if conflicts {
             self.error(
@@ -2813,7 +2895,7 @@ impl Analyzer<'_> {
                 "G5004",
                 format!(
                     "cannot access reborrowed place `{}` through its suspended parent",
-                    parent.place.root
+                    name
                 ),
             );
         }
@@ -2934,24 +3016,21 @@ impl Analyzer<'_> {
     /// therefore the projection-loan owner is the liveness authority here.
     fn live_reborrow_descends_from(&self, carrier: &str) -> bool {
         self.projection_loans.iter().any(|loan| {
-            let Some(mut ancestor) = loan.owner.clone() else {
+            let Some(owner) = &loan.owner else {
                 return false;
             };
-            let mut seen = BTreeSet::new();
-            while seen.insert(ancestor.clone()) {
-                if ancestor == carrier
+            // The carrier owns these loans and its replacement destroys
+            // them together. Only an independently live descendant can
+            // suspend replacement; the carrier is not its own reborrow.
+            if owner == carrier || owner.strip_prefix(carrier)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+            {
+                return false;
+            }
+            self.reference_ancestors(owner).iter().any(|ancestor| ancestor == carrier
                     || ancestor
                         .strip_prefix(carrier)
-                        .is_some_and(|suffix| suffix.starts_with('.'))
-                {
-                    return true;
-                }
-                let Some(parent) = self.reborrow_parents.get(&ancestor) else {
-                    return false;
-                };
-                ancestor = parent.clone();
-            }
-            false
+                        .is_some_and(|suffix| suffix.starts_with('.')))
         })
     }
 
@@ -2960,23 +3039,10 @@ impl Analyzer<'_> {
     /// live child reborrow suspends that operation.
     fn live_child_reborrow_descends_from(&self, carrier: &str) -> bool {
         self.projection_loans.iter().any(|loan| {
-            let Some(mut ancestor) = loan.owner.clone() else {
+            let Some(owner) = &loan.owner else {
                 return false;
             };
-            if ancestor == carrier {
-                return false;
-            }
-            let mut seen = BTreeSet::new();
-            while seen.insert(ancestor.clone()) {
-                let Some(parent) = self.reborrow_parents.get(&ancestor) else {
-                    return false;
-                };
-                if parent == carrier {
-                    return true;
-                }
-                ancestor = parent.clone();
-            }
-            false
+            owner != carrier && self.reference_ancestors(owner).contains(carrier)
         })
     }
 
@@ -2991,18 +3057,19 @@ impl Analyzer<'_> {
         exits: &[HandlerExit],
         incoming: &BTreeMap<String, LocalState>,
     ) {
-        self.reborrow_parents = exits
-            .iter()
-            .flat_map(|(_, _, _, parents, _, _)| parents)
-            .filter(|(child, _)| incoming.contains_key(*child))
-            .map(|(child, parent)| (child.clone(), parent.clone()))
-            .collect();
-        self.reference_origins = exits
-            .iter()
-            .flat_map(|(_, _, _, _, origins, _)| origins)
-            .filter(|(_, loan)| incoming.contains_key(&loan.place.root))
-            .map(|(name, loan)| (name.clone(), loan.clone()))
-            .collect();
+        self.reborrow_parents.clear();
+        self.reference_origins.clear();
+        for (_, _, _, parents, origins, _) in exits {
+            for (child, parents) in parents {
+                if incoming.contains_key(child) {
+                    self.reborrow_parents.entry(child.clone()).or_default().extend(parents.iter().cloned());
+                }
+            }
+            for (name, loans) in origins {
+                self.reference_origins.entry(name.clone()).or_default().extend(loans.iter()
+                    .filter(|loan| incoming.contains_key(&loan.place.root)).cloned());
+            }
+        }
     }
 
     fn error(&mut self, span: Span, code: &'static str, message: String) {

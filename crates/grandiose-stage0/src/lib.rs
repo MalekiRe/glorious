@@ -13,6 +13,7 @@ pub mod coherence;
 pub mod core;
 pub mod dependency;
 pub mod diagnostic;
+mod destruction;
 pub mod escape;
 pub mod fixity;
 pub mod header;

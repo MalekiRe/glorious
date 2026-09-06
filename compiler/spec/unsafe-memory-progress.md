@@ -20,9 +20,9 @@ alone is not proof that unsafe code is sound.
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Rust substrate plus Stage0 per-run total/per-block memory accounting implemented; resident cleanup remains source-owned |
 | U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 25 bodyless memory leaves, including reference construction/address extraction and unsafe forgetting, implemented |
-| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Stage0 schema 98 executes raw memory for scalar/pointer/product/enum and native-reference residents; independent G1 extension remains; untrusted-bytecode admission deferred |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Stage0 schema 99 executes raw memory and guarded owned-slot operations; independent G1 extension remains; untrusted-bytecode admission deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
-| U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Pointer-backed canonical Vec and two-word slices implemented; generic destruction and full resident ABI remain incomplete |
+| U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Pointer-backed Vec/slices and initial concrete structural/generic destruction implemented; collection/capture cleanup and full resident ABI remain incomplete |
 | U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Source UTF-8 and collection consumers migrated; legacy opcode removal, opaque BLAKE3 bridge and remaining work open |
 
 The initial Stage0 U3 path below exposes real raw storage to compiled source;
@@ -547,3 +547,83 @@ Logs are in `/tmp/grandiose-source-costs-ufMKJC/`, including
 The full semantic compiler, G1 emitter/service/bootstrap, structural/generic
 destruction and remaining native ABI work are still open. No new Miri run or
 self-hosting capability is claimed by this checkpoint.
+
+## Concrete destruction and inferred constructor lifetimes
+
+September 6, 2026. Source MIR retains destruction intent until concrete instance
+discovery. A compiler-owned planner selects the actual source `Drop` method and
+recursively discovers owned-field glue. These are ordinary demanded MIR instances
+and calls, not a VM callback which discovers a source destructor at runtime.
+Unelaborated cleanup intent is rejected by VM lowering. Low-level tests now check
+that phase boundary and then independently decode/verify the fully compiled
+program for their executable assertions.
+
+The current implementation covers owned parameters (including generic erasure),
+discarded owned call results, normal and label-exit scope cleanup, shadowed owners,
+record/tuple/active-enum structural destruction, and source-hook-before-field
+ordering. Local and field replacement destroy the previous resident before
+installing the new one. Field moves leave typed uninitialized slots; cleanup
+tests each remaining field and does not destroy a transferred resident. Direct
+unique-reference moves retain a suspended restoration capability, so restoring
+that referent does not destroy it again. Repeated reads/reborrows through a
+reference-valued field observe the reference in place rather than taking it.
+
+Destructor-observed reference leaves add implicit uses through the owner's
+cleanup point, including under structural fields and shadowed bindings. Plain
+references retain nonlexical loan ending in the frontend. Replacement releases the old resident's
+loans; self-assignment snapshots the RHS provenance before replacing destination
+facts. Transferred owners retain their backing loans without suspending their
+now-vacant source slot. An older cancellation test incorrectly created two live
+unique borrows of one counter; it now uses independent counters, and a negative
+test explicitly rejects the overlapping-borrow source.
+
+Omitted constructor lifetimes now use independent inference variables, constrained
+by fields and expected result types, rather than rigid elided placeholders. Unsolved
+holes cannot enter frozen type identity. In particular, this ordinary source works:
+
+```glorious
+fn wrap<'a>(value: Probe<'a>) -> Outer<'a> { Outer { nested: value } }
+```
+
+Frozen reference-return contracts may conservatively relate one result leaf to
+several same-lifetime input leaves. PlaceFlow and escape analysis retain the union
+through nested calls, aggregate moves and child reborrows. Distinct named lifetimes
+remain distinct; forbidden mutations of every possible input remain checked.
+
+Stage0 schema advances from 98 to 99, cache generation to 14, bytecode generation
+to 54 and verifier generation to 13 (language/interface remain three). The new
+owned-slot operations have explicit codecs and frozen-layout checks; initialization
+probes cannot alias their destination with the storage they inspect. Cleanup CFG
+splitting preserves handler-entry ordering and nonlocal-exit control metadata.
+There is no independent G1 format change or new unsafe execution permission.
+
+This is not complete U5: dynamic owned-Array destruction deliberately fails closed;
+owned pattern extraction, partially moved enum payloads, callable environments,
+and source Vec element destruction still need completion and dedicated evidence.
+Moving a referent directly through a reference-valued field remains rejected by
+the existing direct-local rule. Executable MIR also still lacks explicit loan
+ending for some same-block storage replacements accepted by frontend NLL. For
+example, after `let owner = Plain { target: &mut count };` with no destructor or
+later use of `owner`, assigning `count = 42` passes `Check` but `Build` rejects
+the MIR storage transition with G7004. The new frontend non-regression assertion
+does not claim that this program executes; existing strict MIR live-loan storage
+tests remain unchanged. General native homes/callable ABI, actual VM/native
+roundtrips, source BLAKE3, and the Glorious semantic compiler/G1 emitter/service/
+C2/C3 bootstrap are still open. No new Miri or self-hosting claim is made here.
+
+Validation: the final workspace/all-targets run passed **2,569 tests, zero failures,
+two existing ignored manual benchmarks**, in **146.157 seconds wall**. All **48
+source entries** passed in **134.87 seconds**. Their 50 execution TSVs exactly
+match the preceding run's artifacts, results and recorded counters. The focused
+destruction target contains 22 executed tests; the lifetime target contains 12
+tests, including the explicitly frontend-only plain-reference NLL check above.
+All 154 Stage0 VM tests and the existing strict MIR/storage tests pass.
+
+Every invocation retained the 590-second command guard, four-slot memory gate,
+16 GiB cargo-test address-space limit, and unchanged VM execution budgets. Source
+closure audit passes before/after; `--release` still rejects missing full contract
+comparisons and verified C2/C3 bootstrap evidence. Logs are under
+`/tmp/grandiose-source-destruction-eaucXA/`: `workspace-final.log` and
+`workspace-final/` are the passing full run/evidence. Earlier failures are retained
+in the numbered logs; `workspace-round4.log` includes the newly identified MIR
+NLL gap and the two subsequently corrected low-level layout fixtures.

@@ -10801,14 +10801,19 @@ fn service_lowers_nested_completion_values_with_exact_strict_order_and_scope() {
 }
 
 #[test]
-fn service_completion_cfg_preserves_ambiguous_reference_return_rejection() {
-    // Frozen callable contracts require one producer for each returned leaf.
-    // A multi-owner return is already opaque even without a completion; CFG
-    // lowering must not bypass that independent source/verification boundary.
+fn service_completion_cfg_preserves_multi_origin_reference_returns() {
+    // The result conservatively borrows both same-region inputs. Straight-line
+    // and completion CFG bodies share that frozen contract at the caller.
     for body in ["left", "handle flag { true => handle true { true => left, false => right }, false => right }"] {
         let source = format!("fn pick<'a>(flag: Bool, left: &'a mut i64, right: &'a mut i64) -> &'a mut i64 {{ {body} }} fn main() -> i64 {{ let left = 1; let right = 20; let selected = pick(true, &mut left, &mut right); *selected }}");
-        let error = StageZeroCompiler::new().compile(request(&source)).expect_err("an ambiguous caller-region contract must fail closed");
-        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5023"), "{error:?}");
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        let artifact = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 1);
+        for updated in ["left", "right"] {
+            let invalid = source.replace("; *selected", &format!("; {updated} = 0; *selected"));
+            let error = StageZeroCompiler::new().compile(request(&invalid)).expect_err("every possible source must remain borrowed");
+            assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5007"), "{error:?}");
+        }
     }
 }
 
@@ -11243,7 +11248,8 @@ fn service_forwards_multifield_cancellation_without_duplicating_protected_drops(
     // payload, two protected custom-Drop owners, and a suffix depending on
     // the handler result.  `ask(true, 1)` misses the inner arm, so only the
     // outer cancellation path is reachable and each owner must contribute
-    // exactly one increment in reverse lexical cleanup order.
+    // exactly one increment. Distinct counters avoid simultaneous unique
+    // borrows of one resident and detect either owner's missing/double drop.
     let source = r#"
         effect Ask { [0, 1] ask(flag: Bool, value: i64) -> i64; }
         struct Probe<'a> { target: &'a mut i64 }
@@ -11252,17 +11258,18 @@ fn service_forwards_multifield_cancellation_without_duplicating_protected_drops(
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let count = 40;
+            let first_count = 0;
+            let second_count = 0;
             let result = handle {
-                let first = Probe { target: &mut count };
-                let second = Probe { target: &mut count };
+                let first = Probe { target: &mut first_count };
+                let second = Probe { target: &mut second_count };
                 handle Ask::ask(true, 1) {
                     Ask::ask(false, 0, _) => 0,
                 }
             } {
                 Ask::ask(_, _, _) => 0,
             };
-            count + result
+            first_count * 10 + second_count + 31 + result
         }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

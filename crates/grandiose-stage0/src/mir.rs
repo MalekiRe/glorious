@@ -13,9 +13,8 @@ use crate::{
     runtime_manifest::{FloatPrimitive, PrimitiveRole},
     signature::{
         ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedInterface,
-        ElaboratedNominalLayout, ElaboratedTraitReference,
+        ElaboratedNominalLayout,
     },
-    trait_solver::{TraitAnswer, TraitGoal, TraitSolver},
     types::{
         GenericArgument, Mutability, StructuralU32Expr, Type,
         is_canonical_generic_argument_identity, is_canonical_type_identity,
@@ -1029,6 +1028,28 @@ pub enum MirInstruction {
         field_count: u32,
         field_type: Type,
     },
+    /// Move an owned projection out of its actual source storage. Unlike an
+    /// observational projection, this leaves a typed uninitialized slot in
+    /// the containing aggregate, for subsequent structural cleanup.
+    TakeProjection {
+        dst: MirLocal,
+        base: MirLocal,
+        fields: Vec<u32>,
+    },
+    /// Inspect storage initialization without reading the resident value.
+    /// This is compiler-owned cleanup machinery, not a source-level test
+    /// that permits using a moved value.
+    IsInitialized {
+        dst: MirLocal,
+        base: MirLocal,
+        fields: Vec<u32>,
+    },
+    /// An owned-value destruction boundary retained through generic MIR.
+    /// Concrete instance materialization expands this into ordinary guarded
+    /// calls to compiler-generated glue before executable MIR is emitted.
+    Drop {
+        local: MirLocal,
+    },
     /// Project one statically selected tuple element.  Pattern refinement uses
     /// this alongside nominal projection so tuple binders have the same typed
     /// extraction semantics as record and enum binders.
@@ -1199,6 +1220,12 @@ pub enum MirInstruction {
     /// this is how source `move *target` supports `Option::take` without
     /// pretending that an affine value was copied.
     DerefMove {
+        dst: MirLocal,
+        reference: MirLocal,
+    },
+    /// Probe the referent while retaining a unique loan's restoration
+    /// capability. This also accepts a temporarily moved referent.
+    DerefIsInitialized {
         dst: MirLocal,
         reference: MirLocal,
     },
@@ -3065,6 +3092,7 @@ fn instruction_has_persistent_identity(instruction: &MirInstruction) -> bool {
             | MirInstruction::StorageDead { .. }
             | MirInstruction::SetDropFlag { .. }
             | MirInstruction::DestroyIf { .. }
+            | MirInstruction::Drop { .. }
     )
 }
 
@@ -3176,6 +3204,9 @@ fn operation_input_mut(
         | MirInstruction::I64ToI128Wrapping { value, .. }
         | MirInstruction::NotBool { value, .. }
         | MirInstruction::BitNotI64 { value, .. }
+        | MirInstruction::DerefIsInitialized {
+            reference: value, ..
+        }
         | MirInstruction::DerefCopy {
             reference: value, ..
         } | MirInstruction::DerefMove {
@@ -3272,6 +3303,8 @@ fn operation_input_mut(
             captures: fields, ..
         } => operation_input_slot(input, fields),
         MirInstruction::ProjectRecord { base, .. }
+        | MirInstruction::TakeProjection { base, .. }
+        | MirInstruction::IsInitialized { base, .. }
         | MirInstruction::ProjectTuple { base, .. }
         | MirInstruction::ProjectArray { base, .. }
         | MirInstruction::PatternTest { subject: base, .. } => operation_input_slot(input, [base]),
@@ -3280,6 +3313,7 @@ fn operation_input_mut(
             snapshot, value, ..
         } => operation_input_slot(input, [snapshot, value]),
         MirInstruction::DestroyIf { local, flag } => operation_input_slot(input, [local, flag]),
+        MirInstruction::Drop { local } => operation_input_slot(input, [local]),
         MirInstruction::DerefStore { reference, src } => operation_input_slot(input, [reference, src]),
         MirInstruction::ShlI64 { value, count, .. } => operation_input_slot(input, [value, count]),
         MirInstruction::CallIndirect {
@@ -4215,6 +4249,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::MakeRecord { dst, .. }
         | MirInstruction::MakeEnum { dst, .. }
         | MirInstruction::ProjectRecord { dst, .. }
+        | MirInstruction::TakeProjection { dst, .. }
+        | MirInstruction::IsInitialized { dst, .. }
         | MirInstruction::ProjectTuple { dst, .. }
         | MirInstruction::ProjectArray { dst, .. }
         | MirInstruction::UpdateRecord { dst, .. }
@@ -4225,6 +4261,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Move { dst, .. }
         | MirInstruction::Borrow { dst, .. }
         | MirInstruction::DerefCopy { dst, .. }
+        | MirInstruction::DerefIsInitialized { dst, .. }
         | MirInstruction::DerefMove { dst, .. }
         | MirInstruction::NotBool { dst, .. }
         | MirInstruction::AddI64 { dst, .. }
@@ -4353,6 +4390,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::StorageLive { .. }
         | MirInstruction::StorageDead { .. }
         | MirInstruction::DestroyIf { .. } => None,
+        MirInstruction::Drop { .. } => None,
         MirInstruction::ArrayPushMove { .. } => None,
     }
 }
@@ -4551,6 +4589,7 @@ impl MirLowering {
             building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
             named: BTreeMap::new(),
+            shadowed_bindings: BTreeMap::new(),
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
@@ -6733,6 +6772,7 @@ impl MirFunction {
                     MirInstruction::DestroyIf { local, .. } => {
                         inputs.retain(|candidate| candidate != local);
                     }
+                    MirInstruction::Drop { .. } | MirInstruction::IsInitialized { .. } => inputs.clear(),
                     _ => {}
                 }
                 for local in inputs {
@@ -6851,10 +6891,13 @@ impl MirFunction {
                 continue;
             }
             let mut check_edge = |target: MirBlockId,
-                                  arguments: &[MirLocal]|
+                                  arguments: &[MirLocal],
+                                  initialized: Option<MirLocal>|
              -> Result<(), String> {
+                let mut edge_live = live.clone();
+                if let Some(local) = initialized { edge_live[local.0 as usize] = true; }
                 for local in arguments {
-                    if !live[local.0 as usize] {
+                    if !edge_live[local.0 as usize] {
                         return Err(format!(
                             "MIR edge reads dead/uninitialized local {} before source-storage initialization",
                             local.0
@@ -6867,10 +6910,10 @@ impl MirFunction {
                 }
                 let changed_locals = match &mut entries[target_index] {
                     Some(current) => {
-                        intersect_liveness(current, &live)
+                        intersect_liveness(current, &edge_live)
                     }
                     slot => {
-                        *slot = Some(live.clone());
+                        *slot = Some(edge_live.clone());
                         true
                     }
                 };
@@ -6892,7 +6935,7 @@ impl MirFunction {
                 MirTerminator::Goto { target, arguments }
                 | MirTerminator::Leave {
                     target, arguments, ..
-                } => check_edge(*target, arguments)?,
+                } => check_edge(*target, arguments, None)?,
                 MirTerminator::SwitchBool {
                     condition,
                     then_target,
@@ -6906,8 +6949,12 @@ impl MirFunction {
                             condition.0
                         ));
                     }
-                    check_edge(*then_target, then_arguments)?;
-                    check_edge(*else_target, else_arguments)?;
+                    let initialized = match block.instructions.last() {
+                        Some(MirInstruction::IsInitialized { dst, base, .. }) if dst == condition => Some(*base),
+                        _ => None,
+                    };
+                    check_edge(*then_target, then_arguments, initialized)?;
+                    check_edge(*else_target, else_arguments, None)?;
                 }
                 MirTerminator::Return { value } => {
                     if !live[value.0 as usize] {
@@ -7919,6 +7966,53 @@ impl MirFunction {
             );
         }
         match instruction {
+            MirInstruction::IsInitialized { dst, base, fields }
+            | MirInstruction::TakeProjection { dst, base, fields } => {
+                if dst == base {
+                    return Err("MIR storage projection requires a distinct destination".into());
+                }
+                let taking = matches!(instruction, MirInstruction::TakeProjection { .. });
+                if taking && fields.is_empty() {
+                    return Err("MIR projection move requires a nonempty field path".into());
+                }
+                let mut candidates = vec![self.local_type(*base)?.clone()];
+                for index in fields {
+                    let mut projected = Vec::new();
+                    for ty in &candidates {
+                        match ty {
+                            Type::Tuple(fields) => projected.extend(fields.get(*index as usize).cloned()),
+                            Type::Array(element) => projected.push((**element).clone()),
+                            Type::Nominal { definition, arguments } => {
+                                let descriptor = self.nominal_copy_descriptors.iter().find(|descriptor|
+                                    descriptor.definition == *definition && descriptor.arguments == *arguments)
+                                    .ok_or("MIR storage projection has no frozen nominal layout")?;
+                                projected.extend(descriptor.variants.iter().filter_map(|fields|
+                                    fields.get(*index as usize).cloned()));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if projected.is_empty() {
+                        return Err("MIR storage projection is outside its frozen layout".into());
+                    }
+                    candidates = projected;
+                }
+                let destination = self.local_type(*dst)?;
+                if if taking { !candidates.contains(destination) }
+                    else { destination != &Type::Scalar(crate::types::ScalarType::Bool) }
+                {
+                    return Err("MIR storage projection destination type is inconsistent".into());
+                }
+                return Ok(());
+            }
+            MirInstruction::DerefIsInitialized { dst, reference } => {
+                if self.local_type(*dst)? != &Type::Scalar(crate::types::ScalarType::Bool)
+                    || !matches!(self.local_type(*reference)?, Type::Reference { mutability: Mutability::Unique, .. })
+                {
+                    return Err("MIR referent initialization probe requires a unique reference and Bool destination".into());
+                }
+                return Ok(());
+            }
             MirInstruction::StorageLive { binding, local }
             | MirInstruction::StorageDead { binding, local } => {
                 if self.control.source_storage.binding_local(*binding) != Some(*local) {
@@ -8719,7 +8813,7 @@ fn validate_nominal_copy_descriptors(
 /// vector. `ElaboratedInterface`'s executable-field query intentionally
 /// focuses on type arguments; copyability also needs empty and scalar-only
 /// layouts such as `Tag<n: u32>`, whose identity carries a non-type binder.
-fn instantiate_nominal_copy_layout(
+pub(crate) fn instantiate_nominal_copy_layout(
     layout: &ElaboratedNominalLayout,
     arguments: &[GenericArgument],
 ) -> Option<Vec<Vec<Type>>> {
@@ -8776,7 +8870,12 @@ fn substitute_nominal_copy_type(value: &Type, arguments: &[GenericArgument]) -> 
             referent,
         } => Type::Reference {
             mutability: *mutability,
-            lifetime: *lifetime,
+            lifetime: match lifetime {
+                crate::Lifetime::Generic(index) => arguments.get(*index as usize)
+                    .and_then(|argument| match argument { GenericArgument::Lifetime(value) => Some(*value), _ => None })
+                    .unwrap_or(*lifetime),
+                _ => *lifetime,
+            },
             referent: Box::new(substitute_nominal_copy_type(referent, arguments)),
         },
         Type::Nominal {
@@ -8819,6 +8918,9 @@ fn substitute_nominal_copy_argument(
     arguments: &[GenericArgument],
 ) -> GenericArgument {
     match value {
+        GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => arguments.get(*index as usize)
+            .filter(|argument| matches!(argument, GenericArgument::Lifetime(_)))
+            .cloned().unwrap_or_else(|| value.clone()),
         GenericArgument::Type(value) => {
             GenericArgument::Type(substitute_nominal_copy_type(value, arguments))
         }
@@ -9030,6 +9132,9 @@ fn validate_mir_lifetime(
     lifetime: crate::Lifetime,
     lifetime_binders: &[u32],
 ) -> Result<(), String> {
+    if matches!(lifetime, crate::Lifetime::Infer(_)) {
+        return Err("MIR retains unresolved lifetime inference".into());
+    }
     let crate::Lifetime::Bound { depth, index } = lifetime else {
         return Ok(());
     };
@@ -9222,11 +9327,15 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::StorageDead { .. }
         | MirInstruction::SetDropFlag { .. }
         | MirInstruction::DestroyIf { .. }
+        | MirInstruction::Drop { .. }
         | MirInstruction::Copy { .. }
+        | MirInstruction::TakeProjection { .. }
+        | MirInstruction::IsInitialized { .. }
         | MirInstruction::Store { .. }
         | MirInstruction::Move { .. }
         | MirInstruction::Borrow { .. }
         | MirInstruction::DerefCopy { .. }
+        | MirInstruction::DerefIsInitialized { .. }
         | MirInstruction::DerefMove { .. }
         | MirInstruction::DerefStore { .. }
         | MirInstruction::NotBool { .. }
@@ -9879,7 +9988,7 @@ fn type_retains_generic_placeholder(value: &Type) -> bool {
         Type::Reference {
             lifetime, referent, ..
         } => {
-            matches!(lifetime, crate::Lifetime::Generic(_))
+            matches!(lifetime, crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_))
                 || type_retains_generic_placeholder(referent)
         }
         Type::Callable {
@@ -9902,7 +10011,7 @@ fn generic_argument_retains_generic_placeholder(value: &GenericArgument) -> bool
     match value {
         GenericArgument::Type(value) => type_retains_generic_placeholder(value),
         GenericArgument::EffectRow(value) => effect_row_retains_generic_placeholder(value),
-        GenericArgument::Lifetime(crate::Lifetime::Generic(_))
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_))
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
@@ -10126,6 +10235,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             .chain(fields.iter().copied())
             .collect(),
         MirInstruction::ProjectRecord { dst, base, .. }
+        | MirInstruction::TakeProjection { dst, base, .. }
+        | MirInstruction::IsInitialized { dst, base, .. }
         | MirInstruction::ProjectTuple { dst, base, .. }
         | MirInstruction::ProjectArray { dst, base, .. } => vec![*dst, *base],
         MirInstruction::UpdateRecord {
@@ -10154,11 +10265,13 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         }
         MirInstruction::SetDropFlag { flag, .. } => vec![*flag],
         MirInstruction::DestroyIf { local, flag } => vec![*local, *flag],
+        MirInstruction::Drop { local } => vec![*local],
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
         MirInstruction::Borrow { dst, src, .. } => vec![*dst, *src],
         MirInstruction::DerefCopy { dst, reference }
+        | MirInstruction::DerefIsInitialized { dst, reference }
         | MirInstruction::DerefMove { dst, reference } => vec![*dst, *reference],
         MirInstruction::DerefStore { reference, src } => vec![*reference, *src],
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
@@ -10256,6 +10369,9 @@ struct Lowerer<'a> {
     building_nominal_copy_descriptors: Vec<(DefKey, Vec<GenericArgument>)>,
     values: BTreeMap<CoreId, MirLocal>,
     named: BTreeMap<String, MirLocal>,
+    /// Stable lexical owner chain, independent of which spelling is visible.
+    /// Shadowing hides a binding; it does not destroy or forget its value.
+    shadowed_bindings: BTreeMap<MirLocal, MirLocal>,
     lifted: BTreeMap<DefKey, MirFunction>,
     instructions: Vec<MirInstruction>,
     diagnostics: Vec<MirDiagnostic>,
@@ -27306,7 +27422,9 @@ impl Lowerer<'_> {
                     dst: local,
                     src: snapshot,
                 });
-                self.named.insert(name.clone(), local);
+                if let Some(previous) = self.named.insert(name.clone(), local) {
+                    self.shadowed_bindings.insert(local, previous);
+                }
                 let unit = self.alloc(Type::Unit, id);
                 self.instructions
                     .push(MirInstruction::ConstUnit { dst: unit });
@@ -27322,7 +27440,9 @@ impl Lowerer<'_> {
                 self.instructions
                     .push(MirInstruction::Move { dst: local, src });
             }
-            self.named.insert(name.clone(), local);
+            if let Some(previous) = self.named.insert(name.clone(), local) {
+                self.shadowed_bindings.insert(local, previous);
+            }
             let unit = self.alloc(Type::Unit, id);
             self.instructions
                 .push(MirInstruction::ConstUnit { dst: unit });
@@ -27647,7 +27767,7 @@ impl Lowerer<'_> {
             CoreKind::Tuple(fields) => {
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions
                     .push(MirInstruction::MakeTuple { dst, fields });
@@ -27659,7 +27779,7 @@ impl Lowerer<'_> {
                 };
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeArray {
                     dst,
@@ -27674,7 +27794,7 @@ impl Lowerer<'_> {
                     .collect::<Vec<_>>();
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeRecord {
                     dst,
@@ -27694,7 +27814,7 @@ impl Lowerer<'_> {
                     .collect::<Vec<_>>();
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeEnum {
                     dst,
@@ -27709,14 +27829,16 @@ impl Lowerer<'_> {
                 index,
                 field_count,
             } => {
-                let base = self.place_value(base)?;
-                self.instructions.push(MirInstruction::ProjectRecord {
-                    dst,
-                    base,
-                    index,
-                    field_count,
-                    field_type: ty,
-                });
+                if !self.type_is_duplicable(&ty)
+                    && let Some((base, fields, false)) = self.reference_place(id)
+                {
+                    self.instructions.push(MirInstruction::TakeProjection { dst, base, fields });
+                } else {
+                    let base = self.place_value(base)?;
+                    self.instructions.push(MirInstruction::ProjectRecord {
+                        dst, base, index, field_count, field_type: ty,
+                    });
+                }
             }
             CoreKind::PatternTest {
                 subject, pattern, ..
@@ -27777,15 +27899,19 @@ impl Lowerer<'_> {
                 });
             }
             CoreKind::Deref(value) => {
-                let reference = self.capability_value(value)?;
+                let reference = self.reference_value(value)?;
                 self.instructions
                     .push(MirInstruction::DerefCopy { dst, reference });
             }
             CoreKind::Move(value) => {
                 if let CoreKind::Deref(reference) = self.body.expression(value).kind {
-                    let reference = self.capability_value(reference)?;
+                    let reference = self.reference_value(reference)?;
                     self.instructions
                         .push(MirInstruction::DerefMove { dst, reference });
+                } else if matches!(self.body.expression(value).kind, CoreKind::Field { .. })
+                    && let Some((base, fields, false)) = self.reference_place(value)
+                {
+                    self.instructions.push(MirInstruction::TakeProjection { dst, base, fields });
                 } else {
                     let src = self.capability_value(value)?;
                     self.instructions.push(MirInstruction::Move { dst, src });
@@ -30926,7 +31052,8 @@ impl Lowerer<'_> {
         }
     }
     fn statement(&mut self, id: CoreId) -> Option<()> {
-        self.value(id).map(|_| ())
+        let local = self.value(id)?;
+        self.emit_custom_drop(local)
     }
     /// Feed an affine local directly into an operation that consumes or
     /// reborrows its capability. Materializing an ordinary `Copy` first would
@@ -30940,6 +31067,15 @@ impl Lowerer<'_> {
         }
         self.value(id)
     }
+    /// Dereferencing or reborrowing uses a reference in place; it does not
+    /// transfer a unique-reference field out of its containing owner.
+    fn reference_value(&mut self, id: CoreId) -> Option<MirLocal> {
+        if matches!(self.body.expression(id).kind, CoreKind::Field { .. }) {
+            self.place_value(id)
+        } else {
+            self.capability_value(id)
+        }
+    }
     /// Read a stable aggregate place for a projection without materializing a
     /// whole-value copy. The projection instruction itself carries the field
     /// path, so copying the containing nominal value would be both redundant
@@ -30949,6 +31085,17 @@ impl Lowerer<'_> {
             && let Some(local) = self.named.get(name)
         {
             return Some(*local);
+        }
+        if let CoreKind::Field { base, index, field_count } = self.body.expression(id).kind {
+            // Observing a nested place does not consume its intermediate
+            // owner. Only the final value projection may take that field.
+            let base = self.place_value(base)?;
+            let ty = self.body.expression(id).ty.clone();
+            let dst = self.alloc(ty.clone(), id);
+            self.instructions.push(MirInstruction::ProjectRecord {
+                dst, base, index, field_count, field_type: ty,
+            });
+            return Some(dst);
         }
         self.value(id)
     }
@@ -31088,83 +31235,30 @@ impl Lowerer<'_> {
         outer_named: &BTreeMap<String, MirLocal>,
         transferred: Option<MirLocal>,
     ) -> Option<()> {
-        let mut cleanup = self
-            .named
-            .iter()
-            .filter_map(|(name, local)| {
-                (!outer_named.contains_key(name) && Some(*local) != transferred).then_some(*local)
-            })
-            .collect::<Vec<_>>();
+        let mut cleanup = Vec::new();
+        for (name, local) in &self.named {
+            let mut cursor = Some(*local);
+            while let Some(local) = cursor {
+                if outer_named.get(name) == Some(&local) { break; }
+                if Some(local) != transferred { cleanup.push(local); }
+                cursor = self.shadowed_bindings.get(&local).copied();
+            }
+        }
         cleanup.sort_unstable_by_key(|local| std::cmp::Reverse(local.0));
+        cleanup.dedup();
         for local in cleanup {
             self.emit_custom_drop(local)?;
         }
         Some(())
     }
 
-    /// Insert the opaque custom hook for one still-armed lexical local. The
-    /// trait solver is the sole selector: matching a nominal spelling alone
-    /// would let a generic or negative implementation bypass coherence.
-    /// Structural destruction has no VM work yet, but every observable Drop
-    /// method is a normal verified call over an exact unique borrow.
+    /// Retain the ownership boundary until the concrete instance is known.
+    /// A generic's missing lexical Drop evidence is not evidence that the
+    /// concrete value has no destruction work.
     fn emit_custom_drop(&mut self, local: MirLocal) -> Option<()> {
-        let ty = self.locals.get(local)?.ty.clone();
-        let Some(signatures) = self.signatures else {
-            return Some(());
-        };
-        let relation = ElaboratedTraitReference {
-            definition: crate::resolution::language_drop_trait_definition(),
-            arguments: vec![],
-        };
-        let evidence = match TraitSolver::new(signatures).solve(TraitGoal {
-            relation,
-            subject: ty.clone(),
-        }) {
-            TraitAnswer::Proven { evidence } => evidence,
-            TraitAnswer::Refuted { .. }
-            | TraitAnswer::NoSolution
-            | TraitAnswer::Ambiguous
-            | TraitAnswer::Overflow => return Some(()),
-        };
-        let Some(ElaboratedHeader::Implementation(implementation)) =
-            signatures.definitions.get(&evidence)
-        else {
-            self.error(
-                "G6014",
-                "custom Drop evidence does not name an implementation",
-            );
-            return None;
-        };
-        if !implementation.methods.contains_key("drop") {
-            self.error(
-                "G6014",
-                "custom Drop implementation omits its destructor method",
-            );
-            return None;
+        if self.signatures.is_some() {
+            self.instructions.push(MirInstruction::Drop { local });
         }
-        let borrowed = self.alloc(
-            Type::Reference {
-                mutability: Mutability::Unique,
-                lifetime: crate::Lifetime::Elided,
-                referent: Box::new(ty),
-            },
-            CoreId(u32::MAX),
-        );
-        self.instructions.push(MirInstruction::Borrow {
-            dst: borrowed,
-            src: local,
-            fields: vec![],
-            unique: true,
-            reborrow: false,
-        });
-        let result = self.alloc(Type::Unit, CoreId(u32::MAX));
-        self.instructions.push(MirInstruction::Call {
-            dst: result,
-            callee: crate::implementation_method_key(evidence, "drop"),
-            generic_arguments: vec![],
-            trait_instance: None,
-            arguments: vec![borrowed],
-        });
         Some(())
     }
     /// Resolve a Typed Core value place to its stable runtime root and field
@@ -31182,7 +31276,7 @@ impl Lowerer<'_> {
             // aggregate before selecting a field, which is both unsound for a
             // non-Copy enum payload and loses the loan's field path.
             CoreKind::Deref(reference) => self
-                .capability_value(reference)
+                .reference_value(reference)
                 .map(|local| (local, vec![], true)),
             CoreKind::Field { base, index, .. } => {
                 let (root, mut fields, reborrow) = self.reference_place(base)?;
@@ -31221,41 +31315,17 @@ impl Lowerer<'_> {
         }
     }
 
-    fn read_place(&mut self, place: &crate::CorePlace) -> Option<MirLocal> {
-        let _ = self.intern_static_place(place);
+    fn assignment_reference_place(&mut self, place: &CorePlace) -> Option<(MirLocal, Vec<u32>, bool)> {
         match place {
-            crate::CorePlace::Local { name, .. } => self.named.get(name).copied().or_else(|| {
-                self.error("G6009", "MIR place refers to an unknown local");
-                None
-            }),
-            crate::CorePlace::Field {
-                base,
-                index,
-                field_count,
-                ty,
-            } => {
-                let base = self.read_place(base)?;
-                let dst = self.alloc(ty.clone(), CoreId(u32::MAX));
-                self.instructions.push(MirInstruction::ProjectRecord {
-                    dst,
-                    base,
-                    index: *index,
-                    field_count: *field_count,
-                    field_type: ty.clone(),
-                });
-                Some(dst)
+            CorePlace::Local { name, .. } => self.named.get(name).copied().map(|local| (local, vec![], false)),
+            CorePlace::Field { base, index, .. } => {
+                let (root, mut fields, reborrow) = self.assignment_reference_place(base)?;
+                fields.push(*index);
+                Some((root, fields, reborrow))
             }
-            crate::CorePlace::Deref { reference, .. } => {
-                let reference = self.capability_value(*reference)?;
-                let dst = self.alloc(place.ty(), CoreId(u32::MAX));
-                self.instructions
-                    .push(MirInstruction::DerefCopy { dst, reference });
-                Some(dst)
-            }
-            crate::CorePlace::Error => {
-                self.error("G6009", "MIR assignment place is recovered");
-                None
-            }
+            CorePlace::Deref { reference, unique: true, .. } =>
+                self.reference_value(*reference).map(|local| (local, vec![], true)),
+            CorePlace::Deref { .. } | CorePlace::Error => None,
         }
     }
     fn store_place(&mut self, place: &crate::CorePlace, value: MirLocal) -> Option<()> {
@@ -31270,23 +31340,20 @@ impl Lowerer<'_> {
                     .push(MirInstruction::Store { dst, src: value });
                 Some(())
             }
-            crate::CorePlace::Field {
-                base,
-                index,
-                field_count,
-                ty,
-            } => {
-                let base_value = self.read_place(base)?;
-                let updated = self.alloc(base.ty(), CoreId(u32::MAX));
-                self.instructions.push(MirInstruction::UpdateRecord {
-                    dst: updated,
-                    base: base_value,
-                    index: *index,
-                    field_count: *field_count,
-                    value,
-                    field_type: ty.clone(),
+            crate::CorePlace::Field { ty, .. } => {
+                // Replacement owns only this field, not a copied aggregate
+                // plus every still-live sibling. Preserve the addressed place
+                // so destruction and restoration share the same slot.
+                let (src, fields, reborrow) = self.assignment_reference_place(place)?;
+                let reference = self.alloc(Type::Reference {
+                    mutability: Mutability::Unique, lifetime: crate::Lifetime::Elided,
+                    referent: Box::new(ty.clone()),
+                }, CoreId(u32::MAX));
+                self.instructions.push(MirInstruction::Borrow {
+                    dst: reference, src, fields, unique: true, reborrow,
                 });
-                self.store_place(base, updated)
+                self.instructions.push(MirInstruction::DerefStore { reference, src: value });
+                Some(())
             }
             crate::CorePlace::Deref {
                 reference, unique, ..
@@ -31295,7 +31362,7 @@ impl Lowerer<'_> {
                     self.error("G6010", "MIR store through shared reference");
                     return None;
                 }
-                let reference = self.capability_value(*reference)?;
+                let reference = self.reference_value(*reference)?;
                 self.instructions.push(MirInstruction::DerefStore {
                     reference,
                     src: value,
@@ -31428,6 +31495,7 @@ impl Lowerer<'_> {
             building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
             named: BTreeMap::new(),
+            shadowed_bindings: BTreeMap::new(),
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],

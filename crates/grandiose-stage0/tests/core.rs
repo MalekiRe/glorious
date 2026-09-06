@@ -67,6 +67,29 @@ fn core_for(package_name: &str, source: &str) -> TypedBody {
     core_and_signatures_for(package_name, source).0
 }
 
+/// Source MIR retains destruction intent until concrete instance discovery.
+/// Keep template proof checks above this boundary, then exercise the real
+/// specialization/glue pipeline and independent artifact verifier below it.
+fn compile_with_destruction(source: &str, template: &grandiose_stage0::MirFunction) -> grandiose_stage0::VerifiedVmProgram {
+    assert!(matches!(grandiose_stage0::emit_vm(template),
+        Err(grandiose_stage0::VmArtifactError::MalformedEncoding {
+            message: "unelaborated destruction reached VM lowering",
+        })));
+    let package = PackageKey("core-concrete-destruction@0.1.0".into());
+    let request = grandiose_stage0::CompilationRequest {
+        build: grandiose_stage0::CompilerBuildIdentity::stage0(Digest::of_bytes(b"core-concrete-destruction")),
+        mode: grandiose_stage0::CompilationMode::Build,
+        root_package: package.clone(),
+        sources: vec![grandiose_stage0::SourceInput::new(package,
+            LogicalPath::parse("src/main.glorious").unwrap(), source.as_bytes())],
+        target: "stage0-vm".into(), semantic_options: BTreeMap::new(), codegen_options: BTreeMap::new(),
+        capability_manifest: vec![], runtime_manifest: None,
+    };
+    let outcome = grandiose_stage0::StageZeroCompiler::new().compile(request).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap()
+}
+
 #[test]
 fn contextual_call_to_a_shadowing_non_callable_reports_an_error_instead_of_panicking() {
     let core = core_for(
@@ -7749,8 +7772,7 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
     );
     assert!(mir.validate().is_ok());
     assert_eq!(
-        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("VM cleanup lowering"))
-            .expect("VM cleanup verification")
+        compile_with_destruction(source, &mir)
             .run_i64()
             .expect("shadowed cleanup result"),
         42
@@ -7887,10 +7909,8 @@ fn source_lowering_executes_handler_partial_move_and_label_leave() {
             .any(|block| matches!(block.terminator, grandiose_stage0::MirTerminator::Leave { .. })),
         "the source label transfer must remain a MIR Leave: {mir:#?}"
     );
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("source-produced MIR must emit");
     assert_eq!(
-        grandiose_stage0::verify_vm(artifact)
-            .expect("source-produced VM must verify")
+        compile_with_destruction(source, &mir)
             .run_i64()
             .expect("source-produced VM must execute"),
         42
@@ -7969,10 +7989,7 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
         }),
         "reinitialization must retain branch-safe conditional destruction: {mir:#?}"
     );
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("combined cleanup MIR must emit");
-    let verified = grandiose_stage0::verify_vm(artifact.clone()).unwrap_or_else(|error| {
-        panic!("combined cleanup VM must verify: {error:#?}\n{artifact:#?}")
-    });
+    let verified = compile_with_destruction(source, &mir);
     assert_eq!(
         verified
             .run_i64()
@@ -8056,17 +8073,17 @@ fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancell
         .first()
         .expect("outer handler control entry")
         .target;
-    let outer_drop_calls = mir.blocks[outer_cancellation.0 as usize]
+    let outer_drop_intents = mir.blocks[outer_cancellation.0 as usize]
         .instructions
         .iter()
-        .filter(|instruction| matches!(instruction, MirInstruction::Call { .. }))
+        .filter(|instruction| matches!(instruction, MirInstruction::Drop { local }
+            if matches!(mir.locals[local.0 as usize].ty, Type::Nominal { .. })))
         .count();
     assert_eq!(
-        outer_drop_calls, 1,
-        "the forwarded outer-cancellation path must execute exactly one Probe::drop: {mir:#?}"
+        outer_drop_intents, 1,
+        "the forwarded outer-cancellation path must retain exactly one Probe destruction boundary: {mir:#?}"
     );
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("MIR must emit VM");
-    grandiose_stage0::verify_vm(artifact).expect("VM cleanup/control proof must verify");
+    assert_eq!(compile_with_destruction(source, &mir).run_i64().unwrap(), 42);
 }
 
 #[test]
@@ -8319,14 +8336,13 @@ fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
         mir.blocks[1]
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, MirInstruction::Call { .. }))
+            .filter(|instruction| matches!(instruction, MirInstruction::Drop { local }
+                if matches!(mir.locals[local.0 as usize].ty, Type::Nominal { .. })))
             .count(),
         1,
-        "the dynamic rejoin must run Probe::drop once before completion: {mir:#?}"
+        "the dynamic rejoin must retain one Probe destruction boundary before completion: {mir:#?}"
     );
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("cleanup MIR emits VM");
-    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
-        .expect("cleanup-carrying dynamic rejoin bytecode verifies");
+    assert_eq!(compile_with_destruction(source, &mir).run_i64().unwrap(), 183);
 }
 
 #[test]
@@ -8434,14 +8450,13 @@ fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() 
         mir.blocks[1]
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, MirInstruction::Call { .. }))
+            .filter(|instruction| matches!(instruction, MirInstruction::Drop { local }
+                if matches!(mir.locals[local.0 as usize].ty, Type::Nominal { .. })))
             .count(),
         1,
-        "the generic-label rejoin drops Probe exactly once before completion: {mir:#?}"
+        "the generic-label rejoin retains one Probe destruction boundary before completion: {mir:#?}"
     );
-    let artifact = grandiose_stage0::emit_vm(&mir).unwrap();
-    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
-        .expect("replayed forwarding cleanup bytecode verifies");
+    assert_eq!(compile_with_destruction(source, &mir).run_i64().unwrap(), 213);
 }
 
 #[test]
@@ -8763,9 +8778,7 @@ fn reentrant_replay_checks_a_late_third_payload_before_labelled_completion() {
         4,
         "Ask, Tick, and retained Audit replay frames must remain distinct: {mir:#?}"
     );
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("third-payload labelled MIR emits VM");
-    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
-        .expect("third-payload labelled completion VM bytecode verifies");
+    compile_with_destruction(source, &mir);
 }
 
 #[test]

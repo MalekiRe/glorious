@@ -31,6 +31,11 @@ pub enum Safety {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ConstInferVar(pub u32);
 
+/// A body-local lifetime hole, distinct from both declaration binders and
+/// resolved elision. It must be solved before a semantic product is frozen.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LifetimeInferVar(pub u32);
+
 /// An inference variable in an effect row. This is deliberately not a
 /// `InferVar`: a type hole can never accidentally escape as an effect tail.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -52,6 +57,7 @@ pub enum EffectTail {
 /// generic slot.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Lifetime {
+    Infer(LifetimeInferVar),
     Static,
     Generic(u32),
     /// A rigid region introduced by a `for<'a>` callable binder. The index is
@@ -520,6 +526,8 @@ pub enum TypeError {
     UnresolvedGenericEffectRow(u32),
     Unresolved(InferVar),
     UnresolvedConst(ConstInferVar),
+    UnresolvedLifetime(LifetimeInferVar),
+    LifetimeMismatch { expected: Lifetime, found: Lifetime },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -527,9 +535,67 @@ pub struct InferContext {
     bindings: Vec<Option<Type>>,
     effect_bindings: Vec<Option<EffectRow>>,
     const_bindings: Vec<Option<GenericArgument>>,
+    lifetime_bindings: Vec<Option<Lifetime>>,
+    /// Body elaboration may inspect partially constrained constructor types.
+    /// Sealing ends this phase and resolves unconstrained elision holes.
+    pending_body_lifetimes: bool,
 }
 
 impl InferContext {
+    pub(crate) fn for_body() -> Self {
+        Self { pending_body_lifetimes: true, ..Self::default() }
+    }
+
+    pub fn fresh_lifetime(&mut self) -> Lifetime {
+        let variable = LifetimeInferVar(u32::try_from(self.lifetime_bindings.len())
+            .expect("lifetime inference variable arena exceeds G1 range"));
+        self.lifetime_bindings.push(None);
+        Lifetime::Infer(variable)
+    }
+
+    pub fn resolve_lifetime(&mut self, lifetime: Lifetime) -> Result<Lifetime, TypeError> {
+        let Lifetime::Infer(variable) = lifetime else { return Ok(lifetime); };
+        let binding = self.lifetime_bindings.get(variable.0 as usize)
+            .copied().ok_or(TypeError::UnresolvedLifetime(variable))?;
+        match binding {
+            None => Ok(lifetime),
+            Some(bound) => {
+                let resolved = self.resolve_lifetime(bound)?;
+                self.lifetime_bindings[variable.0 as usize] = Some(resolved);
+                Ok(resolved)
+            }
+        }
+    }
+
+    fn unify_lifetimes(&mut self, left: Lifetime, right: Lifetime) -> Result<Lifetime, TypeError> {
+        let left = self.resolve_lifetime(left)?;
+        let right = self.resolve_lifetime(right)?;
+        if left == right { return Ok(left); }
+        match (left, right) {
+            (Lifetime::Infer(variable), value) | (value, Lifetime::Infer(variable)) => {
+                self.lifetime_bindings[variable.0 as usize] = Some(value);
+                Ok(value)
+            }
+            _ => Err(TypeError::LifetimeMismatch { expected: left, found: right }),
+        }
+    }
+
+    fn zonk_lifetime(&mut self, value: Lifetime) -> Result<Lifetime, TypeError> {
+        match self.resolve_lifetime(value)? {
+            Lifetime::Infer(variable) if !self.pending_body_lifetimes => Err(TypeError::UnresolvedLifetime(variable)),
+            value => Ok(value),
+        }
+    }
+
+    /// Only constructor holes lacking any field/context evidence use ordinary
+    /// elision. Named declaration regions are never generalized or rebound.
+    pub(crate) fn finish_body_lifetimes(&mut self) {
+        for binding in &mut self.lifetime_bindings {
+            if binding.is_none() { *binding = Some(Lifetime::Elided); }
+        }
+        self.pending_body_lifetimes = false;
+    }
+
     pub fn fresh(&mut self) -> Type {
         let variable = InferVar(
             u32::try_from(self.bindings.len()).expect("inference variable arena exceeds G1 range"),
@@ -816,10 +882,10 @@ impl InferContext {
                     lifetime: right_lifetime,
                     referent: right,
                 },
-            ) if left_mutability == right_mutability && left_lifetime == right_lifetime => {
+            ) if left_mutability == right_mutability => {
                 Ok(Type::Reference {
                     mutability: left_mutability,
-                    lifetime: left_lifetime,
+                    lifetime: self.unify_lifetimes(left_lifetime, right_lifetime)?,
                     referent: Box::new(self.unify(*left, *right)?),
                 })
             }
@@ -918,7 +984,7 @@ impl InferContext {
                 referent,
             } => Ok(Type::Reference {
                 mutability,
-                lifetime,
+                lifetime: self.zonk_lifetime(lifetime)?,
                 referent: Box::new(self.zonk(*referent)?),
             }),
             Type::Callable {
@@ -951,7 +1017,10 @@ impl InferContext {
     /// effect rows are rejected rather than receiving an allocation-dependent
     /// fingerprint.
     pub fn type_fingerprint(&mut self, value: Type) -> Result<Digest, TypeError> {
-        let value = self.zonk(value)?;
+        let pending = std::mem::replace(&mut self.pending_body_lifetimes, false);
+        let resolved = self.zonk(value);
+        self.pending_body_lifetimes = pending;
+        let value = resolved?;
         let bytes = canonical_type_encoding(&value);
         Ok(Digest::of_parts([
             b"grandiose-stage0-type-v1".as_slice(),
@@ -1144,6 +1213,9 @@ impl InferContext {
                 let left = self.resolve_generic_argument(left);
                 let right = self.resolve_generic_argument(right);
                 match (left, right) {
+                    (GenericArgument::Lifetime(left), GenericArgument::Lifetime(right)) => {
+                        self.unify_lifetimes(left, right).map(GenericArgument::Lifetime)
+                    }
                     (GenericArgument::ConstInfer { variable, kind }, value)
                     | (value, GenericArgument::ConstInfer { variable, kind }) => {
                         self.bind_const(variable, kind, value.clone())?;
@@ -1982,6 +2054,7 @@ impl InferContext {
         argument: GenericArgument,
     ) -> Result<GenericArgument, TypeError> {
         match self.resolve_generic_argument(argument) {
+            GenericArgument::Lifetime(value) => self.zonk_lifetime(value).map(GenericArgument::Lifetime),
             GenericArgument::Type(value) => self.zonk(value).map(GenericArgument::Type),
             GenericArgument::EffectRow(value) => self
                 .zonk_effects_allowing_generic_tail(value)
@@ -2221,6 +2294,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 Mutability::Unique => 1,
             });
             output.push(match lifetime {
+                Lifetime::Infer(_) => 4,
                 Lifetime::Static => 0,
                 Lifetime::Generic(_) => 1,
                 Lifetime::Bound { .. } => 2,
@@ -2228,6 +2302,9 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             });
             if let Lifetime::Generic(index) = lifetime {
                 output.extend_from_slice(&index.to_le_bytes());
+            }
+            if let Lifetime::Infer(variable) = lifetime {
+                output.extend_from_slice(&variable.0.to_le_bytes());
             }
             if let Lifetime::Bound { depth, index } = lifetime {
                 output.extend_from_slice(&depth.to_le_bytes());
@@ -2760,6 +2837,10 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
         GenericArgument::Lifetime(value) => {
             output.push(2);
             match value {
+                Lifetime::Infer(variable) => {
+                    output.push(4);
+                    output.extend_from_slice(&variable.0.to_le_bytes());
+                }
                 Lifetime::Static => output.push(0),
                 Lifetime::Generic(index) => {
                     output.push(1);

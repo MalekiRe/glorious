@@ -558,6 +558,15 @@ impl Analyzer<'_> {
     }
 
     fn borrowed_value(&mut self, id: CoreId) -> Value {
+        if let Some(value) = self.reborrowed_value(id) {
+            for root in borrowed_roots(&value) {
+                if !self.has_frozen_loan_root(&root) {
+                    self.error(self.body.expression(id).span, "G5016",
+                        format!("reference to `{root}` has no frozen NLL loan fact"));
+                }
+            }
+            return value;
+        }
         // Reborrowing through a reference supplied by the caller must remain
         // caller-owned.  `place_root` intentionally has no body-local root
         // for `&*external`; treating that absence as a temporary would reject
@@ -607,6 +616,17 @@ impl Analyzer<'_> {
             CoreKind::Field { base, .. } => self.reborrowed_from_external(base),
             CoreKind::Deref(reference) => matches!(self.value(reference), Value::ExternalBorrowed),
             _ => false,
+        }
+    }
+
+    fn reborrowed_value(&mut self, id: CoreId) -> Option<Value> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Field { base, .. } => self.reborrowed_value(base),
+            CoreKind::Deref(reference) => {
+                let value = self.value(reference);
+                (!matches!(value, Value::None)).then_some(value)
+            }
+            _ => None,
         }
     }
 
@@ -803,6 +823,10 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
 }
 
 fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
+    if let Value::Joined(values) = value {
+        return values.iter().map(|value| value_at_path(value, path))
+            .collect::<Option<Vec<_>>>().map(join);
+    }
     // `ExternalBorrowed` is the sealed marker for a call whose *every*
     // reference leaf is static/external.  A later source-level library call
     // may forward one nested reference leaf (for example, `Str::as_bytes`
@@ -825,10 +849,12 @@ fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
 
 fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
     if path.is_empty() {
-        if !matches!(target, Value::None) {
-            return false;
+        // One result leaf can borrow from any of several contract inputs.
+        // Preserve their union so no local source vanishes at an escape.
+        if matches!(target, Value::None) { *target = replacement; }
+        else if *target != replacement {
+            *target = join(vec![std::mem::replace(target, Value::None), replacement]);
         }
-        *target = replacement;
         return true;
     }
     let required = path[0] as usize + 1;

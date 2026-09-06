@@ -680,6 +680,16 @@ pub enum VmInstruction {
         field_count: u32,
         field_type: VmType,
     },
+    TakeProjection {
+        dst: u32,
+        base: u32,
+        fields: Vec<u32>,
+    },
+    IsInitialized {
+        dst: u32,
+        base: u32,
+        fields: Vec<u32>,
+    },
     ProjectTuple {
         dst: u32,
         base: u32,
@@ -816,6 +826,10 @@ pub enum VmInstruction {
     /// Move through a unique reference. The verifier makes the reference
     /// temporarily unreadable until `DerefStore` restores a referent.
     DerefMove {
+        dst: u32,
+        reference: u32,
+    },
+    DerefIsInitialized {
         dst: u32,
         reference: u32,
     },
@@ -2001,7 +2015,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// storage identity across calls, reborrows, and checked dereferences.
 /// Schema 98 removes retired collection/static-view opcodes and the mutable
 /// mode byte from the surviving shared Array element-borrow instruction.
-pub const STAGE0_VM_SCHEMA: u32 = 98;
+/// Schema 99 adds explicit projection moves and storage-initialization tests
+/// for compiler-generated destruction; earlier projection opcodes retain
+/// their observational semantics.
+pub const STAGE0_VM_SCHEMA: u32 = 99;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2838,6 +2855,43 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
     emit_with_specialized_lifted_targets(function, &BTreeSet::new())
 }
 
+/// MIR block identities survive splitting and need not describe layout order.
+/// The bytecode contract places each private handler entry after every site
+/// installing it. Preserve source order where possible while satisfying those
+/// dependencies, including installs relocated into appended cleanup blocks.
+fn emission_block_order(function: &MirFunction) -> Result<Vec<usize>, VmArtifactError> {
+    let mut successors = vec![BTreeSet::new(); function.blocks.len()];
+    let mut predecessors = vec![0usize; function.blocks.len()];
+    for (index, block) in function.blocks.iter().enumerate() {
+        for instruction in &block.instructions {
+            if let MirInstruction::InstallHandler { target, .. } = instruction {
+                let target = target.0 as usize;
+                if target >= function.blocks.len() {
+                    return Err(VmArtifactError::UnsupportedControlFlow);
+                }
+                if successors[index].insert(target) {
+                    predecessors[target] += 1;
+                }
+            }
+        }
+    }
+    let mut ready = predecessors.iter().enumerate()
+        .filter_map(|(index, count)| (*count == 0).then_some(index))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(function.blocks.len());
+    while let Some(index) = ready.pop_first() {
+        order.push(index);
+        for target in &successors[index] {
+            predecessors[*target] -= 1;
+            if predecessors[*target] == 0 { ready.insert(*target); }
+        }
+    }
+    if order.len() != function.blocks.len() || order.first() != Some(&0) {
+        return Err(VmArtifactError::UnsupportedControlFlow);
+    }
+    Ok(order)
+}
+
 fn emit_with_specialized_lifted_targets(
     function: &MirFunction,
     specialized_lifted_targets: &BTreeSet<DefKey>,
@@ -2861,11 +2915,13 @@ fn emit_with_specialized_lifted_targets(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut starts = Vec::with_capacity(function.blocks.len());
+    let order = emission_block_order(function)?;
+    let mut starts = vec![0; function.blocks.len()];
     // Every emitted body starts with its sealed result/control declaration.
     let mut next = 1u32;
-    for block in &function.blocks {
-        starts.push(next);
+    for block_index in &order {
+        let block = &function.blocks[*block_index];
+        starts[*block_index] = next;
         let control_len = match &block.terminator {
             MirTerminator::Return { .. } => 1,
             MirTerminator::Goto { target, arguments } => {
@@ -2896,7 +2952,8 @@ fn emit_with_specialized_lifted_targets(
         })?,
         returns: false,
     });
-    for (block_index, block) in function.blocks.iter().enumerate() {
+    for block_index in order {
+        let block = &function.blocks[block_index];
         instructions.extend(
             block
                 .instructions
@@ -3927,6 +3984,12 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
         VmGenericArgument::Lifetime(value) => {
             output.push(2);
             match value {
+                Lifetime::Infer(variable) => {
+                    // Reserved, rejected by the decoder and validator. A
+                    // candidate containing inference is never executable.
+                    output.push(4);
+                    output.extend_from_slice(&variable.0.to_le_bytes());
+                }
                 Lifetime::Static => output.push(0),
                 Lifetime::Generic(index) => {
                     output.push(1);
@@ -4810,6 +4873,19 @@ impl<'a> Decoder<'a> {
     }
     fn instruction(&mut self) -> Result<VmInstruction, VmArtifactError> {
         match self.byte()? {
+            197 => Ok(VmInstruction::DerefIsInitialized { dst: self.u32()?, reference: self.u32()? }),
+            opcode @ (195 | 196) => {
+                let dst = self.u32()?;
+                let base = self.u32()?;
+                let count = self.count("storage field projections", MAX_DECODE_TYPE_DEPTH)?;
+                let mut fields = Vec::with_capacity(count);
+                for _ in 0..count { fields.push(self.u32()?); }
+                Ok(if opcode == 195 {
+                    VmInstruction::TakeProjection { dst, base, fields }
+                } else {
+                    VmInstruction::IsInitialized { dst, base, fields }
+                })
+            }
             0 => Ok(VmInstruction::ConstI64 {
                 dst: self.u32()?,
                 value: self.i64()?,
@@ -7100,6 +7176,15 @@ fn lower_instruction(
                 })
                 .collect(),
         },
+        MirInstruction::Drop { .. } => return Err(VmArtifactError::MalformedEncoding {
+            message: "unelaborated destruction reached VM lowering",
+        }),
+        MirInstruction::TakeProjection { dst, base, fields } => VmInstruction::TakeProjection {
+            dst: dst.0, base: base.0, fields: fields.clone(),
+        },
+        MirInstruction::IsInitialized { dst, base, fields } => VmInstruction::IsInitialized {
+            dst: dst.0, base: base.0, fields: fields.clone(),
+        },
         MirInstruction::ProjectRecord {
             dst,
             base,
@@ -7286,6 +7371,9 @@ fn lower_instruction(
         MirInstruction::DerefStore { reference, src } => VmInstruction::DerefStore {
             reference: reference.0,
             src: src.0,
+        },
+        MirInstruction::DerefIsInitialized { dst, reference } => VmInstruction::DerefIsInitialized {
+            dst: dst.0, reference: reference.0,
         },
         MirInstruction::NotBool { dst, value } => VmInstruction::NotBool {
             dst: dst.0,
@@ -8832,6 +8920,43 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     .iter()
                     .any(|field| states.resumptions[*field as usize]);
             }
+            VmInstruction::IsInitialized { dst, base, fields } => {
+                if dst == base {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "initialization probe requires a distinct destination",
+                    });
+                }
+                projected_storage_types(function, &register_type(function, *base)?, fields)?;
+                expect_type(function, *dst, VmType::Bool)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::DerefIsInitialized { dst, reference } => {
+                if !matches!(states.registers.get(*reference as usize), Some(Some(_))) {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *reference });
+                }
+                if !matches!(register_type(function, *reference)?, VmType::Reference { unique: true, .. }) {
+                    return Err(VmArtifactError::MalformedEncoding { message: "referent initialization probe requires a unique reference" });
+                }
+                expect_type(function, *dst, VmType::Bool)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::TakeProjection { dst, base, fields } => {
+                if fields.is_empty() || dst == base {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "projection move requires a nonempty path and distinct destination",
+                    });
+                }
+                read(&states, *base)?;
+                let candidates = projected_storage_types(function, &register_type(function, *base)?, fields)?;
+                if !candidates.contains(&register_type(function, *dst)?) {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "projection move type does not match frozen storage layout",
+                    });
+                }
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
+            }
             VmInstruction::ProjectRecord {
                 dst,
                 base,
@@ -10128,8 +10253,20 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             } => {
                 read(&states, *condition)?;
                 expect_type(function, *condition, VmType::Bool)?;
-                propagate_state(&mut incoming, &mut worklist, *then_target, &states)?;
-                propagate_state(&mut incoming, &mut worklist, *else_target, &states)?;
+                let mut then_states = states.clone();
+                let mut else_states = states.clone();
+                if let Some(VmInstruction::DerefIsInitialized { dst, reference }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
+                    && dst == condition {
+                    then_states[*reference as usize] = Some(true);
+                    else_states[*reference as usize] = Some(false);
+                }
+                if let Some(VmInstruction::IsInitialized { dst, base, fields }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
+                    && dst == condition {
+                    then_states[*base as usize] = Some(true);
+                    if fields.is_empty() { else_states[*base as usize] = Some(false); }
+                }
+                propagate_state(&mut incoming, &mut worklist, *then_target, &then_states)?;
+                propagate_state(&mut incoming, &mut worklist, *else_target, &else_states)?;
                 advances = false;
             }
             VmInstruction::Return { value } => {
@@ -10211,6 +10348,9 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
     for value in values {
         match value {
             VmGenericArgument::Type(value) => validate_vm_type(value)?,
+            VmGenericArgument::Lifetime(Lifetime::Infer(_)) => return Err(VmArtifactError::MalformedEncoding {
+                message: "VM identity retains a body-local lifetime inference variable",
+            }),
             VmGenericArgument::ConstU32(_) => {}
             VmGenericArgument::ConstU32Expr(value) => validate_vm_structural_u32_expr(value)?,
             VmGenericArgument::Lifetime(Lifetime::Bound { .. }) => {
@@ -10634,6 +10774,43 @@ fn nominal_layout_descriptor<'a>(
         })
 }
 
+/// Enumerate only declaration-authorized projected types. Enum dispatch can
+/// select a payload at runtime; a path must still occur in a frozen variant.
+fn projected_storage_types(
+    function: &VmFunction,
+    root: &VmType,
+    fields: &[u32],
+) -> Result<Vec<VmType>, VmArtifactError> {
+    let mut candidates = vec![root.clone()];
+    for field in fields {
+        let mut next = Vec::new();
+        let mut insert = |ty: &VmType| {
+            if !next.contains(ty) { next.push(ty.clone()); }
+        };
+        for candidate in candidates {
+            match candidate {
+                VmType::Tuple(elements) => {
+                    if let Some(ty) = elements.get(*field as usize) { insert(ty); }
+                }
+                VmType::Array(element) => { insert(&element); }
+                nominal @ VmType::Nominal { .. } => {
+                    for variant in &nominal_layout_descriptor(function, &nominal)?.variants {
+                        if let Some(ty) = variant.get(*field as usize) { insert(ty); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if next.is_empty() {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "storage projection has no field in its frozen layout",
+            });
+        }
+        candidates = next;
+    }
+    Ok(candidates)
+}
+
 fn nominal_record_layout<'a>(
     function: &'a VmFunction,
     nominal: &VmType,
@@ -10867,6 +11044,13 @@ fn read(states: &[Option<bool>], register: u32) -> Result<(), VmArtifactError> {
 }
 #[derive(Clone, Debug)]
 enum VmValue {
+    /// A unique loan whose resident was moved out. Its address survives so
+    /// assignment can restore it, but it is not a readable language value.
+    SuspendedReference(Box<VmValue>),
+    /// Private register-storage state, never a language value or a native
+    /// object representation. Retain the type of a moved field so the parent
+    /// layout does not change when part of an aggregate is consumed.
+    Uninitialized(VmType),
     /// A genuine process pointer. Frame transfers copy the pointer, not its
     /// pointee or provenance. Dereferencing requires an unsafe execution call.
     RawPointer { pointer: *mut u8, signature: VmType },
@@ -11039,6 +11223,8 @@ impl VmValue {
     fn ty(&self) -> VmType {
         match self {
             Self::RawPointer { signature, .. } => signature.clone(),
+            Self::Uninitialized(ty) => ty.clone(),
+            Self::SuspendedReference(reference) => reference.ty(),
             Self::Unit => VmType::Unit,
             Self::I64(_) => VmType::I64,
             Self::Usize(_) => VmType::Usize,
@@ -11080,6 +11266,39 @@ impl VmValue {
             },
         }
     }
+}
+
+fn storage_is_initialized(value: Option<&VmValue>, fields: &[u32]) -> bool {
+    let Some(value) = value else { return false; };
+    if matches!(value, VmValue::Uninitialized(_)) { return false; }
+    let Some((field, rest)) = fields.split_first() else { return true; };
+    let values = match value {
+        VmValue::Tuple(values) | VmValue::Array { values }
+        | VmValue::Record { fields: values, .. } | VmValue::Enum { fields: values, .. } => values,
+        _ => return false,
+    };
+    storage_is_initialized(values.get(*field as usize), rest)
+}
+
+fn take_storage_projection(
+    registers: &mut [Option<VmValue>],
+    base: u32,
+    fields: &[u32],
+    expected: &VmType,
+    budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
+    let value = registers.get_mut(base as usize)
+        .ok_or(VmArtifactError::InvalidRegister { register: base })?
+        .as_mut().ok_or(VmArtifactError::UseAfterMove { register: base })?;
+    let slot = project_reference_mut(value, fields, budget)?;
+    if matches!(slot, VmValue::Uninitialized(_)) {
+        return Err(VmArtifactError::UseAfterMove { register: base });
+    }
+    if !vm_type_matches(&slot.ty(), expected) {
+        return Err(VmArtifactError::ResultType { expected: expected.clone(), found: slot.ty() });
+    }
+    let ty = slot.ty();
+    Ok(std::mem::replace(slot, VmValue::Uninitialized(ty)))
 }
 
 fn project_reference(value: &VmValue, fields: &[u32]) -> Result<VmValue, VmArtifactError> {
@@ -11245,6 +11464,19 @@ fn load_reference_target(
     match target {
         ReferenceTarget::Native(native) => native.read(fields, budget),
         _ => project_reference(reference_target(registers, callers, target)?, fields),
+    }
+}
+
+fn referent_is_initialized(registers: &[Option<VmValue>], callers: &[RuntimeProgramCaller],
+    reference: &VmValue) -> Result<bool, VmArtifactError> {
+    match reference {
+        VmValue::SuspendedReference(_) => Ok(false),
+        // Native references promise an initialized resident when constructed.
+        // A later move retains its restoration capability in the variant above.
+        VmValue::Reference { target: ReferenceTarget::Native(_), .. } => Ok(true),
+        VmValue::Reference { target, fields, .. } =>
+            Ok(storage_is_initialized(Some(reference_target(registers, callers, target)?), fields)),
+        _ => Err(VmArtifactError::InvalidRegister { register: 0 }),
     }
 }
 
@@ -11798,6 +12030,7 @@ fn transfer_to_resumed_frame(
 
 fn format_vm_value(value: &VmValue) -> String {
     match value {
+        VmValue::Uninitialized(_) | VmValue::SuspendedReference(_) => "<uninitialized storage>".into(),
         VmValue::RawPointer { .. } => "<raw pointer>".into(),
         VmValue::Unit => "()".into(),
         VmValue::I64(value) => value.to_string(),
@@ -12862,6 +13095,7 @@ fn aggregate_matches_layout(values: &[VmValue], field_types: &[VmType]) -> bool 
 /// A VM generic is a declaration-local wildcard at runtime; every other
 /// structural component must agree exactly with the value's concrete shape.
 fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
+    if matches!(value, VmValue::Uninitialized(_) | VmValue::SuspendedReference(_)) { return false; }
     match expected {
         VmType::Generic(_) => true,
         // Structural constants inhabit nominal identity only; no standalone
@@ -13849,6 +14083,22 @@ fn execute(
                     signature,
                 });
             }
+            VmInstruction::IsInitialized { dst, base, fields } => {
+                registers[dst as usize] = Some(VmValue::Bool(storage_is_initialized(
+                    registers[base as usize].as_ref(), &fields,
+                )));
+            }
+            VmInstruction::DerefIsInitialized { dst, reference } => {
+                let initialized = referent_is_initialized(&registers, &[],
+                    registers[reference as usize].as_ref().expect("verified reference"))?;
+                registers[dst as usize] = Some(VmValue::Bool(initialized));
+            }
+            VmInstruction::TakeProjection { dst, base, fields } => {
+                let expected = register_type(function, dst)?;
+                registers[dst as usize] = Some(take_storage_projection(
+                    &mut registers, base, &fields, &expected, budget,
+                )?);
+            }
             VmInstruction::ProjectRecord {
                 dst,
                 base,
@@ -14408,14 +14658,18 @@ fn execute(
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: reference });
                 };
-                // The verifier has made the unique loan unreadable until its
-                // matching store. Runtime storage can retain the old value in
-                // that interval because no verified instruction can observe
-                // it; cloning here is representation sharing, not language
-                // copying.
+                // The loan retains its address but becomes unreadable until
+                // restoration. This state also prevents replacement cleanup
+                // from destroying the resident transferred out by this move.
                 registers[dst as usize] = Some(load_reference_target(&registers, &[], target, fields, budget)?);
+                let capability = registers[reference as usize].take().expect("verified unique loan");
+                registers[reference as usize] = Some(VmValue::SuspendedReference(Box::new(capability)));
             }
             VmInstruction::DerefStore { reference, src } => {
+                registers[reference as usize] = registers[reference as usize].take().map(|capability| match capability {
+                    VmValue::SuspendedReference(reference) => *reference,
+                    reference => reference,
+                });
                 let VmValue::Reference {
                     target,
                     fields,
@@ -15227,6 +15481,19 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             for ty in types { encode_type(ty, output); }
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments { output.extend_from_slice(&argument.to_le_bytes()); }
+        }
+        VmInstruction::TakeProjection { dst, base, fields }
+        | VmInstruction::IsInitialized { dst, base, fields } => {
+            output.push(if matches!(value, VmInstruction::TakeProjection { .. }) { 195 } else { 196 });
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&base.to_le_bytes());
+            output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
+            for field in fields { output.extend_from_slice(&field.to_le_bytes()); }
+        }
+        VmInstruction::DerefIsInitialized { dst, reference } => {
+            output.push(197);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&reference.to_le_bytes());
         }
         VmInstruction::FloatIntrinsic {
             dst,
@@ -17047,6 +17314,22 @@ fn execute_program_profiled(
                     signature,
                 });
             }
+            VmInstruction::IsInitialized { dst, base, fields } => {
+                registers[*dst as usize] = Some(VmValue::Bool(storage_is_initialized(
+                    registers[*base as usize].as_ref(), fields,
+                )));
+            }
+            VmInstruction::DerefIsInitialized { dst, reference } => {
+                let initialized = referent_is_initialized(&registers, &callers,
+                    registers[*reference as usize].as_ref().expect("verified reference"))?;
+                registers[*dst as usize] = Some(VmValue::Bool(initialized));
+            }
+            VmInstruction::TakeProjection { dst, base, fields } => {
+                let expected = register_type(function, *dst)?;
+                registers[*dst as usize] = Some(take_storage_projection(
+                    &mut registers, *base, fields, &expected, budget,
+                )?);
+            }
             VmInstruction::ProjectRecord {
                 dst,
                 base,
@@ -17705,8 +17988,14 @@ fn execute_program_profiled(
                     ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) | ReferenceTarget::Native(_) => value,
                 };
                 registers[*dst as usize] = Some(value);
+                let capability = registers[*reference as usize].take().expect("verified unique loan");
+                registers[*reference as usize] = Some(VmValue::SuspendedReference(Box::new(capability)));
             }
             VmInstruction::DerefStore { reference, src } => {
+                registers[*reference as usize] = registers[*reference as usize].take().map(|capability| match capability {
+                    VmValue::SuspendedReference(reference) => *reference,
+                    reference => reference,
+                });
                 let VmValue::Reference {
                     target,
                     fields,

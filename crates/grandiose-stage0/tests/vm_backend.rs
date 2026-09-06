@@ -15,6 +15,59 @@ use grandiose_stage0::{
 };
 use std::collections::BTreeMap;
 
+#[test]
+fn owned_projection_moves_preserve_holes_and_validate_the_frozen_path() {
+    let definition = DefKey(Digest::of_bytes(b"owned-projection-moves"));
+    let candidate = |instructions: Vec<VmInstruction>, registers: Vec<VmType>| {
+        let mut candidate = CandidateVmArtifact {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+            runtime_manifest: None,
+            function: VmFunction {
+                definition, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+                nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+                registers, instructions,
+            },
+            fingerprint: Digest::of_bytes(b"stale"),
+        };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        candidate
+    };
+    let registers = vec![VmType::I64, VmType::Tuple(vec![VmType::I64]), VmType::I64, VmType::Bool];
+    let instructions = vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 },
+        VmInstruction::MakeTuple { dst: 1, fields: vec![0] },
+        VmInstruction::TakeProjection { dst: 2, base: 1, fields: vec![0] },
+        VmInstruction::IsInitialized { dst: 3, base: 1, fields: vec![0] },
+        VmInstruction::Return { value: 3 },
+    ];
+    let valid = candidate(instructions.clone(), registers.clone());
+    let decoded = decode_and_verify_artifact(&encode_artifact(&valid)).unwrap();
+    assert!(!decoded.run_bool().unwrap());
+    let mut repeated = instructions.clone();
+    repeated[3] = VmInstruction::TakeProjection { dst: 4, base: 1, fields: vec![0] };
+    repeated[4] = VmInstruction::Return { value: 4 };
+    let mut repeated_registers = registers.clone();
+    repeated_registers.push(VmType::I64);
+    let repeated = decode_and_verify_artifact(&encode_artifact(&candidate(repeated, repeated_registers))).unwrap();
+    assert!(matches!(repeated.run_i64(), Err(VmArtifactError::UseAfterMove { register: 1 })));
+    for invalid in [
+        VmInstruction::TakeProjection { dst: 2, base: 1, fields: vec![] },
+        VmInstruction::TakeProjection { dst: 2, base: 1, fields: vec![1] },
+        VmInstruction::TakeProjection { dst: 3, base: 1, fields: vec![0] },
+        VmInstruction::TakeProjection { dst: 1, base: 1, fields: vec![0] },
+    ] {
+        let mut altered = instructions.clone();
+        altered[2] = invalid;
+        assert!(decode_and_verify_artifact(&encode_artifact(&candidate(altered, registers.clone()))).is_err());
+    }
+    let self_probe = candidate(vec![
+        VmInstruction::IsInitialized { dst: 0, base: 0, fields: vec![] },
+        VmInstruction::Return { value: 0 },
+    ], vec![VmType::Bool]);
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&self_probe)),
+        Err(VmArtifactError::MalformedEncoding { message: "initialization probe requires a distinct destination" })));
+}
+
 fn authoring_tuple_program(second: VmType, instruction: VmInstruction) -> grandiose_stage0::VerifiedVmProgram {
     let definition = DefKey(Digest::of_bytes(b"authoring-tuple-results"));
     let function = VmFunction {
@@ -10221,10 +10274,9 @@ fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
             fields: vec![0],
         }]
     );
-    let mir = MirLowering::lower(definition.key, &core, &flow)
+    let mut mir = MirLowering::lower(definition.key, &core, &flow)
         .function
         .expect("partial move with leave lowers");
-    let mut artifact = emit_vm(&mir).expect("partial move cleanup emits");
     let pair = interface
         .definitions
         .iter()
@@ -10233,14 +10285,15 @@ fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
         .key;
     // This direct lowering test intentionally bypasses the package linker,
     // which normally freezes declaration layouts onto every emitted body.
-    // Supply the same declaration-owned record layout before independently
-    // verifying the raw artifact.
-    artifact.function.nominal_copy_descriptors = vec![VmNominalCopyDescriptor {
+    // Supply the same declaration-owned record layout before validating MIR,
+    // emitting, and independently verifying the raw artifact.
+    mir.nominal_copy_descriptors = vec![grandiose_stage0::MirNominalCopyDescriptor {
         is_enum: false,
         definition: pair,
         arguments: vec![],
-        variants: vec![vec![VmType::I64, VmType::I64]],
+        variants: vec![vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::I64)]],
     }];
+    let mut artifact = emit_vm(&mir).expect("partial move cleanup emits");
     artifact.fingerprint = artifact.computed_fingerprint();
     let cleanup = artifact
         .function

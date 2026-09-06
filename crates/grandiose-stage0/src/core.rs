@@ -305,24 +305,24 @@ pub struct CoreCompletionClause {
     pub span: Span,
 }
 /// Frozen provenance for a direct-reference result at a callable boundary.
-/// A reference-valued call must either name the one argument whose region it
-/// forwards, prove that it is external/static, or be explicitly opaque.  The
+/// A reference-valued call must name every argument whose region it may
+/// forward, prove that it is external/static, or be explicitly opaque. The
 /// latter is rejected by ownership consumers rather than silently shortening
 /// a caller loan based on a callee implementation detail.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CallReferenceOrigin {
     /// The result has no direct reference component.
     None,
-    /// Every direct reference leaf in the result is mapped to one caller
-    /// argument/projection leaf. The vectors use frozen structural field
-    /// indices, never source spellings.
+    /// Every caller-derived reference leaf maps to its possible input leaves.
+    /// Several relations may share a result path; all such input loans remain
+    /// live. Vectors use frozen structural field indices, never spellings.
     Paths(Vec<CallReferencePath>),
     /// The result is an external/static reference with no caller loan.
     External,
     /// Reference validity/lifetimes (including nested/generic residents) are
     /// unsafe callable preconditions, not checked input-loan derivations.
     Unsafe,
-    /// Core could not prove a unique source region for a reference result.
+    /// Core could not prove the possible source regions for a reference result.
     Opaque,
 }
 /// The sealed reference-bearing shape of a callable result.  This is kept
@@ -2045,9 +2045,9 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
             }
             let mut result_paths = std::collections::BTreeSet::new();
             for path in paths {
-                if !result_paths.insert(path.result_fields.clone()) {
+                if !result_paths.insert((path.result_fields.clone(), path.argument, path.argument_fields.clone())) {
                     return Some(format!(
-                        "{boundary}-reference provenance repeats a result projection path"
+                        "{boundary}-reference provenance repeats an argument/result projection relation"
                     ));
                 }
                 let Some(argument) = arguments.get(path.argument as usize) else {
@@ -2328,10 +2328,10 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
         }
         Type::Array(element)
         | Type::RawPointer { pointee: element, .. }
-        | Type::StaticData { element, .. }
-        | Type::Reference {
-            referent: element, ..
-        } => type_contains_inference(element),
+        | Type::StaticData { element, .. } => type_contains_inference(element),
+        Type::Reference { lifetime, referent, .. } => {
+            matches!(lifetime, Lifetime::Infer(_)) || type_contains_inference(referent)
+        }
         Type::Callable {
             parameters,
             result,
@@ -2441,6 +2441,7 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
 
 fn lifetime_is_out_of_scope_bound(lifetime: Lifetime, binders: &[u32]) -> bool {
     match lifetime {
+        Lifetime::Infer(_) => true,
         Lifetime::Bound { depth, index } => binders
             .get(depth as usize)
             .is_none_or(|binder_count| index >= *binder_count),
@@ -2499,6 +2500,7 @@ fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
         GenericArgument::Type(value) => type_contains_inference(value),
         GenericArgument::EffectRow(value) => effect_row_contains_inference(value),
         GenericArgument::ConstInfer { .. } => true,
+        GenericArgument::Lifetime(Lifetime::Infer(_)) => true,
         GenericArgument::ConstProjection {
             subject,
             trait_arguments,
@@ -3134,7 +3136,7 @@ impl TypedBody {
             fixities,
             definition: definition.key,
             module: &definition.module,
-            inference: InferContext::default(),
+            inference: InferContext::for_body(),
             locals: ScopeMap::default(),
             expressions: vec![],
             diagnostics: vec![],
@@ -3411,7 +3413,7 @@ impl TypedBody {
                 context.method.name.as_bytes(),
             ])),
             module: &implementation.module,
-            inference: InferContext::default(),
+            inference: InferContext::for_body(),
             locals: ScopeMap::default(),
             expressions: vec![],
             diagnostics: vec![],
@@ -3588,7 +3590,7 @@ impl TypedBody {
             fixities,
             definition: definition.key,
             module: &definition.module,
-            inference: InferContext::default(),
+            inference: InferContext::for_body(),
             locals: ScopeMap::default(),
             expressions: vec![],
             diagnostics: vec![],
@@ -3704,7 +3706,7 @@ impl TypedBody {
             fixities,
             definition: definition.key,
             module: &definition.module,
-            inference: InferContext::default(),
+            inference: InferContext::for_body(),
             locals: ScopeMap::default(),
             expressions: vec![],
             diagnostics: vec![],
@@ -4316,7 +4318,7 @@ impl Elaborator<'_> {
                 path,
                 arguments,
                 fields,
-            } => self.record(path, arguments, fields, expression.span),
+            } => self.record(path, arguments, fields, None, expression.span),
             ExprKind::Field { base, name } => self.field(base, name, expression.span),
             ExprKind::Is { subject, pattern } => {
                 let subject = self.expression(subject);
@@ -4638,10 +4640,32 @@ impl Elaborator<'_> {
         self.expression_expected_with_open_lifetimes(id, expected, false)
     }
 
+    fn freshen_call_context_lifetimes(&mut self, expected: Type) -> Type {
+        let mut substitution = CallLifetimeSubstitution::default();
+        if align_lifetime_types(&expected, &expected, &mut substitution, LifetimeMode::Instantiate, 0).is_err() {
+            return expected;
+        }
+        for lifetime in substitution.generics.values_mut().chain(substitution.bounds.values_mut()) {
+            *lifetime = self.inference.fresh_lifetime();
+        }
+        substitute_call_lifetimes(expected.clone(), &substitution, 0).unwrap_or(expected)
+    }
+
     fn expression_expected_with_open_lifetimes(&mut self, id: ExprId, expected: Option<Type>, open_call_lifetimes: bool) -> CoreId {
+        // Context may already have solved a nominal's type parameter. Expose
+        // that contract before selecting literal/callable elaboration rules.
+        let expected = expected.map(|ty| self.inference.zonk(ty.clone()).unwrap_or(ty));
+        // A callee's region binders are not rigid names in this body. Supply
+        // fresh contextual holes while elaborating an argument (including
+        // nested aggregate literals); the eventual call jointly checks the
+        // realized argument lifetimes against its declaration contract.
+        let expected = if open_call_lifetimes {
+            expected.map(|expected| self.freshen_call_context_lifetimes(expected))
+        } else { expected };
         let expression = self.body.expression(id).clone();
         match expression.kind {
             ExprKind::Literal(text) => self.literal_expected(text, expected, expression.span),
+            ExprKind::Record { path, arguments, fields } => self.record(path, arguments, fields, expected, expression.span),
             ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
             ExprKind::UnsafeBlock(values) => self.unsafe_block(values, expected, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
@@ -4749,7 +4773,8 @@ impl Elaborator<'_> {
                 // `'a` is still rigid; the call boundary is the only place
                 // that can soundly turn it into the caller-local region.
                 let expected = expected.expect("guarded above");
-                let _ = self.inference.unify(*result, expected.clone());
+                let result_context = self.freshen_call_context_lifetimes(*result);
+                let _ = self.inference.unify(result_context, expected.clone());
                 let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
                 let call = self.call_with_expected(callee, arguments, expression.span,
                     if open_call_lifetimes { None } else { Some(&expected) });
@@ -7994,6 +8019,7 @@ impl Elaborator<'_> {
     /// Typed Core is a frozen semantic boundary: body-local inference holes
     /// can help elaboration but cannot escape to PlaceFlow, MIR, or caches.
     fn seal_types(&mut self) {
+        self.inference.finish_body_lifetimes();
         for index in 0..self.expressions.len() {
             let span = self.expressions[index].span;
             let ty = self.expressions[index].ty.clone();
@@ -8293,6 +8319,12 @@ impl Elaborator<'_> {
         actual: Type,
         span: Span,
     ) -> Result<(), ()> {
+        // Equality inference may solve constructor-owned holes, but never a
+        // declared region. The directional lifetime proof below still owns
+        // all outlives/coercion checks when rigid lifetimes differ.
+        let _ = self.inference.unify(expected.clone(), actual.clone());
+        let expected = self.inference.zonk(expected.clone()).unwrap_or(expected);
+        let actual = self.inference.zonk(actual.clone()).unwrap_or(actual);
         let mut substitution = CallLifetimeSubstitution::default();
         let aligned = match align_lifetime_types(
             &expected,
@@ -9374,7 +9406,7 @@ impl Elaborator<'_> {
             arguments.push(match kind {
                 crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
                 crate::GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow::empty()),
-                crate::GenericKind::Lifetime => GenericArgument::Lifetime(Lifetime::Elided),
+                crate::GenericKind::Lifetime => GenericArgument::Lifetime(self.inference.fresh_lifetime()),
                 crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
                     index: index as u32,
                     kind,
@@ -9431,12 +9463,14 @@ impl Elaborator<'_> {
         path: Vec<String>,
         source_arguments: Vec<crate::header::HeaderGenericArgument>,
         fields: Vec<(String, ExprId)>,
+        expected: Option<Type>,
         span: Span,
     ) -> CoreId {
         if let Some(value) = self.enum_record_constructor(
             path.clone(),
             source_arguments.clone(),
             fields.clone(),
+            expected.clone(),
             span,
         ) {
             return value;
@@ -9464,6 +9498,10 @@ impl Elaborator<'_> {
                 "record generic arguments do not match its declaration",
             );
         };
+        if let Some(expected) = expected
+            && self.unify_rigid_lifetimes(expected, Type::Nominal { definition, arguments: arguments.clone() }, span).is_err() {
+            return self.fail(span, "G4126", "record constructor does not match its contextual expected type");
+        }
         let Some(layout) = self
             .signatures
             .instantiate_struct_fields_generic(definition, &arguments)
@@ -9540,7 +9578,7 @@ impl Elaborator<'_> {
         span: Span,
     ) -> Option<CoreId> {
         if self.empty_enum_record_constructor(&path) {
-            return self.enum_record_constructor(path, source_arguments, vec![], span);
+            return self.enum_record_constructor(path, source_arguments, vec![], None, span);
         }
         self.empty_record_constructor(path, source_arguments, span)
     }
@@ -9565,7 +9603,7 @@ impl Elaborator<'_> {
         };
         fields
             .is_empty()
-            .then(|| self.record(path, source_arguments, vec![], span))
+            .then(|| self.record(path, source_arguments, vec![], None, span))
     }
     fn empty_enum_record_constructor(&self, path: &[String]) -> bool {
         let Some((variant, enum_path)) = path.split_last() else {
@@ -9597,6 +9635,7 @@ impl Elaborator<'_> {
         path: Vec<String>,
         source_arguments: Vec<crate::header::HeaderGenericArgument>,
         supplied_fields: Vec<(String, ExprId)>,
+        expected: Option<Type>,
         span: Span,
     ) -> Option<CoreId> {
         let (variant_name, enum_path) = path.split_last()?;
@@ -9612,6 +9651,10 @@ impl Elaborator<'_> {
                 _ => return None,
             };
         let arguments = self.nominal_arguments(definition, &source_arguments, span)?;
+        if let Some(expected) = expected
+            && self.unify_rigid_lifetimes(expected, Type::Nominal { definition, arguments: arguments.clone() }, span).is_err() {
+            return Some(self.fail(span, "G4134", "enum record constructor does not match its contextual expected type"));
+        }
         let (variant, layout) = self
             .signatures
             .instantiate_enum_record_variant_generic(definition, &arguments, variant_name)
@@ -14384,7 +14427,8 @@ impl Elaborator<'_> {
             // This contributes generic inference evidence only.  The normal
             // call boundary opens declaration-owned lifetimes after it has
             // seen the actual arguments.
-            let _ = self.inference.unify(*result, expected);
+            let result_context = self.freshen_call_context_lifetimes(*result);
+            let _ = self.inference.unify(result_context, expected);
         }
         let left_expected = parameters.first().cloned();
         let right_expected = parameters
@@ -14698,7 +14742,8 @@ fn align_lifetime_types(
                 // longer `'static` argument may satisfy an elided parameter;
                 // ordinary type unification must not turn that safe coercion
                 // back into an equality failure.
-                lifetime: *actual_lifetime,
+                lifetime: if matches!(expected_lifetime, Lifetime::Infer(_))
+                    || matches!(actual_lifetime, Lifetime::Infer(_)) { *expected_lifetime } else { *actual_lifetime },
                 referent: Box::new(referent),
             })
         }
@@ -15026,7 +15071,8 @@ fn align_lifetime_generic_argument(
         }
         (GenericArgument::Lifetime(expected), GenericArgument::Lifetime(actual)) => {
             bind_lifetime(*expected, *actual, substitution, mode, depth)?;
-            Ok(GenericArgument::Lifetime(*actual))
+            Ok(GenericArgument::Lifetime(if matches!(expected, Lifetime::Infer(_))
+                || matches!(actual, Lifetime::Infer(_)) { *expected } else { *actual }))
         }
         (GenericArgument::EffectRow(expected), GenericArgument::EffectRow(actual)) => {
             align_lifetime_effect_row(expected, actual, substitution, mode, depth)
@@ -15205,7 +15251,9 @@ fn bind_lifetime(
     mode: LifetimeMode,
     depth: u32,
 ) -> Result<(), LifetimeError> {
+    if matches!(actual, Lifetime::Infer(_)) { return Ok(()); }
     match expected {
+        Lifetime::Infer(_) => Ok(()),
         Lifetime::Static => (actual == Lifetime::Static)
             .then_some(())
             .ok_or(LifetimeError::UnsatisfiedOutlives),
@@ -15481,7 +15529,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_) => true,
-        GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. })
+        GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. } | Lifetime::Infer(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -15588,7 +15636,8 @@ fn generic_argument_is_selectable_type_projection(
         GenericArgument::Lifetime(Lifetime::Bound { depth, index }) => hrtb_binders
             .get(*depth as usize)
             .is_some_and(|count| *index < *count),
-        GenericArgument::ConstProjection { .. }
+        GenericArgument::Lifetime(Lifetime::Infer(_))
+        | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
 }
@@ -16158,7 +16207,6 @@ fn call_reference_origin(
     for (result_fields, result_ty) in result_leaves {
         let Type::Reference {
             lifetime: result_lifetime,
-            referent: result_referent,
             ..
         } = result_ty
         else {
@@ -16177,37 +16225,23 @@ fn call_reference_origin(
             // structural path, not referent equality.  A well-typed callee
             // may project `&'a Tri` to `&'a i64`; requiring `Tri == i64`
             // would incorrectly turn that unique, frozen loan relation into
-            // opaque provenance.  More than one same-region argument still
-            // remains ambiguous and therefore fails closed below.
+            // opaque provenance. With several inputs in the same region,
+            // retain their union: referent equality cannot rule out a
+            // projection from a differently shaped input aggregate.
             .filter(|(_, _, candidate)| {
                 matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
-        // Erasing declaration lifetimes can make two unrelated arguments
-        // appear to share `Elided`. Prefer the exact referent when that
-        // retains a unique candidate (`Pair<&i64>` versus `Pair<&Bool>`),
-        // but keep the lifetime-only relation as a fallback for sound
-        // aggregate-to-field projections (`&'a Pair` to `&'a Field`).
-        let matching_referents = candidates
-            .iter()
-            .filter(|(_, _, candidate)| {
-                matches!(candidate, Type::Reference { referent, .. } if referent.as_ref() == result_referent.as_ref())
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        let candidates = if matching_referents.is_empty() {
-            candidates
-        } else {
-            matching_referents
-        };
-        let [(argument, argument_fields, _)] = candidates.as_slice() else {
+        if candidates.is_empty() {
             return CallReferenceOrigin::Opaque;
-        };
-        paths.push(CallReferencePath {
-            result_fields,
-            argument: *argument,
-            argument_fields: argument_fields.clone(),
-        });
+        }
+        for (argument, argument_fields, _) in candidates {
+            paths.push(CallReferencePath {
+                result_fields: result_fields.clone(),
+                argument: *argument,
+                argument_fields: argument_fields.clone(),
+            });
+        }
     }
     CallReferenceOrigin::Paths(paths)
 }
@@ -16266,7 +16300,6 @@ fn callable_reference_origin_from_contract(
         }
         let Type::Reference {
             lifetime: result_lifetime,
-            referent: result_referent,
             ..
         } = result_ty
         else {
@@ -16281,30 +16314,16 @@ fn callable_reference_origin_from_contract(
                 matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
-        // See `call_reference_origin`: referent equality disambiguates
-        // sibling aliases after their distinct source regions have opened to
-        // `Elided`, without rejecting a structural projection whose referent
-        // is intentionally narrower than its source aggregate.
-        let matching_referents = candidates
-            .iter()
-            .filter(|(_, _, candidate)| {
-                matches!(candidate, Type::Reference { referent, .. } if referent.as_ref() == result_referent.as_ref())
-            })
-            .copied()
-            .collect::<Vec<_>>();
-        let candidates = if matching_referents.is_empty() {
-            candidates
-        } else {
-            matching_referents
-        };
-        let [(argument, argument_fields, _)] = candidates.as_slice() else {
+        if candidates.is_empty() {
             return CallReferenceOrigin::Opaque;
-        };
-        paths.push(CallReferencePath {
-            result_fields,
-            argument: *argument,
-            argument_fields: argument_fields.clone(),
-        });
+        }
+        for (argument, argument_fields, _) in candidates {
+            paths.push(CallReferencePath {
+                result_fields: result_fields.clone(),
+                argument: *argument,
+                argument_fields: argument_fields.clone(),
+            });
+        }
     }
     CallReferenceOrigin::Paths(paths)
 }

@@ -659,8 +659,47 @@ fn typed_closures_and_mir_preserve_raw_pointer_types() {
         function.result,
         pointer(PointerMutability::Mut, Type::Scalar(ScalarType::I64))
     );
-    let candidate = grandiose_stage0::vm_backend::emit(&function).unwrap();
-    assert!(candidate.function.registers.iter().any(|ty| matches!(ty, grandiose_stage0::VmType::RawPointer { .. })));
+    assert!(matches!(grandiose_stage0::vm_backend::emit(&function),
+        Err(grandiose_stage0::VmArtifactError::MalformedEncoding {
+            message: "unelaborated destruction reached VM lowering",
+        })));
+    // Templates retain cleanup intent. Check executable types only after
+    // concrete instance discovery and destruction elaboration, then decode
+    // and verify the actual serialized artifact independently.
+    let artifact_source = format!(
+        "{} type Callback = (*mut i64) -> *mut i64; pub fn main() -> Callback {{ keep }}",
+        source.replacen("fn main(", "fn keep(", 1));
+    let package = PackageKey("unsafe-memory-artifact@0.1.0".into());
+    let request = grandiose_stage0::CompilationRequest {
+        build: grandiose_stage0::CompilerBuildIdentity::stage0(
+            grandiose_stage0::Digest::of_bytes(b"unsafe-memory-artifact")),
+        mode: grandiose_stage0::CompilationMode::Build,
+        root_package: package.clone(),
+        sources: vec![grandiose_stage0::SourceInput::new(package,
+            grandiose_stage0::LogicalPath::parse("src/main.glorious").unwrap(), artifact_source.as_bytes())],
+        target: "stage0-vm".into(),
+        semantic_options: BTreeMap::new(), codegen_options: BTreeMap::new(),
+        capability_manifest: vec![], runtime_manifest: None,
+    };
+    let outcome = grandiose_stage0::StageZeroCompiler::new().compile(request).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    let candidate = grandiose_stage0::decode_program(&bytes).unwrap();
+    let expected_result = grandiose_stage0::VmInstruction::DeclareResult {
+        result: grandiose_stage0::VmType::RawPointer {
+            mutability: PointerMutability::Mut,
+            pointee: Box::new(grandiose_stage0::VmType::I64),
+        },
+        returns: true,
+    };
+    let pointer_functions = candidate.functions.values().filter(|function|
+        function.instructions.first() == Some(&expected_result)).collect::<Vec<_>>();
+    assert_eq!(pointer_functions.len(), 2, "keep and its lifted closure must retain pointer results");
+    for function in pointer_functions {
+        assert_eq!(function.parameters, 1);
+        assert!(function.registers.iter().any(|ty| matches!(ty, grandiose_stage0::VmType::RawPointer { .. })));
+    }
     assert_eq!(candidate.schema, grandiose_stage0::STAGE0_VM_SCHEMA);
 }
 

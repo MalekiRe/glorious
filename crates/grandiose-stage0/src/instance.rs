@@ -401,7 +401,7 @@ fn encode_lifetime(value: Lifetime, output: &mut Vec<u8>) {
             output.extend_from_slice(&index.to_le_bytes());
         }
         Lifetime::Elided => output.push(2),
-        Lifetime::Generic(_) => unreachable!("validated concrete lifetime"),
+        Lifetime::Generic(_) | Lifetime::Infer(_) => unreachable!("validated concrete lifetime"),
     }
 }
 

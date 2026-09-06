@@ -16,6 +16,52 @@ fn canonical_generic_arguments_keep_lifetimes_and_effect_rows_out_of_type_slots(
 }
 
 #[test]
+fn lifetime_inference_is_local_kind_checked_and_cannot_rebind_declared_regions() {
+    let carrier = DefKey(Digest::of_bytes(b"lifetime-inference-carrier"));
+    let nominal = |lifetime| Type::Nominal {
+        definition: carrier, arguments: vec![GenericArgument::Lifetime(lifetime)],
+    };
+    let mut inference = InferContext::default();
+    let first = inference.fresh_lifetime();
+    let second = inference.fresh_lifetime();
+    let third = inference.fresh_lifetime();
+    assert_ne!(first, second);
+    assert_ne!(second, third);
+    inference.unify(nominal(first), nominal(second)).unwrap();
+    inference.unify(nominal(second), nominal(Lifetime::Generic(0))).unwrap();
+    assert_eq!(inference.zonk(nominal(first)).unwrap(), nominal(Lifetime::Generic(0)));
+    inference.unify(nominal(third), nominal(Lifetime::Static)).unwrap();
+    assert_eq!(inference.zonk(nominal(third)).unwrap(), nominal(Lifetime::Static));
+    assert!(matches!(inference.unify(nominal(first), nominal(Lifetime::Generic(1))),
+        Err(TypeError::LifetimeMismatch { .. })));
+    assert_eq!(inference.zonk(nominal(first)).unwrap(), nominal(Lifetime::Generic(0)));
+    let fresh = inference.fresh_lifetime();
+    assert!(inference.unify(nominal(fresh), Type::Nominal {
+        definition: carrier, arguments: vec![GenericArgument::Type(Type::Unit)],
+    }).is_err());
+}
+
+#[test]
+fn unresolved_lifetimes_cannot_enter_frozen_types_or_fingerprints() {
+    let mut inference = InferContext::default();
+    let lifetime = inference.fresh_lifetime();
+    let reference = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared, lifetime,
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    assert!(matches!(inference.zonk(reference.clone()), Err(TypeError::UnresolvedLifetime(_))));
+    assert!(matches!(inference.type_fingerprint(reference.clone()), Err(TypeError::UnresolvedLifetime(_))));
+    let resolved = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared, lifetime: Lifetime::Static,
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    };
+    inference.unify(reference.clone(), resolved.clone()).unwrap();
+    assert_eq!(inference.zonk(reference.clone()).unwrap(), resolved);
+    assert_eq!(inference.type_fingerprint(reference).unwrap(),
+        InferContext::default().type_fingerprint(resolved).unwrap());
+}
+
+#[test]
 fn const_generic_inference_is_kind_checked_occurs_checked_and_zonked() {
     let carrier = DefKey(Digest::of_bytes(b"const-inference-carrier"));
     let trait_definition = DefKey(Digest::of_bytes(b"const-inference-trait"));

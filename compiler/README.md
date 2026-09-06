@@ -65,7 +65,18 @@ after changing the source/test closure. `--release` remains fail-closed.
 For a focused run, use `tooling/compiler-check.sh --filter gsc2_registry`.
 Reports record the filters and mark this as selected-test evidence, never a
 complete-suite pass. A filter matching no executed fixtures fails closed.
-The current source-cost checkpoint passes **all 48 source entries** in 238.70
+Concrete Stage0 destruction now specializes generic owners, traverses owned
+record/tuple/active-enum fields, handles replacement and partial moves, and
+keeps destructor-observed loans live through cleanup. Constructor lifetime
+arguments infer from fields and result context; same-region reference returns
+retain every possible caller loan. This is prerequisite work, not a completed
+source compiler or complete collection destruction. See the
+[destruction checkpoint](spec/unsafe-memory-progress.md#concrete-destruction-and-inferred-constructor-lifetimes).
+The final workspace run passes **2,569 tests, zero failures**, with two existing
+ignored manual benchmarks, in **146.157 seconds**. All **48 source entries** pass
+in **134.87 seconds**; their 50 evidence files match the preceding run exactly.
+
+The preceding source-cost checkpoint passed **all 48 source entries** in 238.70
 seconds (`run-3jneul71`), including bootstrap admission and the complete
 eight-history registry batch under their unchanged allocation-element limits.
 Private source growth separation, checked byte-window reads and direct
@@ -96,7 +107,7 @@ CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=8 \
   cargo test --workspace --all-targets
 ```
 
-The authoring artifact format is Stage0 program schema 98 (`G0VP`); release G1
+The authoring artifact format is Stage0 program schema 99 (`G0VP`); release G1
 bytes have a different schema and verifier. Development source tests cross the
 Stage0 encode/decode/verify boundary before execution. They do not certify G1.
 

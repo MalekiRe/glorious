@@ -43,7 +43,8 @@ fn lower_main(source: &str) -> (TypedBody, PlaceFlow, grandiose_stage0::MirLower
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
-    let lowered = MirLowering::lower(definition.key, &core, &flow);
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key, &core, &flow, &Default::default(), Some(&signatures));
     (core, flow, lowered)
 }
 

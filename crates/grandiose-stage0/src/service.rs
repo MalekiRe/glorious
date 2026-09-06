@@ -2317,7 +2317,17 @@ impl StageZeroCompiler {
                 )
             })?;
         let mut instance_trait_solver = TraitSolver::new(&signatures);
+        let mut destruction = crate::destruction::Planner::new(&signatures);
         while let Some(caller) = instance_graph.pop_pending() {
+            if crate::destruction::is_glue(&caller) {
+                for callee in destruction.callees(&caller).map_err(|message| failed(input_fingerprint,
+                    vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
+                    instance_graph.discover_callee(&caller, callee, limits).map_err(|error| failed(input_fingerprint,
+                        vec![CompileDiagnostic::resource("G7031", format!("destruction instance discovery limit: {error:?}"))],
+                        &source_lengths))?;
+                }
+                continue;
+            }
             let Some(body) = typed_bodies.get(&caller.callable) else {
                 continue;
             };
@@ -2327,6 +2337,19 @@ impl StageZeroCompiler {
             let caller_arguments = materialization_body_arguments(&caller, &signatures)
                 .map_err(|message| failed(input_fingerprint,
                     vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))?;
+            // Implicit destruction is a real call edge, even though source
+            // Core contains no explicit invocation of the selected hook.
+            // Discover it under the same concrete substitution as body calls.
+            for ty in body.parameters.iter().map(|(_, ty)| ty)
+                .chain(body.expressions.iter().map(|expression| &expression.ty)) {
+                if let Some(glue) = destruction.discover(&specialize_type(ty, &caller_arguments))
+                    .map_err(|message| failed(input_fingerprint,
+                        vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
+                    instance_graph.discover_callee(&caller, glue, limits).map_err(|error| failed(input_fingerprint,
+                        vec![CompileDiagnostic::resource("G7031", format!("destruction instance discovery limit: {error:?}"))],
+                        &source_lengths))?;
+                }
+            }
             // A direct call owns its callable child in Core. Process that
             // child through the call below, rather than once as a first-class
             // function value and again as the call's callee. Retaining
@@ -2629,6 +2652,7 @@ impl StageZeroCompiler {
             &instance_graph,
             &signatures,
             runtime_primitives.as_ref(),
+            &mut destruction,
         ) {
             Ok(instances) => instances,
             Err(message) => {
@@ -2765,6 +2789,7 @@ fn materialize_concrete_instances(
     graph: &InstanceGraph,
     signatures: &ElaboratedInterface,
     runtime_primitives: Option<&BTreeMap<DefKey, crate::PrimitiveRole>>,
+    destruction: &mut crate::destruction::Planner<'_>,
 ) -> Result<BTreeMap<DefKey, MirInstance>, String> {
     let mut instances = BTreeMap::new();
     let mut targets = BTreeMap::new();
@@ -2785,6 +2810,12 @@ fn materialize_concrete_instances(
             return Err(
                 "specialized instance identity collided with an existing MIR function".into(),
             );
+        }
+        if crate::destruction::is_glue(&key) {
+            functions.insert(executable, destruction.materialize(&key)?);
+            targets.insert(key.clone(), executable);
+            instances.insert(executable, MirInstance { key, executable });
+            continue;
         }
         let base = functions
             .get(&key.callable)
@@ -2807,6 +2838,13 @@ fn materialize_concrete_instances(
             signatures,
         )?;
         instances.insert(executable, MirInstance { key, executable });
+    }
+    let glue_definitions = instances.iter().filter_map(|(definition, instance)|
+        crate::destruction::is_glue(&instance.key).then_some(*definition)).collect::<BTreeSet<_>>();
+    for function in functions.values_mut() {
+        if !glue_definitions.contains(&function.definition) {
+            destruction.elaborate(function)?;
+        }
     }
     let mut unmaterialized_trait_calls = BTreeMap::new();
     for function in functions.values_mut() {
@@ -3462,7 +3500,7 @@ fn trait_method_executable_receiver(
 /// vocabulary. Trait and method arguments remain ordered type slots; the
 /// evidence digest is appended as eight const slots so distinct coherent
 /// implementations can never share an executable body.
-fn trait_method_instance_key(
+pub(crate) fn trait_method_instance_key(
     evidence: DefKey,
     method: DefKey,
     trait_arguments: &[GenericArgument],
@@ -3651,7 +3689,7 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
 /// A template can contain a `T` local whose concrete nominal layout becomes
 /// knowable only while materializing an instance. Re-freeze that layout before
 /// the specialized MIR reaches VM emission.
-fn register_specialized_nominal_copy_descriptors(
+pub(crate) fn register_specialized_nominal_copy_descriptors(
     function: &mut MirFunction,
     signatures: &ElaboratedInterface,
 ) {
@@ -4756,7 +4794,8 @@ mod tests {
             (helper, body(helper, vec![missing.clone()])),
         ]);
         assert!(
-            super::materialize_concrete_instances(&mut unused, &graph, &signatures, None).is_ok()
+            super::materialize_concrete_instances(&mut unused, &graph, &signatures, None,
+                &mut crate::destruction::Planner::new(&signatures)).is_ok()
         );
         for edge in [
             MirInstruction::Call {
@@ -4780,7 +4819,8 @@ mod tests {
                 (helper, body(helper, vec![missing.clone()])),
             ]);
             let error =
-                super::materialize_concrete_instances(&mut functions, &graph, &signatures, None)
+                super::materialize_concrete_instances(&mut functions, &graph, &signatures, None,
+                    &mut crate::destruction::Planner::new(&signatures))
                     .expect_err("a reachable owner must not hide an undiscovered method instance");
             assert!(
                 error.contains("selected trait-method instance was not materialized"),
