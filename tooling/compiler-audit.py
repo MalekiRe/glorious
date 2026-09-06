@@ -54,6 +54,7 @@ def main():
                        "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs",
                        "crates/grandiose-stage0/src/destruction.rs",
                        "crates/grandiose-stage0/src/ownership.rs",
+                       "crates/grandiose-stage0/src/evaluation_mir.rs",
                        "crates/grandiose-stage0/src/types.rs", "crates/grandiose-stage0/src/header.rs",
                        "crates/grandiose-stage0/src/interface.rs", "crates/grandiose-stage0/src/lib.rs",
                        "crates/grandiose-stage0/src/body.rs", "crates/grandiose-stage0/src/instance.rs",

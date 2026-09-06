@@ -29,20 +29,58 @@ MIR does not contain source `if`, `match`, loop, return, Boolean, operator,
 decision DAGs, labels, effects, and primitives. It does not run trait selection,
 infer open environments, or decide whether a trailing block was callable.
 
-The frontend hands the backend one `MirBody` plus immutable semantic tables. A
-compact phase tag advances monotonically through:
+The implementation is migrating to six distinct intermediate languages plus
+backend LIR. These are checked immutable phase products, not a phase flag on
+one universal instruction enum:
 
 ```text
-Raw
-  -> Owned       // frontend PlaceFlow facts imported and mapping validated
-  -> Cleanup     // every abandoning edge has an exact cleanup plan
-  -> Optimized   // semantics-preserving transforms complete
-  -> Lowered     // loans/SSA destroyed, bytecode tables and registers selected
+Typed Core
+  -> Evaluation MIR // strict operand order, places, deferred lexical regions
+  -> Control MIR    // CFG, typed delimiters and dynamic transfer contracts
+  -> Ownership MIR  // generic owner inventory, moves, loans, dispositions
+  -> Specialized MIR // demanded concrete instances and selected static calls
+  -> Cleanup MIR    // concrete destruction, flags and all abandoning edges
+  -> Runtime MIR    // storage/ABI and active/suspended continuation protocol
+  -> VM LIR         // backend registers and relocatable instructions
+  -> bytecode
 ```
 
-Only the named phase transition may change the tag. There are no generic wrapper
-types or parallel body objects. Debug and test builds run the relevant validator
-after every transformation pass; release builds validate phase boundaries.
+Each transition has its own instruction vocabulary and validator. Identity,
+types, provenance and unchanged arenas may be shared; a request must not retain
+seven full body copies. Optimization is a validated transformation within a
+phase, not an eighth language. The old Raw/Owned/Cleanup/Optimized/Lowered names
+below describe legacy implementation obligations while consumers migrate.
+The existing VM function/program is the starting point for backend LIR.
+
+Evaluation MIR makes operand evaluation explicit without selecting copy versus
+move or executing deferred regions. Borrow and assignment targets remain
+places. Handler computations, clauses, closures, completion arms and lazy
+right-hand operands retain separate regions. A terminal strict operand stops
+its enclosing evaluation sequence. Control MIR subsequently composes these
+regions into CFG and dynamic transfer operations; function return, handler
+completion, resume, replay and abandonment are distinct contracts.
+
+Ownership is checked before specialization so generic bodies retain their
+obligations; concrete destruction is selected after specialization. Runtime
+MIR must account for temporary, captured, active and suspended owners, and
+the VM must implement one checked transfer/unwind protocol. New phase products
+alone do not repair runtime ownership. No additional production interpreter or
+Rust semantic callback is authorized by this migration.
+
+Migration order is Evaluation/Control, Ownership/Specialized/Cleanup, then
+Runtime/VM LIR. Remove source-shape lowerers as their cases move to shared
+composition. Keep focused transition and regression tests per commit; reserve
+full workspace/source integration gates for major migration milestones.
+
+Migration checkpoint: `evaluation_mir.rs` now normalizes Typed Core into a
+separate immutable Evaluation MIR product, with explicit operands, places,
+deferred regions, terminal exits and a structural scheduling validator.
+Twelve source-normalization tests and seven negative/structural unit tests
+pass. This is the first phase implementation, not a production pipeline
+switch: legacy MIR emission still consumes Core. Control MIR must next consume
+the normalized regions and migrate executable lowering paths. Full phase type,
+ownership and dynamic-control certification, source-language implementations,
+and the other five intermediate languages remain outstanding.
 
 ## 2. Identity and storage model
 
