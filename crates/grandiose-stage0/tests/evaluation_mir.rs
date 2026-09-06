@@ -295,3 +295,27 @@ fn temporary_borrow_keeps_its_owner_as_an_explicit_dependency() {
         if root.instructions.iter().any(|instruction| instruction.value == *value && instruction.operation == Op::Literal("42".into())))
     );
 }
+
+#[test]
+fn statement_disposition_precedes_the_next_statement() {
+    let mir = normalize(
+        "fn first() -> i64 { 1 } fn second() -> i64 { 2 } pub fn main() -> i64 { first(); second() }",
+    );
+    let root = &mir.regions()[mir.entry().0 as usize];
+    let first = root
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.operation, Op::Call(_)))
+        .unwrap();
+    let discard = &root.instructions[first + 1];
+    assert_eq!(discard.operation, Op::Discard);
+    assert_eq!(
+        discard.operands,
+        vec![EvaluationOperand::Value(root.instructions[first].value)]
+    );
+    assert!(
+        root.instructions[first + 2..]
+            .iter()
+            .any(|instruction| matches!(instruction.operation, Op::Call(_)))
+    );
+}

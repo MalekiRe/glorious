@@ -124,6 +124,9 @@ pub enum EvaluationOperation {
         refinement: RefinementEnvironment,
     },
     Bind(String),
+    /// Dispose of a statement result at this point, before evaluating the
+    /// next statement. Ownership MIR selects the actual destruction action.
+    Discard,
     Assign,
     Borrow {
         unique: bool,
@@ -359,9 +362,11 @@ impl EvaluationInstruction {
             | Op::Completion { .. } => arity == 0,
             Op::Tuple | Op::Array | Op::Record(_) | Op::Enum { .. } | Op::Intrinsic(_) => values,
             Op::Field { index, field_count } => values && arity == 1 && index < field_count,
-            Op::PatternTest { .. } | Op::Bind(_) | Op::Deref | Op::LazyBoolean { .. } => {
-                values && arity == 1
-            }
+            Op::PatternTest { .. }
+            | Op::Bind(_)
+            | Op::Discard
+            | Op::Deref
+            | Op::LazyBoolean { .. } => values && arity == 1,
             Op::Transfer(_) => values && arity == 1 && self.ty == Type::Never,
             Op::Move => arity == 1,
             Op::Borrow { .. } => matches!(&self.operands[..], [EvaluationOperand::Place(_)]),
@@ -550,10 +555,24 @@ impl Builder<'_> {
         let value = if let CoreKind::Block(items) = &self.body.expression(source).kind {
             let items = items.clone();
             let mut value = None;
-            for item in items {
+            let count = items.len();
+            for (index, item) in items.into_iter().enumerate() {
                 value = Some(self.expression(item, &mut sequence)?);
                 if sequence.terminal.is_some() {
                     break;
+                }
+                if index + 1 < count {
+                    let statement = value.expect("evaluated statement");
+                    self.emit(
+                        item,
+                        Type::Unit,
+                        EvaluationOperation::Discard,
+                        vec![EvaluationOperand::Value(statement)],
+                        &mut sequence,
+                    )?;
+                    // Synthetic disposal is an effect, not a new meaning for
+                    // the original expression's once-evaluated value.
+                    sequence.values.insert(item, statement);
                 }
             }
             match value {

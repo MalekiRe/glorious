@@ -72,15 +72,25 @@ Runtime/VM LIR. Remove source-shape lowerers as their cases move to shared
 composition. Keep focused transition and regression tests per commit; reserve
 full workspace/source integration gates for major migration milestones.
 
-Migration checkpoint: `evaluation_mir.rs` now normalizes Typed Core into a
-separate immutable Evaluation MIR product, with explicit operands, places,
-deferred regions, terminal exits and a structural scheduling validator.
-Twelve source-normalization tests and seven negative/structural unit tests
-pass. This is the first phase implementation, not a production pipeline
-switch: legacy MIR emission still consumes Core. Control MIR must next consume
-the normalized regions and migrate executable lowering paths. Full phase type,
-ownership and dynamic-control certification, source-language implementations,
-and the other five intermediate languages remain outstanding.
+Migration checkpoint: `evaluation_mir.rs` normalizes Typed Core into a separate
+immutable product with explicit operands, places, deferred regions, statement
+disposition, terminal exits and a structural scheduling validator.
+`control_mir.rs` composes migrated operations into a CFG with lexical scopes,
+typed joins and explicit invocation return continuations. Its validator checks
+edge types and must-definition availability across branches. A production
+adapter consumes Control MIR without inspecting Core for the currently
+migrated scalar/tuple/direct-call domain; abstract destruction still goes
+through existing ownership import and concrete destruction elaboration.
+
+Focused validation passes 967 source normalization, control execution, service
+and destruction tests, plus five Control MIR validator tests. No full suite is
+claimed for this checkpoint. Handlers, labels, closure environments, places and
+resumption capabilities remain on legacy lowering. The next integration
+milestone must move these hard control paths through the new stages, establish
+explicit owner dispositions/unwind contracts, and remove the corresponding
+source-shape lowerers. Full phase type/ownership/dynamic-control certification,
+source-language implementations, and Ownership/Specialized/Cleanup/Runtime MIR
+remain outstanding.
 
 ## 2. Identity and storage model
 

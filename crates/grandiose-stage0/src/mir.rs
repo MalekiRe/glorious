@@ -4672,6 +4672,31 @@ impl MirLowering {
                 local
             })
             .collect::<Vec<_>>();
+        // Migrate by supported IR operations, not by an enclosing source
+        // shape. The adapter consumes Control MIR exclusively; ownership and
+        // destruction still pass through the existing frozen MIR pipeline.
+        if let Ok(evaluation) = crate::evaluation_mir::EvaluationMir::lower(definition, body)
+            && crate::control_mir::ControlMir::is_legacy_value_domain(&evaluation)
+        {
+            match crate::control_mir::ControlMir::lower(&evaluation) {
+                Ok(control) => {
+                    if let Some(function) = control.emit_legacy_values(
+                        lowerer.declared_result_type(body.root), runtime_primitives, signatures.is_some(),
+                    ) {
+                        return Self {
+                            function: Some(Self::freeze(function, flow, &BTreeMap::new())),
+                            lifted: BTreeMap::new(), diagnostics: vec![],
+                        };
+                    }
+                }
+                Err(crate::control_mir::ControlError::NotMigrated(_)) => {},
+                Err(crate::control_mir::ControlError::Invalid(message)) => {
+                    return Self { function: None, lifted: BTreeMap::new(), diagnostics: vec![MirDiagnostic {
+                        code: "G6000", message: format!("invalid Control MIR: {message}"),
+                    }] };
+                }
+            }
+        }
         // Ordered refutable normal-completion clauses may leave after the
         // protected frame has been uninstalled.
         if let Some(function) =

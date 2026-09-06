@@ -17,6 +17,7 @@ mod destruction;
 mod ownership;
 pub mod escape;
 pub mod evaluation_mir;
+pub mod control_mir;
 pub mod fixity;
 pub mod header;
 pub mod identity;
