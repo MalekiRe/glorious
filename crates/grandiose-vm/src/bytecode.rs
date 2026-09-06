@@ -120,8 +120,6 @@ const LABELS_G1: u64 = 1 << 2;
 const HANDLERS_G1: u64 = 1 << 3;
 const MULTISHOT_G1: u64 = 1 << 4;
 const HOST_ABI_G1: u64 = 1 << 5;
-const ARRAY_RESERVE_G1: u64 = 1 << 6;
-const ARRAY_FINISH_DRAINED_G1: u64 = 1 << 7;
 const BYTES_UTF8_VALID_UP_TO_G1: u64 = 1 << 8;
 const EXECUTABLE: u32 = 1;
 pub const EXPORTED: u32 = 1;
@@ -476,22 +474,10 @@ pub enum Primitive {
     BytesFromArrayMove = 0x0054,
     BytesToArray = 0x0055,
     BytesUtf8ValidUpTo = 0x0056,
-    ArrayNew = 0x0060,
-    ArrayLen = 0x0061,
-    ArrayGetCopy = 0x0062,
-    ArrayGetMove = 0x0063,
     ArrayGetBorrowShared = 0x0064,
-    ArrayGetBorrowUnique = 0x0065,
-    ArraySetMove = 0x0066,
     ArrayEmpty = 0x0067,
     ArrayPushMove = 0x0068,
-    ArrayPopMove = 0x0069,
-    ArrayCapacity = 0x006a,
-    ArrayReserve = 0x006b,
-    ArrayFinishDrained = 0x006c,
     StaticLen = 0x0070,
-    StaticSubslice = 0x0071,
-    StaticGetShared = 0x0072,
 }
 impl Primitive {
     pub fn from_u32(n: u32) -> Option<Self> {
@@ -551,22 +537,10 @@ impl Primitive {
             0x0054 => Self::BytesFromArrayMove,
             0x0055 => Self::BytesToArray,
             0x0056 => Self::BytesUtf8ValidUpTo,
-            0x0060 => Self::ArrayNew,
-            0x0061 => Self::ArrayLen,
-            0x0062 => Self::ArrayGetCopy,
-            0x0063 => Self::ArrayGetMove,
             0x0064 => Self::ArrayGetBorrowShared,
-            0x0065 => Self::ArrayGetBorrowUnique,
-            0x0066 => Self::ArraySetMove,
             0x0067 => Self::ArrayEmpty,
             0x0068 => Self::ArrayPushMove,
-            0x0069 => Self::ArrayPopMove,
-            0x006a => Self::ArrayCapacity,
-            0x006b => Self::ArrayReserve,
-            0x006c => Self::ArrayFinishDrained,
             0x0070 => Self::StaticLen,
-            0x0071 => Self::StaticSubslice,
-            0x0072 => Self::StaticGetShared,
             _ => return None,
         })
     }
@@ -638,10 +612,7 @@ pub(crate) fn primitive_result_type(op: Primitive, args: &[TypeId]) -> Option<Ty
         BytesGet => (args == [BYTES, USIZE]).then_some(U8),
         BytesSlice => (args == [BYTES, USIZE, USIZE]).then_some(BYTES),
         BytesUtf8ValidUpTo => (args == [BYTES]).then_some(USIZE),
-        BytesFromArrayMove | BytesToArray | ArrayNew | ArrayLen | ArrayGetCopy | ArrayGetMove
-        | ArrayGetBorrowShared | ArrayGetBorrowUnique | ArraySetMove | ArrayEmpty
-        | ArrayPushMove | ArrayPopMove | ArrayCapacity | ArrayReserve | ArrayFinishDrained
-        | StaticLen | StaticSubslice | StaticGetShared => None,
+        BytesFromArrayMove | BytesToArray | ArrayGetBorrowShared | ArrayEmpty | ArrayPushMove | StaticLen => None,
     }
 }
 
@@ -695,49 +666,17 @@ pub(crate) fn primitive_signature(
         }
         (BytesFromArrayMove, [array]) => array_element(*array) == Some(U8) && result == BYTES,
         (BytesToArray, [BYTES]) => array_element(result) == Some(U8),
-        (ArrayNew, [USIZE, element]) => array_element(result) == Some(*element),
-        (ArrayLen | ArrayCapacity, [array_ref]) => {
-            shared_array_element(*array_ref).is_some() && result == USIZE
-        }
-        (ArrayGetCopy | ArrayGetBorrowShared, [array_ref, USIZE]) => {
+        (ArrayGetBorrowShared, [array_ref, USIZE]) => {
             let Some(element) = shared_array_element(*array_ref) else {
-                return false;
-            };
-            if op == ArrayGetCopy {
-                result == element
-            } else {
-                matches!(ty(result), Some(Type::RefShared { referent }) if *referent == element)
-            }
-        }
-        (ArrayGetMove | ArrayGetBorrowUnique, [array_ref, USIZE]) => {
-            let Some(element) = unique_array_element(*array_ref) else {
-                return false;
-            };
-            if op == ArrayGetMove {
-                result == element
-            } else {
-                matches!(ty(result), Some(Type::RefUnique { referent }) if *referent == element)
-            }
-        }
-        (ArraySetMove, [array_ref, USIZE, element]) | (ArrayPushMove, [array_ref, element]) => {
-            unique_array_element(*array_ref) == Some(*element) && result == UNIT
-        }
-        (ArrayEmpty, []) => array_element(result).is_some(),
-        (ArrayPopMove, [array_ref]) => unique_array_element(*array_ref) == Some(result),
-        (ArrayReserve, [array_ref, USIZE]) => {
-            unique_array_element(*array_ref).is_some() && result == UNIT
-        }
-        (ArrayFinishDrained, [array]) => array_element(*array).is_some() && result == UNIT,
-        (StaticLen, [value]) => static_data(*value).is_some() && result == USIZE,
-        (StaticSubslice, [value, USIZE, USIZE]) => {
-            static_data(*value).is_some() && static_data(*value) == static_data(result)
-        }
-        (StaticGetShared, [value, USIZE]) => {
-            let Some((element, _, _)) = static_data(*value) else {
                 return false;
             };
             matches!(ty(result), Some(Type::RefShared { referent }) if *referent == element)
         }
+        (ArrayPushMove, [array_ref, element]) => {
+            unique_array_element(*array_ref) == Some(*element) && result == UNIT
+        }
+        (ArrayEmpty, []) => array_element(result).is_some(),
+        (StaticLen, [value]) => static_data(*value).is_some() && result == USIZE,
         _ => false,
     }
 }
@@ -1272,8 +1211,6 @@ impl Artifact {
         | HANDLERS_G1
         | MULTISHOT_G1
         | HOST_ABI_G1
-        | ARRAY_RESERVE_G1
-        | ARRAY_FINISH_DRAINED_G1
         | BYTES_UTF8_VALID_UP_TO_G1;
     pub fn encode(&self) -> Vec<u8> {
         #[cfg(test)]
@@ -2002,28 +1939,6 @@ pub(crate) fn used_features(
         )
     }) {
         features |= REFERENCES_G1;
-    }
-    if code.iter().any(|instruction| {
-        matches!(
-            instruction,
-            Instruction::Primitive {
-                op: Primitive::ArrayCapacity | Primitive::ArrayReserve,
-                ..
-            }
-        )
-    }) {
-        features |= ARRAY_RESERVE_G1;
-    }
-    if code.iter().any(|instruction| {
-        matches!(
-            instruction,
-            Instruction::Primitive {
-                op: Primitive::ArrayFinishDrained,
-                ..
-            }
-        )
-    }) {
-        features |= ARRAY_FINISH_DRAINED_G1;
     }
     if code.iter().any(|instruction| {
         matches!(
@@ -6125,73 +6040,26 @@ fn infer_primitive_types(
                 set(inferred, dst, array)?;
             }
         }
-        ArrayNew => {
-            set_arg(0, USIZE, inferred)?;
-            if let Some(element) = args.get(1).and_then(|register| known(*register, inferred))
-                && let Some(array) = array(element)
-            {
-                set(inferred, dst, array)?;
-            }
-            if let Some(Type::Array { element }) = known(dst, inferred)
-                .and_then(|result| types.get(result as usize))
-                .map(Type::representation)
-            {
-                set_arg(1, *element, inferred)?;
-            }
-        }
-        ArrayLen | ArrayCapacity => set(inferred, dst, USIZE)?,
-        ArrayGetCopy | ArrayGetMove => {
+        ArrayGetBorrowShared => {
             set_arg(1, USIZE, inferred)?;
             if let Some(reference_ty) = args.first().and_then(|register| known(*register, inferred))
                 && let Some(referent) =
                     match types.get(reference_ty as usize).map(Type::representation) {
-                        Some(Type::RefShared { referent }) if op == ArrayGetCopy => Some(*referent),
-                        Some(Type::RefUnique { referent }) if op == ArrayGetMove => Some(*referent),
+                        Some(Type::RefShared { referent }) => Some(*referent),
                         _ => None,
                     }
                 && let Some(Type::Array { element }) =
                     types.get(referent as usize).map(Type::representation)
-            {
-                set(inferred, dst, *element)?;
-            }
-            if let Some(element) = known(dst, inferred)
-                && let Some(reference) = array_reference(element, op == ArrayGetMove)
-            {
-                set_arg(0, reference, inferred)?;
-            }
-        }
-        ArrayGetBorrowShared | ArrayGetBorrowUnique => {
-            set_arg(1, USIZE, inferred)?;
-            let unique = op == ArrayGetBorrowUnique;
-            if let Some(reference_ty) = args.first().and_then(|register| known(*register, inferred))
-                && let Some(referent) =
-                    match types.get(reference_ty as usize).map(Type::representation) {
-                        Some(Type::RefShared { referent }) if !unique => Some(*referent),
-                        Some(Type::RefUnique { referent }) if unique => Some(*referent),
-                        _ => None,
-                    }
-                && let Some(Type::Array { element }) =
-                    types.get(referent as usize).map(Type::representation)
-                && let Some(result) = reference(*element, unique)
+                && let Some(result) = reference(*element, false)
             {
                 set(inferred, dst, result)?;
             }
             if let Some(result) = known(dst, inferred)
                 && let Some(element) = match types.get(result as usize).map(Type::representation) {
-                    Some(Type::RefShared { referent }) if !unique => Some(*referent),
-                    Some(Type::RefUnique { referent }) if unique => Some(*referent),
+                    Some(Type::RefShared { referent }) => Some(*referent),
                     _ => None,
                 }
-                && let Some(reference) = array_reference(element, unique)
-            {
-                set_arg(0, reference, inferred)?;
-            }
-        }
-        ArraySetMove => {
-            set(inferred, dst, UNIT)?;
-            set_arg(1, USIZE, inferred)?;
-            if let Some(element) = args.get(2).and_then(|register| known(*register, inferred))
-                && let Some(reference) = array_reference(element, true)
+                && let Some(reference) = array_reference(element, false)
             {
                 set_arg(0, reference, inferred)?;
             }
@@ -6205,55 +6073,12 @@ fn infer_primitive_types(
                 set_arg(0, reference, inferred)?;
             }
         }
-        ArrayPopMove => {
-            if let Some(reference_ty) = args.first().and_then(|register| known(*register, inferred))
-                && let Some(Type::RefUnique { referent }) =
-                    types.get(reference_ty as usize).map(Type::representation)
-                && let Some(Type::Array { element }) =
-                    types.get(*referent as usize).map(Type::representation)
-            {
-                set(inferred, dst, *element)?;
-            }
-            if let Some(element) = known(dst, inferred)
-                && let Some(reference) = array_reference(element, true)
-            {
-                set_arg(0, reference, inferred)?;
-            }
-        }
-        ArrayReserve => {
-            set(inferred, dst, UNIT)?;
-            set_arg(1, USIZE, inferred)?;
-        }
-        ArrayFinishDrained => {
-            set(inferred, dst, UNIT)?;
-        }
         StaticLen => {
             // A sealed segment has a declaration-owned input type, but its
             // length result is unambiguous.  Without this assignment a
             // terminal `static.len` result is left uninferred by ordinary G1
             // decoding and incorrectly requires a development-only hint.
             set(inferred, dst, USIZE)?;
-        }
-        StaticSubslice => {
-            set_arg(1, USIZE, inferred)?;
-            set_arg(2, USIZE, inferred)?;
-            // The primitive preserves the complete sealed static-data type:
-            // element, tag, and alignment cannot be changed by a subview.
-            if let Some(value) = args.first().and_then(|register| known(*register, inferred)) {
-                set(inferred, dst, value)?;
-            } else if let Some(result) = known(dst, inferred) {
-                set_arg(0, result, inferred)?;
-            }
-        }
-        StaticGetShared => {
-            set_arg(1, USIZE, inferred)?;
-            if let Some(value) = args.first().and_then(|register| known(*register, inferred))
-                && let Some(Type::StaticData { element, .. }) =
-                    types.get(value as usize).map(Type::representation)
-                && let Some(shared) = reference(*element, false)
-            {
-                set(inferred, dst, shared)?;
-            }
         }
         _ => {}
     }
@@ -7445,12 +7270,8 @@ mod tests {
         types.push(Type::Array { element: U32 });
         let shared_array = types.len() as TypeId;
         types.push(Type::RefShared { referent: array });
-        let unique_array = types.len() as TypeId;
-        types.push(Type::RefUnique { referent: array });
         let shared_element = types.len() as TypeId;
         types.push(Type::RefShared { referent: U32 });
-        let unique_element = types.len() as TypeId;
-        types.push(Type::RefUnique { referent: U32 });
         let artifact = Artifact {
             required_features: CORE_G1 | REFERENCES_G1,
             types,
@@ -7467,29 +7288,11 @@ mod tests {
                     code_len: 2,
                     label_slot_count: 0,
                 },
-                Function {
-                    flags: 0,
-                    name: "unique".into(),
-                    params: vec![unique_array, USIZE],
-                    return_type: unique_element,
-                    outward_protocols: vec![],
-                    receiver_mode: None,
-                    register_types: vec![UNIT, unique_array, USIZE, unique_element],
-                    code_start: 2,
-                    code_len: 2,
-                    label_slot_count: 0,
-                },
             ],
             code: vec![
                 Instruction::Primitive {
                     dst: 3,
                     op: Primitive::ArrayGetBorrowShared,
-                    args: vec![1, 2],
-                },
-                Instruction::Return { src: Some(3) },
-                Instruction::Primitive {
-                    dst: 3,
-                    op: Primitive::ArrayGetBorrowUnique,
                     args: vec![1, 2],
                 },
                 Instruction::Return { src: Some(3) },
@@ -7749,67 +7552,6 @@ mod tests {
         let bytes = a.encode();
         assert_eq!(Artifact::decode(&bytes).unwrap(), canonical(a));
         assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
-    }
-
-    #[test]
-    fn array_finish_drained_has_permanent_id_and_exact_feature() {
-        assert_eq!(Primitive::ArrayFinishDrained as u32, 0x006c);
-        assert_eq!(
-            Primitive::from_u32(0x006c),
-            Some(Primitive::ArrayFinishDrained)
-        );
-        assert_eq!(
-            format!("{:?}", Primitive::ArrayFinishDrained),
-            "ArrayFinishDrained"
-        );
-
-        let mut types = Type::predefined();
-        types[U64 as usize] = Type::U64.restricted(false, false);
-        types.push(Type::Array { element: U64 });
-        let artifact = Artifact {
-            required_features: CORE_G1 | ARRAY_FINISH_DRAINED_G1,
-            types,
-            cleanups: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "finish".into(),
-                params: vec![19],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 19, UNIT],
-                code_start: 0,
-                code_len: 2,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Primitive {
-                    dst: 2,
-                    op: Primitive::ArrayFinishDrained,
-                    args: vec![1],
-                },
-                Instruction::Return { src: Some(2) },
-            ],
-            ..Artifact::default()
-        };
-        let encoded = artifact.encode();
-        assert_eq!(Artifact::decode(&encoded).unwrap(), canonical(artifact));
-
-        let mut missing = encoded.clone();
-        missing[32] &= !(ARRAY_FINISH_DRAINED_G1 as u8);
-        assert!(matches!(
-            Artifact::decode(&missing),
-            Err(DecodeError::NonCanonical(message))
-                if message == "required feature bits do not exactly describe the artifact"
-        ));
-
-        let mut spurious = Artifact::default().encode();
-        spurious[32] |= ARRAY_FINISH_DRAINED_G1 as u8;
-        assert!(matches!(
-            Artifact::decode(&spurious),
-            Err(DecodeError::NonCanonical(message))
-                if message == "required feature bits do not exactly describe the artifact"
-        ));
     }
 
     #[test]
@@ -8093,43 +7835,6 @@ mod tests {
         let expected = canonical(artifact);
         let bytes = expected.encode();
         assert_eq!(Artifact::decode(&bytes).unwrap(), expected);
-    }
-
-    #[test]
-    fn array_pop_type_inference_flows_from_the_unique_array_reference() {
-        let mut types = Type::predefined();
-        let array = types.len() as TypeId;
-        types.push(Type::Array { element: I64 });
-        let array_reference = types.len() as TypeId;
-        types.push(Type::RefUnique { referent: array });
-        let artifact = canonical(Artifact {
-            required_features: CORE_G1 | REFERENCES_G1,
-            types,
-            functions: vec![Function {
-                flags: 0,
-                name: "pop".into(),
-                params: vec![array_reference],
-                return_type: I64,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, array_reference, I64],
-                code_start: 0,
-                code_len: 2,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Primitive {
-                    dst: 2,
-                    op: Primitive::ArrayPopMove,
-                    args: vec![1],
-                },
-                Instruction::Return { src: Some(2) },
-            ],
-            ..Artifact::default()
-        });
-
-        let bytes = artifact.encode();
-        assert_eq!(Artifact::decode(&bytes).unwrap(), artifact);
     }
 
     fn type_record_flags(bytes: &[u8], type_id: usize) -> u8 {

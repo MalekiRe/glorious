@@ -20,7 +20,7 @@ alone is not proof that unsafe code is sound.
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Rust substrate plus Stage0 per-run total/per-block memory accounting implemented; resident cleanup remains source-owned |
 | U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 25 bodyless memory leaves, including reference construction/address extraction and unsafe forgetting, implemented |
-| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Stage0 schema 97 executes raw memory for scalar/pointer/product/enum and native-reference residents; independent G1 extension remains; untrusted-bytecode admission deferred |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Stage0 schema 98 executes raw memory for scalar/pointer/product/enum and native-reference residents; independent G1 extension remains; untrusted-bytecode admission deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Pointer-backed canonical Vec and two-word slices implemented; generic destruction and full resident ABI remain incomplete |
 | U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Source UTF-8 and collection consumers migrated; legacy opcode removal, opaque BLAKE3 bridge and remaining work open |
@@ -357,8 +357,8 @@ still check bounds and abort before deriving an invalid reference.
 `String` now encodes/decodes/validates UTF-8 and edits byte ranges in source;
 the hash tables access residents through source Vec functions. Obsolete array
 algorithm bindings and static-to-array view bindings have been removed from the
-bundled package and its default manifest. The older instructions still exist in
-the compatibility runtime. Four Array leaves remain solely for the existing
+bundled package and its default manifest. The obsolete instructions have also
+been removed from both VM backends. Three Array leaves remain solely for the existing
 opaque BLAKE3 input/output bridge; Vec's own representation never contains Array.
 
 This is an implementation checkpoint, **not completion of ownership cleanup**.
@@ -385,13 +385,32 @@ unsafe-execution rejection.
 
 Two further general leaves provide unsafe `forget<T>` (caller discharges the
 logical obligations; no Drop hook runs) and sealed raw-literal length. Authority
-tags 206–207 extend the shared inventory to 208. Stage0 schema/cache/bytecode/
-verifier generations are 97/ten/52/eleven.
+tags 206–207 are preserved. After retiring 28 collection/static-view roles,
+the shared active inventory contains 180 entries with reserved numeric gaps.
+Stage0 schema/cache/bytecode/verifier generations are 98/eleven/53/twelve.
 
 The final bundled `__g1_array_len` dependency has subsequently been removed.
 It queried only the BLAKE3 result, whose exact 32-byte output is already part
 of the hash leaf's contract. The declaration and default runtime binding are
 gone; three legacy Array leaves remain for that byte bridge. Regression tests
-compare all digest bytes with the hash oracle and assert that neither the
-default manifest nor the emitted hashing program requests ArrayLen. The legacy
-ArrayLen opcode remains in the separately retained compatibility runtime.
+compare all digest bytes with the hash oracle for empty, textual and binary
+input. They check behavior, not the absence of an opcode.
+
+The retired operations' enum variants, decoders, encoders, lowering, execution,
+verifier branches and manifest signatures are deleted. This includes collection
+mutation/growth/move helpers, array UTF-8 operations and old static-array views.
+The surviving element-borrow instruction is shared-only. Static-array facade
+values and logical array-capacity bookkeeping are removed, as are verifier
+summaries specific to the deleted move/pop/finalization operations. G1 no longer
+advertises the retired capacity/finalization features or accepts the old seed
+identity. No instruction IDs are reassigned and no replacement collection
+intrinsics were introduced. Historical public-contract inventory rows remain
+historical audit records, not active runtime capabilities.
+
+Validation of this cleanup covers the bundled collection behavior and both
+Rust VM suites. The full-closure GSC2 manifest test currently fails during source
+checking: compiler modules still duplicate moved Vec/String-backed values or
+request duplicable collection bounds after the source ownership rewrite. That
+compiler-source migration is not implemented by deleting VM instructions; the
+GSC2 test remains visible and failing rather than weakening its ownership checks
+or narrowing the tested production closure.

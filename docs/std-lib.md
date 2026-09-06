@@ -301,15 +301,13 @@ bootstrap interpreter. Public names such as `String::len` are resolved normally;
 they are not bytecode instruction
 spellings or compiler language items.
 
-The consuming `array.finish_drained(Array<T>) -> ()` primitive is an internal,
-manifest-bound layer-1 leaf. Its identity cannot be created by source spelling,
-aliased into a public disposal function, or invoked by code above layer 1. The
-leaf returns normally only after the VM confirms that every array slot is empty;
-otherwise it raises a catchless primitive fault without destroying resident
-elements. Layer-1 collection code may use it only to release a shell whose
-elements have all been transferred. It is neither general disposal nor an
-`abort` substitute, and it does not weaken the `T: Use<[0,0]>` requirement for
-ordinary array destruction.
+The distributed `Vec`, slices and UTF-8 algorithms use ordinary source over
+the raw-memory leaves. The obsolete array collection and static-view operations
+have been removed from both VM backends, not retained as a compatibility profile.
+Only empty-array construction, push and shared element borrowing remain for the
+current opaque BLAKE3 byte bridge. Their retired neighbors' numeric IDs are not
+reassigned. Source Drop/structural cleanup is still incomplete; see the
+[implementation checkpoint](../compiler/spec/unsafe-memory-progress.md).
 
 The distribution manifest freezes the opaque `Array` machine constructor at
 identity `0x21`. Its trusted source bindings, together with the immutable
@@ -333,22 +331,13 @@ their call sites require the trusted standard-library source domain:
 | `0x0054` | `__g1_bytes_from_array_move` | `BytesFromArrayMove` |
 | `0x0055` | `__g1_bytes_to_array` | `BytesToArray` |
 | `0x0056` | `__g1_bytes_utf8_valid_up_to` | `BytesUtf8ValidUpTo` |
-| `0x0060` | `__g1_array_new` | `ArrayNew` |
-| `0x0061` | `__g1_array_len` | `ArrayLen` |
-| `0x0062` | `__g1_array_get_copy` | `ArrayGetCopy` |
-| `0x0063` | `__g1_array_get_move` | `ArrayGetMove` |
 | `0x0064` | `__g1_array_get_borrow_shared` | `ArrayGetBorrowShared` |
-| `0x0065` | `__g1_array_get_borrow_unique` | `ArrayGetBorrowUnique` |
-| `0x0066` | `__g1_array_set_move` | `ArraySetMove` |
 | `0x0067` | `__g1_array_empty` | `ArrayEmpty` |
 | `0x0068` | `__g1_array_push_move` | `ArrayPushMove` |
-| `0x0069` | `__g1_array_pop_move` | `ArrayPopMove` |
-| `0x006a` | `__g1_array_capacity` | `ArrayCapacity` |
-| `0x006b` | `__g1_array_reserve` | `ArrayReserve` |
-| `0x006c` | `__g1_array_finish_drained` | `ArrayFinishDrained` |
 
-Custom conformance manifests may bind arbitrary names and declaration IDs; this
-table is the canonical distribution mapping only.
+Custom conformance manifests may bind arbitrary names and declaration IDs to
+surviving primitives. The table records the surviving G1 mappings; the bundled
+source manifest selects only the leaves it actually needs.
 
 The bootstrap profile is normative: stage 1 must not rely on a helper that is
 available only in the Rust VM or existing interpreter. Convenience APIs beyond
@@ -368,11 +357,11 @@ The standard library exposes the source scalar types `()`, `!`, `u8`, `u16`,
 metadata; `Never` is not a separate source binding. Bytecode `usize` and `isize`
 are always 64-bit.
 
-The finite manifest additionally supplies the immutable UTF-8 `Text`, immutable
-octet `Bytes`, and growable `Array<T>` machine types. `String` is the public alias
-of `Text`; `Bytes` is public directly; and `Array<T>` is kept behind the public
-dense `Vec<T>` interface except inside layer 1. These identities are trusted
-machine types, unlike all source-defined collection and control types.
+The finite manifest retains immutable UTF-8 `Text`, immutable octet `Bytes`, and
+`Array<T>` machine types for the G1 host interface and byte bridges. The current
+bundled `String` is source-owned UTF-8 storage backed by a raw-pointer `Vec<u8>`;
+`Vec<T>` no longer contains `Array<T>`. These machine identities are distinct from
+the source-defined collection and control types.
 
 For each numeric type it supplies the applicable arithmetic, comparison,
 bitwise, shift, checked-conversion, wrapping-conversion, `min`, `max`, and

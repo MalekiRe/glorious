@@ -94,8 +94,6 @@ Feature IDs are permanent:
 | 3 | `HANDLERS_G1` | protocol, handler, perform, or one-shot resumption occurs |
 | 4 | `MULTISHOT_G1` | a resumption has an upper bound greater than one |
 | 5 | `HOST_ABI_G1` | the import table is nonempty |
-| 6 | `ARRAY_RESERVE_G1` | `array.capacity` or `array.reserve` occurs |
-| 7 | `ARRAY_FINISH_DRAINED_G1` | `array.finish_drained` occurs |
 | 8 | `BYTES_UTF8_VALID_UP_TO_G1` | `bytes.utf8_valid_up_to` occurs |
 
 Bits 9 through 127 are unassigned and therefore unknown. Features beyond 127
@@ -781,22 +779,10 @@ Arguments and result types are checked from the primitive ID.
 | `0x0054` | `bytes.from_array_move` |
 | `0x0055` | `bytes.to_array` |
 | `0x0056` | `bytes.utf8_valid_up_to` |
-| `0x0060` | `array.new` |
-| `0x0061` | `array.len` |
-| `0x0062` | `array.get_copy` |
-| `0x0063` | `array.get_move` |
 | `0x0064` | `array.get_borrow_shared` |
-| `0x0065` | `array.get_borrow_unique` |
-| `0x0066` | `array.set_move` |
 | `0x0067` | `array.empty` |
 | `0x0068` | `array.push_move` |
-| `0x0069` | `array.pop_move` |
-| `0x006a` | `array.capacity` |
-| `0x006b` | `array.reserve` |
-| `0x006c` | `array.finish_drained` |
 | `0x0070` | `static.len` |
-| `0x0071` | `static.subslice` |
-| `0x0072` | `static.get_shared` |
 
 `bytes.utf8_valid_up_to(Bytes) -> usize` returns the byte length when the input
 is valid UTF-8. Otherwise it returns the byte offset of the invalid sequence's
@@ -847,62 +833,32 @@ leaves, not public source-level slice types:
 
 ```text
 static.len(__StaticData<T>) -> usize
-static.subslice(__StaticData<T>, usize start, usize length) -> __StaticData<T>
-static.get_shared(__StaticData<T>, usize index) -> &T
 ```
 
-`subslice` checks `start + length <= current_length` without changing segment,
-tag, alignment, or element type. `get_shared` checks `index < current_length`
-and returns a shared reference to immutable static storage; it cannot be used
-for a unique borrow or mutation. Standard-library `Str` and `Slice` wrappers may
-use these leaves while remaining ordinary library types rather than compiler
-intrinsics.
+Static slicing and element-view operations have been retired. The source-owned
+`Str` and `Slice` implementation uses the Stage0 raw-memory/static-address
+substrate; the corresponding independent G1 unsafe/native-ABI extension remains
+separate work.
 
 Array operations are:
 
 ```text
-new(usize, T) -> Array<T>                 // fill is copied; T duplicable
-len(&Array<T>) -> usize
-get_copy(&Array<T>, usize) -> T           // T duplicable
-get_move(&mut Array<T>, usize) -> T       // leaves an empty slot
 get_borrow_shared(&Array<T>, usize) -> &T
-get_borrow_unique(&mut Array<T>, usize) -> &mut T
-set_move(&mut Array<T>, usize, T) -> ()   // target slot must be empty
 empty<T>() -> Array<T>
 push_move(&mut Array<T>, T) -> ()
-pop_move(&mut Array<T>) -> T              // traps if empty or last slot empty
-capacity(&Array<T>) -> usize
-reserve(&mut Array<T>, usize) -> ()       // additional initialized elements
-finish_drained(Array<T>) -> ()            // consumes only a fully drained shell
 ```
 
 Array bounds and initialized-slot state are checked at runtime. Dropping an array
 skips empty slots and destroys initialized elements in reverse index order, and
-is therefore legal only when `T` has `ZERO_USE_ALLOWED`. `pop_move`, draining,
-and `into_iter`/by-value iteration instead transfer initialized elements to their
-caller and do not require zero-use evidence; an iterator may be abandoned with
-elements remaining only when those elements allow zero.
-`array.finish_drained` consumes its array argument by value and returns unit only
-when every logical slot is uninitialized. If any initialized slot remains, it
-produces a catchless primitive fault without running an element destructor or a
-custom `Drop` hook. It therefore closes an array shell after `get_move` or
-`pop_move` has transferred all element obligations, including when `T` does not
-permit zero use. It does not make ordinary `DROP Array<T>` legal without
-`T: ZERO_USE_ALLOWED` and cannot successfully dispose of a resident element.
-`array.push_move` MUST use geometric capacity growth and therefore amortized
-constant-time appends; the VM must not reallocate to exact length on every push.
-`array.reserve(array, additional)` ensures capacity for at least
-`len(array) + additional` slots without changing the length or initialized-slot
-state. Addition overflow or a configured allocation-limit failure is a VM fault.
+is therefore legal only when `T` has `ZERO_USE_ALLOWED`. The three surviving
+array primitives support byte bridges, not the source `Vec` implementation.
+The shared borrow cannot grant unique element access. Backing allocation remains
+bounded by the runtime resource guard; capacity is no longer an observable
+machine value or separately stored logical field.
 
-Array capacity is a logical, observable value independent of a host allocator's
-physical allocation. `array.empty` has capacity zero; `array.new(n, value)` and
-`bytes.to_array(bytes)` have capacity exactly their initial length. When growth is
-required, `push_move` and `reserve` set logical capacity to the smallest power of
-two at least the required length, with a minimum nonzero capacity of four. They
-do not change logical capacity when the requested elements already fit. Overflow
-while finding that capacity is a primitive trap. A VM may physically allocate
-more memory but `array.capacity` returns only this frozen logical value.
+Retired collection/static-view primitive IDs and feature bits 6–7 are reserved
+gaps, not aliases for surviving instructions. Artifacts requesting them are
+rejected. There is no legacy execution mode for the removed operations.
 
 ## 7. Host ABI G1
 

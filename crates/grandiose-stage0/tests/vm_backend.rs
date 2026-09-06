@@ -5979,7 +5979,10 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
                 referent: Box::new(array.clone()),
             },
             VmType::Usize,
-            tuple.clone(),
+            VmType::Reference {
+                unique: false,
+                referent: Box::new(tuple.clone()),
+            },
             VmType::Reference {
                 unique: false,
                 referent: Box::new(shared.clone()),
@@ -5996,7 +5999,7 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
                 reborrow: false,
             },
             VmInstruction::ConstUsize { dst: 2, value: 0 },
-            VmInstruction::ArrayGetCopy {
+            VmInstruction::ArrayGetBorrowShared {
                 dst: 3,
                 value: 1,
                 index: 2,
@@ -6007,7 +6010,7 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
                 src: 3,
                 fields: vec![0],
                 unique: false,
-                reborrow: false,
+                reborrow: true,
             },
             VmInstruction::DerefCopy {
                 dst: 5,

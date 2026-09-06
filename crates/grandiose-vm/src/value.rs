@@ -205,9 +205,7 @@ fn track_value_graph(value: &Value, visited: &mut BTreeSet<u128>) {
                 aggregate: object, ..
             } => track_value_graph(&Value::Aggregate(object.clone()), visited),
             ReferenceTarget::CallableCapture(capture) => track_capture_graph(capture, visited),
-            ReferenceTarget::DropSlot(_)
-            | ReferenceTarget::WholePlace(_)
-            | ReferenceTarget::StaticDataElement { .. } => {}
+            ReferenceTarget::DropSlot(_) | ReferenceTarget::WholePlace(_) => {}
         },
         _ => {}
     }
@@ -798,7 +796,6 @@ pub struct ArrayValue {
     /// operation requiring a first-class element reference materializes it.
     pub packed_bytes: Option<Vec<Option<u8>>>,
     pub slots: Vec<Option<Value>>,
-    pub logical_capacity: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -865,10 +862,6 @@ pub enum ReferenceTarget {
     Array(ArenaObject<ArrayValue>),
     ArrayElement {
         array: ArenaObject<ArrayValue>,
-        index: usize,
-    },
-    StaticDataElement {
-        data: Rc<StaticDataValue>,
         index: usize,
     },
     Aggregate(ArenaObject<AggregateValue>),
@@ -946,7 +939,6 @@ impl Value {
 
     pub fn array(element_type: TypeId, values: impl IntoIterator<Item = Value>) -> Self {
         let slots = values.into_iter().map(Some).collect::<Vec<_>>();
-        let logical_capacity = slots.len();
         let packed_bytes = (element_type == U8).then(|| {
             slots
                 .iter()
@@ -960,7 +952,6 @@ impl Value {
             element_type,
             slots: if packed_bytes.is_some() { Vec::new() } else { slots },
             packed_bytes,
-            logical_capacity,
         }))
     }
 }
@@ -980,9 +971,7 @@ fn value_edge_identities(value: &Value, edges: &mut Vec<u128>) {
                 aggregate: object, ..
             } => edges.push(object.identity()),
             ReferenceTarget::CallableCapture(capture) => edges.push(capture.identity()),
-            ReferenceTarget::DropSlot(_)
-            | ReferenceTarget::WholePlace(_)
-            | ReferenceTarget::StaticDataElement { .. } => {}
+            ReferenceTarget::DropSlot(_) | ReferenceTarget::WholePlace(_) => {}
         },
         _ => {}
     }
@@ -1269,7 +1258,6 @@ mod slot_tests {
             element_type: 1,
             packed_bytes: None,
             slots: vec![Some(Value::I64(1))],
-            logical_capacity: 1,
         });
         let stale_alias = array.clone();
         array.reclaim_for_test();
@@ -1298,13 +1286,11 @@ mod slot_tests {
             element_type: 1,
             packed_bytes: None,
             slots: vec![Some(Value::I64(5))],
-            logical_capacity: 1,
         });
         let other = ArenaObject::new(ArrayValue {
             element_type: 2,
             packed_bytes: None,
             slots: vec![Some(Value::I64(6))],
-            logical_capacity: 1,
         });
         let identity = array.identity();
         // The identity layout mirrors the former single-entry arena handle:

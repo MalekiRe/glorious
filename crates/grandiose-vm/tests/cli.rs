@@ -2,10 +2,9 @@ use std::{fs, path::PathBuf, process::Command};
 
 use grandiose_vm::{
     ACCEPTED_SEED_IDENTITIES, Artifact, Constant, Function, Instruction, RELEASED_SEED_IDENTITY,
-    SEED_IDENTITY_VERSION, TEXT, Type, UNIT,
+    SEED_IDENTITY_VERSION, BYTES, TEXT, Type, UNIT,
     bytecode::{Import, Signature},
     verify::with_generated_cleanup_plans,
-    vm::MAX_PRIMITIVE_ALLOCATION_BYTES,
 };
 
 struct TempArtifact(PathBuf);
@@ -129,14 +128,26 @@ fn allocation_limit_program() -> TempArtifact {
         "grandiose-vm-cli-{}-allocation-limit.grbc",
         std::process::id()
     ));
-    let mut types = Type::predefined();
-    let array = types.len() as u32;
-    types.push(Type::Array { element: UNIT }.restricted(false, true));
+    let mut code = vec![Instruction::Const { dst: 1, constant: 0 }];
+    // Grow bytes until the supervisor's explicit memory budget stops the worker.
+    // This exercises error classification without an array-growth opcode.
+    for _ in 0..30 {
+        code.push(Instruction::Copy { dst: 2, src: 1 });
+        code.push(Instruction::Primitive {
+            dst: 1,
+            op: grandiose_vm::Primitive::BytesConcat,
+            args: vec![1, 2],
+        });
+    }
+    code.extend([
+        Instruction::Drop { register: 1 },
+        Instruction::Const { dst: 3, constant: 1 },
+        Instruction::Return { src: Some(3) },
+    ]);
     let mut artifact = Artifact {
         required_features: 1,
         entry_function: Some(0),
-        types,
-        constants: vec![Constant::Usize(MAX_PRIMITIVE_ALLOCATION_BYTES as u64 + 1), Constant::Unit],
+        constants: vec![Constant::Bytes(vec![0x61]), Constant::Unit],
         functions: vec![Function {
             flags: 0,
             name: "main".into(),
@@ -144,32 +155,12 @@ fn allocation_limit_program() -> TempArtifact {
             return_type: UNIT,
             outward_protocols: vec![],
             receiver_mode: None,
-            register_types: vec![UNIT, grandiose_vm::USIZE, UNIT, array, UNIT],
+            register_types: vec![UNIT, BYTES, BYTES, UNIT],
             code_start: 0,
-            code_len: 6,
+            code_len: code.len() as u32,
             label_slot_count: 0,
         }],
-        code: vec![
-            Instruction::Const {
-                dst: 1,
-                constant: 0,
-            },
-            Instruction::Const {
-                dst: 2,
-                constant: 1,
-            },
-            Instruction::Primitive {
-                dst: 3,
-                op: grandiose_vm::Primitive::ArrayNew,
-                args: vec![1, 2],
-            },
-            Instruction::Drop { register: 3 },
-            Instruction::Const {
-                dst: 4,
-                constant: 1,
-            },
-            Instruction::Return { src: Some(4) },
-        ],
+        code,
         ..Artifact::default()
     };
     artifact.canonicalize_constants();
@@ -259,7 +250,7 @@ fn released_seed_identity_is_checked_before_loading_or_execution() {
 fn supervised_allocation_limit_is_distinct_from_an_internal_fault() {
     let artifact = allocation_limit_program();
     let output = Command::new(env!("CARGO_BIN_EXE_grvm"))
-        .args(["run", "--memory-limit", "4096MiB"])
+        .args(["run", "--memory-limit", "64MiB"])
         .arg(&artifact.0)
         .output()
         .unwrap();

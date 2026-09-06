@@ -1294,35 +1294,19 @@ const BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> us
 
 const TEXT_BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () } pub fn __g1_bytes_len(value: Bytes) -> usize { () } pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () } pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () } pub fn __g1_bytes_slice(bytes: Bytes, start: usize, end: usize) -> Bytes { () } pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () } pub fn __g1_bytes_to_array(value: Bytes) -> Array<u8> { () } pub fn __g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () } ";
 
-const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_new<T>(length: usize, fill: T) -> Array<T> where T: Use<[0, *]> { () } pub fn __g1_array_len<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_get_copy<T>(value: &Array<T>, index: usize) -> T where T: Use<[0, *]> { () } pub fn __g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () } pub fn __g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T { () } pub fn __g1_array_get_borrow_unique<'a, T>(value: &'a mut Array<T>, index: usize) -> &'a mut T { () } pub fn __g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) { () } pub fn __g1_array_empty<T>() -> Array<T> { () } pub fn __g1_array_push_move<T>(value: &mut Array<T>, item: T) { () } pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () } pub fn __g1_array_capacity<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_reserve<T>(value: &mut Array<T>, additional: usize) { () } pub fn __g1_array_finish_drained<T>(value: Array<T>) { () } ";
+const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T; pub fn __g1_array_empty<T>() -> Array<T>; pub fn __g1_array_push_move<T>(value: &mut Array<T>, item: T); ";
 
 fn array_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
         host_imports: vec![],
         selectors: [
-            (PrimitiveRole::ArrayNew, "__g1_array_new"),
-            (PrimitiveRole::ArrayLen, "__g1_array_len"),
-            (PrimitiveRole::ArrayGetCopy, "__g1_array_get_copy"),
-            (PrimitiveRole::ArrayGetMove, "__g1_array_get_move"),
             (
                 PrimitiveRole::ArrayGetBorrowShared,
                 "__g1_array_get_borrow_shared",
             ),
-            (
-                PrimitiveRole::ArrayGetBorrowUnique,
-                "__g1_array_get_borrow_unique",
-            ),
-            (PrimitiveRole::ArraySetMove, "__g1_array_set_move"),
             (PrimitiveRole::ArrayEmpty, "__g1_array_empty"),
             (PrimitiveRole::ArrayPushMove, "__g1_array_push_move"),
-            (PrimitiveRole::ArrayPopMove, "__g1_array_pop_move"),
-            (PrimitiveRole::ArrayCapacity, "__g1_array_capacity"),
-            (PrimitiveRole::ArrayReserve, "__g1_array_reserve"),
-            (
-                PrimitiveRole::ArrayFinishDrained,
-                "__g1_array_finish_drained",
-            ),
         ]
         .into_iter()
         .map(|(role, name)| PrimitiveSelector {
@@ -1337,7 +1321,7 @@ fn array_runtime_manifest() -> RuntimeManifestInput {
 #[test]
 fn manifest_bound_array_storage_leaves_lower_and_execute() {
     let mut input = request(&format!(
-        "{ARRAY_RUNTIME_LEAVES} pub fn main() -> usize {{ let value = __g1_array_empty<i64>(); __g1_array_len(&value) }}"
+        "{ARRAY_RUNTIME_LEAVES} pub fn main() -> i64 {{ let value = __g1_array_empty<i64>(); __g1_array_push_move(&mut value, 42); *__g1_array_get_borrow_shared(&value, 0) }}"
     ));
     input.runtime_manifest = Some(array_runtime_manifest());
     let artifact = StageZeroCompiler::new()
@@ -1345,7 +1329,7 @@ fn manifest_bound_array_storage_leaves_lower_and_execute() {
         .expect("trusted Array leaves must bind")
         .artifact
         .expect("VM artifact");
-    assert_eq!(artifact.run_usize().unwrap(), 0);
+    assert_eq!(artifact.run_i64().unwrap(), 42);
     assert!(
         decode_program(&artifact.canonical_bytes())
             .unwrap()

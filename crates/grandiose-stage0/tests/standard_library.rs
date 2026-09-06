@@ -2678,8 +2678,7 @@ fn empty_string_views_survive_nested_vector_extraction_and_calls() {
 }
 
 #[test]
-fn blake3_copies_its_fixed_digest_without_a_legacy_array_length_binding() {
-    use grandiose_stage0::{PrimitiveRole, VmInstruction};
+fn blake3_returns_the_complete_digest_for_empty_text_and_binary_input() {
     let source = r#"
         use std::*;
         fn check(value: &Vec<u8>, expected: Slice<u8>, index: usize) -> i64 {
@@ -2707,18 +2706,9 @@ fn blake3_copies_its_fixed_digest_without_a_legacy_array_length_binding() {
         assert_eq!(expected.as_bytes().len(), 32);
         let application = source.replace("@INPUT@", &bytes_literal(input))
             .replace("@EXPECTED@", &bytes_literal(expected.as_bytes()));
-        let compiler = StageZeroCompiler::new();
-        let revision = compiler.import_revision(request(&application), None).unwrap();
-        let session = compiler.open_session(revision).unwrap();
-        let manifest = session.snapshot().world().runtime_manifest.as_ref().unwrap();
-        assert!(!manifest.selectors.iter().any(|selector| selector.role == PrimitiveRole::ArrayLen));
-        let program = compiler.compile_session(&session).unwrap().artifact.unwrap();
-        let decoded = grandiose_stage0::decode_program(&program.canonical_bytes()).unwrap();
-        assert!(decoded.functions.values().flat_map(|function| &function.instructions)
-            .all(|instruction| !matches!(instruction, VmInstruction::ArrayLen { .. })));
+        let program = StageZeroCompiler::new().compile(request(&application)).unwrap().artifact.unwrap();
         assert_eq!(program.run_std_i64().unwrap(), 42);
     }
-    assert!(!include_str!("../../../stdlib/src/lib.glorious").contains("__g1_array_len"));
 }
 
 #[test]

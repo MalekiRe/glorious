@@ -568,7 +568,6 @@ impl ExecutionImage {
         }
     }
 
-
     fn materialize_constant(&self, index: usize) -> Constant {
         match self.constant(ImageConstantId(index)) {
             ImageConstant::Inline(constant) => constant.clone(),
@@ -1547,14 +1546,6 @@ fn verify_drop_hook_move_restrictions(a: &Artifact, hook: u32) -> Result<(), Ver
                         tainted.insert(*dst);
                     }
                     Instruction::ProjectMove { src, .. } if tainted.contains(src) => {
-                        return Err(VerifyError::InvalidFunction(function_id));
-                    }
-                    Instruction::Primitive { op, args, .. }
-                        if matches!(op, Primitive::ArrayGetMove | Primitive::ArrayPopMove)
-                            && args
-                                .first()
-                                .is_some_and(|register| tainted.contains(register)) =>
-                    {
                         return Err(VerifyError::InvalidFunction(function_id));
                     }
                     _ => {}
@@ -3717,27 +3708,12 @@ impl QuantityVerificationCache {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ArrayQuantityAction {
-    Set {
-        root: u32,
-        index: u64,
-        value: Vec<usize>,
-    },
     Push {
         root: u32,
         value: Vec<usize>,
     },
-    Get {
-        root: u32,
-        index: u64,
-        produced: Vec<usize>,
-    },
-    Pop {
-        root: u32,
-        produced: Vec<usize>,
-    },
     Resume(usize),
     Terminal(usize),
-    Finish(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5380,16 +5356,10 @@ fn array_quantity_call_summary(a: &Artifact, fid: u32) -> Option<ArrayQuantityCa
             *root = Some(register as u32);
         }
     }
-    let mut constants = vec![None; function.register_types.len()];
     let mut actions = Vec::new();
     for instruction in function_code(a, function).ok()? {
         match instruction {
-            Instruction::Const { dst, constant } => {
-                constants[*dst as usize] = match a.constants.get(*constant as usize) {
-                    Some(Constant::U64(value) | Constant::Usize(value)) => Some(*value),
-                    _ => None,
-                };
-            }
+            Instruction::Const { .. } => {}
             Instruction::Move { dst, src } if array_types[*src as usize].is_some() => {
                 roots[*dst as usize] = roots[*src as usize].take();
             }
@@ -5413,59 +5383,18 @@ fn array_quantity_call_summary(a: &Artifact, fid: u32) -> Option<ArrayQuantityCa
                 }
             }
             Instruction::Primitive { op, args, .. }
-                if matches!(op, Primitive::ArraySetMove | Primitive::ArrayPushMove) =>
+                if matches!(op, Primitive::ArrayPushMove) =>
             {
                 let reference = *args.first()?;
                 let root = roots[reference as usize]?;
-                let (index, item) = if matches!(op, Primitive::ArraySetMove) {
-                    let index_register = *args.get(1)?;
-                    (Some(constants[index_register as usize]?), *args.get(2)?)
-                } else {
-                    (None, *args.get(1)?)
-                };
+                let item = *args.get(1)?;
                 let value = tokens[item as usize]
                     .iter()
                     .copied()
                     .collect::<Option<Vec<_>>>()?;
                 tokens[item as usize].fill(None);
-                actions.push(if let Some(index) = index {
-                    ArrayQuantityAction::Set { root, index, value }
-                } else {
-                    ArrayQuantityAction::Push { root, value }
-                });
+                actions.push(ArrayQuantityAction::Push { root, value });
             }
-            Instruction::Primitive { dst, op, args }
-                if matches!(op, Primitive::ArrayGetMove | Primitive::ArrayPopMove)
-                    && !leaf_types[*dst as usize].is_empty() =>
-            {
-                let reference = *args.first()?;
-                let root = roots[reference as usize]?;
-                let produced = leaf_types[*dst as usize]
-                    .iter()
-                    .map(|ty| {
-                        let token = next_token;
-                        next_token += 1;
-                        token_types.push(*ty);
-                        token
-                    })
-                    .collect::<Vec<_>>();
-                tokens[*dst as usize] = produced.iter().copied().map(Some).collect();
-                actions.push(if matches!(op, Primitive::ArrayGetMove) {
-                    let index_register = *args.get(1)?;
-                    ArrayQuantityAction::Get {
-                        root,
-                        index: constants[index_register as usize]?,
-                        produced,
-                    }
-                } else {
-                    ArrayQuantityAction::Pop { root, produced }
-                });
-            }
-            Instruction::Primitive {
-                op: Primitive::ArrayFinishDrained,
-                args,
-                ..
-            } => actions.push(ArrayQuantityAction::Finish(roots[*args.first()? as usize]?)),
             Instruction::Resume { resumption, .. } | Instruction::TailResume { resumption, .. } => {
                 let [Some(token)] = tokens[*resumption as usize].as_slice() else {
                     return None;
@@ -5635,7 +5564,6 @@ fn verify_resumption_quantities_for_variants(
     let transport_summaries = &quantity_cache.transport;
     let owned_summaries = &quantity_cache.owned;
     let terminal_effect_summaries = &quantity_cache.terminal_effects;
-    let constants = constant_u64_registers_at_pcs(a, fid, f, label_states)?;
     let finite_handler_representatives = |handler_type: TypeId| -> Option<Vec<u32>> {
         finite_handler_clause_targets(a, handler_type)?
             .into_iter()
@@ -5832,8 +5760,7 @@ fn verify_resumption_quantities_for_variants(
             };
             for action in &summary.actions {
                 match action {
-                    ArrayQuantityAction::Set { root, value, .. }
-                    | ArrayQuantityAction::Push { root, value } => {
+                    ArrayQuantityAction::Push { root, value } => {
                         let root =
                             resolve_root(state, *root).ok_or(VerifyError::InvalidFunction(fid))?;
                         let carried = value
@@ -5847,45 +5774,16 @@ fn verify_resumption_quantities_for_variants(
                         let slots = state.array_slots[root as usize]
                             .as_mut()
                             .ok_or(VerifyError::InvalidFunction(fid))?;
-                        let index = match action {
-                            ArrayQuantityAction::Set { index, .. } => *index,
-                            ArrayQuantityAction::Push { .. } => slots
+                        let index = slots
                                 .keys()
                                 .next_back()
                                 .map_or(Some(0), |index| index.checked_add(1))
-                                .ok_or(VerifyError::InvalidFunction(fid))?,
-                            _ => unreachable!(),
-                        };
+                                .ok_or(VerifyError::InvalidFunction(fid))?;
                         if slots.insert(index, carried).is_some() {
                             return Err(VerifyError::InvalidFunction(fid));
                         }
                         for token in value {
                             token_groups[*token] = None;
-                        }
-                    }
-                    ArrayQuantityAction::Get { root, produced, .. }
-                    | ArrayQuantityAction::Pop { root, produced } => {
-                        let root =
-                            resolve_root(state, *root).ok_or(VerifyError::InvalidFunction(fid))?;
-                        let slots = state.array_slots[root as usize]
-                            .as_mut()
-                            .ok_or(VerifyError::InvalidFunction(fid))?;
-                        let index = match action {
-                            ArrayQuantityAction::Get { index, .. } => *index,
-                            ArrayQuantityAction::Pop { .. } => *slots
-                                .keys()
-                                .next_back()
-                                .ok_or(VerifyError::InvalidFunction(fid))?,
-                            _ => unreachable!(),
-                        };
-                        let carried = slots
-                            .remove(&index)
-                            .ok_or(VerifyError::InvalidFunction(fid))?;
-                        if carried.len() != produced.len() {
-                            return Err(VerifyError::InvalidFunction(fid));
-                        }
-                        for (token, group) in produced.iter().zip(carried) {
-                            token_groups[*token] = group;
                         }
                     }
                     ArrayQuantityAction::Resume(token) => {
@@ -5941,18 +5839,6 @@ fn verify_resumption_quantities_for_variants(
                             return Err(VerifyError::InvalidFunction(fid));
                         }
                         state.counts[group] = None;
-                    }
-                    ArrayQuantityAction::Finish(root) => {
-                        let root =
-                            resolve_root(state, *root).ok_or(VerifyError::InvalidFunction(fid))?;
-                        if state.array_slots[root as usize]
-                            .as_ref()
-                            .is_none_or(|slots| !slots.is_empty())
-                        {
-                            return Err(VerifyError::InvalidFunction(fid));
-                        }
-                        state.array_slots[root as usize] = None;
-                        state.array_roots[root as usize] = None;
                     }
                 }
             }
@@ -6165,21 +6051,16 @@ fn verify_resumption_quantities_for_variants(
                 state.array_roots[*dst as usize] = Some(*dst);
             }
             Instruction::Primitive { op, args, .. }
-                if matches!(op, Primitive::ArraySetMove | Primitive::ArrayPushMove)
+                if matches!(op, Primitive::ArrayPushMove)
                     && args
-                        .get(2)
-                        .or_else(|| args.get(1))
+                        .get(1)
                         .is_some_and(|item| !leaf_types[*item as usize].is_empty()) =>
             {
                 let reference = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
                 let root = state.array_roots[reference as usize]
                     .ok_or(VerifyError::InvalidFunction(fid))?;
                 let item = *args
-                    .get(if matches!(op, Primitive::ArraySetMove) {
-                        2
-                    } else {
-                        1
-                    })
+                    .get(1)
                     .ok_or(VerifyError::InvalidFunction(fid))?;
                 let carried = state.registers[item as usize].clone();
                 if carried.iter().any(Option::is_none) {
@@ -6188,11 +6069,7 @@ fn verify_resumption_quantities_for_variants(
                 let slots = state.array_slots[root as usize]
                     .as_mut()
                     .ok_or(VerifyError::InvalidFunction(fid))?;
-                let index = if matches!(op, Primitive::ArraySetMove) {
-                    let index_register = *args.get(1).ok_or(VerifyError::InvalidFunction(fid))?;
-                    constants[pc as usize][index_register as usize]
-                        .ok_or(VerifyError::InvalidFunction(fid))?
-                } else {
+                let index = {
                     slots
                         .keys()
                         .next_back()
@@ -6203,55 +6080,6 @@ fn verify_resumption_quantities_for_variants(
                     return Err(VerifyError::InvalidFunction(fid));
                 }
                 state.registers[item as usize].fill(None);
-            }
-            Instruction::Primitive { dst, op, args }
-                if matches!(op, Primitive::ArrayGetMove | Primitive::ArrayPopMove)
-                    && !leaf_types[*dst as usize].is_empty() =>
-            {
-                let reference = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
-                let root = state.array_roots[reference as usize]
-                    .ok_or(VerifyError::InvalidFunction(fid))?;
-                let slots = state.array_slots[root as usize]
-                    .as_mut()
-                    .ok_or(VerifyError::InvalidFunction(fid))?;
-                let index = if matches!(op, Primitive::ArrayGetMove) {
-                    let index_register = *args.get(1).ok_or(VerifyError::InvalidFunction(fid))?;
-                    constants[pc as usize][index_register as usize]
-                        .ok_or(VerifyError::InvalidFunction(fid))?
-                } else {
-                    *slots
-                        .keys()
-                        .next_back()
-                        .ok_or(VerifyError::InvalidFunction(fid))?
-                };
-                let carried = slots
-                    .remove(&index)
-                    .ok_or(VerifyError::InvalidFunction(fid))?;
-                if carried.len() != state.registers[*dst as usize].len()
-                    || state.registers[*dst as usize].iter().any(Option::is_some)
-                {
-                    return Err(VerifyError::InvalidFunction(fid));
-                }
-                state.registers[*dst as usize] = carried;
-            }
-            Instruction::Primitive {
-                op: Primitive::ArrayFinishDrained,
-                args,
-                ..
-            } if args
-                .first()
-                .is_some_and(|array| array_element_types[*array as usize].is_some()) =>
-            {
-                let array = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
-                let root = state.array_roots[array as usize].unwrap_or(array);
-                let slots = state.array_slots[root as usize]
-                    .as_ref()
-                    .ok_or(VerifyError::InvalidFunction(fid))?;
-                if !slots.is_empty() {
-                    return Err(VerifyError::InvalidFunction(fid));
-                }
-                state.array_slots[root as usize] = None;
-                state.array_roots[root as usize] = None;
             }
             Instruction::Move { src, dst }
                 if !leaf_types[*src as usize].is_empty()
@@ -8259,7 +8087,6 @@ type EnumDominance = (
     Vec<std::collections::BTreeSet<u32>>,
 );
 
-
 /// Translate an emitted runtime tag (discriminant) back to the variant index it
 /// denotes for the given enum's variant list. `EnumVariant.discriminant(index)`
 /// is the source of truth: an explicit discriminant maps the tag to its
@@ -9861,7 +9688,6 @@ fn aggregate_reference_return_origins_inner(
     let (enum_variants, _, enum_successors) = verify_enum_dominance(a, fid, f, &label_states)?;
     let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
     let array_roots = array_roots_at_pcs(a, fid, f, &label_states)?;
-    let constants = constant_u64_registers_at_pcs(a, fid, f, &label_states)?;
     let mut entry = vec![CarrierOrigins::new(); f.register_types.len()];
     for (parameter, ty) in f.params.iter().enumerate() {
         entry[parameter + 1] = reference_leaves(a, *ty)
@@ -10063,63 +9889,17 @@ fn aggregate_reference_return_origins_inner(
                 let root = args
                     .first()
                     .and_then(|register| array_roots[pc as usize][*register as usize]);
-                let exact = || {
-                    args.get(1)
-                        .and_then(|register| constants[pc as usize][*register as usize])
-                };
-                let source_for = |root: ArrayRoot,
-                                  index: Option<u64>,
-                                  state: &[CarrierOrigins]|
-                 -> Result<CarrierOrigins, VerifyError> {
-                    match root {
-                        ArrayRoot::Local(owner) => {
-                            let mut origins = state[owner as usize]
-                                .iter()
-                                .filter_map(|(path, origin)| {
-                                    let (candidate, element_path) = split_array_slot_path(path)?;
-                                    (index == Some(candidate))
-                                        .then(|| (element_path.to_vec(), origin.clone()))
-                                })
-                                .collect::<CarrierOrigins>();
-                            origins.sort_by(|left, right| left.0.cmp(&right.0));
-                            (!origins.is_empty())
-                                .then_some(origins)
-                                .ok_or(VerifyError::InvalidFunction(fid))
-                        }
-                        ArrayRoot::Parameter(parameter) => reference_leaves(
-                            a,
-                            array_element_type(a, f.params[parameter])
-                                .ok_or(VerifyError::InvalidFunction(fid))?,
-                        )
-                        .into_iter()
-                        .map(|(element_path, _)| {
-                            let path = match index {
-                                Some(index) => array_slot_path(index, element_path.clone())
-                                    .ok_or(VerifyError::InvalidFunction(fid))?,
-                                None => array_last_slot_path(element_path.clone()),
-                            };
-                            Ok((element_path, CarrierOrigin::Parameter { parameter, path }))
-                        })
-                        .collect(),
-                    }
-                };
                 match op {
-                    Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique => {
+                    Primitive::ArrayGetBorrowShared => {
                         let source = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
                         state[*dst as usize] = state[source as usize].clone();
                     }
-                    Primitive::ArraySetMove | Primitive::ArrayPushMove => {
+                    Primitive::ArrayPushMove => {
                         if let Some(ArrayRoot::Local(owner)) = root {
                             let item = *args
-                                .get(if matches!(op, Primitive::ArraySetMove) {
-                                    2
-                                } else {
-                                    1
-                                })
+                                .get(1)
                                 .ok_or(VerifyError::InvalidFunction(fid))?;
-                            let index = if matches!(op, Primitive::ArraySetMove) {
-                                exact().ok_or(VerifyError::InvalidFunction(fid))?
-                            } else {
+                            let index = {
                                 state[owner as usize]
                                     .iter()
                                     .filter_map(|(path, _)| {
@@ -10138,30 +9918,6 @@ fn aggregate_reference_return_origins_inner(
                                 ));
                             }
                         }
-                    }
-                    Primitive::ArrayGetCopy | Primitive::ArrayGetMove => {
-                        if !reference_leaves(a, f.register_types[*dst as usize]).is_empty() {
-                            state[*dst as usize] = source_for(
-                                root.ok_or(VerifyError::InvalidFunction(fid))?,
-                                Some(exact().ok_or(VerifyError::InvalidFunction(fid))?),
-                                &state,
-                            )?;
-                        }
-                    }
-                    Primitive::ArrayPopMove
-                        if !reference_leaves(a, f.register_types[*dst as usize]).is_empty() =>
-                    {
-                        let root = root.ok_or(VerifyError::InvalidFunction(fid))?;
-                        let index = match root {
-                            ArrayRoot::Local(owner) => state[owner as usize]
-                                .iter()
-                                .filter_map(|(path, _)| {
-                                    split_array_slot_path(path).map(|slot| slot.0)
-                                })
-                                .max(),
-                            ArrayRoot::Parameter(_) => None,
-                        };
-                        state[*dst as usize] = source_for(root, index, &state)?;
                     }
                     _ => {}
                 }
@@ -10674,15 +10430,8 @@ fn instruction_is_nonreturning_call(a: &Artifact, fid: u32, instruction: &Instru
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ArrayWritePosition {
-    Exact(u64),
-    Push,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 struct ArrayWriteEffect {
     owner_parameter: usize,
-    position: ArrayWritePosition,
     value_parameter: usize,
     value_path: Vec<u32>,
 }
@@ -10775,7 +10524,6 @@ fn array_write_effects_with(
         .ok_or(VerifyError::InvalidFunction(fid))?;
     let label_states = verify_labels(a, fid, f)?;
     let array_roots = array_roots_at_pcs(a, fid, f, &label_states)?;
-    let constants = constant_u64_registers_at_pcs(a, fid, f, &label_states)?;
     let mut entry = vec![CarrierOrigins::new(); f.register_types.len()];
     for (parameter, ty) in f.params.iter().enumerate() {
         entry[parameter + 1] = reference_leaves(a, *ty)
@@ -10851,28 +10599,15 @@ fn array_write_effects_with(
                     origins[*dst as usize] = origins[*src as usize].clone();
                 }
                 Instruction::Primitive { op, args, .. }
-                    if matches!(op, Primitive::ArraySetMove | Primitive::ArrayPushMove) =>
+                    if matches!(op, Primitive::ArrayPushMove) =>
                 {
                     let root = args
                         .first()
                         .and_then(|register| array_roots[pc as usize][*register as usize]);
                     if let Some(ArrayRoot::Parameter(owner_parameter)) = root {
                         let item = *args
-                            .get(if matches!(op, Primitive::ArraySetMove) {
-                                2
-                            } else {
-                                1
-                            })
+                            .get(1)
                             .ok_or(VerifyError::InvalidFunction(fid))?;
-                        let position = if matches!(op, Primitive::ArraySetMove) {
-                            ArrayWritePosition::Exact(
-                                args.get(1)
-                                    .and_then(|register| constants[pc as usize][*register as usize])
-                                    .ok_or(VerifyError::InvalidFunction(fid))?,
-                            )
-                        } else {
-                            ArrayWritePosition::Push
-                        };
                         let installed = origins[item as usize].clone();
                         if installed.is_empty() {
                             return Err(VerifyError::InvalidFunction(fid));
@@ -10890,7 +10625,6 @@ fn array_write_effects_with(
                             }
                             effects.push(ArrayWriteEffect {
                                 owner_parameter,
-                                position: position.clone(),
                                 value_parameter,
                                 value_path,
                             });
@@ -10931,7 +10665,6 @@ fn array_write_effects_with(
                             }
                             effects.push(ArrayWriteEffect {
                                 owner_parameter,
-                                position: effect.position,
                                 value_parameter: *value_parameter,
                                 value_path: effect.value_path,
                             });
@@ -11399,8 +11132,6 @@ fn reference_return_parameter_inner(
         .ok_or(VerifyError::InvalidFunction(fid))?;
     let label_states = verify_labels(a, fid, f)?;
     let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
-    let array_roots = array_roots_at_pcs(a, fid, f, &label_states)?;
-    let constants = constant_u64_registers_at_pcs(a, fid, f, &label_states)?;
     let mut entry = vec![None; f.register_types.len()];
     // The receiver is tied to callable storage, not a normal argument whose
     // owner is known to the caller, so it is never a permitted escape root.
@@ -11511,27 +11242,9 @@ fn reference_return_parameter_inner(
             Instruction::Primitive { dst, op, args } if carries_reference(*dst) => {
                 let origin = if matches!(
                     op,
-                    Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique
+                    Primitive::ArrayGetBorrowShared
                 ) {
                     args.first().and_then(|arg| state[*arg as usize])
-                } else if matches!(
-                    op,
-                    Primitive::ArrayGetCopy | Primitive::ArrayGetMove | Primitive::ArrayPopMove
-                ) {
-                    let exact = !matches!(op, Primitive::ArrayGetCopy | Primitive::ArrayGetMove)
-                        || args
-                            .get(1)
-                            .is_some_and(|index| constants[pc as usize][*index as usize].is_some());
-                    exact
-                        .then(|| args.first())
-                        .flatten()
-                        .and_then(|array| array_roots[pc as usize][*array as usize])
-                        .and_then(|root| match root {
-                            ArrayRoot::Parameter(parameter) => {
-                                Some(ReferenceOrigin::Parameter(parameter))
-                            }
-                            ArrayRoot::Local(_) => None,
-                        })
                 } else {
                     Some(ReferenceOrigin::Local)
                 };
@@ -12121,16 +11834,13 @@ fn instantiate_array_write_loans(
             .find(|loan| loan.path == effect.value_path)
             .cloned()
             .ok_or(VerifyError::InvalidFunction(callee))?;
-        let index = match effect.position {
-            ArrayWritePosition::Exact(index) => index,
-            ArrayWritePosition::Push => *push_slots.entry(owner).or_insert_with(|| {
+        let index = *push_slots.entry(owner).or_insert_with(|| {
                 loans[owner as usize]
                     .iter()
                     .filter_map(|loan| split_array_slot_path(&loan.path).map(|slot| slot.0))
                     .max()
                     .map_or(0, |index| index.saturating_add(1))
-            }),
-        };
+            });
         if loans[owner as usize].iter().any(|loan| {
             split_array_slot_path(&loan.path)
                 .is_some_and(|(candidate, path)| candidate == index && path == effect.value_path)
@@ -12201,49 +11911,9 @@ fn array_roots_at_pcs(
             }
             Instruction::Primitive {
                 dst,
-                op: Primitive::ArrayEmpty | Primitive::ArrayNew,
+                op: Primitive::ArrayEmpty,
                 ..
             } => state[*dst as usize] = Some(ArrayRoot::Local(*dst)),
-            _ => {
-                if let Some(dst) = instruction_destination(instruction) {
-                    state[dst as usize] = None;
-                }
-            }
-        },
-        join_optional_equality,
-    )
-}
-
-fn constant_u64_registers_at_pcs(
-    a: &Artifact,
-    fid: u32,
-    f: &Function,
-    label_states: &[Vec<LabelEntry>],
-) -> Result<Vec<Vec<Option<u64>>>, VerifyError> {
-    let empty = vec![None; f.register_types.len()];
-    ForwardRegisterAnalysis {
-        artifact: a,
-        function_id: fid,
-        function: f,
-        label_states,
-    }
-    .run(
-        empty.clone(),
-        empty,
-        |state, instruction| match instruction {
-            Instruction::Const { dst, constant } => {
-                state[*dst as usize] = match a.constants.get(*constant as usize) {
-                    Some(Constant::U8(value)) => Some(u64::from(*value)),
-                    Some(Constant::U16(value)) => Some(u64::from(*value)),
-                    Some(Constant::U32(value)) => Some(u64::from(*value)),
-                    Some(Constant::U64(value) | Constant::Usize(value)) => Some(*value),
-                    _ => None,
-                };
-            }
-            Instruction::Move { dst, src } => {
-                state[*dst as usize] = state[*src as usize].take();
-            }
-            Instruction::Copy { dst, src } => state[*dst as usize] = state[*src as usize],
             _ => {
                 if let Some(dst) = instruction_destination(instruction) {
                     state[dst as usize] = None;
@@ -12785,7 +12455,6 @@ fn verify_loans(
 ) -> Result<Vec<Vec<CarrierLoans>>, VerifyError> {
     let start = f.code_start as usize;
     let callable_targets = callable_targets_at_pcs(a, fid, f, label_states)?;
-    let constants = constant_u64_registers_at_pcs(a, fid, f, label_states)?;
     let parallel_move_members = parallel_edge_move_members(a, f);
     let mut states: Vec<Option<Vec<CarrierLoans>>> = vec![None; f.code_len as usize];
     let mut entry = vec![Vec::new(); f.register_types.len()];
@@ -13914,10 +13583,6 @@ fn verify_loans(
                 }
             }
             Instruction::Primitive { dst, op, args } => {
-                let exact_index = || {
-                    args.get(1)
-                        .and_then(|register| constants[pc as usize][*register as usize])
-                };
                 let array_owner = || {
                     let reference = *args.first()?;
                     let [loan] = loans[reference as usize].as_slice() else {
@@ -13928,26 +13593,7 @@ fn verify_loans(
                         && (loan.loan.place.owner as usize) < loans.len())
                     .then_some(loan.loan.place.owner)
                 };
-                let mut transported = None::<CarrierLoans>;
                 match op {
-                    Primitive::ArraySetMove => {
-                        if let Some(owner) = array_owner() {
-                            let index = exact_index().ok_or_else(|| conflict(args[0]))?;
-                            let item = *args.get(2).ok_or(VerifyError::InvalidFunction(fid))?;
-                            let mut carried = loans[item as usize].clone();
-                            for loan in &mut carried {
-                                loan.path = array_slot_path(index, loan.path.clone())
-                                    .ok_or_else(|| conflict(args[0]))?;
-                            }
-                            if loans[owner as usize].iter().any(|loan| {
-                                split_array_slot_path(&loan.path)
-                                    .is_some_and(|(candidate, _)| candidate == index)
-                            }) {
-                                return Err(conflict(args[0]));
-                            }
-                            loans[owner as usize].extend(carried);
-                        }
-                    }
                     Primitive::ArrayPushMove => {
                         if let Some(owner) = array_owner() {
                             let item = *args.get(1).ok_or(VerifyError::InvalidFunction(fid))?;
@@ -13967,130 +13613,11 @@ fn verify_loans(
                             loans[owner as usize].extend(carried);
                         }
                     }
-                    Primitive::ArrayGetCopy | Primitive::ArrayGetMove => {
-                        if !reference_types
-                            .leaves(a, f.register_types[*dst as usize])
-                            .is_empty()
-                        {
-                            let index = exact_index().ok_or_else(|| conflict(args[0]))?;
-                            let mut carried = Vec::new();
-                            if let Some(owner) = array_owner() {
-                                loans[owner as usize].retain(|loan| {
-                                    let Some((candidate, element_path)) =
-                                        split_array_slot_path(&loan.path)
-                                    else {
-                                        return true;
-                                    };
-                                    if candidate != index {
-                                        return true;
-                                    }
-                                    let mut loan = loan.clone();
-                                    loan.path = element_path.to_vec();
-                                    carried.push(loan);
-                                    matches!(op, Primitive::ArrayGetCopy)
-                                });
-                            } else if let Some(reference) = args.first()
-                                && let [array_loan] = loans[*reference as usize].as_slice()
-                            {
-                                carried = reference_types
-                                    .leaves(a, f.register_types[*dst as usize])
-                                    .into_iter()
-                                    .map(|(path, unique)| {
-                                        let mut loan = array_loan.clone();
-                                        loan.path = path.clone();
-                                        loan.loan.place.projections.extend(
-                                            array_slot_path(index, path)
-                                                .unwrap_or_else(|| vec![ARRAY_SLOT_PATH]),
-                                        );
-                                        loan.loan.unique = unique;
-                                        loan
-                                    })
-                                    .collect();
-                            }
-                            if carried.is_empty()
-                                || matches!(op, Primitive::ArrayGetCopy)
-                                    && carried.iter().any(|loan| loan.loan.unique)
-                            {
-                                return Err(conflict(args[0]));
-                            }
-                            transported = Some(remap_carrier_loans(
-                                a,
-                                f.register_types[*dst as usize],
-                                carried,
-                                fid,
-                                reference_types,
-                            )?);
-                        }
-                    }
-                    Primitive::ArrayPopMove => {
-                        if !reference_types
-                            .leaves(a, f.register_types[*dst as usize])
-                            .is_empty()
-                        {
-                            let mut carried = Vec::new();
-                            if let Some(owner) = array_owner() {
-                                let index = loans[owner as usize]
-                                    .iter()
-                                    .filter_map(|loan| {
-                                        split_array_slot_path(&loan.path).map(|slot| slot.0)
-                                    })
-                                    .max()
-                                    .ok_or_else(|| conflict(args[0]))?;
-                                loans[owner as usize].retain(|loan| {
-                                    let Some((candidate, element_path)) =
-                                        split_array_slot_path(&loan.path)
-                                    else {
-                                        return true;
-                                    };
-                                    if candidate != index {
-                                        return true;
-                                    }
-                                    let mut loan = loan.clone();
-                                    loan.path = element_path.to_vec();
-                                    carried.push(loan);
-                                    false
-                                });
-                            } else if let Some(reference) = args.first()
-                                && let [array_loan] = loans[*reference as usize].as_slice()
-                            {
-                                carried = reference_types
-                                    .leaves(a, f.register_types[*dst as usize])
-                                    .into_iter()
-                                    .map(|(path, unique)| {
-                                        let mut loan = array_loan.clone();
-                                        loan.path = path.clone();
-                                        loan.loan
-                                            .place
-                                            .projections
-                                            .extend(array_last_slot_path(path));
-                                        loan.loan.unique = unique;
-                                        loan
-                                    })
-                                    .collect();
-                            }
-                            transported = Some(remap_carrier_loans(
-                                a,
-                                f.register_types[*dst as usize],
-                                carried,
-                                fid,
-                                reference_types,
-                            )?);
-                        }
-                    }
-                    Primitive::ArrayFinishDrained => {
-                        let owner = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
-                        if loans[owner as usize]
-                            .iter()
-                            .any(|loan| split_array_slot_path(&loan.path).is_some())
-                        {
-                            return Err(conflict(owner));
-                        }
-                    }
                     _ => {}
                 }
                 let inherited = if matches!(
                     op,
-                    Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique
+                    Primitive::ArrayGetBorrowShared
                 ) {
                     args.first().and_then(|register| {
                         (loans[*register as usize].len() == 1)
@@ -14099,28 +13626,11 @@ fn verify_loans(
                 } else {
                     None
                 };
-                // Static data is immutable compiler-owned storage, not a
-                // borrow of a source register. A shared element reference is
-                // nevertheless retained as a loan carrier so ordinary
-                // DEREF_COPY/END_BORROW validation still applies. Its owner
-                // lives outside the function's register namespace and cannot
-                // conflict with any mutable source place.
-                let static_shared = matches!(op, Primitive::StaticGetShared).then(|| CarrierLoan {
-                    path: vec![],
-                    loan: Loan {
-                        place: BorrowedPlace {
-                            owner: u32::MAX,
-                            projections: vec![],
-                        },
-                        unique: false,
-                        suspended_parent: None,
-                        authorization_active: true,
-                        referent_initialized: true,
-                    },
-                });
+                // Reading static length neither consumes a source owner nor
+                // creates a reference loan.
                 let static_read_only = matches!(
                     op,
-                    Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared
+                    Primitive::StaticLen
                 );
                 for &register in args {
                     if !static_read_only {
@@ -14129,14 +13639,10 @@ fn verify_loans(
                     }
                 }
                 if let Some(mut loan) = inherited {
-                    loan.loan.unique = matches!(op, Primitive::ArrayGetBorrowUnique);
+                    loan.loan.unique = false;
                     loan.loan.place.projections.push(u32::MAX);
                     loan.path.clear();
                     loans[*dst as usize] = vec![loan];
-                } else if let Some(loan) = static_shared {
-                    loans[*dst as usize] = vec![loan];
-                } else if let Some(transported) = transported {
-                    loans[*dst as usize] = transported;
                 }
             }
             Instruction::Call {
@@ -14206,17 +13712,6 @@ fn verify_loans(
                         })
                     });
                 let mut returned_loans = if let Some(contract) = array_contract {
-                    let callee_copies = function_code(a, &a.functions[*function as usize])?
-                        .iter()
-                        .any(|instruction| {
-                            matches!(
-                                instruction,
-                                Instruction::Primitive {
-                                    op: Primitive::ArrayGetCopy,
-                                    ..
-                                }
-                            )
-                        });
                     let mut returned = Vec::new();
                     for (result_path, origin) in contract {
                         let CarrierOrigin::Parameter { parameter, path } = origin else {
@@ -14263,11 +13758,7 @@ fn verify_loans(
                                 )
                             })
                             .ok_or(VerifyError::InvalidFunction(*function))?;
-                        let mut loan = if callee_copies {
-                            loans[owner as usize][position].clone()
-                        } else {
-                            loans[owner as usize].remove(position)
-                        };
+                        let mut loan = loans[owner as usize].remove(position);
                         loan.path = result_path;
                         returned.push(loan);
                     }
@@ -16207,32 +15698,9 @@ fn transfer(
                     instruction: pc,
                 });
             }
-            let element = match (*op, arg_types.as_slice()) {
-                (Primitive::ArrayNew, [_, element]) => Some(*element),
-                (Primitive::ArrayGetCopy, [reference, _]) => {
-                    let referent = match type_at(a, *reference)? {
-                        Type::RefShared { referent } => *referent,
-                        _ => unreachable!("primitive signature already checked"),
-                    };
-                    match type_at(a, referent)? {
-                        Type::Array { element } => Some(*element),
-                        _ => unreachable!("primitive signature already checked"),
-                    }
-                }
-                _ => None,
-            };
-            if matches!(*op, Primitive::ArrayNew | Primitive::ArrayGetCopy)
-                && element.is_some_and(|element| !is_copy(a, element))
-            {
-                return Err(VerifyError::IllegalCopy {
-                    function: fid,
-                    instruction: pc,
-                    ty: element.unwrap(),
-                });
-            }
             let static_read_only = matches!(
                 op,
-                Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared
+                Primitive::StaticLen
             );
             for &r in args {
                 read(s, r)?;
@@ -21518,63 +20986,6 @@ mod tests {
     }
 
     #[test]
-    fn finish_drained_consumes_an_exact_linear_array_shell_with_exact_types() {
-        let mut types = Type::predefined();
-        types[U64 as usize] = Type::U64.restricted(false, false);
-        types.push(Type::Array { element: U64 });
-        let artifact = Artifact {
-            required_features: 1 | (1 << 7),
-            types,
-            constants: vec![],
-            imports: vec![],
-            protocols: vec![],
-            handler_defs: vec![],
-            cleanups: vec![],
-            exports: vec![],
-            drop_glue: vec![],
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "finish".into(),
-                params: vec![19],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 19, UNIT],
-                code_start: 0,
-                code_len: 2,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Primitive {
-                    dst: 2,
-                    op: Primitive::ArrayFinishDrained,
-                    args: vec![1],
-                },
-                Instruction::Return { src: Some(2) },
-            ],
-            entry_function: None,
-        };
-        verify(artifact.clone()).expect("drained-shell consumption is an owned transition");
-
-        let mut ordinary_drop = artifact.clone();
-        ordinary_drop.required_features = 1;
-        ordinary_drop.code[0] = Instruction::Drop { register: 1 };
-        assert!(matches!(
-            verify(ordinary_drop),
-            Err(VerifyError::LiveValueAtExit { register: 1, .. })
-        ));
-
-        let mut wrong_argument = artifact;
-        wrong_argument.functions[0].params[0] = U64;
-        wrong_argument.functions[0].register_types[1] = U64;
-        assert!(matches!(
-            verify(wrong_argument),
-            Err(VerifyError::InvalidPrimitive { .. })
-        ));
-    }
-
-    #[test]
     fn rejects_moving_an_array_while_uniquely_borrowed() {
         let mut types = Type::predefined();
         types.push(Type::Array { element: U64 });
@@ -23811,17 +23222,6 @@ mod tests {
             Err(VerifyError::InvalidFunction(0))
         ));
 
-        let mut popping_through_self = artifact.clone();
-        popping_through_self.code[0] = Instruction::Primitive {
-            dst: 2,
-            op: Primitive::ArrayPopMove,
-            args: vec![1],
-        };
-        assert!(matches!(
-            verify(popping_through_self),
-            Err(VerifyError::InvalidFunction(0))
-        ));
-
         let mut reachable_forbidden = artifact.clone();
         reachable_forbidden.required_features |= 1 << 2;
         reachable_forbidden.functions[0].code_len = 3;
@@ -23950,320 +23350,6 @@ mod tests {
             required_features: 1 | (1 << 3) | (1 << 4),
             ..Artifact::default()
         }
-    }
-
-    fn quantity_array_transport_artifact(pop: bool) -> Artifact {
-        let mut types = Type::predefined();
-        types.extend([
-            Type::Resumption {
-                input_type: I64,
-                output_type: I64,
-                effect_signature: Signature {
-                    params: vec![],
-                    result: UNIT,
-                    outward_protocols: vec![],
-                },
-                lower_uses: 1,
-                upper_uses: Some(1),
-                identity_name: "array quantity".into(),
-                copy: false,
-            },
-            Type::Array { element: 19 },
-            Type::RefUnique { referent: 20 },
-        ]);
-        let mut code = vec![
-            Instruction::Primitive {
-                dst: 3,
-                op: Primitive::ArrayEmpty,
-                args: vec![],
-            },
-            Instruction::BorrowUnique { dst: 4, src: 3 },
-            Instruction::Primitive {
-                dst: 5,
-                op: Primitive::ArrayPushMove,
-                args: vec![4, 1],
-            },
-            Instruction::Drop { register: 5 },
-        ];
-        if pop {
-            code.extend([
-                Instruction::BorrowUnique { dst: 6, src: 3 },
-                Instruction::Primitive {
-                    dst: 7,
-                    op: Primitive::ArrayPopMove,
-                    args: vec![6],
-                },
-                Instruction::Resume {
-                    dst: 8,
-                    resumption: 7,
-                    receiver_mode: 2,
-                    value: 2,
-                },
-                Instruction::Drop { register: 8 },
-            ]);
-        }
-        code.extend([
-            Instruction::Primitive {
-                dst: 9,
-                op: Primitive::ArrayFinishDrained,
-                args: vec![3],
-            },
-            Instruction::Return { src: Some(9) },
-        ]);
-        let mut artifact = Artifact {
-            types,
-            constants: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "quantity_array_transport".into(),
-                params: vec![19, I64],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 19, I64, 20, 21, UNIT, 21, 19, I64, UNIT],
-                code_start: 0,
-                code_len: code.len() as u32,
-                label_slot_count: 0,
-            }],
-            code,
-            ..Artifact::default()
-        };
-        artifact.required_features =
-            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
-        artifact
-    }
-
-    #[test]
-    fn dynamic_array_slots_preserve_and_discharge_one_quantity_identity() {
-        verify(quantity_array_transport_artifact(true))
-            .expect("a pushed quantity is the same logical owner after an exact pop");
-        assert!(matches!(
-            verify(quantity_array_transport_artifact(false)),
-            Err(VerifyError::InvalidFunction(0))
-        ));
-    }
-
-    #[test]
-    fn direct_array_summaries_replay_push_and_pop_quantity_identity() {
-        let mut artifact = quantity_array_transport_artifact(true);
-        artifact.code = vec![
-            Instruction::Primitive {
-                dst: 3,
-                op: Primitive::ArrayEmpty,
-                args: vec![],
-            },
-            Instruction::BorrowUnique { dst: 4, src: 3 },
-            Instruction::Call {
-                dst: Some(5),
-                function: 1,
-                args: vec![4, 1],
-            },
-            Instruction::BorrowUnique { dst: 6, src: 3 },
-            Instruction::Call {
-                dst: Some(7),
-                function: 2,
-                args: vec![6],
-            },
-            Instruction::Resume {
-                dst: 8,
-                resumption: 7,
-                receiver_mode: 2,
-                value: 2,
-            },
-            Instruction::Drop { register: 8 },
-            Instruction::Primitive {
-                dst: 9,
-                op: Primitive::ArrayFinishDrained,
-                args: vec![3],
-            },
-            Instruction::Return { src: Some(9) },
-            Instruction::Primitive {
-                dst: 3,
-                op: Primitive::ArrayPushMove,
-                args: vec![1, 2],
-            },
-            Instruction::Return { src: Some(3) },
-            Instruction::Primitive {
-                dst: 2,
-                op: Primitive::ArrayPopMove,
-                args: vec![1],
-            },
-            Instruction::Return { src: Some(2) },
-        ];
-        artifact.functions = vec![
-            Function {
-                flags: 0,
-                name: "array_summary_caller".into(),
-                params: vec![19, I64],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 19, I64, 20, 21, UNIT, 21, 19, I64, UNIT],
-                code_start: 0,
-                code_len: 9,
-                label_slot_count: 0,
-            },
-            Function {
-                flags: 0,
-                name: "array_summary_push".into(),
-                params: vec![21, 19],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 21, 19, UNIT],
-                code_start: 9,
-                code_len: 2,
-                label_slot_count: 0,
-            },
-            Function {
-                flags: 0,
-                name: "array_summary_pop".into(),
-                params: vec![21],
-                return_type: 19,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 21, 19],
-                code_start: 11,
-                code_len: 2,
-                label_slot_count: 0,
-            },
-        ];
-        artifact.required_features =
-            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
-
-        verify(artifact.clone())
-            .expect("body-derived array summaries preserve the exact stored owner");
-        let divergent = CallableTargets::from([1, 2]);
-        assert!(canonical_array_quantity_call_summary(&artifact, &divergent).is_none());
-        let mut hostile_host = artifact.clone();
-        hostile_host.imports.push(Import {
-            capability: "hostile-array".into(),
-            symbol: "mutate".into(),
-            signature: Signature {
-                params: vec![21, 19],
-                result: UNIT,
-                outward_protocols: vec![],
-            },
-            may_trap: false,
-        });
-        hostile_host.code[2] = Instruction::HostCall {
-            dst: Some(5),
-            import: 0,
-            args: vec![4, 1],
-        };
-        hostile_host.required_features =
-            crate::bytecode::used_features(&hostile_host.types, &hostile_host.code, false, true);
-        let hostile = verify(hostile_host);
-        assert!(
-            matches!(hostile, Err(VerifyError::InvalidFunction(0))),
-            "{hostile:?}"
-        );
-
-        let mut effectful = artifact.clone();
-        let Type::Resumption {
-            lower_uses,
-            upper_uses,
-            copy,
-            ..
-        } = &mut effectful.types[19]
-        else {
-            unreachable!()
-        };
-        *lower_uses = 2;
-        *upper_uses = Some(2);
-        *copy = true;
-        let pop_start = effectful.functions[2].code_start as usize;
-        effectful.code.splice(
-            pop_start..,
-            [
-                Instruction::Primitive {
-                    dst: 3,
-                    op: Primitive::ArrayPopMove,
-                    args: vec![1],
-                },
-                Instruction::Resume {
-                    dst: 4,
-                    resumption: 3,
-                    receiver_mode: 0,
-                    value: 2,
-                },
-                Instruction::Drop { register: 4 },
-                Instruction::Return { src: Some(3) },
-            ],
-        );
-        effectful.functions[0].register_types.push(I64);
-        effectful
-            .code
-            .insert(4, Instruction::Copy { dst: 10, src: 2 });
-        effectful.functions[0].code_len += 1;
-        effectful.functions[1].code_start += 1;
-        effectful.functions[2].code_start += 1;
-        let Instruction::Call { args, .. } = &mut effectful.code[5] else {
-            unreachable!()
-        };
-        args.push(10);
-        effectful.functions[2].params.push(I64);
-        effectful.functions[2].register_types = vec![UNIT, 21, I64, 19, I64];
-        effectful.functions[2].code_len = 4;
-        effectful.required_features =
-            crate::bytecode::used_features(&effectful.types, &effectful.code, true, false);
-        verify(effectful.clone())
-            .expect("a popped slot may accumulate an exact body-derived resume delta");
-        let Type::Resumption {
-            lower_uses,
-            upper_uses,
-            copy,
-            ..
-        } = &mut effectful.types[19]
-        else {
-            unreachable!()
-        };
-        *lower_uses = 1;
-        *upper_uses = Some(1);
-        *copy = false;
-        effectful.required_features =
-            crate::bytecode::used_features(&effectful.types, &effectful.code, true, false);
-        assert!(matches!(
-            verify(effectful),
-            Err(VerifyError::InvalidFunction(0))
-        ));
-
-        let mut indirect = artifact;
-        indirect.types.push(Type::Callable {
-            signature: Signature {
-                params: vec![21, 19],
-                result: UNIT,
-                outward_protocols: vec![],
-            },
-            capture_type: UNIT,
-            receiver_mode: 2,
-            identity_name: "array summary push callable".into(),
-            copy: false,
-            zero_use_allowed: false,
-        });
-        indirect.functions[0].register_types.push(22);
-        indirect.code.insert(
-            2,
-            Instruction::MakeCallable {
-                dst: 10,
-                callable_type: 22,
-                function: 1,
-                captures: vec![],
-            },
-        );
-        indirect.code[3] = Instruction::CallIndirect {
-            dst: Some(5),
-            callable: 10,
-            receiver_mode: 2,
-            args: vec![4, 1],
-        };
-        indirect.functions[0].code_len += 1;
-        indirect.functions[1].receiver_mode = Some(2);
-        indirect.functions[1].code_start += 1;
-        indirect.functions[2].code_start += 1;
-        indirect.required_features =
-            crate::bytecode::used_features(&indirect.types, &indirect.code, true, false);
-        verify(indirect).expect("a finite indirect producer replays the same exact array summary");
     }
 
     #[test]
@@ -30969,234 +30055,6 @@ mod tests {
             verify(artifact).expect_err("different returned leaves must be rejected"),
             VerifyError::InvalidFunction(0)
         );
-    }
-
-    fn reference_array_transport_artifact(dynamic_index: bool) -> Artifact {
-        let mut types = Type::predefined();
-        types.push(Type::RefShared { referent: I64 });
-        types.push(Type::Array { element: 19 });
-        types.push(Type::RefUnique { referent: 20 });
-        let register_types = vec![UNIT, I64, USIZE, 20, 19, 21, UNIT, 21, 19];
-        let mut code = vec![
-            Instruction::Primitive {
-                dst: 3,
-                op: Primitive::ArrayEmpty,
-                args: vec![],
-            },
-            Instruction::BorrowShared { dst: 4, src: 1 },
-            Instruction::BorrowUnique { dst: 5, src: 3 },
-            Instruction::Primitive {
-                dst: 6,
-                op: Primitive::ArrayPushMove,
-                args: vec![5, 4],
-            },
-            Instruction::Drop { register: 6 },
-            Instruction::BorrowUnique { dst: 7, src: 3 },
-        ];
-        code.push(Instruction::Primitive {
-            dst: 8,
-            op: if dynamic_index {
-                Primitive::ArrayGetMove
-            } else {
-                Primitive::ArrayPopMove
-            },
-            args: if dynamic_index { vec![7, 2] } else { vec![7] },
-        });
-        code.extend([
-            Instruction::EndBorrow { reference: 8 },
-            Instruction::Primitive {
-                dst: 6,
-                op: Primitive::ArrayFinishDrained,
-                args: vec![3],
-            },
-            Instruction::Return { src: Some(6) },
-        ]);
-        Artifact {
-            types,
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "reference_array_transport".into(),
-                params: vec![I64, USIZE],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types,
-                code_start: 0,
-                code_len: code.len() as u32,
-                label_slot_count: 0,
-            }],
-            code,
-            required_features: 1 | (1 << 1) | (1 << 7),
-            ..Artifact::default()
-        }
-    }
-
-    #[test]
-    fn array_push_and_pop_preserve_a_reference_loan() {
-        verify(reference_array_transport_artifact(false))
-            .expect("an exact pushed reference origin must survive a matching pop");
-    }
-
-    #[test]
-    fn dynamic_array_reference_move_fails_closed() {
-        let error = verify(reference_array_transport_artifact(true)).unwrap_err();
-        assert!(
-            matches!(error, VerifyError::BorrowConflict { function: 0, .. }),
-            "{error:?}"
-        );
-    }
-
-    #[test]
-    fn exact_array_wrapper_exports_reference_slot_provenance() {
-        let mut types = Type::predefined();
-        types.push(Type::RefShared { referent: I64 });
-        types.push(Type::Array { element: 19 });
-        types.push(Type::RefUnique { referent: 20 });
-        let artifact = Artifact {
-            types,
-            constants: vec![Constant::Usize(0)],
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "take_zero_reference".into(),
-                params: vec![21],
-                return_type: 19,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 21, 21, 19],
-                code_start: 0,
-                code_len: 3,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Move { dst: 2, src: 1 },
-                Instruction::Primitive {
-                    dst: 3,
-                    op: Primitive::ArrayPopMove,
-                    args: vec![2],
-                },
-                Instruction::Return { src: Some(3) },
-            ],
-            required_features: 1 | (1 << 1),
-            ..Artifact::default()
-        };
-        assert_eq!(
-            aggregate_reference_return_origins(&artifact, 0, &mut vec![]).unwrap(),
-            vec![(
-                vec![],
-                CarrierOrigin::Parameter {
-                    parameter: 0,
-                    path: vec![ARRAY_SLOT_PATH, ARRAY_SLOT_PATH],
-                },
-            )]
-        );
-        verify(artifact).expect("the exact trusted wrapper contract must verify");
-    }
-
-    #[test]
-    fn cross_call_push_then_read_wrapper_preserves_the_installed_reference_loan() {
-        let mut types = Type::predefined();
-        types.push(Type::RefShared { referent: I64 });
-        types.push(Type::Array { element: 19 });
-        types.push(Type::RefUnique { referent: 20 });
-        types.push(Type::RefUnique { referent: I64 });
-        let caller = vec![
-            Instruction::Primitive {
-                dst: 2,
-                op: Primitive::ArrayEmpty,
-                args: vec![],
-            },
-            Instruction::BorrowShared { dst: 3, src: 1 },
-            Instruction::BorrowUnique { dst: 4, src: 2 },
-            Instruction::Call {
-                dst: Some(5),
-                function: 1,
-                args: vec![4, 3],
-            },
-            Instruction::BorrowUnique { dst: 6, src: 2 },
-            Instruction::Call {
-                dst: Some(7),
-                function: 2,
-                args: vec![6],
-            },
-            Instruction::EndBorrow { reference: 7 },
-            Instruction::BorrowUnique { dst: 8, src: 1 },
-            Instruction::EndBorrow { reference: 8 },
-            Instruction::Primitive {
-                dst: 9,
-                op: Primitive::ArrayFinishDrained,
-                args: vec![2],
-            },
-            Instruction::Return { src: Some(9) },
-        ];
-        let writer = vec![
-            Instruction::Primitive {
-                dst: 3,
-                op: Primitive::ArrayPushMove,
-                args: vec![1, 2],
-            },
-            Instruction::Return { src: Some(3) },
-        ];
-        let reader = vec![
-            Instruction::Primitive {
-                dst: 2,
-                op: Primitive::ArrayPopMove,
-                args: vec![1],
-            },
-            Instruction::Return { src: Some(2) },
-        ];
-        let writer_start = caller.len() as u32;
-        let reader_start = writer_start + writer.len() as u32;
-        let mut code = caller;
-        code.extend(writer);
-        code.extend(reader);
-        let artifact = Artifact {
-            types,
-            reference_return_contracts: vec![],
-            functions: vec![
-                Function {
-                    flags: 0,
-                    name: "caller".into(),
-                    params: vec![I64],
-                    return_type: UNIT,
-                    outward_protocols: vec![],
-                    receiver_mode: None,
-                    register_types: vec![UNIT, I64, 20, 19, 21, UNIT, 21, 19, 22, UNIT],
-                    code_start: 0,
-                    code_len: writer_start,
-                    label_slot_count: 0,
-                },
-                Function {
-                    flags: 0,
-                    name: "push_reference".into(),
-                    params: vec![21, 19],
-                    return_type: UNIT,
-                    outward_protocols: vec![],
-                    receiver_mode: None,
-                    register_types: vec![UNIT, 21, 19, UNIT],
-                    code_start: writer_start,
-                    code_len: 2,
-                    label_slot_count: 0,
-                },
-                Function {
-                    flags: 0,
-                    name: "pop_reference".into(),
-                    params: vec![21],
-                    return_type: 19,
-                    outward_protocols: vec![],
-                    receiver_mode: None,
-                    register_types: vec![UNIT, 21, 19],
-                    code_start: reader_start,
-                    code_len: 2,
-                    label_slot_count: 0,
-                },
-            ],
-            code,
-            required_features: 1 | (1 << 1) | (1 << 7),
-            ..Artifact::default()
-        };
-        verify(artifact).expect("the write summary must feed the exact read summary");
     }
 
     #[test]

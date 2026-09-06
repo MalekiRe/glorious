@@ -1847,38 +1847,10 @@ impl StageZeroCompiler {
                             crate::PrimitiveRole::BytesToArray,
                             crate::PrimitiveRole::BytesUtf8ValidUpTo,
                             crate::PrimitiveRole::Blake3,
-                            crate::PrimitiveRole::ArrayNew,
-                            crate::PrimitiveRole::ArrayLen,
-                            crate::PrimitiveRole::ArrayUtf8ValidUpTo,
-                            crate::PrimitiveRole::ArrayPushUtf8Char,
-                            crate::PrimitiveRole::ArrayExtendFromSlice,
-                            crate::PrimitiveRole::ArrayInsertMove,
-                            crate::PrimitiveRole::ArrayRemoveMove,
-                            crate::PrimitiveRole::ArrayAppendMove,
-                            crate::PrimitiveRole::ArrayInsertFromSlice,
-                            crate::PrimitiveRole::ArrayInsertUtf8FromSlice,
-                            crate::PrimitiveRole::ArrayTruncateDiscard,
-                            crate::PrimitiveRole::ArrayReverseMove,
-                            crate::PrimitiveRole::ArraySplitOffMove,
-                            crate::PrimitiveRole::ArraySplitBorrowUnique,
-                            crate::PrimitiveRole::ArrayPopUtf8Char,
-                            crate::PrimitiveRole::ArrayUtf8CharAt,
-                            crate::PrimitiveRole::ArrayGetCopy,
-                            crate::PrimitiveRole::ArrayGetMove,
                             crate::PrimitiveRole::ArrayGetBorrowShared,
-                            crate::PrimitiveRole::ArrayGetBorrowUnique,
-                            crate::PrimitiveRole::ArraySetMove,
                             crate::PrimitiveRole::ArrayEmpty,
                             crate::PrimitiveRole::ArrayPushMove,
-                            crate::PrimitiveRole::ArrayPopMove,
-                            crate::PrimitiveRole::ArrayCapacity,
-                            crate::PrimitiveRole::ArrayReserve,
-                            crate::PrimitiveRole::ArrayFinishDrained,
                             crate::PrimitiveRole::StaticLen,
-                            crate::PrimitiveRole::StaticSubslice,
-                            crate::PrimitiveRole::StaticGetShared,
-                            crate::PrimitiveRole::StaticAsArray,
-                            crate::PrimitiveRole::StaticRawAsArray,
                             crate::PrimitiveRole::U32CheckedAdd,
                             crate::PrimitiveRole::U32CheckedSub,
                             crate::PrimitiveRole::U32CheckedMul,
@@ -3507,27 +3479,9 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
                 }
                 crate::MirInstruction::MakeArray { element_type, .. }
                 | crate::MirInstruction::ProjectArray { element_type, .. }
-                | crate::MirInstruction::ArrayNew { element_type, .. }
-                | crate::MirInstruction::ArrayLen { element_type, .. }
-                | crate::MirInstruction::ArrayGetCopy { element_type, .. }
-                | crate::MirInstruction::ArrayGetMove { element_type, .. }
-                | crate::MirInstruction::ArrayGetBorrow { element_type, .. }
-                | crate::MirInstruction::ArraySetMove { element_type, .. }
+                | crate::MirInstruction::ArrayGetBorrowShared { element_type, .. }
                 | crate::MirInstruction::ArrayEmpty { element_type, .. }
-                | crate::MirInstruction::ArrayPushMove { element_type, .. }
-                | crate::MirInstruction::ArrayExtendFromSlice { element_type, .. }
-                | crate::MirInstruction::ArrayInsertMove { element_type, .. }
-                | crate::MirInstruction::ArrayRemoveMove { element_type, .. }
-                | crate::MirInstruction::ArrayAppendMove { element_type, .. }
-                | crate::MirInstruction::ArrayInsertFromSlice { element_type, .. }
-                | crate::MirInstruction::ArrayTruncateDiscard { element_type, .. }
-                | crate::MirInstruction::ArrayReverseMove { element_type, .. }
-                | crate::MirInstruction::ArraySplitOffMove { element_type, .. }
-                | crate::MirInstruction::ArraySplitBorrowUnique { element_type, .. }
-                | crate::MirInstruction::ArrayPopMove { element_type, .. }
-                | crate::MirInstruction::ArrayCapacity { element_type, .. }
-                | crate::MirInstruction::ArrayReserve { element_type, .. }
-                | crate::MirInstruction::ArrayFinishDrained { element_type, .. } => {
+                | crate::MirInstruction::ArrayPushMove { element_type, .. } => {
                     *element_type = specialize_type(element_type, arguments);
                 }
                 crate::MirInstruction::MakeRecord { field_types, .. }

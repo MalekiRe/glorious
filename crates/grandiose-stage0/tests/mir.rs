@@ -880,25 +880,6 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
         "an i64 register must not be accepted as a Bytes-to-array result"
     );
 
-    let mut array_size = graph();
-    let i64 = Type::Scalar(ScalarType::I64);
-    array_size.locals.push(local(Type::Reference {
-        mutability: Mutability::Shared,
-        lifetime: Lifetime::Elided,
-        referent: Box::new(Type::Array(Box::new(i64))),
-    }));
-    array_size.blocks[0].instructions.push(MirInstruction::ArrayLen {
-        dst: MirLocal(1),
-        value: MirLocal(5),
-        element_type: Type::Scalar(ScalarType::I64),
-    });
-    assert!(
-        array_size
-            .validate()
-            .is_err_and(|error| error.contains("array size destination")),
-        "an i64 register must not be accepted as an Array length result"
-    );
-
     let mut array_view = graph();
     let i64 = Type::Scalar(ScalarType::I64);
     array_view.locals.push(local(Type::Scalar(ScalarType::Usize)));
@@ -907,12 +888,19 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
         lifetime: Lifetime::Elided,
         referent: Box::new(Type::Array(Box::new(i64))),
     }));
-    array_view.blocks[0].instructions.push(MirInstruction::ArrayLen {
-        dst: MirLocal(5),
+    array_view.locals.push(local(Type::Reference {
+        mutability: Mutability::Shared,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(Type::Scalar(ScalarType::I64)),
+    }));
+    array_view.blocks[0].instructions.push(MirInstruction::ArrayGetBorrowShared {
+        dst: MirLocal(7),
         value: MirLocal(6),
+        index: MirLocal(5),
         element_type: Type::Scalar(ScalarType::I64),
     });
     array_view.parameters.push(MirLocal(6));
+    array_view.parameters.push(MirLocal(5));
     assert!(
         array_view.validate().is_ok(),
         "a unique Array reference may be reborrowed for a shared Array read"
@@ -928,11 +916,10 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
     }));
     array_borrow.blocks[0]
         .instructions
-        .push(MirInstruction::ArrayGetBorrow {
+        .push(MirInstruction::ArrayGetBorrowShared {
             dst: MirLocal(1),
             value: MirLocal(6),
             index: MirLocal(5),
-            unique: false,
             element_type: Type::Scalar(ScalarType::I64),
         });
     assert!(

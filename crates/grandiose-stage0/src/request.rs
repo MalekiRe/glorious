@@ -91,12 +91,14 @@ pub struct CompilerBuildIdentity {
 /// unsafe aggregate-reference origins and native/static address leaves.
 /// Cache ten, bytecode 52 and verifier eleven migrate collection storage to
 /// source, fix trait-body instance discovery and add explicit unsafe forgetting.
+/// Cache eleven, bytecode 53 and verifier twelve remove retired collection and
+/// static-view instructions and make the remaining Array element borrow shared-only.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 2;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 2;
-pub const STAGE0_CACHE_GENERATION: u32 = 10;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 52;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 11;
+pub const STAGE0_CACHE_GENERATION: u32 = 11;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 53;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 12;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

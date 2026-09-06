@@ -1637,7 +1637,7 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
         assert_eq!(value.selector_name(), name);
         assert!(inventory.insert(value, (name, tag.parse::<u8>().unwrap())).is_none());
     }
-    assert_eq!(inventory.len(), 208);
+    assert_eq!(inventory.len(), 180);
     let mut metadata = String::new();
     let mut previous = *inventory.first_key_value().unwrap().0;
     let mut checks = Vec::new();
@@ -1665,7 +1665,7 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
     let program = source_program(case, &[("@CASES@", generated), ("@ROLES@", metadata), ("@CONVERSIONS@", literal(&conversions))]);
     let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
     record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
-    assert_eq!(results, [cases.len() as i64, 208, 648, 1, 20]);
+    assert_eq!(results, [cases.len() as i64, 180, 648, 1, 20]);
 }
 
 #[test]

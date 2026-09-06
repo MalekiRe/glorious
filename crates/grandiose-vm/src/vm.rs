@@ -251,7 +251,6 @@ fn take_pooled_frame() -> Option<Frame> {
     FRAME_POOL.with(|pool| pool.borrow_mut().pop())
 }
 
-
 #[derive(Clone, Copy)]
 enum CapturePruning {
     Multishot,
@@ -1415,13 +1414,13 @@ impl Vm {
                     // retain the exact old left-to-right collection path.
                     let v = if matches!(
                         op,
-                        Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared
+                        Primitive::StaticLen
                     ) {
                         let values = args
                             .iter()
                             .map(|register| get(frame, *register))
                             .collect::<Result<Vec<_>, _>>()?;
-                        static_data_primitive(a, result_type, op, &values)?
+                        static_data_primitive(op, &values)?
                     } else {
                         match args.as_slice() {
                         // The self-hosted compiler spends much of its time in
@@ -2636,7 +2635,6 @@ fn make_verified_zero_argument_receiver_frame(
     })
 }
 
-
 /// Construct the common one-argument direct-call frame without setting up a
 /// slice iterator or first materializing an all-empty register file.
 #[inline]
@@ -3593,15 +3591,6 @@ fn copy_reference_target(
             .and_then(Option::as_ref)
             .cloned()
             .ok_or(RuntimeError::TypeConfusion)?,
-        ReferenceTarget::StaticDataElement { data, index } => {
-            let offset = data
-                .offset
-                .checked_add(*index)
-                .ok_or(RuntimeError::TypeConfusion)?;
-            Value::U64(u64::from(
-                *data.bytes.get(offset).ok_or(RuntimeError::TypeConfusion)?,
-            ))
-        }
         ReferenceTarget::Aggregate(aggregate) => Value::Aggregate(aggregate.clone()),
         ReferenceTarget::AggregateField { aggregate, field } => aggregate
             .try_borrow()
@@ -3646,9 +3635,7 @@ fn observe_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeEr
             .and_then(Option::as_ref)
             .cloned()
             .ok_or(RuntimeError::TypeConfusion)?,
-        ReferenceTarget::Array(_)
-        | ReferenceTarget::Aggregate(_)
-        | ReferenceTarget::StaticDataElement { .. } => {
+        ReferenceTarget::Array(_) | ReferenceTarget::Aggregate(_) => {
             return Err(RuntimeError::TypeConfusion);
         }
     };
@@ -3715,7 +3702,6 @@ fn build_enum_tag_tables(a: &ExecutionImage) -> Vec<Box<[u32]>> {
         .collect()
 }
 
-
 fn reference_target_enum_tag(target: &ReferenceTarget) -> Result<u32, RuntimeError> {
     fn value_tag(value: &Value) -> Result<u32, RuntimeError> {
         let Value::Aggregate(aggregate) = value else {
@@ -3769,7 +3755,7 @@ fn reference_target_enum_tag(target: &ReferenceTarget) -> Result<u32, RuntimeErr
                     .ok_or(RuntimeError::TypeConfusion)?,
             )
         }
-        ReferenceTarget::Array(_) | ReferenceTarget::StaticDataElement { .. } => {
+        ReferenceTarget::Array(_) => {
             Err(RuntimeError::TypeConfusion)
         }
     }
@@ -3796,7 +3782,6 @@ fn take_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError
                     element_type,
                     packed_bytes: None,
                     slots: Vec::new(),
-                    logical_capacity: 0,
                 },
             );
             Ok(Value::Array(ArenaObject::new_tracked(value)))
@@ -3808,7 +3793,6 @@ fn take_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError
             .get_mut(*index)
             .and_then(Option::take)
             .ok_or(RuntimeError::TypeConfusion),
-        ReferenceTarget::StaticDataElement { .. } => Err(RuntimeError::TypeConfusion),
         ReferenceTarget::Aggregate(aggregate) => {
             let mut aggregate = aggregate
                 .try_borrow_mut()
@@ -3859,7 +3843,7 @@ fn store_reference_target(target: &ReferenceTarget, value: Value) -> Result<(), 
             let mut target = array
                 .try_borrow_mut()
                 .map_err(|_| RuntimeError::TypeConfusion)?;
-            if !target.slots.is_empty() || target.logical_capacity != 0 {
+            if array_len(&target) != 0 {
                 return Err(RuntimeError::TypeConfusion);
             }
             *target = value;
@@ -3905,7 +3889,6 @@ fn store_reference_target(target: &ReferenceTarget, value: Value) -> Result<(), 
             }
             *slot = Some(value);
         }
-        ReferenceTarget::StaticDataElement { .. } => return Err(RuntimeError::TypeConfusion),
     }
     Ok(())
 }
@@ -4477,7 +4460,6 @@ impl SnapshotCloneContext {
                         element_type: source.element_type,
                         packed_bytes: source.packed_bytes.as_ref().map(|_| Vec::new()),
                         slots: vec![],
-                        logical_capacity: source.logical_capacity,
                     }),
                 );
                 for value in source.slots.iter().flatten() {
@@ -4985,10 +4967,6 @@ fn remap_shared_reference_target(
                 .unwrap_or_else(|| array.clone()),
             index: *index,
         },
-        ReferenceTarget::StaticDataElement { data, index } => ReferenceTarget::StaticDataElement {
-            data: data.clone(),
-            index: *index,
-        },
         ReferenceTarget::Aggregate(aggregate) => context
             .aggregates
             .get(&aggregate.identity())
@@ -5134,7 +5112,6 @@ fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
                 return array.element_type == U8 && *element == U8;
             }
             array.element_type == *element
-                && array.logical_capacity >= array.slots.len()
                 && array.slots.iter().all(|slot| {
                     slot.as_ref()
                         .is_none_or(|value| value_matches(a, value, *element))
@@ -5333,8 +5310,6 @@ fn runtime_field_index(
 /// the matching hidden type tag and reference result; these dynamic checks
 /// retain that boundary for in-memory artifacts and hostile VM callers.
 fn static_data_primitive(
-    a: &ExecutionImage,
-    result_type: TypeId,
     op: Primitive,
     values: &[Value],
 ) -> Result<Value, RuntimeError> {
@@ -5342,60 +5317,6 @@ fn static_data_primitive(
         (Primitive::StaticLen, [Value::StaticData(data)]) => u64::try_from(data.length)
             .map(Value::U64)
             .map_err(|_| RuntimeError::TypeConfusion),
-        (
-            Primitive::StaticSubslice,
-            [Value::StaticData(data), Value::U64(start), Value::U64(length)],
-        ) => {
-            let start = to_index(*start)?;
-            let length = to_index(*length)?;
-            let end = start.checked_add(length).ok_or(RuntimeError::IndexOutOfBounds)?;
-            if end > data.length {
-                return Err(RuntimeError::IndexOutOfBounds);
-            }
-            let Type::StaticData { tag, alignment, .. } = a
-                .checked_type(result_type)
-                .map(Type::representation)
-                .ok_or(RuntimeError::TypeConfusion)?
-            else {
-                return Err(RuntimeError::TypeConfusion);
-            };
-            if *tag != data.tag || *alignment != data.alignment {
-                return Err(RuntimeError::TypeConfusion);
-            }
-            let offset = data
-                .offset
-                .checked_add(start)
-                .ok_or(RuntimeError::IndexOutOfBounds)?;
-            Ok(Value::StaticData(Rc::new(StaticDataValue {
-                segment: data.segment,
-                tag: data.tag,
-                alignment: data.alignment,
-                bytes: data.bytes.clone(),
-                offset,
-                length,
-            })))
-        }
-        (Primitive::StaticGetShared, [Value::StaticData(data), Value::U64(index)]) => {
-            let index = to_index(*index)?;
-            if index >= data.length {
-                return Err(RuntimeError::IndexOutOfBounds);
-            }
-            let Type::RefShared { referent } = a
-                .checked_type(result_type)
-                .map(Type::representation)
-                .ok_or(RuntimeError::TypeConfusion)?
-            else {
-                return Err(RuntimeError::TypeConfusion);
-            };
-            Ok(Value::Reference {
-                referent_type: *referent,
-                unique: false,
-                target: ReferenceTarget::StaticDataElement {
-                    data: data.clone(),
-                    index,
-                },
-            })
-        }
         _ => Err(RuntimeError::TypeConfusion),
     }
 }
@@ -5465,8 +5386,8 @@ fn primitive_typed(
             [Value::U64(value)] => Ok(Value::U64(*value)),
             _ => Err(RuntimeError::TypeConfusion),
         },
-        Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared => {
-            static_data_primitive(a, result_type, op, v)
+        Primitive::StaticLen => {
+            static_data_primitive(op, v)
         }
         Primitive::TextByteLen => match v {
             [Value::Text(x)] => Ok(Value::U64(x.len() as u64)),
@@ -5604,41 +5525,7 @@ fn primitive_typed(
                 Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
                     element_type,
                     packed_bytes: Some(packed_bytes),
-                    logical_capacity: bytes.len(),
                     slots: Vec::new(),
-                })))
-            }
-            _ => Err(RuntimeError::TypeConfusion),
-        },
-        Primitive::ArrayNew => match v {
-            [Value::U64(length), fill] => {
-                let length = to_index(*length)?;
-                let element_type = array_element_type(a, result_type)?;
-                if element_type == U8 {
-                    let Value::U64(byte) = fill else {
-                        return Err(RuntimeError::TypeConfusion);
-                    };
-                    let byte = u8::try_from(*byte).map_err(|_| RuntimeError::TypeConfusion)?;
-                    let mut packed_bytes = Vec::new();
-                    reserve_packed_bytes(&mut packed_bytes, length)?;
-                    packed_bytes.resize(length, Some(byte));
-                    return Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
-                        element_type,
-                        packed_bytes: Some(packed_bytes),
-                        slots: Vec::new(),
-                        logical_capacity: length,
-                    })));
-                }
-                let mut slots = Vec::new();
-                reserve_output(&mut slots, length)?;
-                for _ in 0..length {
-                    slots.push(Some(copy_value(a, element_type, fill)?));
-                }
-                Ok(Value::Array(ArenaObject::new_tracked(ArrayValue {
-                    element_type,
-                    packed_bytes: None,
-                    slots,
-                    logical_capacity: length,
                 })))
             }
             _ => Err(RuntimeError::TypeConfusion),
@@ -5647,64 +5534,9 @@ fn primitive_typed(
             array_element_type(a, result_type)?,
             std::iter::empty(),
         )),
-        Primitive::ArrayLen => {
-            let array = referenced_array(v, false)?;
-            let length = array_len(&array.borrow());
-            Ok(Value::U64(length as u64))
-        }
-        Primitive::ArrayCapacity => {
-            let array = referenced_array(v, false)?;
-            let capacity = array.borrow().logical_capacity;
-            Ok(Value::U64(capacity as u64))
-        }
-        Primitive::ArrayGetCopy => match v {
+        Primitive::ArrayGetBorrowShared => match v {
             [reference, Value::U64(index)] => {
                 let array = reference_array(reference, false)?;
-                let index = to_index(*index)?;
-                let array = array.borrow();
-                if let Some(slots) = &array.packed_bytes {
-                    return slots
-                        .get(index)
-                        .ok_or(RuntimeError::IndexOutOfBounds)?
-                        .map(|byte| Value::U64(u64::from(byte)))
-                        .ok_or(RuntimeError::EmptyArraySlot);
-                }
-                let value = array
-                    .slots
-                    .get(index)
-                    .ok_or(RuntimeError::IndexOutOfBounds)?
-                    .as_ref()
-                    .ok_or(RuntimeError::EmptyArraySlot)?;
-                copy_value(a, array.element_type, value)
-            }
-            _ => Err(RuntimeError::TypeConfusion),
-        },
-        Primitive::ArrayGetMove => match v {
-            [reference, Value::U64(index)] => {
-                let array = reference_array(reference, true)?;
-                let index = to_index(*index)?;
-                let mut array = array.borrow_mut();
-                if let Some(slots) = &mut array.packed_bytes {
-                    return slots
-                        .get_mut(index)
-                        .ok_or(RuntimeError::IndexOutOfBounds)?
-                        .take()
-                        .map(|byte| Value::U64(u64::from(byte)))
-                        .ok_or(RuntimeError::EmptyArraySlot);
-                }
-                array
-                    .slots
-                    .get_mut(index)
-                    .ok_or(RuntimeError::IndexOutOfBounds)?
-                    .take()
-                    .ok_or(RuntimeError::EmptyArraySlot)
-            }
-            _ => Err(RuntimeError::TypeConfusion),
-        },
-        Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique => match v {
-            [reference, Value::U64(index)] => {
-                let unique = op == Primitive::ArrayGetBorrowUnique;
-                let array = reference_array(reference, unique)?;
                 let index = to_index(*index)?;
                 materialize_packed_bytes(&mut array.borrow_mut())?;
                 if array
@@ -5717,42 +5549,14 @@ fn primitive_typed(
                     return Err(RuntimeError::EmptyArraySlot);
                 }
                 let referent_type = match a.checked_type(result_type).map(Type::representation) {
-                    Some(Type::RefShared { referent }) if !unique => *referent,
-                    Some(Type::RefUnique { referent }) if unique => *referent,
+                    Some(Type::RefShared { referent }) => *referent,
                     _ => return Err(RuntimeError::TypeConfusion),
                 };
                 Ok(Value::Reference {
                     referent_type,
-                    unique,
+                    unique: false,
                     target: ReferenceTarget::ArrayElement { array, index },
                 })
-            }
-            _ => Err(RuntimeError::TypeConfusion),
-        },
-        Primitive::ArraySetMove => match v {
-            [reference, Value::U64(index), value] => {
-                let array = reference_array(reference, true)?;
-                let index = to_index(*index)?;
-                let mut array = array.borrow_mut();
-                if let Some(slots) = &mut array.packed_bytes {
-                    let byte = match value {
-                        Value::U64(value) => u8::try_from(*value).map_err(|_| RuntimeError::TypeConfusion)?,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
-                    let slot = slots.get_mut(index).ok_or(RuntimeError::IndexOutOfBounds)?;
-                    if slot.is_some() { return Err(RuntimeError::ArraySlotAlreadyInitialized); }
-                    *slot = Some(byte);
-                    return Ok(Value::Unit);
-                }
-                let slot = array
-                    .slots
-                    .get_mut(index)
-                    .ok_or(RuntimeError::IndexOutOfBounds)?;
-                if slot.is_some() {
-                    return Err(RuntimeError::ArraySlotAlreadyInitialized);
-                }
-                *slot = Some(value.clone());
-                Ok(Value::Unit)
             }
             _ => Err(RuntimeError::TypeConfusion),
         },
@@ -5766,8 +5570,9 @@ fn primitive_typed(
                         _ => return Err(RuntimeError::TypeConfusion),
                     };
                     let required = array_len(&array).checked_add(1).ok_or(RuntimeError::AllocationOverflow)?;
-                    grow_packed_bytes(&mut array, required)?;
-                    array.packed_bytes.as_mut().expect("packed representation was retained").push(Some(byte));
+                    let bytes = array.packed_bytes.as_mut().expect("packed representation was retained");
+                    grow_array_backing(bytes, required)?;
+                    bytes.push(Some(byte));
                     return Ok(Value::Unit);
                 }
                 let required = array
@@ -5775,45 +5580,9 @@ fn primitive_typed(
                     .len()
                     .checked_add(1)
                     .ok_or(RuntimeError::AllocationOverflow)?;
-                grow_array(&mut array, required)?;
+                grow_array_backing(&mut array.slots, required)?;
                 array.slots.push(Some(value.clone()));
                 Ok(Value::Unit)
-            }
-            _ => Err(RuntimeError::TypeConfusion),
-        },
-        Primitive::ArrayPopMove => {
-            let array = referenced_array(v, true)?;
-            let mut array = array.borrow_mut();
-            if let Some(slots) = &mut array.packed_bytes {
-                return slots.pop().ok_or(RuntimeError::IndexOutOfBounds)?.map(|byte| Value::U64(u64::from(byte))).ok_or(RuntimeError::EmptyArraySlot);
-            }
-            array
-                .slots
-                .pop()
-                .ok_or(RuntimeError::IndexOutOfBounds)?
-                .ok_or(RuntimeError::EmptyArraySlot)
-        }
-        Primitive::ArrayReserve => match v {
-            [reference, Value::U64(additional)] => {
-                let array = reference_array(reference, true)?;
-                let mut array = array.borrow_mut();
-                let required = array
-                    .packed_bytes.as_ref().map_or_else(|| array.slots.len(), Vec::len)
-                    .checked_add(to_index(*additional)?)
-                    .ok_or(RuntimeError::AllocationOverflow)?;
-                if array.packed_bytes.is_some() { grow_packed_bytes(&mut array, required)?; } else { grow_array(&mut array, required)?; }
-                Ok(Value::Unit)
-            }
-            _ => Err(RuntimeError::TypeConfusion),
-        },
-        Primitive::ArrayFinishDrained => match v {
-            [Value::Array(array)] => {
-                let array = array.borrow();
-                if array.packed_bytes.as_ref().map_or_else(|| array.slots.iter().any(Option::is_some), |slots| slots.iter().any(Option::is_some)) {
-                    Err(RuntimeError::ArrayNotDrained)
-                } else {
-                    Ok(Value::Unit)
-                }
             }
             _ => Err(RuntimeError::TypeConfusion),
         },
@@ -5955,35 +5724,16 @@ fn reference_array(
     }
 }
 
-fn referenced_array(
-    values: &[Value],
-    require_unique: bool,
-) -> Result<ArenaObject<ArrayValue>, RuntimeError> {
-    match values {
-        [reference] => reference_array(reference, require_unique),
-        _ => Err(RuntimeError::TypeConfusion),
-    }
-}
-
-fn grow_array(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeError> {
-    checked_output_bytes::<Option<Value>>(required)?;
-    if required > array.logical_capacity {
+fn grow_array_backing<T>(values: &mut Vec<T>, required: usize) -> Result<(), RuntimeError> {
+    checked_output_bytes::<T>(required)?;
+    if required > values.capacity() {
         let capacity = required
             .max(4)
             .checked_next_power_of_two()
             .ok_or(RuntimeError::AllocationOverflow)?;
-        checked_output_bytes::<Option<Value>>(capacity)?;
-        if capacity > array.slots.capacity() {
-            array
-                .slots
-                .try_reserve_exact(capacity.saturating_sub(array.slots.len()))
-                .map_err(|_| RuntimeError::AllocationLimit)?;
-        }
-        array.logical_capacity = capacity;
-    } else if required > array.slots.capacity() {
-        array
-            .slots
-            .try_reserve_exact(required.saturating_sub(array.slots.len()))
+        checked_output_bytes::<T>(capacity)?;
+        values
+            .try_reserve_exact(capacity.saturating_sub(values.len()))
             .map_err(|_| RuntimeError::AllocationLimit)?;
     }
     Ok(())
@@ -5993,9 +5743,8 @@ fn array_len(array: &ArrayValue) -> usize {
     array.packed_bytes.as_ref().map_or_else(|| array.slots.len(), Vec::len)
 }
 
-/// Materialize only at the bytecode-visible reference boundary. Most compiler
-/// emission uses push/reserve/finalize and never pays this representation
-/// expansion.
+/// Materialize only at the bytecode-visible reference boundary. Byte bridges
+/// that only push and convert back to `Bytes` keep the compact representation.
 fn materialize_packed_bytes(array: &mut ArrayValue) -> Result<(), RuntimeError> {
     let Some(bytes) = array.packed_bytes.take() else {
         return Ok(());
@@ -6004,21 +5753,6 @@ fn materialize_packed_bytes(array: &mut ArrayValue) -> Result<(), RuntimeError> 
     reserve_output(&mut slots, bytes.len())?;
     slots.extend(bytes.into_iter().map(|byte| byte.map(|byte| Value::U64(u64::from(byte)))));
     array.slots = slots;
-    Ok(())
-}
-
-fn grow_packed_bytes(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeError> {
-    let bytes = array.packed_bytes.as_mut().ok_or(RuntimeError::TypeConfusion)?;
-    if required > array.logical_capacity {
-        let capacity = required.max(4).checked_next_power_of_two().ok_or(RuntimeError::AllocationOverflow)?;
-        checked_output_bytes::<Option<u8>>(capacity)?;
-        if capacity > bytes.capacity() {
-            bytes.try_reserve_exact(capacity.saturating_sub(bytes.len())).map_err(|_| RuntimeError::AllocationLimit)?;
-        }
-        array.logical_capacity = capacity;
-    } else if required > bytes.capacity() {
-        bytes.try_reserve_exact(required.saturating_sub(bytes.len())).map_err(|_| RuntimeError::AllocationLimit)?;
-    }
     Ok(())
 }
 
@@ -8350,68 +8084,6 @@ mod tests {
     }
 
     #[test]
-    fn sealed_static_data_preserves_segment_tag_bounds_and_shared_access() {
-        let mut types = Type::predefined();
-        let static_bytes = types.len() as TypeId;
-        types.push(Type::StaticData {
-            element: U8,
-            tag: 0x4752_414e_4449_4f53_455f_5554_4638_0001,
-            alignment: 1,
-        });
-        let shared_u8 = types.len() as TypeId;
-        types.push(Type::RefShared { referent: U8 });
-        let artifact = Artifact {
-            types,
-            constants: vec![
-                Constant::Usize(1),
-                Constant::StaticData {
-                    tag: 0x4752_414e_4449_4f53_455f_5554_4638_0001,
-                    alignment: 1,
-                    bytes: b"xyz".to_vec(),
-                },
-            ],
-            functions: vec![Function {
-                flags: 0,
-                name: "main".into(),
-                params: vec![],
-                return_type: U8,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, static_bytes, USIZE, shared_u8, U8],
-                code_start: 0,
-                code_len: 6,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Const {
-                    dst: 1,
-                    constant: 1,
-                },
-                Instruction::Const {
-                    dst: 2,
-                    constant: 0,
-                },
-                Instruction::Primitive {
-                    dst: 3,
-                    op: Primitive::StaticGetShared,
-                    args: vec![1, 2],
-                },
-                Instruction::DerefCopy { dst: 4, src: 3 },
-                Instruction::EndBorrow { reference: 3 },
-                Instruction::Return { src: Some(4) },
-            ],
-            required_features: 1 | (1 << 1),
-            ..Artifact::default()
-        };
-        let encoded = artifact.encode();
-        let decoded = Artifact::decode(&encoded).expect("static data artifact must round-trip");
-        assert_eq!(
-            Vm::from_artifact(decoded).unwrap().run(0, vec![]).unwrap(),
-            Value::U64(b'y' as u64)
-        );
-    }
-
-    #[test]
     fn ordinary_g1_decode_infers_static_len_result_without_type_hints() {
         let mut types = Type::predefined();
         let static_bytes = types.len() as TypeId;
@@ -8485,83 +8157,16 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_g1_decode_infers_static_subslice_result_without_type_hints() {
-        let mut types = Type::predefined();
-        let static_bytes = types.len() as TypeId;
-        types.push(Type::StaticData {
-            element: U8,
-            tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
-            alignment: 1,
-        });
-        let artifact = Artifact {
-            types,
-            constants: vec![
-                Constant::Usize(1),
-                Constant::StaticData {
-                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
-                    alignment: 1,
-                    bytes: b"xyz".to_vec(),
-                },
-            ],
-            functions: vec![Function {
-                flags: 0,
-                name: "main".into(),
-                params: vec![],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, static_bytes, USIZE, USIZE, static_bytes],
-                code_start: 0,
-                code_len: 5,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Const {
-                    dst: 1,
-                    constant: 1,
-                },
-                Instruction::Const {
-                    dst: 2,
-                    constant: 0,
-                },
-                Instruction::Const {
-                    dst: 3,
-                    constant: 0,
-                },
-                Instruction::Primitive {
-                    dst: 4,
-                    op: Primitive::StaticSubslice,
-                    args: vec![1, 2, 3],
-                },
-                Instruction::Return { src: None },
-            ],
-            required_features: 1,
-            entry_function: Some(0),
-            ..Artifact::default()
-        };
-        let artifact = crate::verify::with_generated_cleanup_plans(artifact).unwrap();
-        let decoded = Artifact::decode(&artifact.encode())
-            .expect("ordinary G1 static.subslice artifact must infer register types");
-        assert_eq!(
-            decoded.functions[0].register_types,
-            vec![UNIT, static_bytes, USIZE, USIZE, static_bytes]
-        );
-        assert_eq!(
-            Vm::from_artifact(decoded).unwrap().run(0, vec![]).unwrap(),
-            Value::Unit
-        );
-    }
-
-    #[test]
-    fn array_push_uses_frozen_geometric_capacity() {
+    fn array_push_and_shared_borrow_roundtrip() {
         let mut types = Type::predefined();
         types.push(Type::Array { element: U64 }.restricted(false, true));
         types.push(Type::RefUnique { referent: 19 });
         types.push(Type::RefShared { referent: 19 });
+        types.push(Type::RefShared { referent: U64 });
         let a = Artifact {
-            required_features: 1 | (1 << 1) | (1 << 6),
+            required_features: 1 | (1 << 1),
             types,
-            constants: vec![Constant::U64(42)],
+            constants: vec![Constant::U64(42), Constant::Usize(0)],
             imports: vec![],
             protocols: vec![],
             handler_defs: vec![],
@@ -8573,12 +8178,12 @@ mod tests {
                 flags: 0,
                 name: "main".into(),
                 params: vec![],
-                return_type: USIZE,
+                return_type: U64,
                 outward_protocols: vec![],
                 receiver_mode: None,
-                register_types: vec![UNIT, 19, 20, U64, UNIT, 21, USIZE],
+                register_types: vec![UNIT, 19, 20, U64, UNIT, 21, USIZE, 22, U64],
                 code_start: 0,
-                code_len: 9,
+                code_len: 12,
                 label_slot_count: 0,
             }],
             code: vec![
@@ -8599,13 +8204,16 @@ mod tests {
                 },
                 Instruction::Drop { register: 4 },
                 Instruction::BorrowShared { dst: 5, src: 1 },
+                Instruction::Const { dst: 6, constant: 1 },
                 Instruction::Primitive {
-                    dst: 6,
-                    op: Primitive::ArrayCapacity,
-                    args: vec![5],
+                    dst: 7,
+                    op: Primitive::ArrayGetBorrowShared,
+                    args: vec![5, 6],
                 },
+                Instruction::DerefCopy { dst: 8, src: 7 },
+                Instruction::EndBorrow { reference: 7 },
                 Instruction::Drop { register: 1 },
-                Instruction::Return { src: Some(6) },
+                Instruction::Return { src: Some(8) },
             ],
             entry_function: None,
         };
@@ -8614,287 +8222,7 @@ mod tests {
         assert_eq!(decoded.encode(), encoded);
         assert_eq!(
             Vm::from_artifact(decoded).unwrap().run(0, vec![]).unwrap(),
-            Value::U64(4)
-        );
-    }
-
-    #[test]
-    fn array_move_leaves_an_empty_slot_that_drops_safely() {
-        let mut types = Type::predefined();
-        types.push(Type::Array { element: U64 }.restricted(false, true));
-        types.push(Type::RefUnique { referent: 19 });
-        let a = Artifact {
-            required_features: 1 | (1 << 1),
-            types,
-            constants: vec![Constant::U64(42)],
-            imports: vec![],
-            protocols: vec![],
-            handler_defs: vec![],
-            cleanups: vec![],
-            exports: vec![],
-            drop_glue: vec![],
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "main".into(),
-                params: vec![USIZE, USIZE],
-                return_type: U64,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, USIZE, USIZE, U64, 19, 20, U64],
-                code_start: 0,
-                code_len: 6,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Const {
-                    dst: 3,
-                    constant: 0,
-                },
-                Instruction::Primitive {
-                    dst: 4,
-                    op: Primitive::ArrayNew,
-                    args: vec![1, 3],
-                },
-                Instruction::BorrowUnique { dst: 5, src: 4 },
-                Instruction::Primitive {
-                    dst: 6,
-                    op: Primitive::ArrayGetMove,
-                    args: vec![5, 2],
-                },
-                Instruction::Drop { register: 4 },
-                Instruction::Return { src: Some(6) },
-            ],
-            entry_function: None,
-        };
-        assert_eq!(
-            Vm::from_artifact(a)
-                .unwrap()
-                .run(0, vec![Value::U64(1), Value::U64(0)])
-                .unwrap(),
             Value::U64(42)
-        );
-    }
-
-    #[test]
-    fn finish_drained_closes_an_exact_linear_array_after_its_element_moves() {
-        let mut types = Type::predefined();
-        types[U64 as usize] = Type::U64.restricted(false, false);
-        types.push(Type::Array { element: U64 });
-        types.push(Type::RefUnique { referent: 19 });
-        let artifact = Artifact {
-            required_features: 1 | (1 << 1) | (1 << 7),
-            types,
-            constants: vec![],
-            imports: vec![],
-            protocols: vec![],
-            handler_defs: vec![],
-            cleanups: vec![],
-            exports: vec![],
-            drop_glue: vec![],
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "drain_one".into(),
-                params: vec![19, USIZE],
-                return_type: U64,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 19, USIZE, 20, U64, UNIT],
-                code_start: 0,
-                code_len: 4,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::BorrowUnique { dst: 3, src: 1 },
-                Instruction::Primitive {
-                    dst: 4,
-                    op: Primitive::ArrayGetMove,
-                    args: vec![3, 2],
-                },
-                Instruction::Primitive {
-                    dst: 5,
-                    op: Primitive::ArrayFinishDrained,
-                    args: vec![1],
-                },
-                Instruction::Return { src: Some(4) },
-            ],
-            entry_function: None,
-        };
-
-        assert_eq!(
-            Vm::from_artifact(artifact)
-                .unwrap()
-                .run(0, vec![Value::array(U64, [Value::U64(42)]), Value::U64(0)])
-                .unwrap(),
-            Value::U64(42)
-        );
-    }
-
-    #[test]
-    fn finish_drained_faults_without_destroying_a_resident_element() {
-        let mut types = Type::predefined();
-        types[U64 as usize] = Type::U64.restricted(false, false);
-        types.push(Type::Array { element: U64 });
-        let artifact = Artifact {
-            required_features: 1 | (1 << 7),
-            types,
-            constants: vec![],
-            imports: vec![],
-            protocols: vec![],
-            handler_defs: vec![],
-            cleanups: vec![],
-            exports: vec![],
-            drop_glue: vec![],
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "finish_resident".into(),
-                params: vec![19],
-                return_type: UNIT,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, 19, UNIT],
-                code_start: 0,
-                code_len: 2,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Primitive {
-                    dst: 2,
-                    op: Primitive::ArrayFinishDrained,
-                    args: vec![1],
-                },
-                Instruction::Return { src: Some(2) },
-            ],
-            entry_function: None,
-        };
-        let input = Value::array(U64, [Value::U64(42)]);
-        let Value::Array(storage) = &input else {
-            unreachable!()
-        };
-        let retained = storage.clone();
-
-        let error = Vm::from_artifact(artifact)
-            .unwrap()
-            .run(0, vec![input])
-            .unwrap_err();
-        assert_eq!(error, RuntimeError::ArrayNotDrained);
-        assert_eq!(error.category(), RuntimeFaultCategory::PrimitiveTrap);
-        assert_eq!(retained.borrow().slots, [Some(Value::U64(42))]);
-    }
-
-    #[test]
-    fn array_slot_mutation_reserve_pop_and_bytes_conversion_follow_g1() {
-        let mut types = Type::predefined();
-        types.push(Type::Array { element: U64 });
-        types.push(Type::RefUnique { referent: 19 });
-        types.push(Type::RefShared { referent: 19 });
-        types.push(Type::Array { element: U8 });
-        let artifact = image(Artifact {
-            types,
-            ..Artifact::default()
-        });
-        let array = primitive(
-            &artifact,
-            19,
-            Primitive::ArrayNew,
-            &[Value::U64(1), Value::U64(42)],
-        )
-        .unwrap();
-        let Value::Array(storage) = &array else {
-            panic!("array.new returned a non-array")
-        };
-        let unique = || Value::Reference {
-            referent_type: 19,
-            unique: true,
-            target: ReferenceTarget::Array(storage.clone()),
-        };
-        let shared = || Value::Reference {
-            referent_type: 19,
-            unique: false,
-            target: ReferenceTarget::Array(storage.clone()),
-        };
-        assert_eq!(
-            primitive(
-                &artifact,
-                U64,
-                Primitive::ArrayGetMove,
-                &[unique(), Value::U64(0)]
-            ),
-            Ok(Value::U64(42))
-        );
-        assert_eq!(
-            primitive(
-                &artifact,
-                UNIT,
-                Primitive::ArraySetMove,
-                &[unique(), Value::U64(0), Value::U64(9)]
-            ),
-            Ok(Value::Unit)
-        );
-        assert_eq!(
-            primitive(
-                &artifact,
-                U64,
-                Primitive::ArrayGetCopy,
-                &[shared(), Value::U64(0)]
-            ),
-            Ok(Value::U64(9))
-        );
-        primitive(
-            &artifact,
-            UNIT,
-            Primitive::ArrayPushMove,
-            &[unique(), Value::U64(10)],
-        )
-        .unwrap();
-        primitive(
-            &artifact,
-            UNIT,
-            Primitive::ArrayReserve,
-            &[unique(), Value::U64(10)],
-        )
-        .unwrap();
-        assert_eq!(
-            primitive(&artifact, USIZE, Primitive::ArrayCapacity, &[shared()]),
-            Ok(Value::U64(16))
-        );
-        assert_eq!(
-            primitive(&artifact, U64, Primitive::ArrayPopMove, &[unique()]),
-            Ok(Value::U64(10))
-        );
-
-        let backing: Rc<[u8]> = vec![1, 2, 3].into();
-        let bytes = Value::Bytes(backing.clone());
-        let byte_array = primitive(&artifact, 22, Primitive::BytesToArray, &[bytes]).unwrap();
-        let Value::Array(storage) = &byte_array else {
-            panic!("BytesToArray returned a non-Array value")
-        };
-        assert_eq!(storage.borrow().logical_capacity, 3);
-        assert!(storage.borrow().packed_bytes.is_some());
-        let byte_unique = Value::Reference {
-            referent_type: 22,
-            unique: true,
-            target: ReferenceTarget::Array(storage.clone()),
-        };
-        assert_eq!(
-            primitive(&artifact, U64, Primitive::ArrayGetMove, &[byte_unique.clone(), Value::U64(0)]),
-            Ok(Value::U64(1))
-        );
-        assert_eq!(
-            primitive(&artifact, UNIT, Primitive::ArraySetMove, &[byte_unique, Value::U64(0), Value::U64(9)]),
-            Ok(Value::Unit)
-        );
-        assert_eq!(backing.as_ref(), &[1, 2, 3]);
-        assert_eq!(
-            primitive(
-                &artifact,
-                BYTES,
-                Primitive::BytesFromArrayMove,
-                &[byte_array]
-            ),
-            Ok(Value::Bytes(vec![9, 2, 3].into()))
         );
     }
 
@@ -8950,113 +8278,6 @@ mod tests {
         let resolved = reference_array(&projected, true).unwrap();
         assert!(ArenaObject::ptr_eq(&resolved, &retained));
         assert_eq!(resolved.borrow().slots, [Some(Value::U64(42))]);
-    }
-
-    #[test]
-    fn array_copy_primitives_structurally_copy_aggregate_elements() {
-        let mut types = Type::predefined();
-        types.push(Type::Tuple {
-            fields: vec![U64],
-            copy: true,
-        });
-        types.push(Type::Array { element: 19 });
-        types.push(Type::RefShared { referent: 20 });
-        let artifact = image(Artifact {
-            types,
-            ..Artifact::default()
-        });
-        let fill = Value::aggregate(19, [Value::U64(7)]);
-        let array = primitive(
-            &artifact,
-            20,
-            Primitive::ArrayNew,
-            &[Value::U64(2), fill.clone()],
-        )
-        .unwrap();
-        let Value::Array(storage) = &array else {
-            panic!("array.new returned a non-array")
-        };
-        let first = storage.borrow().slots[0].as_ref().unwrap().clone();
-        let second = storage.borrow().slots[1].as_ref().unwrap().clone();
-        let (Value::Aggregate(fill), Value::Aggregate(first), Value::Aggregate(second)) =
-            (&fill, &first, &second)
-        else {
-            panic!("aggregate array elements")
-        };
-        assert!(!ArenaObject::ptr_eq(fill, first));
-        assert!(!ArenaObject::ptr_eq(first, second));
-        first.borrow_mut().fields[0] = Some(Value::U64(9));
-        assert_eq!(second.borrow().fields[0], Some(Value::U64(7)));
-
-        let copied = primitive(
-            &artifact,
-            19,
-            Primitive::ArrayGetCopy,
-            &[
-                Value::Reference {
-                    referent_type: 20,
-                    unique: false,
-                    target: ReferenceTarget::Array(storage.clone()),
-                },
-                Value::U64(1),
-            ],
-        )
-        .unwrap();
-        let Value::Aggregate(copied) = copied else {
-            panic!("array.get_copy returned a non-aggregate")
-        };
-        assert!(!ArenaObject::ptr_eq(&copied, second));
-        copied.borrow_mut().fields[0] = Some(Value::U64(11));
-        assert_eq!(second.borrow().fields[0], Some(Value::U64(7)));
-    }
-
-    #[test]
-    fn hostile_array_length_traps_before_allocating() {
-        let mut types = Type::predefined();
-        types.push(Type::Array { element: U64 });
-        let artifact = Artifact {
-            types,
-            reference_return_contracts: vec![],
-            functions: vec![Function {
-                flags: 0,
-                name: "huge_array".into(),
-                params: vec![USIZE, U64],
-                return_type: 19,
-                outward_protocols: vec![],
-                receiver_mode: None,
-                register_types: vec![UNIT, USIZE, U64, 19],
-                code_start: 0,
-                code_len: 2,
-                label_slot_count: 0,
-            }],
-            code: vec![
-                Instruction::Primitive {
-                    dst: 3,
-                    op: Primitive::ArrayNew,
-                    args: vec![1, 2],
-                },
-                Instruction::Return { src: Some(3) },
-            ],
-            ..Artifact::default()
-        };
-        assert_eq!(
-            Vm::from_artifact(artifact)
-                .unwrap()
-                .run(0, vec![Value::U64(u64::MAX), Value::U64(1)]),
-            Err(RuntimeError::AllocationOverflow)
-        );
-        assert_eq!(
-            RuntimeError::AllocationOverflow.category(),
-            RuntimeFaultCategory::PrimitiveTrap
-        );
-        assert_eq!(
-            checked_output_bytes::<u8>(MAX_PRIMITIVE_ALLOCATION_BYTES + 1),
-            Err(RuntimeError::AllocationLimit)
-        );
-        assert_eq!(
-            RuntimeError::AllocationLimit.category(),
-            RuntimeFaultCategory::MemoryLimit
-        );
     }
 
     #[test]
@@ -11387,7 +10608,6 @@ mod tests {
             element_type: I64,
             packed_bytes: None,
             slots: vec![None, Some(Value::I64(1))],
-            logical_capacity: 2,
         }));
         let aggregate = Value::aggregate(20, [array]);
         let ended_borrow_place = SlotStore::default().insert(Some(Value::I64(7))).unwrap();
