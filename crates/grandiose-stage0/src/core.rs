@@ -667,6 +667,10 @@ pub enum CoreKind {
     Completion {
         computation: CoreId,
         clauses: Vec<CoreCompletionClause>,
+        /// This dispatch belongs to the directly wrapped operation handler,
+        /// whose full-control clauses bypass normal-completion dispatch.
+        /// A distinct outer completion must observe the inner handler result.
+        handles_operations: bool,
     },
     /// A call to a compiler-owned primitive implementation.  Surface
     /// operators either elaborate to a source-selected trait method or this
@@ -823,6 +827,15 @@ impl TypedBody {
             for child in core_children(&expression.kind) {
                 check(child);
             }
+            if let CoreKind::Completion { computation, handles_operations: true, .. } = &expression.kind
+                && !self.expressions.get(computation.0 as usize)
+                    .is_some_and(|expression| matches!(expression.kind, CoreKind::Handle { .. }))
+            {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4183", span: expression.span,
+                    message: "Typed Core completion is not attached to its direct operation handler".into(),
+                });
+            }
             if type_contains_inference(&expression.ty)
                 || core_metadata_contains_inference(&expression.kind)
             {
@@ -962,6 +975,7 @@ impl TypedBody {
                 CoreKind::Completion {
                     computation,
                     clauses,
+                    ..
                 } => {
                     pending.push((*computation, allowed));
                     pending.extend(clauses.iter().map(|clause| (clause.body, false)));
@@ -1609,8 +1623,10 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                handles_operations,
             } => {
                 self.bytes(b"completion");
+                self.bytes(&[*handles_operations as u8]);
                 self.id(*computation);
                 self.bytes(&(clauses.len() as u64).to_le_bytes());
                 for clause in clauses {
@@ -1698,6 +1714,7 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         CoreKind::Completion {
             computation,
             clauses,
+            ..
         } => std::iter::once(*computation)
             .chain(clauses.iter().map(|clause| clause.body))
             .collect(),
@@ -1780,6 +1797,7 @@ fn completion_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<Stri
     let CoreKind::Completion {
         computation,
         clauses,
+        ..
     } = kind
     else {
         return None;
@@ -3244,6 +3262,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            pending_callable_bounds: vec![],
             allow_rigid_trait_arguments: false,
         };
         let expected_result = signatures
@@ -3524,6 +3543,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            pending_callable_bounds: vec![],
             allow_rigid_trait_arguments: true,
         };
         elaborator.declared_effects =
@@ -3641,6 +3661,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            pending_callable_bounds: vec![],
             allow_rigid_trait_arguments: false,
         };
         let expected = match signatures.definitions.get(&definition.key) {
@@ -3757,6 +3778,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            pending_callable_bounds: vec![],
             allow_rigid_trait_arguments: false,
         };
         let root = elaborator.expression_expected(body.root, None);
@@ -3994,6 +4016,14 @@ impl ResolvedHandlerClause {
     }
 }
 
+struct PendingCallableBound {
+    subject: Type,
+    relation: crate::ElaboratedTraitReference,
+    type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
+    effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+    span: Span,
+}
+
 struct Elaborator<'a> {
     unsafe_context: bool,
     unsafe_scopes: std::collections::BTreeSet<CoreId>,
@@ -4085,6 +4115,9 @@ struct Elaborator<'a> {
     /// tracked separately from source nominal definitions: a source path can
     /// never resolve to one of these identities.
     generated_environment_types: std::collections::BTreeSet<DefKey>,
+    /// Obligations whose subject has no shape yet remain live until the
+    /// enclosing inference island is closed. Zonk alone proves no Fn bound.
+    pending_callable_bounds: Vec<PendingCallableBound>,
     /// Only an implementation body may use its selected implementation
     /// evidence to reduce projections carrying rigid trait arguments.
     allow_rigid_trait_arguments: bool,
@@ -7783,6 +7816,7 @@ impl Elaborator<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                ..
             } => {
                 self.collect_captures(*computation, locals, captures);
                 for clause in clauses {
@@ -7873,6 +7907,35 @@ impl Elaborator<'_> {
     /// can help elaboration but cannot escape to PlaceFlow, MIR, or caches.
     fn seal_types(&mut self) {
         self.inference.finish_body_lifetimes();
+        let mut pending = std::mem::take(&mut self.pending_callable_bounds);
+        while !pending.is_empty() {
+            let previous = pending.len();
+            for bound in pending {
+                self.check_intrinsic_callable_bindings(
+                    vec![(bound.subject, bound.relation)],
+                    bound.type_bindings,
+                    bound.effect_bindings,
+                    bound.span,
+                    true,
+                );
+            }
+            pending = std::mem::take(&mut self.pending_callable_bounds);
+            // A solved Output/input equality can expose the shape needed by
+            // an earlier obligation. Retry while at least one was discharged;
+            // no-progress subjects are ambiguous, never guessed callables.
+            if pending.len() == previous {
+                for bound in pending {
+                    self.check_intrinsic_callable_bindings(
+                        vec![(bound.subject, bound.relation)],
+                        bound.type_bindings,
+                        bound.effect_bindings,
+                        bound.span,
+                        false,
+                    );
+                }
+                break;
+            }
+        }
         for index in 0..self.expressions.len() {
             let span = self.expressions[index].span;
             let ty = self.expressions[index].ty.clone();
@@ -11922,7 +11985,7 @@ impl Elaborator<'_> {
         if completion_clauses.is_empty() {
             handler
         } else {
-            self.completion_handle_core(handler, &completion_clauses, expected, span)
+            self.completion_handle_core(handler, &completion_clauses, expected, span, true)
         }
     }
     /// Normal-completion dispatch is a distinct Core node.  Keeping its
@@ -11937,7 +12000,7 @@ impl Elaborator<'_> {
         span: Span,
     ) -> CoreId {
         let subject = self.expression(computation);
-        self.completion_handle_core(subject, clauses, expected, span)
+        self.completion_handle_core(subject, clauses, expected, span, false)
     }
 
     fn completion_handle_core(
@@ -11946,6 +12009,7 @@ impl Elaborator<'_> {
         clauses: &[HandlerClause],
         expected: Option<Type>,
         span: Span,
+        handles_operations: bool,
     ) -> CoreId {
         // Structural value patterns contribute ordinary type constraints.
         // A polymorphic initializer may leave an uninhabited variant's type
@@ -12165,7 +12229,13 @@ impl Elaborator<'_> {
                 "completion arms do not cover every value; add a fallback or cover every finite constructor",
             );
         }
-        let result = if core_clauses.iter().all(|clause|
+        let operation_can_finish = handles_operations && matches!(
+            &self.expressions[subject.0 as usize].kind,
+            CoreKind::Handle { clauses, .. } if clauses.iter().any(|clause|
+                !matches!(clause.resumption, CoreHandlerResumption::Tail { .. })
+                    && self.expressions[clause.body.0 as usize].ty != Type::Never)
+        );
+        let result = if !operation_can_finish && core_clauses.iter().all(|clause|
             matches!(self.expressions[clause.body.0 as usize].ty, Type::Never)) {
             Type::Never
         } else { result };
@@ -12173,6 +12243,7 @@ impl Elaborator<'_> {
             CoreKind::Completion {
                 computation: subject,
                 clauses: core_clauses,
+                handles_operations,
             },
             result,
             span,
@@ -13363,6 +13434,7 @@ impl Elaborator<'_> {
             signature.where_associated_type_bindings.clone(),
             signature.where_associated_effect_bindings.clone(),
             span,
+            true,
         );
         self.check_nonintrinsic_associated_bindings(
             signature.where_associated_type_bindings,
@@ -13705,19 +13777,47 @@ impl Elaborator<'_> {
         type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
         effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
         span: Span,
+        defer_unresolved: bool,
     ) {
         for (subject, relation) in bounds {
             if !crate::is_intrinsic_callable_trait(&relation) {
                 continue;
             }
-            let Ok(Type::Callable {
+            let resolved = self.inference.resolve(subject.clone());
+            if matches!(resolved, Type::Infer(_)) {
+                if defer_unresolved {
+                    self.pending_callable_bounds.push(PendingCallableBound {
+                        subject,
+                        relation,
+                        type_bindings: type_bindings.clone(),
+                        effect_bindings: effect_bindings.clone(),
+                        span,
+                    });
+                } else {
+                    self.error(span, "G4141", "cannot prove `Fn` evidence for an unresolved argument type");
+                    self.recovered = true;
+                }
+                continue;
+            }
+            let Type::Callable {
                 safety,
                 parameters,
                 result,
                 effects,
                 ..
-            }) = self.inference.zonk(subject.clone())
+            } = resolved
             else {
+                // A terminal/recovered argument never supplies a runtime value.
+                // Every other non-structural callable needs exact lexical
+                // evidence; skipping it admits scalars as generic callbacks.
+                if !matches!(resolved, Type::Error | Type::Never)
+                    && !self.ambient_intrinsic_callable_bound_proves(
+                        &resolved, &relation, &type_bindings, &effect_bindings,
+                    )
+                {
+                    self.error(span, "G4105", "argument does not supply the required `Fn` evidence");
+                    self.recovered = true;
+                }
                 continue;
             };
             if safety != crate::Safety::Safe {
@@ -13738,12 +13838,7 @@ impl Elaborator<'_> {
                     continue;
                 }
             };
-            let inputs = inputs
-                .iter()
-                .cloned()
-                .map(|input| self.inference.zonk(input))
-                .collect::<Result<Vec<_>, _>>();
-            if inputs.as_ref().is_ok_and(|inputs| *inputs != parameters) {
+            if self.inference.unify(Type::Tuple(inputs), Type::Tuple(parameters)).is_err() {
                 self.error(
                     span,
                     "G4166",
@@ -13800,6 +13895,44 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
+    }
+
+    fn ambient_intrinsic_callable_bound_proves(
+        &mut self,
+        subject: &Type,
+        relation: &crate::ElaboratedTraitReference,
+        type_bindings: &[crate::ElaboratedAssociatedTypeBinding],
+        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
+    ) -> bool {
+        let Ok(arguments) = relation.arguments.iter().cloned()
+            .map(|argument| self.inference.zonk_generic_argument(argument))
+            .collect::<Result<Vec<_>, _>>() else { return false; };
+        let required = crate::ElaboratedTraitReference {
+            definition: relation.definition,
+            arguments,
+        };
+        if !self.ambient_trait_solver_assumptions().iter()
+            .any(|goal| goal.subject == *subject && goal.relation == required)
+        {
+            return false;
+        }
+        for binding in type_bindings.iter().filter(|binding| binding.relation == *relation) {
+            let binding_subject = self.inference.resolve(binding.subject.clone());
+            if binding_subject != *subject { continue; }
+            let Some((subject, relation, arguments, value)) = self.zonk_associated_type_binding(binding) else { return false; };
+            if !self.ambient_associated_type_binding_proves(binding, &subject, &relation, &arguments, &value) {
+                return false;
+            }
+        }
+        for binding in effect_bindings.iter().filter(|binding| binding.relation == *relation) {
+            let binding_subject = self.inference.resolve(binding.subject.clone());
+            if binding_subject != *subject { continue; }
+            let Some((subject, relation, arguments, value)) = self.zonk_associated_effect_binding(binding) else { return false; };
+            if !self.ambient_associated_effect_binding_proves(binding, &subject, &relation, &arguments, &value) {
+                return false;
+            }
+        }
+        true
     }
     fn check_intrinsic_runs_in_bindings(
         &mut self,

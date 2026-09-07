@@ -177,7 +177,7 @@ impl OwnershipMir {
                         ));
                     }
                 } else if !matches!(ty, Type::Generic(_) | Type::Projection { .. }) {
-                    return Err(invalid("ownership invocation lacks a callable contract"));
+                    return Err(invalid(&format!("ownership invocation lacks a callable contract in {:?} for value {}: {ty:?}", self.definition, callee.0)));
                 }
                 if let Some(target) = continuation
                     && self.blocks[target.0 as usize].parameters != vec![*result]
@@ -280,9 +280,9 @@ impl OwnershipMir {
             }
         };
         if !valid {
-            return Err(invalid(
-                "dynamic ownership edge disagrees with its delimiter contract",
-            ));
+            return Err(invalid(&format!(
+                "dynamic ownership edge disagrees with its delimiter contract: {transfer:?}",
+            )));
         }
         Ok(())
     }

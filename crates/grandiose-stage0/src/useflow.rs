@@ -866,6 +866,7 @@ impl Analyzer<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                ..
             } => {
                 let computation_id = computation;
                 let computation = self.expression(computation_id, environment);
@@ -2603,6 +2604,7 @@ mod tests {
                 CoreExpr {
                     kind: CoreKind::Completion {
                         computation: CoreId(8),
+                        handles_operations: false,
                         clauses: vec![
                             CoreCompletionClause {
                                 pattern: CorePattern::Literal("true".into()),

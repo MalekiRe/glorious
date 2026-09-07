@@ -1849,6 +1849,7 @@ pub enum RuntimeOperation {
         resume_type: Type,
         continuation: MirContinuationPolicy,
         target: MirBlockId,
+        replay_owned: Vec<MirLocal>,
     },
     ClaimEffectPayloads { payloads: Vec<MirLocal> },
     UninstallHandler,
@@ -2596,6 +2597,7 @@ impl RuntimeOperation {
                 resume_type,
                 continuation,
                 target,
+                replay_owned: vec![],
             },
             crate::MirInstruction::ClaimEffectPayloads { payloads } => Self::ClaimEffectPayloads { payloads },
             crate::MirInstruction::UninstallHandler => Self::UninstallHandler,
@@ -3177,6 +3179,7 @@ impl RuntimeOperation {
                 resume_type,
                 continuation,
                 target,
+                ..
             } => crate::MirInstruction::InstallHandler {
                 site,
                 effect,

@@ -377,6 +377,7 @@ impl Analyzer<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                ..
             } => {
                 let computation = self.value(computation);
                 let incoming = self.values.clone();

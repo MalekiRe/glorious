@@ -33,6 +33,7 @@ use crate::MemoryPrimitive;
 mod native_memory;
 mod native_bridge;
 mod native_storage;
+mod replay;
 pub use native_bridge::{
     VmNativeAbi, VmNativeCall, VmNativeCallback, VmNativeImport, VmNativeImports,
     VmNativeLayout, VmNativeLayoutField, VmNativeLayoutShape, VmNativeResidentContract, VmNativeStatus,
@@ -772,6 +773,7 @@ pub enum VmInstruction {
         resume_type: VmType,
         continuation: VmContinuationPolicy,
         target: u32,
+        replay_owned: Vec<u32>,
     },
     ClaimEffectPayloads { payloads: Vec<u32> },
     /// Install one lexical handler frame. The frame is active while its
@@ -1178,7 +1180,7 @@ impl VmInstruction {
             Self::Perform { dst, effect, effect_arguments, operation, arguments } =>
                 Self::PerformOwned { dst, effect, effect_arguments, operation, arguments },
             Self::InstallHandler { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target } =>
-                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target },
+                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target, replay_owned: vec![] },
             value => value,
         }
     }
@@ -2148,7 +2150,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 106 seals whole-frame destruction plans for abandoned execution.
 /// Schema 107 makes call/effect carrier consumption and handler payload
 /// claims explicit; legacy fixture opcodes keep their original meanings.
-pub const STAGE0_VM_SCHEMA: u32 = 107;
+pub const STAGE0_VM_SCHEMA: u32 = 108;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3280,11 +3282,20 @@ fn reachable_return_values(instructions: &[VmInstruction]) -> Vec<u32> {
             }
             VmInstruction::Trap
             | VmInstruction::Resume { .. }
-            | VmInstruction::Forward
-            | VmInstruction::Cancel => {}
+            | VmInstruction::ResumeSnapshot { .. }
+            | VmInstruction::Forward => {}
             VmInstruction::Jump { target }
-            | VmInstruction::MakeLabel { target, .. }
             | VmInstruction::Leave { target, .. } => pending.push(*target),
+            // These instructions register a dynamic entry and then continue
+            // normally. Either continuation can eventually return: a terminal
+            // perform in the protected computation does not make its handler's
+            // returning clause unreachable.
+            VmInstruction::MakeLabel { target, .. }
+            | VmInstruction::InstallHandler { target, .. }
+            | VmInstruction::InstallHandlerOwned { target, .. } => {
+                pending.push(*target);
+                pending.push(pc.saturating_add(1));
+            }
             VmInstruction::BranchBool {
                 then_target,
                 else_target,
@@ -5250,7 +5261,16 @@ impl<'a> Decoder<'a> {
                     },
                     target: self.u32()?,
                 };
-                Ok(if opcode == 209 { instruction.with_owned_effect_payloads() } else { instruction })
+                if opcode == 209 {
+                    let count = self.count("replay-owned roots", MAX_DECODE_REGISTERS)?;
+                    let mut roots = Vec::with_capacity(count);
+                    for _ in 0..count { roots.push(self.u32()?); }
+                    let mut instruction = instruction.with_owned_effect_payloads();
+                    if let VmInstruction::InstallHandlerOwned { replay_owned, .. } = &mut instruction {
+                        *replay_owned = roots;
+                    }
+                    Ok(instruction)
+                } else { Ok(instruction) }
             }
             210 => {
                 let count = self.count("claimed effect payloads", MAX_DECODE_REGISTERS)?;
@@ -9640,6 +9660,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 resume_type,
                 continuation,
                 target,
+                ..
             }
             | VmInstruction::InstallHandler {
                 effect,
@@ -9652,6 +9673,14 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
             } => {
                 if matches!(continuation, VmContinuationPolicy::Replay { uses } if *uses < 2) {
                     return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                if let VmInstruction::InstallHandlerOwned { replay_owned, .. } = instruction {
+                    if replay_owned.windows(2).any(|pair| pair[0] >= pair[1])
+                        || (!replay_owned.is_empty() && !continuation.is_replay())
+                    {
+                        return Err(VmArtifactError::HandlerStateMismatch);
+                    }
+                    for root in replay_owned { register_type(function, *root)?; }
                 }
                 validate_vm_type(resume_type)?;
                 // Source `!` is represented by the VM's Unit leaf. A
@@ -9767,6 +9796,9 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     }
                 };
                 let replaying = frame.continuation.is_replay();
+                if frame.owned_payloads {
+                    states.registers[*value as usize] = Some(false);
+                }
                 for continuation in continuations {
                     let mut resumed_handlers = states.handlers.clone();
                     resumed_handlers.last_mut().unwrap().payload_claim = None;
@@ -9823,6 +9855,9 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 // The destination ABI is checked at the completion boundary,
                 // not against the operation parameter or enclosing function.
                 let result = register_type(function, *dst)?;
+                if frame.owned_payloads {
+                    states.registers[*value as usize] = Some(false);
+                }
                 let resumption_return_result = vec![(frame.id, result)];
                 let mut resumed_handlers = states.handlers.clone();
                 resumed_handlers.last_mut().unwrap().payload_claim = None;
@@ -9941,6 +9976,9 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 // after the captured frame, then reinstates precisely the
                 // frames saved with its continuation. This is the verifier
                 // counterpart of the VM's deep-handler restoration rule.
+                if frame.owned_payloads {
+                    states.registers[*value as usize] = Some(false);
+                }
                 let prefix = states.handlers[..=index].to_vec();
                 for continuation in continuations {
                     let mut resumed_handlers = prefix.clone();
@@ -11831,6 +11869,8 @@ struct RuntimeHandlerFrame {
     continuation: VmContinuationPolicy,
     target: u32,
     owned_payloads: bool,
+    /// Source allocations and SSA carriers already outside this delimiter.
+    shared_registers: BTreeMap<u32, Option<u64>>,
     suspended: Option<RuntimeContinuation>,
 }
 
@@ -11846,6 +11886,10 @@ struct RuntimeRegisters {
     native_homes: BTreeMap<u32, Arc<native_storage::NativeHome>>,
     pending_native: Vec<u32>,
     capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
+    /// A replay of an active callback can own copied capture slots without
+    /// owning its outer callable. These slots use the same selected cleanup
+    /// as an ordinary environment instead of being returned to that outer one.
+    detached_captures: bool,
 }
 
 impl RuntimeRegisters {
@@ -14512,6 +14556,10 @@ fn execute(
         registers.instruction_result(pc);
         let consumes_arguments = instruction.consumed_arguments().is_some();
         let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
+        let replay_owned = match &instruction {
+            VmInstruction::InstallHandlerOwned { replay_owned, .. } => replay_owned.clone(),
+            _ => vec![],
+        };
         if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
             && !allowed_before_payload_claim(&instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
@@ -15403,6 +15451,7 @@ fn execute(
                     continuation,
                     target,
                     owned_payloads,
+                    shared_registers: replay::shared_registers(&registers, owned_payloads && continuation.is_replay(), &replay_owned, budget)?,
                     suspended: None,
                 })
             }
@@ -15455,6 +15504,9 @@ fn execute(
                 if frame.continuation.is_replay() {
                     frame.suspended = None;
                 }
+                if frame.owned_payloads {
+                    registers.retire_call_arguments(&[value]);
+                }
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -15487,7 +15539,10 @@ fn execute(
                 }
                 let replaying = frame.continuation.is_replay();
                 let continuation = if replaying {
-                    frame.suspended.clone()
+                    if frame.owned_payloads {
+                        frame.suspended.as_ref().map(|saved| replay::fork(saved, frame.call_depth,
+                            &frame.shared_registers, &mut next_storage_id, budget)).transpose()?
+                    } else { frame.suspended.clone() }
                 } else {
                     frame.suspended.take()
                 }
@@ -15496,6 +15551,11 @@ fn execute(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 budget.reserve_allocation(registers.len())?;
+                // The clause snapshot must not retain the carrier just
+                // transferred to the resumed computation.
+                if frame.owned_payloads {
+                    registers.retire_call_arguments(&[value]);
+                }
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
@@ -15571,15 +15631,16 @@ fn execute(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = match handlers[index].continuation {
-                    VmContinuationPolicy::Consume => handlers[index].suspended.take(),
-                    VmContinuationPolicy::Replay { .. } => handlers[index].suspended.clone(),
+                    VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
+                        handlers[index].suspended.take()
+                    }
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
                 }
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if handlers[index].continuation.is_replay() {
-                    handlers[index].suspended = None;
+                if handlers[index].owned_payloads {
+                    registers.retire_call_arguments(&[value]);
                 }
                 // Resumption is a non-local transfer. Frames installed after
                 // the captured frame belong to the abandoned clause path;
@@ -16801,6 +16862,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             resume_type,
             continuation,
             target,
+            ..
         }
         | VmInstruction::InstallHandler {
             effect,
@@ -16829,6 +16891,10 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 VmContinuationPolicy::Terminal => output.push(2),
             }
             output.extend_from_slice(&target.to_le_bytes());
+            if let VmInstruction::InstallHandlerOwned { replay_owned, .. } = value {
+                output.extend_from_slice(&(replay_owned.len() as u64).to_le_bytes());
+                for root in replay_owned { output.extend_from_slice(&root.to_le_bytes()); }
+            }
         }
         VmInstruction::ClaimEffectPayloads { payloads } => {
             output.push(210);
@@ -17922,6 +17988,50 @@ fn destroy_program_frame(
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
 ) -> Result<(), VmArtifactError> {
+    destroy_program_frame_except(program, definition, registers, callers, transferred,
+        None, depth, budget, host)
+}
+
+fn release_program_capture_loan(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    registers: &mut RuntimeRegisters,
+    callers: &mut Vec<RuntimeProgramCaller>,
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
+    let detached = registers.detached_captures.then(|| registers.capture_environment.clone()).flatten();
+    registers.detached_captures = false;
+    registers.release_capture_loan(budget)?;
+    let Some(environment) = detached else { return Ok(()); };
+    let Some(destructor) = program.callable_environments.get(&definition)
+        .and_then(|environment| environment.destructor) else { return Ok(()); };
+    budget.reserve_value("detached capture destruction arguments", environment.len())?;
+    let arguments = environment.take().into_iter().map(|value|
+        transfer_call_frame_value(&value, registers, callers, UniqueReferenceTransfer::IntoCallee))
+        .collect::<Result<Vec<_>, _>>()?;
+    budget.reserve_allocation(1)?;
+    callers.push(RuntimeProgramCaller {
+        definition, registers: std::mem::take(registers), pc: 0, return_destination: 0,
+    });
+    execute_program_profiled(program, destructor, &arguments, depth, budget, host,
+        None, false, None, Some(callers))?;
+    *registers = callers.pop().ok_or(VmArtifactError::HandlerStateMismatch)?.registers;
+    Ok(())
+}
+
+fn destroy_program_frame_except(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    registers: &mut RuntimeRegisters,
+    callers: &mut Vec<RuntimeProgramCaller>,
+    transferred: Option<u32>,
+    shared: Option<&BTreeMap<u32, Option<u64>>>,
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
     let function = program.functions.get(&definition)
         .ok_or(VmArtifactError::MissingFunction { definition })?;
     // Header placement and target ABIs were validated before execution.
@@ -17933,6 +18043,7 @@ fn destroy_program_frame(
     for action in actions {
         budget.tick()?;
         if Some(action.owner) == transferred { continue; }
+        if shared.is_some_and(|outer| replay::shared(registers, action.owner, outer)) { continue; }
         if !storage_is_initialized(registers.values[action.owner as usize].as_ref(), &[]) {
             continue;
         }
@@ -17952,7 +18063,9 @@ fn destroy_program_frame(
             None, false, None, Some(callers))?;
         *registers = callers.pop().ok_or(VmArtifactError::HandlerStateMismatch)?.registers;
     }
-    registers.release_capture_loan(budget)?;
+    if shared.is_none() {
+        release_program_capture_loan(program, definition, registers, callers, depth, budget, host)?;
+    }
     Ok(())
 }
 
@@ -17977,6 +18090,7 @@ fn abandon_program_handlers(
         let mut frame = handlers.pop().expect("checked handler suffix");
         if let Some(suspended) = frame.suspended.take() {
             abandon_program_continuation(program, suspended, frame.call_depth,
+                (frame.owned_payloads && frame.continuation.is_replay()).then_some(frame.shared_registers),
                 current, current_callers, depth, budget, host)?;
         }
     }
@@ -17992,6 +18106,7 @@ fn abandon_program_continuation(
     program: &CandidateVmProgram,
     mut suspended: RuntimeContinuation,
     owner_depth: usize,
+    replay_outer: Option<BTreeMap<u32, Option<u64>>>,
     current: &mut RuntimeRegisters,
     current_callers: &mut [RuntimeProgramCaller],
     depth: u32,
@@ -18007,8 +18122,8 @@ fn abandon_program_continuation(
     // recurse on the Rust stack. Every visited edge and saved path is charged.
     budget.reserve_value("abandoned continuation paths", 1)?;
     budget.reserve_allocation(1)?;
-    let mut pending = vec![(suspended, owner_depth)];
-    while let Some((parent, _)) = pending.last_mut() {
+    let mut pending = vec![(suspended, owner_depth, replay_outer)];
+    while let Some((parent, _, _)) = pending.last_mut() {
         if let Some(mut frame) = parent.above.pop() {
             budget.tick()?;
             if let Some(mut child) = frame.suspended.take() {
@@ -18021,11 +18136,12 @@ fn abandon_program_continuation(
                 }
                 budget.reserve_value("abandoned continuation paths", pending.len() + 1)?;
                 budget.reserve_allocation(1)?;
-                pending.push((child, frame.call_depth));
+                pending.push((child, frame.call_depth,
+                    (frame.owned_payloads && frame.continuation.is_replay()).then_some(frame.shared_registers)));
             }
             continue;
         }
-        let (mut finished, owner_depth) = pending.pop().expect("checked pending path");
+        let (mut finished, owner_depth, replay_outer) = pending.pop().expect("checked pending path");
         let saved = finished.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
         while saved.callers.len() > owner_depth {
             budget.tick()?;
@@ -18035,7 +18151,11 @@ fn abandon_program_continuation(
             saved.definition = caller.definition;
             finished.registers = caller.registers;
         }
-        if let Some((parent, _)) = pending.last_mut() {
+        if let Some(outer) = &replay_outer {
+            destroy_program_frame_except(program, saved.definition, &mut finished.registers,
+                &mut saved.callers, None, Some(outer), depth, budget, host)?;
+        }
+        if let Some((parent, _, _)) = pending.last_mut() {
             let parent_program = parent.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
             synchronize_abandoned_source_storage(&finished.registers, &saved.callers,
                 &mut parent.registers, &mut parent_program.callers);
@@ -18137,6 +18257,10 @@ fn execute_program_profiled(
         registers.instruction_result(pc);
         let consumes_arguments = instruction.consumed_arguments().is_some();
         let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
+        let replay_owned = match instruction {
+            VmInstruction::InstallHandlerOwned { replay_owned, .. } => replay_owned.as_slice(),
+            _ => &[],
+        };
         if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
             && !allowed_before_payload_claim(instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
@@ -19057,6 +19181,7 @@ fn execute_program_profiled(
                     continuation: *continuation,
                     target: *target,
                     owned_payloads,
+                    shared_registers: replay::shared_registers(&registers, owned_payloads && continuation.is_replay(), replay_owned, budget)?,
                     suspended: None,
                 });
             }
@@ -19121,6 +19246,9 @@ fn execute_program_profiled(
                     continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
                     budget,
                 )?;
+                if frame.owned_payloads {
+                    registers.retire_call_arguments(&[*value]);
+                }
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -19158,7 +19286,10 @@ fn execute_program_profiled(
                 }
                 let replaying = frame.continuation.is_replay();
                 let continuation = if replaying {
-                    frame.suspended.clone()
+                    if frame.owned_payloads {
+                        frame.suspended.as_ref().map(|saved| replay::fork(saved, frame.call_depth,
+                            &frame.shared_registers, &mut next_storage_id, budget)).transpose()?
+                    } else { frame.suspended.clone() }
                 } else {
                     frame.suspended.take()
                 }
@@ -19172,6 +19303,9 @@ fn execute_program_profiled(
                     continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
                     budget,
                 )?;
+                if frame.owned_payloads {
+                    registers.retire_call_arguments(&[*value]);
+                }
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
@@ -19255,16 +19389,14 @@ fn execute_program_profiled(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = match handlers[index].continuation {
-                    VmContinuationPolicy::Consume => handlers[index].suspended.take(),
-                    VmContinuationPolicy::Replay { .. } => handlers[index].suspended.clone(),
+                    VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
+                        handlers[index].suspended.take()
+                    }
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
                 }
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if handlers[index].continuation.is_replay() {
-                    handlers[index].suspended = None;
-                }
                 // See the standalone-artifact interpreter above: an explicit
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.
@@ -19275,6 +19407,9 @@ fn execute_program_profiled(
                     continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
                     budget,
                 )?;
+                if handlers[index].owned_payloads {
+                    registers.retire_call_arguments(&[*value]);
+                }
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -19388,6 +19523,7 @@ fn execute_program_profiled(
                 };
                 let suspended = frame.suspended.take().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 abandon_program_continuation(program, suspended, frame.call_depth,
+                    (frame.owned_payloads && frame.continuation.is_replay()).then_some(frame.shared_registers),
                     &mut registers, &mut callers, depth, budget, host)?;
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     resumption_returns.clear();
@@ -20510,7 +20646,7 @@ fn execute_program_profiled(
                     pc = return_to_clause.pc;
                     continue;
                 }
-                registers.release_capture_loan(budget)?;
+                release_program_capture_loan(program, definition, &mut registers, &mut callers, depth, budget, host)?;
                 if callers.len() > return_floor {
                     // Ancestor handlers remain dynamically active across a
                     // callee return. Only a handler installed by this frame
@@ -20661,6 +20797,35 @@ impl ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn return_reachability_includes_dynamic_handler_entries() {
+        use super::*;
+        let install = VmInstruction::InstallHandler {
+            effect: DefKey(Digest::of_bytes(b"returning-terminal-handler")),
+            effect_arguments: vec![],
+            operation: 0,
+            payload_destinations: vec![],
+            resume_type: VmType::Unit,
+            continuation: VmContinuationPolicy::Terminal,
+            target: 2,
+        };
+        for install in [install.clone(), install.with_owned_effect_payloads()] {
+            assert_eq!(reachable_return_values(&[
+                install,
+                VmInstruction::Trap,
+                VmInstruction::Return { value: 0 },
+            ]), [0]);
+        }
+        assert!(reachable_return_values(&[
+            VmInstruction::Trap,
+            VmInstruction::Return { value: 0 },
+        ]).is_empty(), "a trap must not reach a syntactically later return");
+        assert_eq!(reachable_return_values(&[
+            VmInstruction::Cancel,
+            VmInstruction::Return { value: 0 },
+        ]), [0], "cancellation continues the clause after abandoning its snapshot");
+    }
+
     #[test]
     fn resumption_storage_sync_preserves_allocations_not_register_spellings() {
         use super::*;

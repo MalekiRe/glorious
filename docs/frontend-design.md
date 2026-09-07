@@ -712,6 +712,14 @@ If callable applicability or eager/callable interpretation remains ambiguous,
 the block is rejected before its body is checked. Diagnostics show the competing
 parameter obligations.
 
+Intrinsic `Fn` obligations require a structural callable or matching lexical
+evidence, including the declared input, output, and effect equalities. A concrete
+non-callable argument is a type error, not a deferred MIR invariant failure.
+Obligations whose subject is still unknown remain live through inference and
+are discharged to a fixed point before Typed Core is sealed; solving an ordinary
+type variable alone does not prove its `Fn` obligation. This checking is shared
+by ordinary calls and source-defined operators, independently of their names.
+
 ### 6.4 Callable relations
 
 For every callable body, capture analysis begins with resolved free-place uses,

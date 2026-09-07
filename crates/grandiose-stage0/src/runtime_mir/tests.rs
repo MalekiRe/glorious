@@ -15,13 +15,122 @@ pub(crate) fn fixture(source: &str) -> RuntimeMir {
     body
 }
 const CALL: &str = "pub fn main(action: () -> i64) -> i64 { action() }";
+const PERFORM: &str = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(42) { Ask::ask(value) with _ => value } }";
+
+#[test]
+fn runtime_rejects_reading_a_consumed_effect_argument() {
+    let mut body = fixture(PERFORM);
+    let dst = MirLocal(body.locals.len() as u32);
+    body.locals.push(MirLocalDecl {
+        ty: Type::Scalar(crate::ScalarType::I64),
+        source: CoreId(u32::MAX),
+    });
+    let mut inserted = false;
+    for block in &mut body.blocks {
+        if let Some((offset, src)) =
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .find_map(|(offset, op)| {
+                    if let RuntimeOperation::Perform { arguments, .. } = op {
+                        Some((offset, arguments[0]))
+                    } else {
+                        None
+                    }
+                })
+        {
+            block
+                .instructions
+                .insert(offset + 1, RuntimeOperation::Copy { dst, src });
+            inserted = true;
+            break;
+        }
+    }
+    assert!(inserted);
+    body.frame = body.derive_frame().unwrap();
+    assert!(body.validate().unwrap_err().contains("dead/uninitialized"));
+}
+
+#[test]
+fn runtime_rejects_reading_a_consumed_resumption_argument() {
+    let mut body = fixture(
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }",
+    );
+    let dst = MirLocal(body.locals.len() as u32);
+    body.locals.push(MirLocalDecl {
+        ty: Type::Scalar(crate::ScalarType::I64),
+        source: CoreId(u32::MAX),
+    });
+    let mut inserted = false;
+    for block in &mut body.blocks {
+        if let Some((offset, src)) =
+            block
+                .instructions
+                .iter()
+                .enumerate()
+                .find_map(|(offset, op)| {
+                    if let RuntimeOperation::ResumeReturn { value, .. } = op {
+                        Some((offset, *value))
+                    } else {
+                        None
+                    }
+                })
+        {
+            block
+                .instructions
+                .insert(offset + 1, RuntimeOperation::Copy { dst, src });
+            inserted = true;
+            break;
+        }
+    }
+    assert!(inserted);
+    body.frame = body.derive_frame().unwrap();
+    assert!(body.validate().unwrap_err().contains("dead/uninitialized"));
+}
+
+#[test]
+fn runtime_saved_frame_excludes_handed_off_effect_owners() {
+    let mut body = fixture(PERFORM);
+    let argument = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .find_map(|op| {
+            if let RuntimeOperation::Perform { arguments, .. } = op {
+                Some(arguments[0])
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let owners = body.control.cleanup_owners.get_or_insert_with(Vec::new);
+    if !owners.contains(&argument) {
+        owners.push(argument);
+    }
+    body.frame = body.derive_frame().unwrap();
+    body.validate().unwrap();
+    let site = body
+        .frame
+        .transfers
+        .iter_mut()
+        .find(|site| matches!(site.kind, RuntimeTransferKind::Perform(_)))
+        .unwrap();
+    assert!(!site.retained.contains(&argument));
+    site.retained.push(argument);
+    assert!(body.validate().unwrap_err().contains("transfer inventory"));
+}
 
 #[test]
 fn runtime_requires_an_explicit_leave_handler_depth() {
     let mut body = fixture("pub fn main() -> i64 { label done { transfer done 42 } }");
     assert!(!body.control.leave_handler_depths.is_empty());
     body.control.leave_handler_depths.clear();
-    assert!(body.validate().unwrap_err().contains("retained-handler contract"));
+    assert!(
+        body.validate()
+            .unwrap_err()
+            .contains("retained-handler contract")
+    );
 }
 
 #[test]

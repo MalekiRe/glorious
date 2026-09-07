@@ -1529,13 +1529,7 @@ impl StageZeroCompiler {
                     &signatures,
                     &fixities,
                 );
-                if core.diagnostics.is_empty() && !core.recovered {
-                    let (generic_kinds, ty) = core.value_initializer_type();
-                    if let Some(pattern) = crate::pattern::initializer_pattern(&core, core.root, &signatures) {
-                        signatures.pattern_values.insert(declaration.key, (ty.clone(), pattern));
-                    }
-                    signatures.freeze_value_initializer(declaration.key, generic_kinds, ty);
-                }
+                signatures.freeze_typed_value_initializer(declaration.key, &core);
             }
         }
         // `Use` is not ordinary implementation selection: the frozen
@@ -4207,33 +4201,7 @@ fn visible_fixities_for_module(
     index: &DefinitionIndex,
     declarations: &BTreeMap<DefKey, crate::FixityHeader>,
 ) -> FixityTable {
-    let mut table = FixityTable::with_prelude();
-    for (definition, header) in declarations {
-        let path = vec![header.operator.clone()];
-        match index.resolve_path(crate::DefinitionNamespace::Operator, module, &path) {
-            crate::ResolutionState::Resolved(candidate) if candidate == *definition => {
-                table.insert_declared(*definition, header);
-            }
-            crate::ResolutionState::Ambiguous(candidates) if candidates.contains(definition) => {
-                // Prefix and infix positions are distinct declaration slots.
-                // Name resolution returns all visible declarations for this
-                // spelling; only competing fixities in the same position
-                // constitute a grouping ambiguity.
-                let same_position = candidates.iter().filter(|candidate| {
-                    declarations.get(candidate).is_some_and(|candidate|
-                        candidate.form.is_prefix() == header.form.is_prefix())
-                }).count();
-                if same_position == 1 {
-                    table.insert_declared(*definition, header);
-                } else {
-                    table.mark_ambiguous(header);
-                }
-            }
-            _ => {}
-        }
-    }
-    table.freeze();
-    table
+    FixityTable::visible_in_module(module, index, declarations)
 }
 
 /// Body syntax is a request-local frontend product. It includes recovery and

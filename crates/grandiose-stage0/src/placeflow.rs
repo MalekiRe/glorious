@@ -1476,6 +1476,7 @@ impl Analyzer<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                ..
             } => {
                 let mut inside_completion = live_after.clone();
                 for clause in &clauses {
@@ -1798,6 +1799,7 @@ impl Analyzer<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                ..
             } => {
                 self.collect_local_uses(*computation, uses);
                 for clause in clauses {

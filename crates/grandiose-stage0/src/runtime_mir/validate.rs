@@ -162,6 +162,7 @@ impl RuntimeMir {
             }
             let mut unique_loans = BTreeMap::<MirLocal, MirLocal>::new();
             let mut aborts = false;
+            let mut dynamic_entries = Vec::new();
             for instruction in &block.instructions {
                 let destination = destination(instruction);
                 let mut inputs = references(instruction);
@@ -193,6 +194,25 @@ impl RuntimeMir {
                             local.0
                         ));
                     }
+                }
+                // Dynamic clauses and lexical label targets are executable
+                // entries too, even when no ordinary CFG edge reaches them.
+                // Their lexical environment is captured at installation;
+                // dispatch defines the explicit payload destinations.
+                match instruction {
+                    RuntimeOperation::InstallHandler { target, payload_destinations, .. } => {
+                        let mut entry_live = live.clone();
+                        for payload in payload_destinations {
+                            entry_live[payload.0 as usize] = true;
+                        }
+                        dynamic_entries.push((*target, entry_live, storage_live.clone()));
+                    }
+                    RuntimeOperation::MakeLabel { target, destination, .. } => {
+                        let mut entry_live = live.clone();
+                        entry_live[destination.0 as usize] = true;
+                        dynamic_entries.push((*target, entry_live, storage_live.clone()));
+                    }
+                    _ => {}
                 }
                 if let RuntimeOperation::Store { dst, .. } = instruction {
                     let binding = binding_by_local[dst.0 as usize];
@@ -240,21 +260,15 @@ impl RuntimeMir {
                 {
                     unique_loans.insert(*dst, *src);
                 }
-                match instruction {
-                    RuntimeOperation::Call { arguments, .. }
-                    | RuntimeOperation::CallIndirect { arguments, .. }
-                    | RuntimeOperation::HostCall { arguments, .. } => {
-                        let mut outgoing = BTreeSet::new();
-                        for argument in arguments {
-                            if Some(*argument) == destination || !outgoing.insert(*argument) {
-                                return Err(
-                                    "Runtime call aliases a consumed argument carrier".into()
-                                );
-                            }
-                            live[argument.0 as usize] = false;
-                            unique_loans.remove(argument);
-                        }
+                let mut outgoing = BTreeSet::new();
+                for argument in protocol::consumed_carriers(instruction) {
+                    if Some(*argument) == destination || !outgoing.insert(*argument) {
+                        return Err("Runtime transfer aliases a consumed argument carrier".into());
                     }
+                    live[argument.0 as usize] = false;
+                    unique_loans.remove(argument);
+                }
+                match instruction {
                     RuntimeOperation::StorageLive { binding, local } => {
                         if storage_live[binding.0 as usize] {
                             return Err(format!(
@@ -311,6 +325,23 @@ impl RuntimeMir {
                 if matches!(instruction, RuntimeOperation::Abort) {
                     aborts = true;
                     break;
+                }
+            }
+            for (target, edge_live, edge_storage) in dynamic_entries {
+                let target_index = target.0 as usize;
+                if target_index >= entries.len() {
+                    return Err(format!("MIR dynamic edge targets absent block {}", target.0));
+                }
+                let changed_locals = match &mut entries[target_index] {
+                    Some(current) => intersect_liveness(current, &edge_live),
+                    slot => { *slot = Some(edge_live); true }
+                };
+                let changed_storage = match &mut storage_entries[target_index] {
+                    Some(current) => intersect_liveness(current, &edge_storage),
+                    slot => { *slot = Some(edge_storage); true }
+                };
+                if changed_locals || changed_storage {
+                    worklist.push_back(target_index);
                 }
             }
             if aborts {
@@ -1729,9 +1760,16 @@ impl RuntimeMir {
             payload_destinations,
             continuation,
             target,
+            replay_owned,
             ..
         } = instruction
         {
+            if replay_owned.windows(2).any(|pair| pair[0] >= pair[1])
+                || (!replay_owned.is_empty() && !matches!(continuation, MirContinuationPolicy::Replay { .. }))
+            {
+                return Err("MIR replay ownership roots are not canonical".into());
+            }
+            for root in replay_owned { self.local_type(*root)?; }
             if matches!(continuation, MirContinuationPolicy::Replay { uses } if *uses < 2) {
                 return Err("MIR replay handler has fewer than two exact uses".into());
             }

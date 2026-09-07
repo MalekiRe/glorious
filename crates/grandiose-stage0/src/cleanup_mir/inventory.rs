@@ -4,6 +4,60 @@ use super::*;
 type Inventory = BTreeSet<ControlValue>;
 
 impl CleanupMir {
+    /// Roots owned by the protected computation, including outer bindings
+    /// explicitly consumed within it. Mere borrowed access keeps outer storage
+    /// shared; lexical allocation time alone does not determine capture mode.
+    pub(crate) fn replay_owned_roots(&self, handler: ControlHandlerId) -> BTreeSet<ControlValue> {
+        let delimiter = &self.handlers[handler.0 as usize];
+        let mut roots = self
+            .owners
+            .iter()
+            .filter(|owner| self.frame_owner(owner)
+                && !self.aliases.contains_key(&owner.value)
+                && self.below_scope(owner, delimiter.scope))
+            .map(|owner| owner.value)
+            .collect::<BTreeSet<_>>();
+        let mut pending = self
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.terminator.control {
+                CleanupControl::Transfer(ControlTransfer::EnterHandler {
+                    handler: entered,
+                    computation,
+                    ..
+                }) if *entered == handler => Some(computation.target),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(target) = pending.pop() {
+            if !visited.insert(target) {
+                continue;
+            }
+            let block = &self.blocks[target.0 as usize];
+            for flags in block
+                .instructions
+                .iter()
+                .map(|instruction| &instruction.flags)
+                .chain(std::iter::once(&block.terminator.flags))
+                .chain(&block.terminator.edge_flags)
+            {
+                for write in flags.before.iter().chain(&flags.after) {
+                    if !write.initialized {
+                        roots.insert(self.flags[write.flag.0 as usize].place.root());
+                    }
+                }
+            }
+            if matches!(&block.terminator.control,
+                CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
+                    | ControlTransfer::FinishClause { handler: exited, .. }) if *exited == handler)
+            {
+                continue;
+            }
+            pending.extend(block.terminator.successors.iter().map(|edge| edge.target));
+        }
+        roots
+    }
     fn apply_writes(&self, state: &mut Inventory, writes: &[FlagTransition]) {
         for write in writes {
             let place = &self.flags[write.flag.0 as usize].place;
@@ -56,7 +110,7 @@ impl CleanupMir {
             _ => None,
         }
     }
-    fn below_scope(&self, owner: &Owner, boundary: ControlScopeId) -> bool {
+    pub(super) fn below_scope(&self, owner: &Owner, boundary: ControlScopeId) -> bool {
         let Some(mut scope) = owner.scope else {
             return false;
         };
@@ -68,7 +122,7 @@ impl CleanupMir {
         }
         false
     }
-    fn plan_owners(&self, plan: CleanupPlanId) -> Vec<ControlValue> {
+    pub(super) fn plan_owners(&self, plan: CleanupPlanId) -> Vec<ControlValue> {
         self.plans[plan.0 as usize]
             .actions
             .iter()
@@ -78,7 +132,7 @@ impl CleanupMir {
             })
             .collect()
     }
-    pub(super) fn validate_inventories(&self) -> Result<(), CleanupError> {
+    fn incoming_inventories(&self) -> (Vec<Inventory>, Vec<bool>) {
         let mut incoming = vec![Inventory::new(); self.blocks.len()];
         incoming[self.entry.0 as usize].extend(self.parameters.iter().copied());
         let mut reachable = vec![false; self.blocks.len()];
@@ -112,6 +166,42 @@ impl CleanupMir {
                 break;
             }
         }
+        (incoming, reachable)
+    }
+
+    pub(super) fn capture_inventories(&self) -> Vec<Vec<ControlValue>> {
+        let (incoming, reachable) = self.incoming_inventories();
+        incoming.iter().enumerate().map(|(index, state)| {
+            if !reachable[index] { return vec![]; }
+            let state = self.before_transfer(index, state);
+            self.owners.iter().filter(|owner| matches!(owner.kind, OwnerKind::Capture(_))
+                && state.contains(&owner.value)).map(|owner| owner.value).collect()
+        }).collect()
+    }
+
+    pub(super) fn validate_inventories(&self) -> Result<(), CleanupError> {
+        let mut replay_regions = Vec::new();
+        for block in &self.blocks {
+            let CleanupControl::Transfer(ControlTransfer::EnterHandler {
+                handler, computation, ..
+            }) = &block.terminator.control else { continue; };
+            let owner = &self.handlers[handler.0 as usize];
+            if !owner.clauses.iter().any(|clause| clause.contract.as_ref()
+                .is_some_and(|contract| contract.invocation.lower >= 2)) { continue; }
+            let mut region = BTreeSet::new();
+            let mut pending = vec![computation.target];
+            while let Some(target) = pending.pop() {
+                if !region.insert(target) { continue; }
+                let block = &self.blocks[target.0 as usize];
+                if matches!(&block.terminator.control,
+                    CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
+                        | ControlTransfer::FinishClause { handler: exited, .. }) if exited == handler)
+                { continue; }
+                pending.extend(block.terminator.successors.iter().map(|edge| edge.target));
+            }
+            replay_regions.push((owner, region));
+        }
+        let (incoming, reachable) = self.incoming_inventories();
         for (index, block) in self.blocks.iter().enumerate() {
             if !reachable[index] {
                 continue;
@@ -158,6 +248,34 @@ impl CleanupMir {
                 .rev()
                 .filter(|owner| self.frame_owner(owner) && state.contains(&owner.value))
                 .collect::<Vec<_>>();
+            if let CleanupControl::Transfer(ControlTransfer::Perform {
+                effect, operation, ..
+            }) = &block.terminator.control
+            {
+                for (handler, region) in &replay_regions {
+                    if !region.contains(&ControlBlockId(index as u32))
+                        || !handler.clauses.iter().any(|clause| {
+                            &clause.effect == effect
+                                && clause.operation == *operation
+                                && clause
+                                    .contract
+                                    .as_ref()
+                                    .is_some_and(|contract| contract.invocation.lower >= 2)
+                        })
+                    {
+                        continue;
+                    }
+                    if let Some(owner) = expected.iter().find(|owner| {
+                        self.below_scope(owner, handler.scope)
+                            && owner.quantity != Some(crate::Quantity::UNRESTRICTED)
+                    }) {
+                        return Err(CleanupError(format!(
+                            "Cleanup {:?} block {index}: replay cannot duplicate live owner {} without Copy permission",
+                            self.definition, owner.value.0
+                        )));
+                    }
+                }
+            }
             if matches!(
                 block.terminator.control,
                 CleanupControl::Invoke { .. }

@@ -1753,7 +1753,9 @@ impl InferContext {
         }
     }
 
-    fn resolve(&mut self, value: Type) -> Type {
+    /// Expose the outer shape during constraint generation without requiring
+    /// nested type variables to be solved. Persistence boundaries use `zonk`.
+    pub(crate) fn resolve(&mut self, value: Type) -> Type {
         let Type::Infer(variable) = value else {
             return value;
         };

@@ -354,6 +354,36 @@ fn immutable_function_aliases_preserve_direct_calls() {
 }
 
 #[test]
+fn arbitrary_function_callback_chains_use_ordinary_inference() {
+    for count in [2, 8] {
+        let chain = format!("1{}", (2..=count)
+            .map(|value| format!(" follow {{ {value} }}"))
+            .collect::<String>());
+        let source = format!("pub infixl 3 follow; fn follow<A, B, F>(value: A, next: F) -> B where A: Use<[0, 1]>, F: Fn<(), Output = B> {{ next() }} pub fn main() -> i64 {{ {chain} }}");
+        assert_eq!(run(&source), count);
+    }
+}
+
+#[test]
+fn library_and_rejects_a_value_where_its_callback_is_required() {
+    for expression in ["1 == 1 and 2 == 2", "and(true, false)"] {
+        let source = format!("use std::*; pub fn main() -> i64 {{ handle {expression} {{ true => 42; false => 0 }} }}");
+        let Err(ServiceError::Failed(diagnostics)) = compile(&source) else {
+            panic!("noncallable argument was accepted: {source}");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4105"),
+            "{diagnostics:#?}");
+    }
+}
+
+#[test]
+fn distinct_normal_completion_observes_inner_handler_clause_results() {
+    assert_eq!(run("use std::*; effect Stop { stop() -> !; } pub fn main() -> i64 { handle { handle Stop::stop() { Stop::stop() => 42 } } { value => value + 100 } }"), 142);
+    assert_eq!(run("use std::*; effect Stop { stop() -> !; } pub fn main() -> i64 { handle Stop::stop() { value => value + 100, Stop::stop() => 42 } }"), 42);
+    assert_eq!(run("effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { value => transfer done value, Ask::ask(_) => 42 } } }"), 42);
+}
+
+#[test]
 fn reassigned_function_aliases_call_the_current_value() {
     assert_eq!(
         run(

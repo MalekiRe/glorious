@@ -187,6 +187,7 @@ impl ControlMir {
             },
             mapped: BTreeMap::new(),
             active_labels: BTreeMap::new(),
+            active_label_values: BTreeMap::new(),
             active_resumptions: BTreeMap::new(),
             active_handler_clauses: vec![],
             proven_subjects: BTreeMap::new(),
@@ -398,9 +399,12 @@ impl ControlMir {
                 .zip(&target.parameters)
                 .any(|(argument, parameter)| self.ty(*argument).ok() != self.ty(*parameter).ok())
         {
-            return Err(ControlError::Invalid(
-                "edge argument types disagree with parameters".into(),
-            ));
+            return Err(ControlError::Invalid(format!(
+                "edge argument types disagree with parameters at {:?}: arguments {:?}, parameters {:?}",
+                edge.target,
+                edge.arguments.iter().map(|value| (*value, self.ty(*value))).collect::<Vec<_>>(),
+                target.parameters.iter().map(|value| (*value, self.ty(*value))).collect::<Vec<_>>(),
+            )));
         }
         Ok(())
     }
@@ -695,6 +699,7 @@ struct Builder<'a> {
     result: ControlMir,
     mapped: BTreeMap<EvaluationValue, ControlValue>,
     active_labels: BTreeMap<crate::LabelBrand, ControlLabelId>,
+    active_label_values: BTreeMap<crate::LabelBrand, ControlValue>,
     active_resumptions: BTreeMap<String, ControlValue>,
     active_handler_clauses: Vec<(ControlHandlerId, u32)>,
     proven_subjects: BTreeMap<CoreId, ControlValue>,

@@ -229,6 +229,189 @@ fn source_forwarded_effect_packet_has_one_payload_owner_after_a_late_pattern_rej
 }
 
 #[test]
+fn source_resumption_handoff_destroys_its_owned_argument_once() {
+    check_vec_drop_action_with_declarations(r#"{
+        handle receive_probe() {
+            SupplyProbe::supply() with k => k(DropProbe { target: target })
+        };
+        ()
+    }"#, r#"
+        effect SupplyProbe { [1, 1] supply() -> DropProbe; }
+        fn receive_probe() -> i64 / SupplyProbe {
+            let owned = SupplyProbe::supply();
+            0
+        }
+    "#, 1);
+}
+
+#[test]
+fn source_replayed_frames_keep_independent_owned_residents() {
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            let owned = CopyDropProbe { target: target };
+            ReplayTick::tick();
+            let consumed = move owned;
+            0
+        } {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, "effect ReplayTick { [2, 2] tick() -> i64; }", 3);
+    check_vec_drop_action_with_declarations(r#"{
+        let outside = CopyDropProbe { target: target };
+        handle replay_probe(target) {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        let consumed = move outside;
+        ()
+    }"#, r#"
+        effect ReplayTick { [2, 2] tick() -> i64; }
+        fn replay_probe(target: *mut i64) -> i64 / ReplayTick {
+            let owned = CopyDropProbe { target: target };
+            let view = &owned;
+            ReplayTick::tick();
+            let pointer = (*view).target;
+            let consumed = move owned;
+            0
+        }
+    "#, 4);
+}
+
+#[test]
+fn source_replayed_frames_copy_consumed_outer_owners() {
+    check_vec_drop_action_with_declarations(r#"{
+        let outside = CopyDropProbe { target: target };
+        handle {
+            ReplayTick::tick();
+            let consumed = move outside;
+            0
+        } {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, "effect ReplayTick { [2, 2] tick() -> i64; }", 3);
+}
+
+#[test]
+fn source_replay_copies_idle_closure_capture_owners() {
+    check_vec_drop_action(r#"{
+        let owned = CopyDropProbe { target: target };
+        let pending = move (owned) { 42 };
+        pending();
+        ()
+    }"#, 2);
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            let owned = CopyDropProbe { target: target };
+            let pending = move (owned) { 42 };
+            ReplayTick::tick();
+            pending();
+            0
+        } {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, "effect ReplayTick { [2, 2] tick() -> i64; }", 6);
+}
+
+#[test]
+fn source_replay_copies_active_closure_capture_owners() {
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            let owned = CopyDropProbe { target: target };
+            let pending = () -> i64 / ReplayTick {
+                ReplayTick::tick();
+                let consumed = move owned;
+                42
+            };
+            pending();
+            0
+        } {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, "effect ReplayTick { [2, 2] tick() -> i64; }", 6);
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            let owned = CopyDropProbe { target: target };
+            let pending = () -> i64 / ReplayTick {
+                ReplayTick::tick();
+                let retained = owned;
+                42
+            };
+            pending();
+            0
+        } {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, "effect ReplayTick { [2, 2] tick() -> i64; }", 8);
+}
+
+#[test]
+fn source_replay_retires_detached_capture_owners() {
+    check_vec_drop_action_with_declarations(r#"{
+        let owned = CopyDropProbe { target: target };
+        let pending = () -> i64 / ReplayTick {
+            ReplayTick::tick();
+            let retained = owned;
+            42
+        };
+        handle pending() {
+            ReplayTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, "effect ReplayTick { [2, 2] tick() -> i64; }", 6);
+}
+
+#[test]
+fn source_nested_replay_preserves_outer_resident_ownership() {
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            let outer = CopyDropProbe { target: target };
+            handle {
+                let inner = CopyDropProbe { target: target };
+                OuterTick::tick();
+                InnerTick::tick();
+                let consumed = move inner;
+                0
+            } {
+                InnerTick::tick() with k => { k(1); k(2) }
+            };
+            let consumed = move outer;
+            0
+        } {
+            OuterTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, r#"
+        effect OuterTick { [2, 2] tick() -> i64; }
+        effect InnerTick { [2, 2] tick() -> i64; }
+    "#, 10);
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            let outer = CopyDropProbe { target: target };
+            handle {
+                let inner = CopyDropProbe { target: target };
+                InnerTick::tick();
+                let consumed = move inner;
+                0
+            } {
+                InnerTick::tick() with k => { OuterTick::tick(); k(1); k(2) }
+            };
+            let consumed = move outer;
+            0
+        } {
+            OuterTick::tick() with k => { k(1); k(2) }
+        };
+        ()
+    }"#, r#"
+        effect OuterTick { [2, 2] tick() -> i64; }
+        effect InnerTick { [2, 2] tick() -> i64; }
+    "#, 10);
+}
+
+#[test]
 fn source_native_projected_replacement_does_not_drop_a_moved_resident_twice() {
     check_vec_drop_action(r#"{
         let allocation = __g1_memory_allocate(__g1_memory_size_of<DropPair>(), __g1_memory_align_of<DropPair>());
@@ -3435,10 +3618,10 @@ fn source_blake3_compression_preserves_high_chunk_counter_bits() {
         pub fn blake3_compress_fixture(input: Slice<u8>, counter: u64, expected: Slice<u8>) -> i64 {{
             let actual = blake3_compress(blake3_iv(), blake3_block(input, 0, 64), counter, 64, 3);
             let wanted = blake3_block(expected, 0, 32);
-            handle actual.a == wanted.a and actual.b == wanted.b
-                and actual.c == wanted.c and actual.d == wanted.d
-                and actual.e == wanted.e and actual.f == wanted.f
-                and actual.g == wanted.g and actual.h == wanted.h
+            handle actual.a == wanted.a and {{ actual.b == wanted.b }}
+                and {{ actual.c == wanted.c }} and {{ actual.d == wanted.d }}
+                and {{ actual.e == wanted.e }} and {{ actual.f == wanted.f }}
+                and {{ actual.g == wanted.g }} and {{ actual.h == wanted.h }}
             {{ true => 1, false => 0 }}
         }}
     "#, include_str!("../../../stdlib/src/lib.glorious"));
@@ -3451,6 +3634,19 @@ fn source_blake3_compression_preserves_high_chunk_counter_bits() {
     // large counter is compression data, never a fabricated memory address.
     let (results, _) = unsafe { program.run_tuple_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
     assert_eq!(results, vec![1; offsets.len()]);
+}
+
+#[test]
+fn source_long_logical_chains_infer_each_contextual_result() {
+    for count in [2, 8] {
+        let condition = format!("1 == 1{}", (2..=count)
+            .map(|value| format!(" and {{ {value} == {value} }}"))
+            .collect::<String>());
+        let source = format!("use std::*; pub fn main() -> i64 {{ handle {condition} {{ true => 42, false => 0 }} }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
+    }
 }
 
 #[test]

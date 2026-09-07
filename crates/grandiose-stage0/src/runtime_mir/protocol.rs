@@ -58,6 +58,7 @@ pub struct RuntimeTransfer {
     pub kind: RuntimeTransferKind,
     pub arguments: Vec<RuntimeArgument>,
     pub result: Option<MirLocal>,
+    /// Owners remaining in this frame after outgoing carriers are handed off.
     pub retained: Vec<MirLocal>,
     pub cancellation: Vec<MirFrameDrop>,
     pub handler_prefix: Vec<MirHandlerSiteId>,
@@ -237,10 +238,11 @@ impl RuntimeMir {
                     _ => None,
                 };
                 if let Some((kind, arguments, result)) = contract {
+                    let consumed = consumed_carriers(operation);
                     let retained = owners
                         .iter()
                         .copied()
-                        .filter(|local| initialized.contains(local))
+                        .filter(|local| initialized.contains(local) && !consumed.contains(local))
                         .collect::<Vec<_>>();
                     let mut arguments = arguments
                         .into_iter()
@@ -422,15 +424,24 @@ impl RuntimeMir {
     }
 }
 
-fn transition(operation: &RuntimeOperation, initialized: &mut BTreeSet<MirLocal>) {
+pub(super) fn consumed_carriers(operation: &RuntimeOperation) -> &[MirLocal] {
     match operation {
         RuntimeOperation::Call { arguments, .. }
         | RuntimeOperation::CallIndirect { arguments, .. }
-        | RuntimeOperation::HostCall { arguments, .. } => {
-            for argument in arguments {
-                initialized.remove(argument);
-            }
-        }
+        | RuntimeOperation::HostCall { arguments, .. }
+        | RuntimeOperation::Perform { arguments, .. } => arguments,
+        RuntimeOperation::Resume { value, .. }
+        | RuntimeOperation::ResumeReturn { value, .. }
+        | RuntimeOperation::ResumeSnapshot { value, .. } => std::slice::from_ref(value),
+        _ => &[],
+    }
+}
+
+fn transition(operation: &RuntimeOperation, initialized: &mut BTreeSet<MirLocal>) {
+    for argument in consumed_carriers(operation) {
+        initialized.remove(argument);
+    }
+    match operation {
         RuntimeOperation::Move { src, .. }
         | RuntimeOperation::DestroyCallable { value: src, .. }
         | RuntimeOperation::StorageDead { local: src, .. }

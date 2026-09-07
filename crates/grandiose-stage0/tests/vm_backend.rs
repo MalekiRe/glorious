@@ -85,6 +85,7 @@ fn owned_effect_candidate(forward: bool) -> CandidateVmArtifact {
     let install = |payload, target| VmInstruction::InstallHandlerOwned {
         effect, effect_arguments: vec![], operation: 0, payload_destinations: vec![payload],
         resume_type: VmType::I64, continuation: VmContinuationPolicy::Consume, target,
+        replay_owned: vec![],
     };
     let instructions = if forward {
         vec![
@@ -197,6 +198,44 @@ fn owned_effect_packets_reject_missing_duplicate_wrong_and_forwarded_claims() {
     candidate.function.instructions[3] = VmInstruction::Copy { dst: 2, src: 0 };
     candidate.fingerprint = candidate.computed_fingerprint();
     assert!(matches!(decode_and_verify_artifact(&encode_artifact(&candidate)), Err(VmArtifactError::UseAfterMove { register: 0 })));
+}
+
+#[test]
+fn owned_resumption_return_does_not_restore_its_outgoing_argument() {
+    let mut candidate = owned_effect_candidate(false);
+    let VmInstruction::PerformOwned { effect, .. } = candidate.function.instructions[2] else { panic!() };
+    candidate.function.registers = vec![VmType::I64, VmType::I64, VmType::I64, VmType::Bool];
+    candidate.function.instructions = vec![
+        VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
+            payload_destinations: vec![], resume_type: VmType::I64,
+            continuation: VmContinuationPolicy::Consume, target: 5, replay_owned: vec![] },
+        VmInstruction::PerformOwned { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
+        VmInstruction::CompleteHandler { value: 0 },
+        VmInstruction::UninstallHandler,
+        VmInstruction::Return { value: 0 },
+        VmInstruction::ClaimEffectPayloads { payloads: vec![] },
+        VmInstruction::ConstI64 { dst: 1, value: 42 },
+        VmInstruction::ResumeReturn { dst: 2, value: 1 },
+        VmInstruction::IsInitialized { dst: 3, base: 1, fields: vec![] },
+        VmInstruction::BranchBool { condition: 3, then_target: 10, else_target: 11 },
+        VmInstruction::Trap,
+        VmInstruction::CompleteHandler { value: 2 },
+        VmInstruction::UninstallHandler,
+        VmInstruction::Return { value: 2 },
+    ];
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert_eq!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64().unwrap(), 42);
+    let mut program = CandidateVmProgram { schema: candidate.schema, runtime_manifest: None,
+        entry: candidate.function.definition,
+        functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
+        host_capabilities: vec![], callable_environments: BTreeMap::new(), fingerprint: candidate.fingerprint };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), 42);
+
+    candidate.function.instructions[8] = VmInstruction::Copy { dst: 0, src: 1 };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&candidate)),
+        Err(VmArtifactError::UseAfterMove { register: 1 })));
 }
 
 #[test]

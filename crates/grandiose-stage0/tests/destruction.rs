@@ -44,6 +44,88 @@ fn run(body: &str) -> i64 {
 }
 
 #[test]
+fn replay_cannot_duplicate_a_live_affine_resident() {
+    let outcome = compile(r#"
+        struct Affine { value: i64 }
+        impl Use<[0, 1]> for Affine {}
+        effect Tick { [2, 2] tick() -> i64; }
+        pub fn main() -> i64 {
+            handle {
+                let owned = Affine { value: 42 };
+                Tick::tick();
+                let consumed = move owned;
+                consumed.value
+            } {
+                Tick::tick() with k => { k(1); k(2) }
+            }
+        }
+    "#);
+    assert!(matches!(outcome, Err(grandiose_stage0::ServiceError::Failed(_))), "replay accepted an affine capture");
+}
+
+#[test]
+fn replay_cannot_duplicate_affine_residents_across_ordinary_calls() {
+    for (computation, declarations) in [
+        ("callee()", r#"
+            fn callee() -> i64 / Tick {
+                let owned = Affine { value: 42 };
+                Tick::tick();
+                let consumed = move owned;
+                consumed.value
+            }
+        "#),
+        (r#"{
+            let owned = Affine { value: 42 };
+            callee();
+            let consumed = move owned;
+            consumed.value
+        }"#, "fn callee() -> i64 / Tick { Tick::tick() }"),
+    ] {
+        let outcome = compile(&format!(r#"
+            struct Affine {{ value: i64 }}
+            impl Use<[0, 1]> for Affine {{}}
+            effect Tick {{ [2, 2] tick() -> i64; }}
+            {declarations}
+            pub fn main() -> i64 {{
+                handle {computation} {{
+                    Tick::tick() with k => {{ k(1); k(2) }}
+                }}
+            }}
+        "#));
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+            panic!("replay accepted an affine ordinary-call frame");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("without Copy permission")),
+            "replay failed for an unrelated reason: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn replay_cannot_duplicate_an_affine_active_capture() {
+    let outcome = compile(r#"
+        struct Affine { value: i64 }
+        impl Use<[0, 1]> for Affine {}
+        effect Tick { [2, 2] tick() -> i64; }
+        pub fn main() -> i64 {
+            let owned = Affine { value: 42 };
+            let pending = () -> i64 / Tick {
+                Tick::tick();
+                let consumed = move owned;
+                consumed.value
+            };
+            handle pending() {
+                Tick::tick() with k => { k(1); k(2) }
+            }
+        }
+    "#);
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+        panic!("replay accepted an affine active capture");
+    };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("without Copy permission")),
+        "replay failed for an unrelated reason: {diagnostics:?}");
+}
+
+#[test]
 fn array_elements_are_destroyed_by_runtime_loop() {
     assert_eq!(run(r#"
         fn finish(first: &mut i64, second: &mut i64) -> {

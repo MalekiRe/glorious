@@ -153,7 +153,7 @@ impl CleanupMir {
                         ));
                     }
                 } else if !self.symbols.contains(callee) {
-                    return Err(invalid("ownership invocation lacks a callable contract"));
+                    return Err(invalid(&format!("cleanup invocation lacks a callable contract in {:?} for value {}: {ty:?}", self.definition, callee.0)));
                 }
                 if let Some(target) = continuation
                     && self.blocks[target.0 as usize].parameters != vec![*result]

@@ -967,6 +967,10 @@ impl CleanupMir {
                                     resume_type,
                                     continuation,
                                     target: MirBlockId(clause.entry.0),
+                                    replay_owned: if matches!(continuation, crate::MirContinuationPolicy::Replay { .. }) {
+                                        self.replay_owned_roots(*handler).into_iter().map(local)
+                                            .collect::<BTreeSet<_>>().into_iter().collect()
+                                    } else { vec![] },
                                 });
                             }
                             Some(computation)

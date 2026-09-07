@@ -235,7 +235,7 @@ fn completion_refinement_keeps_once_evaluated_subject_provenance() {
         "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
     );
     let root = &mir.regions()[mir.entry().0 as usize];
-    let Op::Completion { computation, arms } = &root.instructions.last().unwrap().operation else {
+    let Op::Completion { computation, arms, .. } = &root.instructions.last().unwrap().operation else {
         panic!("{root:?}");
     };
     assert_eq!(arms.len(), 2);

@@ -14,6 +14,7 @@ mod graph;
 mod inventory;
 mod lower;
 mod program;
+mod replay;
 #[cfg(test)]
 pub(crate) mod tests;
 mod validate;

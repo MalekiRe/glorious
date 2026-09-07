@@ -167,6 +167,7 @@ pub enum EvaluationOperation {
     Completion {
         computation: EvaluationRegionId,
         arms: Vec<EvaluationCompletionArm>,
+        handles_operations: bool,
     },
 }
 
@@ -278,6 +279,15 @@ impl EvaluationMir {
             let mut available = BTreeSet::new();
             for (index, instruction) in region.instructions.iter().enumerate() {
                 instruction.validate_shape()?;
+                if let EvaluationOperation::Completion { computation, handles_operations: true, .. } = &instruction.operation
+                    && !self.regions.get(computation.0 as usize).is_some_and(|region| {
+                        let result = match region.exit { EvaluationExit::Yield(value) | EvaluationExit::Diverge(value) => value };
+                        region.instructions.iter().any(|instruction|
+                            instruction.value == result && matches!(instruction.operation, EvaluationOperation::Handle { .. }))
+                    })
+                {
+                    return Err(EvaluationError("completion is not attached to its direct operation handler".into()));
+                }
                 for operand in &instruction.operands {
                     let mut dependencies = vec![];
                     operand.dependencies(&mut dependencies);
@@ -401,7 +411,7 @@ impl EvaluationOperation {
                 result.push(*computation);
                 result.extend(arms.iter().map(|arm| arm.region));
             }
-            Self::Completion { computation, arms } => {
+            Self::Completion { computation, arms, .. } => {
                 result.push(*computation);
                 result.extend(arms.iter().map(|arm| arm.region));
             }
@@ -969,6 +979,7 @@ impl Builder<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                handles_operations,
             } => {
                 let computation = self.region(computation)?;
                 let mut arms = vec![];
@@ -981,7 +992,7 @@ impl Builder<'_> {
                         span: contract.span,
                     });
                 }
-                Op::Completion { computation, arms }
+                Op::Completion { computation, arms, handles_operations }
             }
             CoreKind::Error => {
                 return Err(EvaluationError("Core error has no evaluation form".into()));

@@ -170,7 +170,13 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
                     operation,
                     transfers.get(&(index, offset)).copied(),
                 );
-                lower_instruction(&leaf, &labels).map(VmInstruction::with_owned_effect_payloads)
+                let mut instruction = lower_instruction(&leaf, &labels)?.with_owned_effect_payloads();
+                if let (RuntimeOperation::InstallHandler { replay_owned, .. },
+                    VmInstruction::InstallHandlerOwned { replay_owned: machine, .. }) = (operation, &mut instruction)
+                {
+                    *machine = replay_owned.iter().map(|local| local.0).collect();
+                }
+                Ok(instruction)
             })
             .collect::<Result<Vec<_>, _>>()?;
         // Runtime's explicit Abort leaf ends execution before any nominal

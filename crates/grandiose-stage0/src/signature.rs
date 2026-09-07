@@ -1159,6 +1159,18 @@ impl ElaboratedInterface {
         );
     }
 
+    /// Publish a checked initializer's inferred type and structural constant
+    /// pattern together, so later body elaboration sees the same value facts.
+    pub fn freeze_typed_value_initializer(&mut self, definition: DefKey, body: &crate::TypedBody) -> bool {
+        if body.recovered || !body.diagnostics.is_empty() { return false; }
+        let (generic_kinds, ty) = body.value_initializer_type();
+        if let Some(pattern) = crate::pattern::initializer_pattern(body, body.root, self) {
+            self.pattern_values.insert(definition, (ty.clone(), pattern));
+        }
+        self.freeze_value_initializer(definition, generic_kinds, ty);
+        true
+    }
+
     /// Validate the language-owned `Use` relation once every nominal layout
     /// has been frozen.  Unlike ordinary trait selection, `Use` has a single
     /// principal interval per type: source implementations may narrow the

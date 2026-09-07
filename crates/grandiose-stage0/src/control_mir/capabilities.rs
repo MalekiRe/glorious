@@ -344,8 +344,12 @@ impl Builder<'_> {
                 EvaluationOperand::Place(place) => self.place(place, names)?,
                 EvaluationOperand::Value(_) => ControlPlace::Temporary(operands[0]),
             }),
-            EvalOp::LabelValue(brand) => Op::Label(*self.active_labels.get(brand)
-                .ok_or_else(|| ControlError::Invalid("label capability outside delimiter".into()))?),
+            EvalOp::LabelValue(brand) => {
+                let value = *self.active_label_values.get(brand)
+                    .ok_or_else(|| ControlError::Invalid("label capability outside delimiter".into()))?;
+                self.emit(*block, scope, destination, ControlOperation::Read(value));
+                return Ok(true);
+            }
             EvalOp::Resumption { name, .. } => {
                 let value = *names.get(name).or_else(|| self.active_resumptions.get(name))
                     .ok_or_else(|| ControlError::Invalid(format!("resumption {name} outside clause")))?;
@@ -357,9 +361,24 @@ impl Builder<'_> {
                 let label = ControlLabelId(self.result.labels.len() as u32);
                 self.result.labels.push(ControlLabel { brand: *brand, scope, target, result: destination, handler_prefix: self.active_handler_clauses.clone() });
                 let previous = self.active_labels.insert(*brand, label);
+                // Capture the lexical destination at delimiter entry, before
+                // any nested handlers are installed. Each use observes that
+                // same capability; minting at its use site would capture a
+                // clause's handler depth and give one brand multiple scopes.
+                let capability_type = self.evaluation.regions().iter()
+                    .flat_map(|region| &region.instructions)
+                    .find(|instruction| matches!(instruction.operation, EvalOp::LabelValue(candidate) if candidate == *brand))
+                    .map(|instruction| instruction.ty.clone());
+                let previous_value = if let Some(ty) = capability_type {
+                    let value = self.value(ty, instruction.source, instruction.span)?;
+                    self.emit(*block, scope, value, ControlOperation::Capability(Op::Label(label)));
+                    self.active_label_values.insert(*brand, value)
+                } else { None };
                 let (exit, value) = self.region(*body, *block, names, Some(scope))?;
                 if let Some(previous) = previous { self.active_labels.insert(*brand, previous); }
                 else { self.active_labels.remove(brand); }
+                if let Some(previous) = previous_value { self.active_label_values.insert(*brand, previous); }
+                else { self.active_label_values.remove(brand); }
                 if let Some(exit) = exit { self.edge(exit, target, value); }
                 *block = target;
                 return Ok(true);
@@ -378,7 +397,7 @@ impl Builder<'_> {
                 if let Some(next) = continuation { *block = next; }
                 return Ok(true);
             }
-            EvalOp::Completion { computation, arms } => {
+            EvalOp::Completion { computation, arms, handles_operations } => {
                 let completion_scope = self.arm_scope(*computation, scope)?;
                 let (exit, subject) = self.region(*computation, *block, names, Some(completion_scope))?;
                 let Some(mut test_block) = exit else { return Ok(true); };
@@ -398,7 +417,11 @@ impl Builder<'_> {
                         });
                     match forwarded { Some(value) => origin = value, None => break }
                 }
-                if let Some(handler_index) = self.result.handlers.iter().position(|handler| handler.result == origin) {
+                if *handles_operations {
+                    let handler_index = self.result.handlers.iter().position(|handler| handler.result == origin)
+                        .ok_or_else(|| ControlError::Invalid("completion lost its associated operation handler".into()))?;
+                    self.result.handlers[handler_index].target = join;
+                    self.result.handlers[handler_index].result = result;
                     for block in &mut self.result.blocks {
                         if let ControlTerminator::Transfer(ControlTransfer::FinishClause { handler, edge, .. }) = &mut block.terminator
                             && handler.0 as usize == handler_index { edge.target = join; }
@@ -537,7 +560,7 @@ impl Builder<'_> {
                     parameters: vec![], values: vec![], scopes: vec![], entry: ControlBlockId(0), blocks: vec![],
                     labels: vec![], handlers: vec![], closures: vec![],
                     source_bindings: BTreeMap::new(),
-                }, mapped: BTreeMap::new(), active_labels: BTreeMap::new(), active_resumptions: BTreeMap::new(), active_handler_clauses: vec![], proven_subjects: BTreeMap::new() };
+                }, mapped: BTreeMap::new(), active_labels: BTreeMap::new(), active_label_values: BTreeMap::new(), active_resumptions: BTreeMap::new(), active_handler_clauses: vec![], proven_subjects: BTreeMap::new() };
                 for capture in &environment.captures {
                     captures.push(*names.get(&capture.name).ok_or_else(|| ControlError::Invalid(format!("missing capture {}", capture.name)))?);
                     let value = child.value(capture.ty.clone(), instruction.source, instruction.span)?;

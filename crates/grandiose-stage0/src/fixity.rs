@@ -51,6 +51,38 @@ impl FixityTable {
         table
     }
 
+    /// Resolve declaration visibility before grouping bodies, including
+    /// imported operators and independent prefix/infix declarations.
+    pub fn visible_in_module(
+        module: &crate::ModuleKey,
+        index: &crate::DefinitionIndex,
+        declarations: &BTreeMap<DefKey, crate::FixityHeader>,
+    ) -> Self {
+        let mut table = Self::with_prelude();
+        for (definition, header) in declarations {
+            let path = vec![header.operator.clone()];
+            match index.resolve_path(crate::DefinitionNamespace::Operator, module, &path) {
+                crate::ResolutionState::Resolved(candidate) if candidate == *definition => {
+                    table.insert_declared(*definition, header);
+                }
+                crate::ResolutionState::Ambiguous(candidates) if candidates.contains(definition) => {
+                    let same_position = candidates.iter().filter(|candidate| {
+                        declarations.get(candidate).is_some_and(|candidate|
+                            candidate.form.is_prefix() == header.form.is_prefix())
+                    }).count();
+                    if same_position == 1 {
+                        table.insert_declared(*definition, header);
+                    } else {
+                        table.mark_ambiguous(header);
+                    }
+                }
+                _ => {}
+            }
+        }
+        table.freeze();
+        table
+    }
+
     /// Extend a module table with a declaration already proven visible by the
     /// module resolver. Imports and globs are resolved before this point, so
     /// the caller supplies the source spelling that is in scope.

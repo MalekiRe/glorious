@@ -78,6 +78,7 @@ impl CleanupProgram {
             }
             body.validate()?;
         }
+        super::replay::validate(self)?;
         for plan in self.destruction.values() {
             crate::specialized_mir::closed_type(&plan.ty).map_err(|error| CleanupError(error.0))?;
             if let Some(hook) = &plan.hook {

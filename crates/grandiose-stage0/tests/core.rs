@@ -11,32 +11,60 @@ use grandiose_stage0::{
 use std::collections::{BTreeMap, BTreeSet};
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
-    let package = PackageKey(package_name.into());
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, _) = core_and_signatures_for(package_name, source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     PlaceFlow::analyze(&core)
 }
 
+fn freeze_initializers(
+    interface: &grandiose_stage0::PackageInterface,
+    source: &str,
+    lexed: &LexedFile,
+    index: &DefinitionIndex,
+    signatures: &mut ElaboratedInterface,
+    fixities: &grandiose_stage0::FixityTable,
+) {
+    for declaration in &interface.definitions {
+        if !matches!(declaration.syntax.header, grandiose_stage0::ParsedHeader::ValueInitializer { .. }) {
+            continue;
+        }
+        let Some(range) = declaration.body else { continue; };
+        let syntax = BodySyntax::parse_expression_with_fixities(lexed, source, range, fixities);
+        let value = TypedBody::elaborate_value_initializer(declaration, &syntax, index, signatures, fixities);
+        signatures.freeze_typed_value_initializer(declaration.key, &value);
+    }
+}
+
+fn standard_frontend() -> &'static (grandiose_stage0::PackageInterface, ElaboratedInterface) {
+    static STANDARD: std::sync::OnceLock<(grandiose_stage0::PackageInterface, ElaboratedInterface)> = std::sync::OnceLock::new();
+    STANDARD.get_or_init(|| {
+        let package = PackageKey("std@0.1.0".into());
+        let source = include_str!("../../../stdlib/src/lib.glorious");
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let index = DefinitionIndex::from_interface(&interface);
+        let mut signatures = ElaboratedInterface::elaborate(&interface);
+        let fixities = grandiose_stage0::FixityTable::for_module(&interface);
+        freeze_initializers(&interface, source, &lexed, &index, &mut signatures, &fixities);
+        assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+        (interface, signatures)
+    })
+}
+
+fn standard_bool_type() -> Type {
+    let (interface, signatures) = standard_frontend();
+    let definition = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some("Bool")).unwrap();
+    let grandiose_stage0::ElaboratedHeader::Alias { target, .. } = &signatures.definitions[&definition.key] else { panic!("stdlib Bool alias"); };
+    signatures.normalize_type_aliases(target.clone())
+}
+
 fn core_and_signatures_for(package_name: &str, source: &str) -> (TypedBody, ElaboratedInterface) {
+    let (_, core, signatures) = frontend_for(package_name, source);
+    (core, signatures)
+}
+
+fn frontend_for(package_name: &str, source: &str) -> (DefKey, TypedBody, ElaboratedInterface) {
     let package = PackageKey(package_name.into());
     let file = FileKey::new(
         &package,
@@ -45,19 +73,36 @@ fn core_and_signatures_for(package_name: &str, source: &str) -> (TypedBody, Elab
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
     let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
+    // Loading std is explicit in the fixture source, just as in the service.
+    // Bare fixtures retain an empty operator/truth environment.
+    let standard = source.contains("use std").then(standard_frontend);
+    let interfaces = std::iter::once(&interface).chain(standard.map(|(interface, _)| interface)).collect::<Vec<_>>();
+    let index = DefinitionIndex::from_interfaces(interfaces.iter().copied());
+    let mut signatures = ElaboratedInterface::merge(
+        std::iter::once(ElaboratedInterface::elaborate_with_index(&interface, &index))
+            .chain(standard.map(|(_, signatures)| signatures.clone())),
+    );
+    let declarations = interfaces.iter().flat_map(|interface| &interface.definitions).filter_map(|definition| {
+        if let grandiose_stage0::ParsedHeader::Fixity(header) = &definition.syntax.header {
+            Some((definition.key, header.clone()))
+        } else { None }
+    }).collect();
+    let fixities = grandiose_stage0::FixityTable::visible_in_module(&interface.module, &index, &declarations);
+    freeze_initializers(&interface, source, &lexed, &index, &mut signatures, &fixities);
     let definition = interface
         .definitions
         .iter()
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let body = BodySyntax::parse_with_fixities(&lexed, source, definition.body.expect("main body"), &fixities);
     (
-        TypedBody::elaborate(
+        definition.key,
+        TypedBody::elaborate_with_fixities(
             definition,
             &body,
-            &DefinitionIndex::from_interface(&interface),
+            &index,
             &signatures,
+            &fixities,
         ),
         signatures,
     )
@@ -65,6 +110,84 @@ fn core_and_signatures_for(package_name: &str, source: &str) -> (TypedBody, Elab
 
 fn core_for(package_name: &str, source: &str) -> TypedBody {
     core_and_signatures_for(package_name, source).0
+}
+
+fn handler_payload_test_count(mir: &grandiose_stage0::MirFunction) -> usize {
+    let payloads = mir.blocks.iter().flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            MirInstruction::InstallHandler { payload_destinations, .. } => Some(payload_destinations),
+            _ => None,
+        }).flatten().copied().collect::<BTreeSet<_>>();
+    mir.blocks.iter().flat_map(|block| &block.instructions).filter(|instruction| {
+        matches!(instruction, MirInstruction::PatternTest { subject, .. } if payloads.contains(subject))
+    }).count()
+}
+
+#[test]
+fn ordinary_fn_bounds_reject_noncallable_arguments_during_elaboration() {
+    for argument in ["42", "()", "Token { value: 42 }"] {
+        let source = format!("struct Token {{ value: i64 }} fn invoke<F>(next: F) -> i64 where F: Fn<(), Output = i64> {{ next() }} pub fn main() -> i64 {{ let value = {argument}; invoke(value) }}");
+        let core = core_for("noncallable-fn-bound@0.1.0", &source);
+        assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4105"),
+            "{argument}: {:#?}", core.diagnostics);
+    }
+    let core = core_for("unproven-fn-bound@0.1.0",
+        "fn invoke<F>(next: F) -> i64 where F: Fn<(), Output = i64> { next() } pub fn main<F>(next: F) -> i64 { invoke(next) }");
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4105"), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn ordinary_fn_bounds_require_matching_lexical_evidence() {
+    for (bound, valid) in [("Fn<(), Output = i64>", true), ("Fn<(), Output = ()>", false), ("Fn<(i64), Output = i64>", false)] {
+        let source = format!("fn invoke<F>(next: F) -> i64 where F: Fn<(), Output = i64> {{ next() }} pub fn main<F>(next: F) -> i64 where F: {bound} {{ invoke(next) }}");
+        let core = core_for("lexical-fn-bound@0.1.0", &source);
+        assert_eq!(core.diagnostics.is_empty(), valid, "{bound}: {:#?}", core.diagnostics);
+    }
+}
+
+#[test]
+fn ordinary_fn_bounds_are_rechecked_when_later_arguments_solve_the_subject() {
+    let core = core_for("late-fn-bound@0.1.0", r#"
+        enum Maybe<T> { Missing, Value(T) }
+        fn require<F>(value: Maybe<F>) -> Maybe<F> where F: Fn<(), Output = i64> { value }
+        fn take(value: Maybe<i64>) -> i64 { 42 }
+        pub fn main() -> i64 { let value = require(Maybe::Missing); take(value) }
+    "#);
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4105"), "{:#?}", core.diagnostics);
+    let core = core_for("late-valid-fn-bound@0.1.0", r#"
+        enum Maybe<T> { Missing, Value(T) }
+        fn require<F>(value: Maybe<F>) -> Maybe<F> where F: Fn<(), Output = i64> { value }
+        fn take<F>(value: Maybe<F>, next: F) -> i64 where F: Fn<(), Output = i64> { next() }
+        pub fn main() -> i64 { let value = require(Maybe::Missing); take(value, { 42 }) }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn ordinary_fn_bounds_infer_types_from_callback_inputs() {
+    let core = core_for("infer-fn-input-bound@0.1.0", r#"
+        fn inspect<A, F>(next: F) -> i64 where F: Fn<(A, A), Output = i64> { 42 }
+        fn answer(left: i64, right: i64) -> i64 { right }
+        pub fn main() -> i64 { inspect(answer) }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn ordinary_fn_bounds_close_linked_obligations_independently_of_order() {
+    let core = core_for("linked-fn-bounds@0.1.0", r#"
+        enum Maybe<T> { Missing, Value(T) }
+        fn require<F>(value: Maybe<F>) -> Maybe<F> where F: Fn<(), Output = i64> { value }
+        fn factory<F, A>(value: Maybe<F>, output: Maybe<A>) -> Maybe<F> where F: Fn<(), Output = A> { value }
+        fn infer<F>(value: Maybe<F>, next: F) -> i64 { 42 }
+        fn make() -> () -> i64 { () -> i64 { 42 } }
+        pub fn main() -> i64 {
+            let value = require(Maybe::Missing);
+            let pending = factory(Maybe::Missing, value);
+            infer(pending, make)
+        }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
 }
 
 /// Source MIR retains destruction intent until concrete instance discovery.
@@ -75,6 +198,10 @@ fn compile_with_destruction(source: &str, template: &grandiose_stage0::MirFuncti
         Err(grandiose_stage0::VmArtifactError::MalformedEncoding {
             message: "unelaborated destruction reached VM lowering",
         })));
+    compile_source(source)
+}
+
+fn compile_source(source: &str) -> grandiose_stage0::VerifiedVmProgram {
     let package = PackageKey("core-concrete-destruction@0.1.0".into());
     let request = grandiose_stage0::CompilationRequest {
         build: grandiose_stage0::CompilerBuildIdentity::stage0(Digest::of_bytes(b"core-concrete-destruction")),
@@ -101,31 +228,16 @@ fn contextual_call_to_a_shadowing_non_callable_reports_an_error_instead_of_panic
 
 #[test]
 fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
-    let package = PackageKey("core@0.1.0".into());
-    let source = "pub fn main() -> i64 { let value = 1; value + 2 }";
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = &interface.definitions[0];
-    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let source = "use std::*; pub fn main() -> i64 { let value = 1; value + 2 }";
+    let core = core_for("core@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let root = core.expression(core.root);
     assert!(matches!(root.kind, CoreKind::Block(_)));
     assert!(
         core.expressions
             .iter()
-            .any(|expression| matches!(expression.kind, CoreKind::IntrinsicCall { .. }))
+            .any(|expression| matches!(expression.kind, CoreKind::Call { callee, .. }
+                if matches!(core.expression(callee).kind, CoreKind::TraitMethod { .. })))
     );
 }
 
@@ -155,7 +267,7 @@ fn typed_core_contextualizes_late_generic_integer_literals_from_prior_arguments(
         ),
     ] {
         let source = format!(
-            "fn {bits}(value: {float}) -> {scalar_name} {{ () }}\
+            "use std::*; fn {bits}(value: {float}) -> {scalar_name} {{ () }}\
              fn __g1_int_bit_and<T>(left: T, right: T) -> T {{ () }}\
              bit_and<T>(left: T, right: T) -> T {{ __g1_int_bit_and(move left, move right) }}\
              pub fn main(value: {float}) -> Bool {{\
@@ -173,10 +285,7 @@ fn typed_core_contextualizes_late_generic_integer_literals_from_prior_arguments(
             "{name}: {:#?}",
             core.diagnostics
         );
-        assert_eq!(
-            core.expression(core.root).ty,
-            Type::Scalar(ScalarType::Bool)
-        );
+        assert_eq!(core.expression(core.root).ty, standard_bool_type());
         assert!(core.expressions.iter().any(|expression| {
             matches!(&expression.kind, CoreKind::Literal(value) if value == mask)
                 && expression.ty == Type::Scalar(scalar)
@@ -588,7 +697,7 @@ fn typed_core_normalizes_concrete_associated_effect_rows_on_method_values() {
 
 #[test]
 fn projected_trait_effect_handler_statements_rejoin_their_lexical_suffix_in_mir() {
-    let source = "effect Trace { [1,1] note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { let invoke = apply; handle invoke(Relay::relay) { Trace::note() with k => k(41) }; let suffix = (value: i64) -> i64 { value + 1 }; suffix(41) }";
+    let source = "use std::*; effect Trace { [1,1] note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { let invoke = apply; handle invoke(Relay::relay) { Trace::note() with k => k(41) }; let suffix = (value: i64) -> i64 { value + 1 }; suffix(41) }";
     let package = PackageKey("core-projected-statement-handler@0.1.0".into());
     let file = FileKey::new(
         &package,
@@ -606,7 +715,7 @@ fn projected_trait_effect_handler_statements_rejoin_their_lexical_suffix_in_mir(
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(definition, &body, &index, &signatures);
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     assert!(core.expressions.iter().any(|expression| matches!(
         &expression.kind,
@@ -784,7 +893,7 @@ fn typed_core_rejects_parent_only_inherited_type_effect_and_const_projections() 
 
 #[test]
 fn typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis() {
-    let source = "struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 1]> {} impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
+    let source = "use std::*; struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 1]> {} impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let core = core_for("core-defaulted-nominal-partial-move@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64));
@@ -2288,7 +2397,7 @@ fn placeflow_freezes_distinct_move_path_roots_for_shadowed_bindings() {
 fn forged_completion_refinement_shadowing_is_rejected_before_placeflow_or_mir() {
     let mut core = core_for(
         "core-forged-completion-refinement-place-shadow@0.1.0",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: i64, result: Result) -> i64 { let loan = &mut value; handle result is Result::Ok(found) { true => { let branch = &mut found; branch; 0 }; false => 0 }; value; loan; 0 }",
+        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: i64, result: Result) -> i64 { let loan = &mut value; handle result is Result::Ok(found) { true => { let branch = &mut found; branch; 0 }; false => 0 }; value; loan; 0 }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let clause = core
@@ -2352,7 +2461,7 @@ fn forged_completion_refinement_shadowing_is_rejected_before_placeflow_or_mir() 
 fn typed_core_validation_rejects_completion_refinement_on_a_negative_boolean_arm() {
     let mut core = core_for(
         "core-forged-negative-refinement@0.1.0",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let positive = core
@@ -2403,7 +2512,7 @@ fn typed_core_validation_rejects_completion_refinement_on_a_negative_boolean_arm
 fn typed_core_validation_rederives_refinement_binding_types_from_pattern_layout() {
     let mut core = core_for(
         "core-forged-refinement-binding-type@0.1.0",
-        "pub struct Pair { value: i64 } pub fn main(value: Pair) -> i64 { handle value is Pair { value: found } { true => found; false => 0 } }",
+        "use std::*; pub struct Pair { value: i64 } pub fn main(value: Pair) -> i64 { handle value is Pair { value: found } { true => found; false => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let pattern_test = core
@@ -2588,6 +2697,7 @@ fn terminal_strict_operand_does_not_publish_unreachable_move_or_cleanup_facts() 
         "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64), "{:#?}", core.expressions);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     assert!(
@@ -2611,6 +2721,7 @@ fn terminal_strict_operand_does_not_publish_unreachable_move_or_cleanup_facts() 
     )
     .function
     .expect("terminal handler must lower after unreachable ownership suffix is discarded");
+    assert_eq!(mir.result, Type::Scalar(ScalarType::I64));
     let image = grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
         .expect("MIR cleanup proof must survive independent VM verification");
     assert_eq!(image.run_i64().unwrap(), 42);
@@ -2618,10 +2729,8 @@ fn terminal_strict_operand_does_not_publish_unreachable_move_or_cleanup_facts() 
 
 #[test]
 fn label_consumed_transfer_preserves_following_strict_ownership_effects() {
-    let core = core_for(
-        "core-label-rejoining-strict-ownership@0.1.0",
-        "pub fn main() -> i64 { let value = 0; let result = label done { transfer done 40; 0 }; let loan = &mut value; *loan = 2; result + value }",
-    );
+    let source = "use std::*; pub fn main() -> i64 { let value = 0; let result = label done { transfer done 40; 0 }; let loan = &mut value; *loan = 2; result + value }";
+    let core = core_for("core-label-rejoining-strict-ownership@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
@@ -2642,8 +2751,8 @@ fn label_consumed_transfer_preserves_following_strict_ownership_effects() {
     )
     .function
     .expect("label rejoining path must lower");
-    let image = grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
-        .expect("label rejoining cleanup path must verify");
+    mir.validate().unwrap();
+    let image = compile_source(source);
     assert_eq!(image.run_i64().unwrap(), 42);
 }
 
@@ -2755,7 +2864,7 @@ fn placeflow_reinitializes_partial_moves_at_field_and_aggregate_boundaries() {
 
 #[test]
 fn placeflow_tracks_nested_partial_moves_and_respects_projection_loans() {
-    let nested = "pub struct Pair { left: i64, right: i64 } pub struct Outer { pair: Pair, spare: i64 } pub fn main() -> i64 { let outer = Outer { pair: Pair { left: 1, right: 2 }, spare: 3 }; move outer.pair.left; outer.pair.right + outer.spare }";
+    let nested = "use std::*; pub struct Pair { left: i64, right: i64 } pub struct Outer { pair: Pair, spare: i64 } pub fn main() -> i64 { let outer = Outer { pair: Pair { left: 1, right: 2 }, spare: 3 }; move outer.pair.left; outer.pair.right + outer.spare }";
     let flow = flow_for("core-nested-partial-move@0.1.0", nested);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     assert!(
@@ -2819,7 +2928,7 @@ fn placeflow_rejects_writes_through_a_moved_parent_projection() {
 
 #[test]
 fn placeflow_joins_partial_moves_from_dynamic_handler_exits() {
-    let source = "effect Tick { tick(value: Bool) -> i64; } pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; handle Tick::tick(true) { Tick::tick(true) => move pair.left, Tick::tick(false) => 0 }; pair.left }";
+    let source = "use std::*; effect Tick { tick(value: Bool) -> i64; } pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; handle Tick::tick(true) { Tick::tick(true) => move pair.left, Tick::tick(false) => 0 }; pair.left }";
     let flow = flow_for("core-partial-move-handler-join@0.1.0", source);
     assert!(
         flow.diagnostics
@@ -2839,35 +2948,20 @@ fn placeflow_joins_partial_moves_from_dynamic_handler_exits() {
 
 #[test]
 fn typed_core_and_placeflow_lower_to_validated_mir() {
-    let package = PackageKey("core@0.1.0".into());
-    let source = "pub fn main() -> i64 { let value = 1; value + 2 }";
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = &interface.definitions[0];
-    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let source = "use std::*; pub fn main() -> i64 { let value = 1; value + 2 }";
+    let (definition, core, _) = frontend_for("core@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
-    let lowered = MirLowering::lower(definition.key, &core, &flow);
+    let lowered = MirLowering::lower(definition, &core, &flow);
     assert!(lowered.diagnostics.is_empty(), "{:#?}", lowered.diagnostics);
     let mir = lowered.function.unwrap();
-    assert!(
-        mir.entry_block()
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::AddI64 { .. }))
-    );
-    assert!(mir.validate().is_ok());
+    assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(instruction, MirInstruction::Call { .. })));
+    mir.validate().unwrap();
+    let program = compile_source(source);
+    assert_eq!(program.run_i64().unwrap(), 3);
+    let image = grandiose_stage0::decode_program(&program.canonical_bytes()).unwrap();
+    assert!(image.functions.values().flat_map(|function| &function.instructions)
+        .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::AddI64 { .. })));
 }
 
 #[test]
@@ -2902,71 +2996,32 @@ fn enum_reference_results_preserve_variant_invariant_caller_paths() {
 
 #[test]
 fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
-    let package = PackageKey("core-u32-comparison-mir@0.1.0".into());
-    let source = "infixl 20 <=; pub fn main(value: u32) -> bool { value <= 1114111 }";
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let source = "use std::*; pub fn main(value: u32) -> Bool { value <= 1114111 }";
+    let (definition, core, _) = frontend_for("core-u32-comparison-mir@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression|
+        matches!(&expression.kind, CoreKind::Literal(value) if value == "1114111")
+            && expression.ty == Type::Scalar(ScalarType::U32)));
     let flow = PlaceFlow::analyze(&core);
-    let lowered = MirLowering::lower(definition.key, &core, &flow);
+    let lowered = MirLowering::lower(definition, &core, &flow);
     assert!(lowered.diagnostics.is_empty(), "{:#?}", lowered.diagnostics);
-    let mir = lowered
-        .function
-        .expect("u32 comparison should lower to MIR");
-    assert!(
-        mir.entry_block()
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::ConstU32 { .. }))
-    );
-    assert!(
-        mir.entry_block()
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::U32Le { .. }))
-    );
-    assert!(mir.validate().is_ok());
+    let mir = lowered.function.unwrap();
+    assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| matches!(instruction, MirInstruction::Call { .. })));
+    mir.validate().unwrap();
+    let executable = format!("{} pub fn main() -> i64 {{ handle compare(1114111) {{ true => handle compare(1114112) {{ false => 42, true => 0 }}, false => 0 }} }}",
+        source.replace("fn main(value", "fn compare(value"));
+    let program = compile_source(&executable);
+    assert_eq!(program.run_i64().unwrap(), 42);
+    let image = grandiose_stage0::decode_program(&program.canonical_bytes()).unwrap();
+    assert!(image.functions.values().flat_map(|function| &function.instructions)
+        .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::IntIntrinsic {
+            primitive: grandiose_stage0::PrimitiveRole::IntGreater, scalar: ScalarType::U32, .. })));
 }
 
 #[test]
 fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
-    let package = PackageKey("core-closure@0.1.0".into());
-    let source =
-        "pub fn main(value: i64) -> i64 { let add = (extra: i64) -> i64 { value + extra }; 1 }";
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = &interface.definitions[0];
-    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let core = core_for("core-closure@0.1.0",
+        "use std::*; pub fn main(value: i64) -> i64 { let add = (extra: i64) -> i64 { value + extra }; 1 }");
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let Some(CoreKind::Closure {
         parameters,
@@ -4081,9 +4136,10 @@ fn handler_coverage_tracks_direct_operations_but_calls_require_total_protocol_co
 
 #[test]
 fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_coverage() {
+    let source = "use std::*; effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle Stop::die(true) { Stop::die(true) => 1, Stop::die(false) => 2 } }";
     let total = core_for(
         "core-handler-pattern-matrix-total@0.1.0",
-        "effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle Stop::die(true) { Stop::die(true) => 1, Stop::die(false) => 2 } }",
+        source,
     );
     assert!(total.diagnostics.is_empty(), "{:#?}", total.diagnostics);
     let flow = PlaceFlow::analyze(&total);
@@ -4096,17 +4152,14 @@ fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_cover
     .function
     .expect("total terminal handler lowers to MIR");
     assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
-        matches!(instruction, MirInstruction::PatternTest { pattern: MirPattern::Literal(value), .. } if value == "true")
+        matches!(instruction, MirInstruction::PatternTest { pattern: MirPattern::Enum { variant: 0, .. }, .. })
     }));
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("pattern handler emits VM");
-    let verified =
-        grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
-            .expect("pattern handler VM artifact verifies");
+    let verified = compile_source(source);
     assert_eq!(verified.run_i64().expect("VM executes pattern dispatch"), 1);
 
     let unreachable = core_for(
         "core-handler-pattern-matrix-unreachable@0.1.0",
-        "effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle Stop::die(true) { Stop::die(true) => 1, Stop::die(true) => 2, Stop::die(false) => 3 } }",
+        "use std::*; effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle Stop::die(true) { Stop::die(true) => 1, Stop::die(true) => 2, Stop::die(false) => 3 } }",
     );
     assert!(
         unreachable
@@ -4122,7 +4175,7 @@ fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_cover
 fn result_carried_bool_literals_and_patterns_remain_source_level_control() {
     let core = core_for(
         "core-result-bool-literals@0.1.0",
-        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; pub fn main(value: Bool) -> Bool { handle value { true => true, false => false } }",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; let true = Result::Ok(()); let false = Result::Err(()); pub fn main(value: Bool) -> Bool { handle value { true => true, false => false } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let Some(completion) = core
@@ -4146,8 +4199,9 @@ fn result_carried_bool_literals_and_patterns_remain_source_level_control() {
     for clause in clauses {
         assert!(matches!(
             core.expression(clause.body).kind,
-            CoreKind::Enum { fields: ref values, .. } if values.len() == 1
+            CoreKind::Constant { .. }
         ));
+        assert_eq!(core.expression(clause.body).ty, core.expression(core.root).ty);
     }
 }
 
@@ -4155,7 +4209,7 @@ fn result_carried_bool_literals_and_patterns_remain_source_level_control() {
 fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handlers() {
     let comparison = core_for(
         "core-nominal-bool-integer-comparison@0.1.0",
-        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixl 20 <=; pub fn main(value: u32) -> Bool { handle value <= 1114111 { true => true, false => false } }",
+        "use std::*; pub fn main(value: u32) -> Bool { handle value <= 1114111 { true => true, false => false } }",
     );
     assert!(
         comparison.diagnostics.is_empty(),
@@ -4165,8 +4219,8 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
     assert!(comparison.expressions.iter().any(|expression| {
         matches!(
             expression.kind,
-            CoreKind::IntrinsicCall { ref operator, ref arguments }
-                if operator == "<="
+            CoreKind::Call { callee, ref arguments, .. }
+                if matches!(comparison.expression(callee).kind, CoreKind::TraitMethod { .. })
                     && arguments.len() == 2
                     && comparison.expression(arguments[1]).ty == Type::Scalar(ScalarType::U32)
         )
@@ -4174,7 +4228,7 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
 
     let reversed_comparison = core_for(
         "core-nominal-bool-reversed-integer-comparison@0.1.0",
-        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixl 20 <; pub fn main(value: u32) -> Bool { handle value < 55296 { true => true, false => 57343 < value } }",
+        "use std::*; pub fn main(value: u32) -> Bool { handle value < 55296 { true => true, false => 57343 < value } }",
     );
     assert!(
         reversed_comparison.diagnostics.is_empty(),
@@ -4184,8 +4238,8 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
     assert!(reversed_comparison.expressions.iter().any(|expression| {
         matches!(
             expression.kind,
-            CoreKind::IntrinsicCall { ref operator, ref arguments }
-                if operator == "<"
+            CoreKind::Call { callee, ref arguments, .. }
+                if matches!(reversed_comparison.expression(callee).kind, CoreKind::TraitMethod { .. })
                     && arguments.len() == 2
                     && reversed_comparison.expression(arguments[0]).ty == Type::Scalar(ScalarType::U32)
                     && reversed_comparison.expression(arguments[1]).ty == Type::Scalar(ScalarType::U32)
@@ -4194,7 +4248,7 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
 
     let terminal_handler = core_for(
         "core-nominal-bool-terminal-handler@0.1.0",
-        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; effect Branch { select(value: u32) -> ! } pub fn main(value: u32) -> Bool { handle Branch::select(value) { Branch::select(0) => false, Branch::select(_) => true } }",
+        "use std::*; effect Branch { select(value: u32) -> ! } pub fn main(value: u32) -> Bool { handle Branch::select(value) { Branch::select(0) => false, Branch::select(_) => true } }",
     );
     assert!(
         terminal_handler.diagnostics.is_empty(),
@@ -4203,13 +4257,7 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
     );
     assert_eq!(
         terminal_handler.expression(terminal_handler.root).ty,
-        terminal_handler
-            .expressions
-            .iter()
-            .find_map(|expression| {
-                matches!(expression.kind, CoreKind::Enum { .. }).then(|| expression.ty.clone())
-            })
-            .expect("terminal handler Bool literals lower to the nominal carrier")
+        standard_bool_type()
     );
 }
 
@@ -4262,13 +4310,13 @@ fn contextual_if_accepts_affine_condition_payloads() {
 fn direct_float_calls_contextualize_signed_numeric_literals() {
     let core = core_for(
         "core-contextual-signed-float-literal@0.1.0",
-        "fn accept(value: f32) -> f32 { value } pub fn main() -> f32 { accept(-128.0) }",
+        "use std::*; fn accept(value: f32) -> f32 { value } pub fn main() -> f32 { accept(-128.0) }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     assert!(core.expressions.iter().any(|expression| {
         matches!(
             expression.kind,
-            CoreKind::IntrinsicCall { ref operator, .. } if operator == "-"
+            CoreKind::Call { callee, .. } if matches!(core.expression(callee).kind, CoreKind::TraitMethod { .. })
         )
     }));
 }
@@ -4788,7 +4836,7 @@ fn effect_operation_generic_kind_mismatches_reach_the_contract_boundary() {
 #[test]
 fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
     let package = PackageKey("core-handler-flow@0.1.0".into());
-    let source = "effect Console { read(value: Bool) -> i64; } pub fn main() -> i64 { let value = 7; handle Console::read(true) { Console::read(true) => move value, Console::read(false) => 0 }; value }";
+    let source = "use std::*; effect Console { read(value: Bool) -> i64; } pub fn main() -> i64 { let value = 7; handle Console::read(true) { Console::read(true) => move value, Console::read(false) => 0 }; value }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -4803,12 +4851,7 @@ fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .unwrap();
     let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(
@@ -4823,7 +4866,7 @@ fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
 #[test]
 fn exact_one_shot_tail_resumption_lowers_to_a_runtime_handler_frame() {
     let package = PackageKey("core-handler-runtime@0.1.0".into());
-    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(41); value + 1 } { Ask::ask(seed) => seed } }";
+    let source = "use std::*; effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(41); value + 1 } { Ask::ask(seed) => seed } }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -4838,12 +4881,7 @@ fn exact_one_shot_tail_resumption_lowers_to_a_runtime_handler_frame() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .unwrap();
     let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
@@ -4870,7 +4908,7 @@ fn exact_one_shot_tail_resumption_lowers_to_a_runtime_handler_frame() {
 #[test]
 fn normalized_quantity_bounds_drive_finite_resumption_core_and_mir_contracts() {
     let package = PackageKey("core-handler-quantity-arithmetic@0.1.0".into());
-    let source = "effect Ask<budget: Quantity> { [1 + 1, 3 - 1] ask() -> i64; } pub fn main() -> i64 { handle Ask<[2, 2]>::ask() { Ask<[2, 2]>::ask() with resume => resume(40) + resume(41) } }";
+    let source = "use std::*; effect Ask<budget: Quantity> { [1 + 1, 3 - 1] ask() -> i64; } pub fn main() -> i64 { handle Ask<[2, 2]>::ask() { Ask<[2, 2]>::ask() with resume => resume(40) + resume(41) } }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -4890,12 +4928,7 @@ fn normalized_quantity_bounds_drive_finite_resumption_core_and_mir_contracts() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let continuation = core
         .expressions
@@ -4943,7 +4976,7 @@ fn nested_handler_arms_preserve_outer_resumption_use_tracking() {
 fn nested_handler_arms_reject_excess_outer_resumption_uses() {
     let core = core_for(
         "core-nested-resumption-use-rejection@0.1.0",
-        "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) + outer(value) } } } }",
+        "use std::*; effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) + outer(value) } } } }",
     );
     assert!(
         core.diagnostics
@@ -4972,7 +5005,7 @@ fn normalized_quantity_bounds_reject_implicit_one_shot_resumption() {
 #[test]
 fn affine_discarded_resumption_lowers_to_a_runtime_handler_cancellation() {
     let package = PackageKey("core-handler-cancel@0.1.0".into());
-    let source = "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask(_) => 42 } }";
+    let source = "use std::*; effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask(_) => 42 } }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -4987,12 +5020,7 @@ fn affine_discarded_resumption_lowers_to_a_runtime_handler_cancellation() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .unwrap();
     let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     let mir = MirLowering::lower(definition.key, &core, &flow)
@@ -5010,7 +5038,7 @@ fn affine_discarded_resumption_lowers_to_a_runtime_handler_cancellation() {
 fn mir_lowering_rejects_cancellation_that_violates_a_frozen_required_resume_contract() {
     let mut core = core_for(
         "core-handler-frozen-cleanup-contract@0.1.0",
-        "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask() with _ => 7 } }",
+        "use std::*; effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask() with _ => 7 } }",
     );
     let clause = core
         .expressions
@@ -5497,7 +5525,7 @@ fn forged_opaque_result_shape_cannot_bypass_core_or_mir_validation() {
 fn forged_nominal_callable_contract_cannot_retarget_a_sibling_argument() {
     let mut core = core_for(
         "core-forged-nominal-call-reference-relation@0.1.0",
-        "type Ref = &i64; type FlagRef = &Bool; pub struct Pair<T> { value: T } pub fn first<T, U>(left: Pair<T>, right: Pair<U>) -> Pair<T> { left } pub fn main() -> Pair<&i64> { let left = 1; let right = true; let left_pair = Pair { value: &left }; let right_pair = Pair { value: &right }; first<Ref, FlagRef>(left_pair, right_pair) }",
+        "use std::*; type Ref = &i64; type FlagRef = &Bool; pub struct Pair<T> { value: T } pub fn first<T, U>(left: Pair<T>, right: Pair<U>) -> Pair<T> { left } pub fn main() -> Pair<&i64> { let left = 1; let right = true; let left_pair = Pair { value: &left }; let right_pair = Pair { value: &right }; first<Ref, FlagRef>(left_pair, right_pair) }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let (contract, origin) = core
@@ -6012,7 +6040,7 @@ fn placeflow_allows_and_tracks_a_reborrow_through_an_aggregate_reference_field()
 fn placeflow_rejects_access_through_aggregate_parent_while_unique_child_reborrow_is_live() {
     let core = core_for(
         "core-aggregate-reference-reborrow-conflict@0.1.0",
-        "pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; let observed = *holder.loan; *child + observed }",
+        "use std::*; pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; let observed = *holder.loan; *child + observed }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6058,7 +6086,7 @@ fn placeflow_releases_aggregate_reborrows_after_their_last_handler_use() {
 fn placeflow_preserves_enum_payload_reference_origins_across_handler_boundaries() {
     let core = core_for(
         "core-enum-reference-reborrow-handler@0.1.0",
-        "pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder::Held(&mut value); handle holder is Holder::Held(parent) { true => { let child = & *(*parent); handle Tick::tick() { Tick::tick() => *child }; *(*parent) }; false => 0 } }",
+        "use std::*; pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder::Held(&mut value); handle holder is Holder::Held(parent) { true => { let child = & *(*parent); handle Tick::tick() { Tick::tick() => *child }; *(*parent) }; false => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6795,7 +6823,7 @@ fn generic_effect_handler_frame_retains_its_nominal_instance_arguments() {
 fn closures_seal_distinct_owner_scoped_environment_brands() {
     let core = core_for(
         "core-callable-environment-brand@0.1.0",
-        "pub fn main(value: i64) -> i64 { let first = (x: i64) -> i64 { value + x }; let second = (x: i64) -> i64 { value + x }; 0 }",
+        "use std::*; pub fn main(value: i64) -> i64 { let first = (x: i64) -> i64 { value + x }; let second = (x: i64) -> i64 { value + x }; 0 }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let environments = core
@@ -7159,7 +7187,7 @@ fn is_pattern_tests_publish_sealed_scoped_refinement_facts() {
 fn positive_is_completion_arm_opens_nominal_refinement_bindings() {
     let core = core_for(
         "core-is-nominal-refinement-branch@0.1.0",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let clauses = core
@@ -7218,7 +7246,7 @@ fn is_refinement_binders_cannot_shadow_incoming_post_state_names() {
 fn is_refinement_binders_cannot_escape_in_nested_closures() {
     let core = core_for(
         "core-is-refinement-closure-escape@0.1.0",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => { let delayed = (ignored: i64) -> i64 { found }; 0 }; false => 0 } }",
+        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => { let delayed = (ignored: i64) -> i64 { found }; 0 }; false => 0 } }",
     );
     assert!(
         core.diagnostics
@@ -7327,10 +7355,8 @@ fn nested_labels_can_transfer_to_an_enclosing_brand_through_the_vm_edge() {
 
 #[test]
 fn bound_label_transfer_rejoins_its_source_continuation_before_vm_execution() {
-    let core = core_for(
-        "core-bound-label-transfer@0.1.0",
-        "pub fn main() -> i64 { let answer = label done { transfer done 40; 0 }; answer + 2 }",
-    );
+    let source = "use std::*; pub fn main() -> i64 { let answer = label done { transfer done 40; 0 }; answer + 2 }";
+    let core = core_for("core-bound-label-transfer@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     let owner = core
@@ -7354,19 +7380,17 @@ fn bound_label_transfer_rejoins_its_source_continuation_before_vm_execution() {
             .iter()
             .any(|instruction| matches!(
                 instruction,
-                grandiose_stage0::MirInstruction::AddI64 { .. }
+                grandiose_stage0::MirInstruction::Call { .. }
             ))
     );
-    let verified = grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap()).unwrap();
+    let verified = compile_source(source);
     assert_eq!(verified.run_i64().unwrap(), 42);
 }
 
 #[test]
 fn label_transfer_used_as_a_binary_operand_rejoins_through_typed_mir() {
-    let core = core_for(
-        "core-operand-label-transfer@0.1.0",
-        "pub fn main() -> i64 { label done { transfer done 40; 0 } + 2 }",
-    );
+    let source = "use std::*; pub fn main() -> i64 { label done { transfer done 40; 0 } + 2 }";
+    let core = core_for("core-operand-label-transfer@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     let owner = core
@@ -7386,8 +7410,7 @@ fn label_transfer_used_as_a_binary_operand_rejoins_through_typed_mir() {
         grandiose_stage0::MirTerminator::Leave { .. }
     ));
     assert_eq!(
-        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
-            .unwrap()
+        compile_source(source)
             .run_i64()
             .unwrap(),
         42
@@ -7398,7 +7421,7 @@ fn label_transfer_used_as_a_binary_operand_rejoins_through_typed_mir() {
 fn binary_operand_transfer_emits_a_cleanup_carrying_leave_edge() {
     let core = core_for(
         "core-binary-label-transfer@0.1.0",
-        "pub fn main() -> i64 { label done { 1 + transfer done 42 } }",
+        "use std::*; pub fn main() -> i64 { label done { 1 + transfer done 42 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -7439,7 +7462,7 @@ fn binary_operand_transfer_emits_a_cleanup_carrying_leave_edge() {
 fn lazy_label_transfer_uses_a_boolean_join_for_the_skipped_branch() {
     let core = core_for(
         "core-lazy-label-transfer@0.1.0",
-        "pub fn main() -> Bool { label done { false or transfer done true } }",
+        "use std::*; pub fn main() -> Bool { label done { false or transfer done true } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -7487,7 +7510,7 @@ fn lazy_label_transfer_uses_a_boolean_join_for_the_skipped_branch() {
 fn nested_completion_label_transfer_keeps_ordered_normal_and_leave_edges() {
     let core = core_for(
         "core-nested-completion-label-transfer@0.1.0",
-        "pub fn main() -> i64 { label done { 1 + handle 40 { 40 => transfer done 42, _ => 0 } } }",
+        "use std::*; pub fn main() -> i64 { label done { 1 + handle 40 { 40 => transfer done 42, _ => 0 } } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -7525,10 +7548,8 @@ fn nested_completion_label_transfer_keeps_ordered_normal_and_leave_edges() {
 
 #[test]
 fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
-    let core = core_for(
-        "core-operand-label-prefix@0.1.0",
-        "pub fn main() -> i64 { 1 + label done { transfer done 40; 0 } + 1 }",
-    );
+    let source = "use std::*; pub fn main() -> i64 { 1 + label done { transfer done 40; 0 } + 1 }";
+    let core = core_for("core-operand-label-prefix@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     let owner = core
@@ -7550,8 +7571,7 @@ fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
         ]
     ));
     assert_eq!(
-        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
-            .unwrap()
+        compile_source(source)
             .run_i64()
             .unwrap(),
         42
@@ -7560,10 +7580,8 @@ fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
 
 #[test]
 fn inner_label_transfer_rejoins_its_enclosing_label_expression() {
-    let core = core_for(
-        "core-inner-label-transfer@0.1.0",
-        "pub fn main() -> i64 { label outer { label inner { transfer inner 40; 0 } + 2 } }",
-    );
+    let source = "use std::*; pub fn main() -> i64 { label outer { label inner { transfer inner 40; 0 } + 2 } }";
+    let core = core_for("core-inner-label-transfer@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     let owner = core
@@ -7582,8 +7600,7 @@ fn inner_label_transfer_rejoins_its_enclosing_label_expression() {
         grandiose_stage0::MirTerminator::Leave { .. }
     ));
     assert_eq!(
-        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
-            .unwrap()
+        compile_source(source)
             .run_i64()
             .unwrap(),
         42
@@ -7594,7 +7611,7 @@ fn inner_label_transfer_rejoins_its_enclosing_label_expression() {
 fn nested_label_transfer_preserves_cleanup_and_the_outer_continuation() {
     let core = core_for(
         "core-nested-bound-label-cleanup@0.1.0",
-        "pub fn main() -> i64 { let value = 1; let answer = label outer { label inner { move value; transfer outer 40; 0 }; 1 }; answer + 2 }",
+        "use std::*; pub fn main() -> i64 { let value = 1; let answer = label outer { label inner { move value; transfer outer 40; 0 }; 1 }; answer + 2 }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -7873,6 +7890,7 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
 #[test]
 fn source_lowering_executes_handler_partial_move_and_label_leave() {
     let source = r#"
+        use std::*;
         effect Ask { [1,1] ask() -> i64; }
         pub struct Pair { left: i64, right: i64 }
         pub fn main() -> i64 {
@@ -7940,6 +7958,7 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
     // carry every owner through the label cleanup plan without confusing the
     // branch-correlated old field move with the reinitialized aggregate.
     let source = r#"
+        use std::*;
         effect Ask { [1, 1] ask(value: Bool) -> i64; }
         struct Pair { left: i64, right: i64 }
         pub fn main() -> i64 {
@@ -8020,6 +8039,7 @@ fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancell
     // continuation, so this source shape needs one Drop call on the outer
     // cancellation edge and must never duplicate it at the rejoin.
     let source = r#"
+        use std::*;
         effect Ask { [0, 1] ask(value: i64) -> i64; }
         struct Probe<'a> { target: &'a mut i64 }
         impl<'a> Use<[0, 1]> for Probe<'a> {}
@@ -8052,12 +8072,7 @@ fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancell
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -8139,6 +8154,7 @@ fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
 #[test]
 fn nested_generic_label_forward_rejoins_completion_after_refutable_handler() {
     let source = r#"
+        use std::*;
         escape<L>(destination: L, value: i64) -> !
         where L: Label<i64>
         {
@@ -8210,6 +8226,7 @@ fn nested_generic_label_forward_rejoins_completion_after_refutable_handler() {
 #[test]
 fn nested_generic_label_forward_checks_each_refutable_payload_before_rejoin() {
     let source = r#"
+        use std::*;
         escape<L>(destination: L, value: i64) -> !
         where L: Label<i64>
         {
@@ -8252,14 +8269,7 @@ fn nested_generic_label_forward_checks_each_refutable_payload_before_rejoin() {
         .unwrap_or_else(|| panic!("multi-payload forwarding lowers: {:#?}", lowered.diagnostics));
     mir.validate()
         .unwrap_or_else(|error| panic!("multi-payload forwarding MIR validates: {error}\n{mir:#?}"));
-    let pattern_blocks = mir
-        .blocks
-        .iter()
-        .filter(|block| block
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::PatternTest { .. })))
-        .count();
+    let pattern_blocks = handler_payload_test_count(&mir);
     assert_eq!(pattern_blocks, 2, "both payload positions need ordered CFG tests: {mir:#?}");
     assert!(mir.blocks.iter().any(|block| block
         .instructions
@@ -8279,6 +8289,7 @@ fn nested_generic_label_forward_checks_each_refutable_payload_before_rejoin() {
 #[test]
 fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
     let source = r#"
+        use std::*;
         escape<L>(destination: L, value: i64) -> !
         where L: Label<i64>
         {
@@ -8326,12 +8337,7 @@ fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -8363,6 +8369,7 @@ fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
 #[test]
 fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() {
     let source = r#"
+        use std::*;
         escape<L>(destination: L, value: i64) -> !
         where L: Label<i64>
         {
@@ -8418,12 +8425,7 @@ fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() 
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -8450,10 +8452,7 @@ fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() 
         "both forwarded handler frames retain the exact replay budget: {mir:#?}"
     );
     assert_eq!(
-        mir.blocks
-            .iter()
-            .filter(|block| block.instructions.iter().any(|instruction| matches!(instruction, MirInstruction::PatternTest { .. })))
-            .count(),
+        handler_payload_test_count(&mir),
         2,
         "a late multi-payload refutation must retain both ordered tests: {mir:#?}"
     );
@@ -8481,6 +8480,7 @@ fn interprocedural_replay_forwards_after_a_late_payload_then_cancels() {
     // forwards to the outer exact replayer; each replayed residual then
     // reaches the sibling cancellation clause.
     let source = r#"
+        use std::*;
         effect Console {
             [2, 2] read(flag: Bool, value: i64) -> i64;
             [0, 1] write(value: i64) -> i64;
@@ -8516,12 +8516,7 @@ fn interprocedural_replay_forwards_after_a_late_payload_then_cancels() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -8542,13 +8537,7 @@ fn interprocedural_replay_forwards_after_a_late_payload_then_cancels() {
         panic!("late-payload replay/cancellation MIR validates: {error}\n{mir:#?}")
     });
     assert_eq!(
-        mir.blocks
-            .iter()
-            .filter(|block| block.instructions.iter().any(|instruction| matches!(
-                instruction,
-                MirInstruction::PatternTest { .. }
-            )))
-            .count(),
+        handler_payload_test_count(&mir),
         2,
         "both refutable payload positions must have ordered MIR tests: {mir:#?}"
     );
@@ -8575,14 +8564,13 @@ fn interprocedural_replay_forwards_after_a_late_payload_then_cancels() {
         .instructions
         .iter()
         .any(|instruction| matches!(instruction, MirInstruction::Cancel { .. }))));
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("late-payload MIR emits VM");
-    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
-        .expect("late-payload replay/cancellation VM bytecode verifies");
+    compile_with_destruction(source, &mir);
 }
 
 #[test]
 fn deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows() {
     let source = r#"
+        use std::*;
         effect Console {
             [2, 2] read(flag: Bool, middle: i64, final: i64) -> i64;
             [0, 1] write(value: i64) -> i64;
@@ -8623,12 +8611,7 @@ fn deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -8649,13 +8632,7 @@ fn deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows() {
         panic!("deep third-payload replay/cancellation MIR validates: {error}\n{mir:#?}")
     });
     assert_eq!(
-        mir.blocks
-            .iter()
-            .filter(|block| block.instructions.iter().any(|instruction| matches!(
-                instruction,
-                MirInstruction::PatternTest { .. }
-            )))
-            .count(),
+        handler_payload_test_count(&mir),
         6,
         "both partial rows must retain an ordered test for each payload: {mir:#?}"
     );
@@ -8672,14 +8649,13 @@ fn deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows() {
         .instructions
         .iter()
         .any(|instruction| matches!(instruction, MirInstruction::Cancel { .. }))));
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("deep third-payload MIR emits VM");
-    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
-        .expect("deep third-payload cancellation VM bytecode verifies");
+    compile_with_destruction(source, &mir);
 }
 
 #[test]
 fn reentrant_replay_checks_a_late_third_payload_before_labelled_completion() {
     let source = r#"
+        use std::*;
         effect Ask { [2, 2] ask(flag: Bool, middle: i64, final: i64) -> i64; }
         effect Tick { [2, 2] tick() -> i64; }
         effect Audit { [2, 2] note(value: i64) -> i64; }
@@ -8734,12 +8710,7 @@ fn reentrant_replay_checks_a_late_third_payload_before_labelled_completion() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (core, signatures) = core_and_signatures_for(&definition.module.package.0, &source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -8760,13 +8731,7 @@ fn reentrant_replay_checks_a_late_third_payload_before_labelled_completion() {
         panic!("third-payload reentrant MIR validates: {error}\n{mir:#?}")
     });
     assert_eq!(
-        mir.blocks
-            .iter()
-            .filter(|block| block.instructions.iter().any(|instruction| matches!(
-                instruction,
-                MirInstruction::PatternTest { .. }
-            )))
-            .count(),
+        handler_payload_test_count(&mir),
         3,
         "the partial Ask row must retain an ordered test for all three payloads: {mir:#?}"
     );
@@ -8919,14 +8884,7 @@ fn projected_terminal_contract_rejoins_nested_completion_through_a_label() {
         block.terminator,
         grandiose_stage0::MirTerminator::Leave { .. }
     )));
-    let artifact = grandiose_stage0::emit_vm(&mir).expect("projected terminal label MIR emits VM");
-    assert_eq!(
-        grandiose_stage0::verify_vm(artifact)
-            .expect("projected terminal label VM verifies")
-            .run_i64()
-            .expect("projected terminal label VM runs"),
-        42
-    );
+    assert_eq!(compile_with_destruction(source, &mir).run_i64().unwrap(), 42);
 }
 
 #[test]

@@ -138,9 +138,23 @@ and bytecode verification reject repeated carriers and reads after handoff.
 The callee's native homes are installed before outgoing homes are disarmed;
 an indirect callable receiver remains borrowed, separate from its consumed
 parameters. Host calls retain their exact capability and native-resident ABI.
-Effect payload handoff, saved-frame ownership and native projected-hole
-initialization still need work. These are explicit protocol gaps, not a
-reason to defer construction of the final compiler language.
+Effect dispatch now uses consuming payload carriers and an explicit claim
+after the complete pattern gate. Rejected clauses may observe and forward an
+unclaimed packet but cannot consume it; acceptance removes the packet's
+forwarding owner exactly once. Native projected initialization now follows
+logical paths shared by checked aliases, including distinct zero-sized fields.
+The focused source drop-count and independent bytecode regressions pass.
+Saved-frame and replay ownership remain under audit. Returning resumptions
+now retire their outgoing value before saving the clause, and Runtime MIR
+checks consumed carriers in dynamic handler and lexical-label entries as well
+as ordinary CFG entries. Focused drop-count regressions now pass for independent
+replay residents, suspended ordinary callees, and outer bindings consumed by
+the protected computation. Cleanup checks Copy permission across suspended
+call inventories and provides explicit owned roots to Runtime and VM handler
+installation (schema 108); lexical allocation time does not decide capture
+ownership. Nested handler snapshots, closure environments, and independent
+verification of the complete replay permission contract remain under audit.
+These focused fixes do not establish complete replay safety.
 
 `vm_lir.rs` now consumes Runtime MIR directly into concrete VM registers,
 machine leaves and symbolic basic blocks. Parallel branch arguments become
