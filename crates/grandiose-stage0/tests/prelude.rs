@@ -82,6 +82,35 @@ fn default_prelude_resolves_result_based_boolean_types_and_constants() {
 }
 
 #[test]
+fn unit_patterns_execute_in_completions_nested_values_and_operation_payloads() {
+    for source in [
+        "pub fn main() -> i64 { handle () { () => 42 } }",
+        "pub fn main() -> i64 { handle ((), [(), ()]) { ((), [(), ()]) => 42, _ => 0 } }",
+        "fn value() -> Result<(), i64> { Ok(()) } pub fn main() -> i64 { handle value() { Result::Ok(()) => 42, Result::Err(_) => 0 } }",
+        "effect Pick { [1, 1] pick(()) -> i64; } pub fn main() -> i64 { handle Pick::pick(()) { Pick::pick((), k) => k(42) } }",
+    ] {
+        runs(source);
+    }
+}
+
+#[test]
+fn unit_patterns_do_not_accept_nonunit_subjects_or_nonempty_tuple_patterns() {
+    for source in [
+        "pub fn main() -> i64 { handle 7 { () => 42 } }",
+        "pub fn main() -> i64 { handle ((), 7) { () => 42 } }",
+        "pub fn main() -> i64 { handle () { (value,) => 42 } }",
+    ] {
+        let input = request(source);
+        let file = input.sources[0].key;
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(input) else {
+            panic!("mismatched unit pattern compiled: {source}");
+        };
+        assert!(diagnostics.iter().any(|d| matches!(d.code, "G4202" | "G4203")
+            && d.primary.is_some_and(|span| span.file == file)), "{diagnostics:#?}");
+    }
+}
+
+#[test]
 fn boolean_constants_infer_closed_types_without_context() {
     runs(
         "pub fn main() -> i64 { let yes = true; let no = false; handle (yes, no) { (true, false) => 42, _ => 0 } }",

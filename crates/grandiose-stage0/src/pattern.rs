@@ -287,6 +287,12 @@ impl Elaborator<'_> {
                 }
             }
             PatternKind::Tuple(values) => {
+                // Surface `()` denotes Unit, not a structural tuple. Match
+                // its sole value exactly as a frozen unit constant does;
+                // only erase the test after checking the subject type.
+                if values.is_empty() && subject == Type::Unit {
+                    return PatternDecision::Any;
+                }
                 let Type::Tuple(types) = subject else {
                     self.error(
                         pattern.span,

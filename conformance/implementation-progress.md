@@ -331,6 +331,26 @@ not used as full-run evidence. With explicit cleanup permission, `cargo clean
 `target/conformance-groundwork` build and comparison logs were preserved, and
 the complete baseline was rerun using the sixth slice's command and guards.
 
+## Eighth slice: unit patterns
+
+Empty tuple-pattern syntax `()` now recognizes a Unit subject before the
+ordinary tuple-arity check. It produces the same irrefutable decision as a
+frozen unit constant. This is not a wildcard for other types: scalar subjects,
+nonempty tuples, and nonempty tuple patterns against Unit remain errors.
+Cache generation 27 identifies the changed elaboration result.
+
+Three new tests cover direct pattern elaboration, completion arms, nested
+tuples/arrays, enum payloads, operation payloads, and type/arity mismatches.
+Positive integration cases also execute verified canonical-wire round trips.
+All 66 tests in the pattern, pattern-names, prelude, and request/revision suites
+pass, and the conformance-plan integrity check passes. The full non-GSC2 suite
+was subsequently rerun with the same optimized profile and resource guards:
+2,558 tests executed, with 2,387 passing and 171 failing. All three new tests
+pass; suite-qualified comparison finds no regressions, missing tests, or
+changes to the previous failures. All 54 suites completed, and all 22
+conformance-plan checker tests pass. This does not establish full semantic
+or self-hosting conformance.
+
 ## Next work
 
 1. Triage the remaining failures after default-prelude selection, separating

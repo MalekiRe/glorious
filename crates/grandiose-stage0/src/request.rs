@@ -130,10 +130,11 @@ pub struct CompilerBuildIdentity {
 /// Cache twenty-five and verifier twenty-one separate deep resumption return
 /// contexts and audit every suspended suffix reaching a shared clause.
 /// Cache twenty-six checks pattern binder uniqueness after constant resolution.
+/// Cache twenty-seven elaborates empty tuple syntax against the Unit type.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 4;
-pub const STAGE0_CACHE_GENERATION: u32 = 26;
+pub const STAGE0_CACHE_GENERATION: u32 = 27;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 64;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 21;
 

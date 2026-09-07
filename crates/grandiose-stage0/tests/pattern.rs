@@ -31,6 +31,29 @@ fn parsed(
 }
 
 #[test]
+fn empty_pattern_distinguishes_unit_from_nonempty_and_scalar_subjects() {
+    let (interface, signatures, body) = parsed("pub fn main() -> () { () is () }");
+    let ExprKind::Block(values) = &body.expression(body.root).kind else { panic!("block"); };
+    let ExprKind::Is { pattern, .. } = body.expression(values[0]).kind else { panic!("test"); };
+    for (subject, accepted) in [
+        (Type::Unit, true),
+        (Type::Scalar(ScalarType::I64), false),
+        (Type::Tuple(vec![Type::Unit]), false),
+    ] {
+        let result = elaborate_pattern(&body, pattern, subject.clone(),
+            &DefinitionIndex::from_interface(&interface), &signatures, &interface.module);
+        assert_eq!(!result.recovered, accepted, "{subject:?}: {:?}", result.diagnostics);
+        if accepted {
+            assert!(!result.plan.refutable);
+            assert!(result.plan.bindings.is_empty());
+            assert!(result.diagnostics.is_empty());
+        } else {
+            assert!(result.diagnostics.iter().any(|d| matches!(d.code, "G4202" | "G4203")));
+        }
+    }
+}
+
+#[test]
 fn is_pattern_elaboration_rejects_duplicate_resolved_binders() {
     let source = "pub fn main() -> () { (1, 2) is (value, value) }";
     let (interface, signatures, body) = parsed(source);
