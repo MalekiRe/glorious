@@ -59,6 +59,14 @@ pub struct ScanDiagnostic {
 pub struct DeclarationScan {
     pub declarations: Vec<DeclarationShell>,
     pub diagnostics: Vec<ScanDiagnostic>,
+    pub module_attributes: ModuleAttributes,
+}
+
+/// Source-owned controls for automatic library inclusion and lexical imports.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ModuleAttributes {
+    pub no_std: bool,
+    pub no_implicit_prelude: bool,
 }
 
 impl DeclarationScan {
@@ -96,6 +104,7 @@ impl DeclarationScan {
             declarations: vec![],
             diagnostics: vec![],
         };
+        let module_attributes = scanner.module_attributes();
         while scanner.current().is_some() {
             scanner.next_declaration();
         }
@@ -105,6 +114,7 @@ impl DeclarationScan {
         Self {
             declarations: scanner.declarations,
             diagnostics: scanner.diagnostics,
+            module_attributes,
         }
     }
 }
@@ -119,6 +129,37 @@ struct Scanner<'a> {
 }
 
 impl Scanner<'_> {
+    fn module_attributes(&mut self) -> ModuleAttributes {
+        let mut attributes = ModuleAttributes::default();
+        while let Some(start) = self.current() {
+            if self.lexed.text(self.source, &self.lexed.tokens[start]) != "#!" {
+                break;
+            }
+            let open = self.significant.get(self.position + 1).copied();
+            let close = open
+                .filter(|index| self.lexed.tokens[*index].kind == TokenKind::Punctuation('['))
+                .and_then(|index| self.lexed.delimiters.matching(index));
+            let close_position = close.and_then(|index| self.significant.iter().position(|i| *i == index));
+            let name = self.word_at(self.position + 2);
+            let valid = close_position == Some(self.position + 3);
+            match (valid, name) {
+                (true, Some("no_std")) => attributes.no_std = true,
+                (true, Some("no_implicit_prelude")) => attributes.no_implicit_prelude = true,
+                _ => self.diagnostics.push(ScanDiagnostic {
+                    code: "G2004",
+                    span: Span {
+                        file: self.lexed.file,
+                        start: self.lexed.tokens[start].span.start,
+                        end: self.lexed.tokens[close.unwrap_or(start)].span.end,
+                    },
+                    message: "expected `#![no_std]` or `#![no_implicit_prelude]`",
+                }),
+            }
+            self.position = close_position.map_or(self.position + 1, |position| position + 1);
+        }
+        attributes
+    }
+
     fn next_declaration(&mut self) {
         let start_position = self.position;
         let mut public = false;

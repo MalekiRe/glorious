@@ -2,6 +2,10 @@ use grandiose_stage0::*;
 use std::collections::BTreeMap;
 
 fn compile(source: &str) -> Result<CompilationOutcome, ServiceError> {
+    // These fixtures deliberately define their own truth/operator contracts.
+    // Opt out of the distribution's prelude while keeping explicit std imports
+    // available to the tests which exercise the real library boundary.
+    let source = format!("#![no_implicit_prelude]\n{source}");
     let package = PackageKey("library-boundary@0.1.0".into());
     StageZeroCompiler::new().compile(CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"source-owned-operators")),

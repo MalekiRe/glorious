@@ -220,7 +220,7 @@ impl NativeLayout {
     pub(super) fn supports_resident(&self, descriptors: &Arc<[VmNominalCopyDescriptor]>) -> bool {
         fn visit(layout: &NativeLayout, descriptors: &Arc<[VmNominalCopyDescriptor]>, seen: &mut std::collections::BTreeSet<Vec<u8>>, depth: usize) -> bool {
             let mut key = vec![];
-            super::encode_type(&layout.ty, &mut key);
+            super::codec::encode_type(&layout.ty, &mut key);
             if !seen.insert(key) { return true; }
             if depth >= 96 { return false; }
             match &layout.shape {

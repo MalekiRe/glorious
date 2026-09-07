@@ -5,6 +5,41 @@ use grandiose_stage0::{
 };
 
 #[test]
+fn effect_payloads_parse_positional_types_without_callable_binders() {
+    let package = PackageKey("positional-effects@0.1.0".into());
+    let source = "effect Pack<'a, T> { send(i64, &'a T, (T, i64), module::Item<T>, (T) -> T,); empty(); stop(T) -> !; }";
+    let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Effect(header) = parsed.header else {
+        panic!("expected effect header")
+    };
+    let send = &header.operations[0];
+    assert_eq!(send.parameters.len(), 5);
+    assert_eq!(send.parameters.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["0", "1", "2", "3", "4"]);
+    assert!(matches!(&send.parameters[1].ty, HeaderType::Reference { lifetime: Some(name), .. } if name == "'a"));
+    assert!(matches!(&send.parameters[2].ty, HeaderType::Tuple(types) if types.len() == 2));
+    assert!(matches!(&send.parameters[3].ty, HeaderType::Application(base, _) if matches!(base.as_ref(), HeaderType::Path(path) if path == &["module", "Item"])));
+    assert!(matches!(send.parameters[4].ty, HeaderType::Callable { .. }));
+    assert_eq!(send.resumption, Quantity::ONCE);
+    assert!(send.result.is_none());
+    assert!(header.operations[1].parameters.is_empty());
+    assert!(header.operations[2].terminal);
+}
+
+#[test]
+fn positional_effect_syntax_does_not_relax_function_parameter_binders() {
+    let package = PackageKey("positional-function-rejection@0.1.0".into());
+    let source = "pub fn invalid(i64) -> i64 { 42 }";
+    let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3203"), "{parsed:#?}");
+}
+
+#[test]
 fn inherent_method_unit_type_arguments_do_not_scan_into_method_bodies() {
     let package = PackageKey("header-inherent@0.1.0".into());
     let source =

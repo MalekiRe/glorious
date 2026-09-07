@@ -3841,7 +3841,7 @@ fn service_request_package_registry_commits_or_rolls_back_atomically() {
             .iter()
             .map(|entry| entry.status)
             .collect::<Vec<_>>(),
-        vec![PackageSessionStatus::Committed]
+        vec![PackageSessionStatus::Committed; 2]
     );
     let committed = good.retention_metadata();
     assert_eq!(committed.active_packages, 0);
@@ -3868,7 +3868,7 @@ fn service_request_package_registry_commits_or_rolls_back_atomically() {
             .iter()
             .map(|entry| entry.status)
             .collect::<Vec<_>>(),
-        vec![PackageSessionStatus::RolledBack]
+        vec![PackageSessionStatus::RolledBack; 2]
     );
     let rolled_back = failed.retention_metadata();
     assert_eq!(rolled_back.active_packages, 0);
@@ -5170,11 +5170,19 @@ fn service_rebuilds_nested_record_write_paths_from_leaf_to_root() {
 #[test]
 fn service_failures_preserve_source_identity_classification_and_request_provenance() {
     let request = request("pub fn main() -> i64 { missing_name }");
-    let expected_world = request.clone().normalize().unwrap().fingerprint;
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler.import_revision(request.clone(), None).unwrap();
+    // Provenance includes the selected distributed library, not just host inputs.
+    let expected_world = compiler
+        .open_session(revision)
+        .unwrap()
+        .snapshot()
+        .world()
+        .fingerprint;
     let mut reordered = request.clone();
     reordered.sources.reverse();
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-        StageZeroCompiler::new().compile(request)
+        compiler.compile_revision(revision)
     else {
         panic!("unresolved source unexpectedly compiled");
     };
@@ -14174,6 +14182,7 @@ fn check_mode_reuses_semantic_validation_without_publishing_a_vm_artifact() {
 
 #[test]
 fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
+    // Convergence fixtures budget for the distributed library plus 16 KiB of guest source.
     let source = "pub fn main() -> i64 { 40 + 2 }";
     let mut stage_one = request(source);
     stage_one.build.compiler = Digest::of_bytes(b"rust-seed");
@@ -14181,7 +14190,10 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
         ordinal: 1,
         producer: Digest::of_bytes(b"rust-seed"),
         optimization_level: 2,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: None,
     });
     let compiler = StageZeroCompiler::new();
@@ -14205,7 +14217,10 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
         ordinal: 2,
         producer: first_manifest.artifact,
         optimization_level: 2,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: Some(first_manifest.artifact),
     });
     let second = compiler.compile(stage_two).unwrap();
@@ -14226,7 +14241,10 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
         ordinal: 3,
         producer: second_manifest.artifact,
         optimization_level: 2,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: Some(second_manifest.artifact),
     });
     let third_manifest = compiler
@@ -14252,7 +14270,10 @@ fn bootstrap_stage_rejects_a_nonconvergent_expected_artifact() {
         ordinal: 2,
         producer: Digest::of_bytes(b"not-this-program"),
         optimization_level: 2,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: Some(Digest::of_bytes(b"not-this-program")),
     });
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
@@ -14280,7 +14301,10 @@ fn bootstrap_convergence_failure_discards_emission_session_staging() {
         ordinal: 2,
         producer: Digest::of_bytes(b"emission-session-rollback"),
         optimization_level: 2,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: Some(Digest::of_bytes(b"emission-session-rollback")),
     });
     let failed_revision = compiler.import_revision(nonconvergent, None).unwrap();
@@ -14320,7 +14344,10 @@ fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
         ordinal: 1,
         producer: Digest::of_bytes(b"seed"),
         optimization_level: 1,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: None,
     });
     let first = StageZeroCompiler::new()
@@ -14335,7 +14362,10 @@ fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
         ordinal: 2,
         producer: first.artifact,
         optimization_level: 1,
-        limits: BootstrapLimits::new(4, 16 * 1024),
+        limits: BootstrapLimits::new(
+            4,
+            16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+        ),
         expected_artifact: Some(first.artifact),
     });
     let second = StageZeroCompiler::new()
@@ -14366,7 +14396,10 @@ fn bootstrap_convergence_rejects_skipped_or_substituted_successors() {
             ordinal: 1,
             producer: Digest::of_bytes(b"rust-seed"),
             optimization_level: 2,
-            limits: BootstrapLimits::new(4, 16 * 1024),
+            limits: BootstrapLimits::new(
+                4,
+                16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+            ),
             expected_artifact: None,
         },
         stage_one_artifact,
@@ -14376,7 +14409,10 @@ fn bootstrap_convergence_rejects_skipped_or_substituted_successors() {
             ordinal: 2,
             producer: Digest::of_bytes(b"substituted-stage-one"),
             optimization_level: 2,
-            limits: BootstrapLimits::new(4, 16 * 1024),
+            limits: BootstrapLimits::new(
+                4,
+                16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+            ),
             expected_artifact: Some(Digest::of_bytes(b"substituted-stage-one")),
         },
         stage_one_artifact,
@@ -14392,7 +14428,10 @@ fn bootstrap_convergence_rejects_skipped_or_substituted_successors() {
             ordinal: 3,
             producer: stage_one_artifact,
             optimization_level: 2,
-            limits: BootstrapLimits::new(4, 16 * 1024),
+            limits: BootstrapLimits::new(
+                4,
+                16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+            ),
             expected_artifact: Some(stage_one_artifact),
         },
         stage_one_artifact,
@@ -14424,7 +14463,10 @@ fn bootstrap_manifests_round_trip_canonically_and_reject_corruption() {
             ordinal: 2,
             producer: Digest::of_bytes(b"stage-one-artifact"),
             optimization_level: 2,
-            limits: BootstrapLimits::new(4, 16 * 1024),
+            limits: BootstrapLimits::new(
+                4,
+                16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+            ),
             expected_artifact: Some(Digest::of_bytes(b"stage-one-artifact")),
         },
         world: Digest::of_bytes(b"world"),
@@ -19114,7 +19156,7 @@ fn service_enforces_cross_package_orphan_coherence_through_public_reexports() {
         request.sources.push(SourceInput::new(
             PackageKey("provider@0.1.0".into()),
             LogicalPath::parse("src/lib.glorious").unwrap(),
-            b"pub trait ForeignTrait { fn value(receiver: Self) -> i64; } pub struct ForeignType {};".as_slice(),
+            b"pub trait ForeignTrait { fn value(receiver: Self) -> i64; } pub struct ForeignType {}".as_slice(),
         ));
         StageZeroCompiler::new().compile(request)
     };
@@ -19134,7 +19176,7 @@ fn service_enforces_cross_package_orphan_coherence_through_public_reexports() {
         request.sources.push(SourceInput::new(
             PackageKey("provider@0.1.0".into()),
             LogicalPath::parse("src/lib.glorious").unwrap(),
-            b"pub trait ForeignTrait { fn value(receiver: Self) -> i64; } pub struct ForeignType {};".as_slice(),
+            b"pub trait ForeignTrait { fn value(receiver: Self) -> i64; } pub struct ForeignType {}".as_slice(),
         ));
         StageZeroCompiler::new().compile(request)
     };

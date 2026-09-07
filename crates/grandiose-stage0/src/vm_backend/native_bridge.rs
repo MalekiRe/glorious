@@ -8,10 +8,11 @@
 //! rebuilt at the boundary. Owned results use caller-provided native slots.
 
 use super::native_memory::{NativeLayout, NativeShape, native_layout};
+use super::codec::encode_type;
 use super::{
     CandidateVmProgram, DefKey, Digest, ExecutionBudget, NativeMemory, ReferenceTarget,
     RuntimeCaptureEnvironment, RuntimeRegisters, VerifiedVmProgram, VmArtifactError, VmExecutionLimits, VmInstruction,
-    VmNativeResident, VmNominalCopyDescriptor, VmType, VmValue, encode_type,
+    VmNativeResident, VmNominalCopyDescriptor, VmType, VmValue,
     execute_program_profiled, execute_with_arguments, expect_i64,
 };
 use std::{
@@ -177,7 +178,7 @@ fn destruction_code_identity(
     bytes.extend_from_slice(&entry.0.as_bytes());
     bytes.extend_from_slice(&(seen.len() as u64).to_le_bytes());
     for definition in seen {
-        super::encode_function(&program.functions[&definition], &mut bytes);
+        super::codec::encode_function(&program.functions[&definition], &mut bytes);
     }
     Ok(Digest::of_bytes(&bytes))
 }

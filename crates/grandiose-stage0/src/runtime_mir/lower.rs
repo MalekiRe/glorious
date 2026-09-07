@@ -104,6 +104,7 @@ impl CleanupMir {
                 _ => None,
             })
             .collect::<BTreeMap<_, _>>();
+        let unused_optional_resumptions = self.unused_optional_resumptions();
         let symbols = &self.symbols;
         let mut locals: Vec<_> = self
             .values
@@ -1023,7 +1024,8 @@ impl CleanupMir {
                                 selected.resumption,
                                 crate::CoreHandlerResumption::Discard { .. }
                                     | crate::CoreHandlerResumption::Terminal
-                            ) || selected
+                            ) || unused_optional_resumptions.contains(&(*handler, *clause))
+                                || selected
                                 .contract
                                 .as_ref()
                                 .is_some_and(|contract| contract.invocation.lower >= 2)

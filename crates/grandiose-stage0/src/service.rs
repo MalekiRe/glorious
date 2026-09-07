@@ -15,13 +15,13 @@ use crate::revision::{
 use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
-    DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
-    ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
+    DefinitionIndex, DependencyNode, DependencyTrace, Digest, ElaboratedHeader,
+    ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InstanceGraph,
     InstanceKey, InstanceLimits,
     LogicalPath, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow,
     PrimitiveRole, PrimitiveSelector,
-    PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId, Severity,
-    RuntimeManifestInput, SourceInput, SourceSpan, Span, TraitConstProjectionAnswer, TraitGoal,
+    PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId,
+    RuntimeManifestInput, SourceInput, SourceSpan, TraitConstProjectionAnswer, TraitGoal,
     TraitSolver, TrustedRuntimeManifest,
     PersistentArtifactCache, Type, TypedBody, UseFlow, VerifiedVmProgram, implementation_method_key,
     verify_vm_program,
@@ -30,437 +30,12 @@ use crate::{
 #[cfg(test)]
 use crate::{MirFunction, MirInstance, MirInstruction};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CompileDiagnostic {
-    pub code: &'static str,
-    pub message: String,
-    /// Stable failure classification.  Tooling must not infer this from a
-    /// textual message or a numeric-code range.
-    pub class: DiagnosticClass,
-    pub severity: Severity,
-    /// The primary source identity when this fact originated from source.
-    pub primary: Option<SourceSpan>,
-    /// The immutable request world from which this diagnostic was derived.
-    pub input_fingerprint: Option<Digest>,
-    /// Source locations which explain the primary fact without competing with
-    /// it for the editor's primary highlight.
-    pub related: Vec<RelatedDiagnosticLocation>,
-    /// Canonical semantic facts suitable for both a human explanation and a
-    /// machine client.  These deliberately retain names and values as
-    /// separate fields rather than encoding a second sentence in `message`.
-    pub facts: Vec<DiagnosticFact>,
-    /// Ordered explanation frames from the semantic boundary to the reported
-    /// failure.  Frames are canonicalized before publication, so phase and
-    /// map traversal order cannot affect a diagnostic product.
-    pub explanation: Vec<DiagnosticExplanationFrame>,
-}
+mod diagnostics;
+mod interface_dependencies;
+pub use diagnostics::{
+    CompileDiagnostic, DiagnosticExplanationFrame, DiagnosticFact, RelatedDiagnosticLocation,
+};
 
-/// A non-primary source location participating in a compiler diagnostic.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RelatedDiagnosticLocation {
-    pub label: String,
-    pub span: SourceSpan,
-}
-
-/// A typed-by-name semantic observation attached to a diagnostic.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct DiagnosticFact {
-    pub name: String,
-    pub value: String,
-}
-
-/// One stable step in a semantic explanation chain.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct DiagnosticExplanationFrame {
-    pub kind: String,
-    pub message: String,
-}
-
-impl CompileDiagnostic {
-    /// The maximum number of error diagnostics published for one failed
-    /// request. Keeping this bound at the service boundary protects hosts and
-    /// tools from pathological recovery cascades while preserving a single,
-    /// explicit explanation that additional facts were suppressed.
-    pub const DEFAULT_ERROR_LIMIT: usize = 100;
-
-    /// Serialize one published diagnostic as a self-contained JSON object.
-    ///
-    /// The service deliberately owns this small serializer instead of exposing
-    /// Rust `Debug` output to editor and build-tool clients. Field order is
-    /// fixed, source locations use stable file identities plus byte offsets,
-    /// and every control character in a diagnostic message is escaped
-    /// according to JSON's string grammar. Callers should emit one returned
-    /// value per line (JSON Lines), after the batch has crossed the ordinary
-    /// canonicalization and span-validation boundary.
-    pub fn to_json_line(&self) -> String {
-        let primary = self.primary.map_or_else(
-            || "null".to_owned(),
-            |primary| {
-                format!(
-                    "{{\"file\":\"{}\",\"start_byte\":{},\"end_byte\":{}}}",
-                    primary.file.0, primary.start, primary.end
-                )
-            },
-        );
-        let input_fingerprint = self.input_fingerprint.map_or_else(
-            || "null".to_owned(),
-            |fingerprint| format!("\"{fingerprint}\""),
-        );
-        let related = json_array(self.related.iter().map(|related| {
-            format!(
-                "{{\"label\":\"{}\",\"span\":{{\"file\":\"{}\",\"start_byte\":{},\"end_byte\":{}}}}}",
-                json_escape(&related.label),
-                related.span.file.0,
-                related.span.start,
-                related.span.end,
-            )
-        }));
-        let facts = json_array(self.facts.iter().map(|fact| {
-            format!(
-                "{{\"name\":\"{}\",\"value\":\"{}\"}}",
-                json_escape(&fact.name),
-                json_escape(&fact.value),
-            )
-        }));
-        let explanation = json_array(self.explanation.iter().map(|frame| {
-            format!(
-                "{{\"kind\":\"{}\",\"message\":\"{}\"}}",
-                json_escape(&frame.kind),
-                json_escape(&frame.message),
-            )
-        }));
-        format!(
-            "{{\"code\":\"{}\",\"class\":\"{}\",\"severity\":\"{}\",\"message\":\"{}\",\"primary\":{},\"related\":{},\"facts\":{},\"explanation\":{},\"input_fingerprint\":{}}}",
-            self.code,
-            self.class.json_name(),
-            self.severity.json_name(),
-            json_escape(&self.message),
-            primary,
-            related,
-            facts,
-            explanation,
-            input_fingerprint,
-        )
-    }
-
-    /// Render a deterministic, line-oriented human projection of this
-    /// structured fact.  Hosts may choose their own presentation, but the
-    /// stage-zero CLI uses this stable fallback rather than discarding
-    /// semantic context.
-    pub fn text_lines(&self) -> Vec<String> {
-        let mut lines = vec![format!("{}: {}", self.code, self.message)];
-        lines.extend(self.related.iter().map(|related| {
-            format!(
-                "  related {} at {}:{}..{}",
-                related.label, related.span.file.0, related.span.start, related.span.end
-            )
-        }));
-        lines.extend(
-            self.facts
-                .iter()
-                .map(|fact| format!("  fact {}: {}", fact.name, fact.value)),
-        );
-        lines.extend(
-            self.explanation
-                .iter()
-                .map(|frame| format!("  because {}: {}", frame.kind, frame.message)),
-        );
-        lines
-    }
-
-    pub fn with_related_location(mut self, label: impl Into<String>, span: SourceSpan) -> Self {
-        self.related.push(RelatedDiagnosticLocation {
-            label: label.into(),
-            span,
-        });
-        self
-    }
-
-    pub fn with_fact(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.facts.push(DiagnosticFact {
-            name: name.into(),
-            value: value.into(),
-        });
-        self
-    }
-
-    pub fn with_explanation(mut self, kind: impl Into<String>, message: impl Into<String>) -> Self {
-        self.explanation.push(DiagnosticExplanationFrame {
-            kind: kind.into(),
-            message: message.into(),
-        });
-        self
-    }
-
-    fn source(code: &'static str, message: impl Into<String>, span: Option<Span>) -> Self {
-        Self::new(code, message, DiagnosticClass::Source, span)
-    }
-
-    fn request(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(code, message, DiagnosticClass::Request, None)
-    }
-
-    fn invariant(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(code, message, DiagnosticClass::Invariant, None)
-    }
-
-    fn verification(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(code, message, DiagnosticClass::Verification, None)
-    }
-
-    fn input_corruption(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(code, message, DiagnosticClass::InputCorruption, None)
-    }
-
-    fn resource(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(code, message, DiagnosticClass::Resource, None)
-    }
-
-    fn cancellation(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(code, message, DiagnosticClass::Cancellation, None)
-    }
-
-    fn new(
-        code: &'static str,
-        message: impl Into<String>,
-        class: DiagnosticClass,
-        span: Option<Span>,
-    ) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            class,
-            severity: Severity::Error,
-            primary: span.map(|span| SourceSpan {
-                file: span.file,
-                start: span.start,
-                end: span.end,
-            }),
-            input_fingerprint: None,
-            related: Vec::new(),
-            facts: Vec::new(),
-            explanation: Vec::new(),
-        }
-    }
-
-    /// Canonicalize a diagnostic batch at the service boundary.  Individual
-    /// compiler phases deliberately retain local recovery behavior, so more
-    /// than one phase can independently report the same source fact.  The
-    /// published result must neither depend on phase traversal order nor make
-    /// clients render that fact repeatedly.
-    pub fn canonicalize(mut diagnostics: Vec<Self>) -> Vec<Self> {
-        // De-duplication is about identity, while rendering order is about
-        // source priority.  Keep those two concerns separate: sorting by the
-        // identity key first makes `dedup_by` deterministic, then the public
-        // batch is reordered according to the documented source-first order.
-        for diagnostic in &mut diagnostics {
-            diagnostic.canonicalize_provenance();
-        }
-        diagnostics.sort_by(|left, right| left.fact_key().cmp(&right.fact_key()));
-        let mut merged = Vec::<Self>::with_capacity(diagnostics.len());
-        for diagnostic in diagnostics {
-            if let Some(previous) = merged
-                .last_mut()
-                .filter(|previous| previous.fact_key() == diagnostic.fact_key())
-            {
-                previous.related.extend(diagnostic.related);
-                previous.facts.extend(diagnostic.facts);
-                previous.explanation.extend(diagnostic.explanation);
-                previous.canonicalize_provenance();
-            } else {
-                merged.push(diagnostic);
-            }
-        }
-        let mut diagnostics = merged;
-        diagnostics.sort_by(|left, right| left.presentation_key().cmp(&right.presentation_key()));
-        diagnostics
-    }
-
-    /// Defend the publication boundary from malformed phase-local locations.
-    /// A compiler bug must not make a host or editor trust a source span that
-    /// names an absent input or points outside the immutable request snapshot.
-    /// Replace the invalid fact with a stable invariant diagnostic instead.
-    pub fn validate_primary_spans(
-        diagnostics: Vec<Self>,
-        source_lengths: &BTreeMap<crate::FileKey, u32>,
-    ) -> Vec<Self> {
-        diagnostics
-            .into_iter()
-            .map(|diagnostic| {
-                let primary_valid = diagnostic.primary.is_none_or(|primary| {
-                    source_lengths
-                        .get(&primary.file)
-                        .is_some_and(|length| primary.start <= primary.end && primary.end <= *length)
-                });
-                let related_valid = diagnostic.related.iter().all(|related| {
-                    source_lengths.get(&related.span.file).is_some_and(|length| {
-                        related.span.start <= related.span.end && related.span.end <= *length
-                    })
-                });
-                if primary_valid && related_valid {
-                    diagnostic
-                } else {
-                    let mut replacement = Self::invariant(
-                        "G7014",
-                        format!(
-                            "compiler produced diagnostic {} with an invalid source provenance span",
-                            diagnostic.code
-                        ),
-                    );
-                    replacement.input_fingerprint = diagnostic.input_fingerprint;
-                    replacement
-                }
-            })
-            .collect()
-    }
-
-    /// Publish at most `limit` error facts from a canonical batch. Warnings
-    /// and notes remain useful context and do not consume the error budget.
-    /// If the limit is exceeded, the last error slot is reserved for a stable
-    /// resource diagnostic that states exactly how many errors were hidden.
-    pub fn limit_errors(diagnostics: Vec<Self>, limit: usize) -> Vec<Self> {
-        // A terminal resource fact must remain observable, so normalize an
-        // accidental zero configuration to the smallest meaningful budget.
-        let limit = limit.max(1);
-        let diagnostics = Self::canonicalize(diagnostics);
-        let error_count = diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.severity == Severity::Error)
-            .count();
-        if error_count <= limit {
-            return diagnostics;
-        }
-
-        let retained_error_count = limit.saturating_sub(1);
-        let mut remaining_errors = retained_error_count;
-        let mut published = Vec::with_capacity(diagnostics.len());
-        let mut suppressed = 0usize;
-        for diagnostic in diagnostics {
-            if diagnostic.severity == Severity::Error {
-                if remaining_errors == 0 {
-                    suppressed += 1;
-                    continue;
-                }
-                remaining_errors -= 1;
-            }
-            published.push(diagnostic);
-        }
-        published.push(Self::resource(
-            "G7013",
-            format!(
-                "diagnostic error limit of {limit} reached; {suppressed} additional error(s) suppressed"
-            ),
-        ));
-        Self::canonicalize(published)
-    }
-
-    fn fact_key(
-        &self,
-    ) -> (
-        &'static str,
-        DiagnosticClass,
-        Severity,
-        Option<SourceSpan>,
-        &str,
-    ) {
-        // Request provenance is attached after all phase-local diagnostics
-        // have been produced.  It identifies the outcome, not a distinct
-        // user-facing diagnostic fact, and is intentionally excluded here.
-        (
-            self.code,
-            self.class,
-            self.severity,
-            self.primary,
-            &self.message,
-        )
-    }
-
-    fn canonicalize_provenance(&mut self) {
-        self.related.sort();
-        self.related.dedup();
-        self.facts.sort();
-        self.facts.dedup();
-        self.explanation.sort();
-        self.explanation.dedup();
-    }
-
-    fn presentation_key(
-        &self,
-    ) -> (
-        u8,
-        Option<SourceSpan>,
-        Severity,
-        &'static str,
-        DiagnosticClass,
-        &str,
-    ) {
-        // Source facts appear before diagnostics without a primary location;
-        // the latter still have a deterministic order after the source bundle.
-        // `SourceSpan` supplies the stable file/start/end tie-breakers, while
-        // severity and code implement the frontend diagnostic contract.
-        (
-            u8::from(self.primary.is_none()),
-            self.primary,
-            self.severity,
-            self.code,
-            self.class,
-            &self.message,
-        )
-    }
-}
-
-fn json_array(values: impl IntoIterator<Item = String>) -> String {
-    format!("[{}]", values.into_iter().collect::<Vec<_>>().join(","))
-}
-
-impl Severity {
-    fn json_name(self) -> &'static str {
-        match self {
-            Self::Error => "error",
-            Self::Warning => "warning",
-            Self::Note => "note",
-        }
-    }
-}
-
-impl DiagnosticClass {
-    fn json_name(self) -> &'static str {
-        match self {
-            Self::Request => "request",
-            Self::InputCorruption => "input_corruption",
-            Self::Source => "source",
-            Self::Recovery => "recovery",
-            Self::Resource => "resource",
-            Self::Cancellation => "cancellation",
-            Self::Cache => "cache",
-            Self::Invariant => "invariant",
-            Self::Verification => "verification",
-            Self::Runtime => "runtime",
-        }
-    }
-}
-
-fn json_escape(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\u{08}' => escaped.push_str("\\b"),
-            '\u{0C}' => escaped.push_str("\\f"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            character if character.is_control() => {
-                use std::fmt::Write;
-                write!(&mut escaped, "\\u{:04x}", character as u32)
-                    .expect("writing into a String cannot fail");
-            }
-            character => escaped.push(character),
-        }
-    }
-    escaped
-}
 #[derive(Debug)]
 pub struct CompilationOutcome {
     pub diagnostics: Vec<CompileDiagnostic>,
@@ -745,30 +320,6 @@ impl ServiceError {
     }
 }
 
-impl CompileDiagnostic {
-    fn from_input_error(error: &InputError) -> Self {
-        let (code, class) = match error {
-            InputError::EmptySources => ("G7015", DiagnosticClass::Request),
-            InputError::DuplicateFileKey(_) => ("G7016", DiagnosticClass::Request),
-            InputError::DigestMismatch { .. } => ("G7017", DiagnosticClass::InputCorruption),
-            InputError::SourceIdentityMismatch { .. } => {
-                ("G7017", DiagnosticClass::InputCorruption)
-            }
-            InputError::InvalidUtf8(_) => ("G7018", DiagnosticClass::InputCorruption),
-            InputError::InvalidLogicalPath(_) => ("G7019", DiagnosticClass::Request),
-            InputError::InvalidPackageModuleAlias(_) => ("G7036", DiagnosticClass::Request),
-            InputError::DuplicatePackageModuleAlias { .. } => {
-                ("G7036", DiagnosticClass::Request)
-            }
-            InputError::DuplicateCapability(_) => ("G7020", DiagnosticClass::Request),
-            InputError::InvalidCapability(_) => ("G7021", DiagnosticClass::Request),
-            InputError::InvalidRuntimeManifest => ("G7022", DiagnosticClass::Request),
-            InputError::InvalidBootstrapStage { .. } => ("G7023", DiagnosticClass::Request),
-            InputError::BootstrapSourceLimit { .. } => ("G7024", DiagnosticClass::Resource),
-        };
-        Self::new(code, error.to_string(), class, None)
-    }
-}
 impl From<RevisionError> for ServiceError {
     fn from(value: RevisionError) -> Self {
         Self::Revision(value)
@@ -799,18 +350,27 @@ pub struct StageZeroCompiler {
 const BUNDLED_STANDARD_LIBRARY: &str = "std@0.1.0";
 const BUNDLED_STANDARD_SOURCE: &[u8] = include_bytes!("../../../stdlib/src/lib.glorious");
 
-fn request_mentions_bundled_standard_library(request: &CompilationRequest) -> bool {
-    request.sources.iter().any(|source| {
-        source.package != PackageKey(BUNDLED_STANDARD_LIBRARY.into())
-            && std::str::from_utf8(&source.bytes)
-                .is_ok_and(|text| text.contains("use std") || text.contains("std::"))
-    })
+fn request_root_attributes(request: &CompilationRequest) -> Option<crate::scanner::ModuleAttributes> {
+    let mut roots = request.sources.iter().filter(|source| {
+        source.package == request.root_package
+            && matches!(source.logical_path.as_str(), "src/main.glorious" | "src/lib.glorious")
+    });
+    let source = roots.next()?;
+    // Invalid multi-root requests must not select a library profile by source
+    // enumeration order. Ordinary request/graph validation reports the error.
+    if roots.next().is_some() {
+        return None;
+    }
+    let text = std::str::from_utf8(&source.bytes).ok()?;
+    let lexed = crate::LexedFile::lex(source.key, text);
+    Some(crate::DeclarationScan::scan(&lexed, text).module_attributes)
 }
 
 /// Attach the compiler-distributed source package unless a host already
 /// supplied that exact package. The latter remains useful for bootstrap and
 /// conformance worlds; ordinary CLI and API requests receive the canonical
-/// library automatically and still import it explicitly in source.
+/// library automatically. Its source-owned prelude is selected after module
+/// collection; source bytes and source spans are never rewritten with imports.
 fn bundled_standard_library(mut request: CompilationRequest) -> CompilationRequest {
     let standard_library = PackageKey(BUNDLED_STANDARD_LIBRARY.into());
     // An explicit runtime manifest is a closed authority contract. Do not
@@ -818,12 +378,12 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
     // manifest did not bind; callers using such a manifest may still supply
     // `std@0.1.0` explicitly when they want this distributed source package.
     let injected = request.runtime_manifest.is_none()
-        && request_mentions_bundled_standard_library(&request)
+        && request_root_attributes(&request).is_some_and(|attributes| !attributes.no_std)
         && request.root_package != standard_library
         && !request
             .sources
             .iter()
-            .any(|source| source.package == standard_library);
+            .any(|source| crate::identity::package_module_alias(&source.package).as_deref() == Some("std"));
     if injected {
         request.sources.push(SourceInput::new(
             standard_library.clone(),
@@ -1332,11 +892,16 @@ impl StageZeroCompiler {
                 )
             }));
         }
-        let index = DefinitionIndex::from_interfaces(
+        let prelude = graphs.keys()
+            .find(|package| crate::identity::package_module_alias(package).as_deref() == Some("std"))
+            .map(|package| crate::ModuleKey { package: package.clone(), path: "crate::prelude".into() })
+            .filter(|module| graphs.get(&module.package).is_some_and(|graph| graph.modules.contains_key(module)));
+        let index = DefinitionIndex::from_interfaces_with_prelude(
             graphs
                 .values()
                 .flat_map(|graph| graph.modules.values())
                 .map(|node| &node.interface.interface),
+            prelude,
         );
         let declared_fixities = graphs
             .values()
@@ -1364,18 +929,23 @@ impl StageZeroCompiler {
         else {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
+        let interface_inputs = graphs
+            .values()
+            .flat_map(|graph| graph.modules.values())
+            .map(|node| {
+                (
+                    node.key.clone(),
+                    (node.file, index.sealed_public_dependencies(&node.interface.interface)),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let interface_dependencies =
+            interface_dependencies::publication_dependencies(&interface_inputs);
         for node in graphs.values().flat_map(|graph| graph.modules.values()) {
-            let mut interface_dependencies = vec![DependencyNode::Input(node.file)];
-            interface_dependencies.extend(
-                index
-                    .sealed_public_dependencies(&node.interface.interface)
-                    .into_iter()
-                    .map(DependencyNode::Interface),
-            );
             dependencies.record(
                 DependencyNode::Interface(node.key.clone()),
                 node.interface.interface.public_fingerprint,
-                interface_dependencies,
+                interface_dependencies[&node.key].clone(),
             );
         }
         diagnostics.extend(index.validate_imports().into_iter().map(|diagnostic| {

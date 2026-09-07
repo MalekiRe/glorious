@@ -15,6 +15,7 @@ mod inventory;
 mod lower;
 mod program;
 mod replay;
+mod resumptions;
 #[cfg(test)]
 pub(crate) mod tests;
 mod validate;

@@ -4,6 +4,35 @@
 // ordinary source-defined UTF-8 view; its private byte window works equally
 // for compiler-emitted static data and for a future owned `String` buffer.
 
+// The distributed profile selects this source-owned export set. The compiler
+// imports it at lowest lexical priority; it does not synthesize library names.
+pub mod prelude {
+    pub use crate::{Result, Ok, Err, Option, Some, None, Bool, true, false, Ordering, Range,
+        Default, Clone, Eq, Ord, Hash, Display, Debug, As, as,
+        Arithmetic, NumericPrefix, Comparison, LogicalNot,
+        if, else, and, or, not, loop, loop_state, return, try,
+        Vec, String, Str, Slice, SliceMut};
+
+    pub infix 20 ==;
+    pub infix 20 !=;
+    pub infix 20 <;
+    pub infix 20 <=;
+    pub infix 20 >;
+    pub infix 20 >=;
+    pub infixl 30 +;
+    pub infixl 30 -;
+    pub infixl 40 *;
+    pub infixl 40 /;
+    pub infixl 40 %;
+    pub prefix 50 +;
+    pub prefix 50 -;
+    pub prefix 50 !;
+    pub infixr 1 else;
+    pub infixl 2 or;
+    pub infixl 3 and;
+    pub prefix 4 not;
+}
+
 // An ownership-only marker has no resident payload or machine representation.
 // Its sole principal interval follows T; pointer owners can therefore account
 // for their logical residents without pretending that pointer copies own T.
@@ -160,6 +189,8 @@ __g1_f64_to_i128_checked(value: f64) -> i128;
 __g1_f64_to_isize_checked(value: f64) -> isize;
 
 pub enum Result<T, E> { Ok(T), Err(E) }
+pub let Ok = Result::Ok;
+pub let Err = Result::Err;
 // Structural pattern tests carry separate positive and negative contexts.
 pub enum Test<Y, N> { Yes(Y), No(N) }
 

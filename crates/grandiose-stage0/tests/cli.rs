@@ -286,7 +286,10 @@ fn bootstrap_request(
             ordinal,
             producer: compiler,
             optimization_level: 0,
-            limits: BootstrapLimits::new(4, 16 * 1024),
+            limits: BootstrapLimits::new(
+                4,
+                16 * 1024 + include_bytes!("../../../stdlib/src/lib.glorious").len() as u64,
+            ),
             expected_artifact,
         }),
         root_package: package.clone(),

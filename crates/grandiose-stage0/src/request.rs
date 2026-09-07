@@ -123,10 +123,14 @@ pub struct CompilerBuildIdentity {
 /// strict callee ordering and normal returns from label helpers.
 /// Bytecode 64 extends abandonment cleanup to retained handler branches and
 /// preserves terminal cancellation-clause control flow.
-pub const STAGE0_LANGUAGE_GENERATION: u32 = 3;
+/// Language/interface four and cache twenty-three retain module opt-outs and
+/// source-selected default preludes in lexical resolution and interface identity.
+/// Cache twenty-four cancels provably unused optional resumption tokens at
+/// clause exit, using the existing checked cancellation and cleanup protocol.
+pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
-pub const STAGE0_INTERFACE_GENERATION: u32 = 3;
-pub const STAGE0_CACHE_GENERATION: u32 = 22;
+pub const STAGE0_INTERFACE_GENERATION: u32 = 4;
+pub const STAGE0_CACHE_GENERATION: u32 = 24;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 64;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 20;
 

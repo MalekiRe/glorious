@@ -160,6 +160,9 @@ pub struct DefinitionIndex {
     entries: BTreeMap<(DefinitionNamespace, String), Vec<IndexedDefinition>>,
     qualified: BTreeMap<(DefinitionNamespace, ModuleKey, String), Vec<IndexedDefinition>>,
     modules: BTreeMap<ModuleKey, ()>,
+    module_attributes: BTreeMap<ModuleKey, crate::scanner::ModuleAttributes>,
+    /// A driver-selected source module, never compiler-invented declarations.
+    library_prelude: Option<ModuleKey>,
     /// Dependency roots linked into this frozen interface set. Source uses
     /// the package-name component before `@`; full package keys remain the
     /// ownership identities used by coherence.
@@ -328,7 +331,15 @@ impl DefinitionIndex {
     }
 
     pub fn from_interfaces<'a>(interfaces: impl IntoIterator<Item = &'a PackageInterface>) -> Self {
+        Self::from_interfaces_with_prelude(interfaces, None)
+    }
+
+    pub(crate) fn from_interfaces_with_prelude<'a>(
+        interfaces: impl IntoIterator<Item = &'a PackageInterface>,
+        prelude: Option<ModuleKey>,
+    ) -> Self {
         let mut index = Self::default();
+        index.library_prelude = prelude;
         for interface in interfaces {
             index.extend(interface);
         }
@@ -338,6 +349,7 @@ impl DefinitionIndex {
 
     fn extend(&mut self, interface: &PackageInterface) {
         self.modules.insert(interface.module.clone(), ());
+        self.module_attributes.insert(interface.module.clone(), interface.module_attributes);
         for definition in &interface.definitions {
             self.owners
                 .entry(definition.key)
@@ -618,6 +630,9 @@ impl DefinitionIndex {
         requester: &ModuleKey,
     ) -> Vec<DefKey> {
         let mut names = BTreeSet::new();
+        if let Some(prelude) = self.prelude_for(requester) {
+            names.extend(self.module_member_names(prelude, namespace, &mut BTreeSet::new()));
+        }
         let mut lexical = requester.clone();
         loop {
             names.extend(self.module_member_names(&lexical, namespace, &mut BTreeSet::new()));
@@ -664,6 +679,20 @@ impl DefinitionIndex {
         };
         let mut active = BTreeSet::new();
         let surface = self.public_module_surface(&interface.module, &requester, &mut active);
+        // A public header may name a type supplied only by the selected
+        // prelude. Seal that resolution context as well as explicit exports;
+        // otherwise changing the profile could reuse a stale public ABI.
+        let prelude = self.prelude_for(&interface.module).map(|module| {
+            self.public_module_surface(module, &requester, &mut BTreeSet::new())
+        });
+        if let Some(prelude) = prelude {
+            return crate::identity::Digest::of_parts([
+                b"grandiose-stage0-interface-sealed-prelude-v1".as_slice(),
+                interface.public_fingerprint.as_bytes().as_slice(),
+                surface.as_bytes().as_slice(),
+                prelude.as_bytes().as_slice(),
+            ]);
+        }
         crate::identity::Digest::of_parts([
             b"grandiose-stage0-interface-sealed-v1".as_slice(),
             interface.public_fingerprint.as_bytes().as_slice(),
@@ -698,6 +727,12 @@ impl DefinitionIndex {
             &mut active,
             &mut dependencies,
         );
+        if let Some(prelude) = self.prelude_for(&interface.module) {
+            dependencies.insert(prelude.clone());
+            self.collect_public_surface_dependencies(
+                prelude, &interface.module, &requester, &mut active, &mut dependencies,
+            );
+        }
         dependencies.into_iter().collect()
     }
 
@@ -1016,6 +1051,10 @@ impl DefinitionIndex {
                     break;
                 };
                 lexical.path = parent;
+            }
+            let prelude = self.resolve_prelude(namespace, owner, owner, name, &mut BTreeSet::new());
+            if !matches!(prelude, ResolutionState::Unresolved) {
+                return prelude;
             }
             return if namespace == DefinitionNamespace::Trait {
                 language_prelude_trait(path)
@@ -1535,6 +1574,30 @@ impl DefinitionIndex {
         require_public: bool,
         visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
     ) -> ResolutionState {
+        let explicit = self.resolve_import_group(
+            namespace, owner, alias, requester, require_public, visited, false,
+        );
+        if !matches!(explicit, ResolutionState::Unresolved) {
+            return explicit;
+        }
+        self.resolve_import_group(
+            namespace, owner, alias, requester, require_public, visited, true,
+        )
+    }
+
+    /// Resolve one import priority at a time. Ambiguous or inaccessible
+    /// explicit candidates must not fall back to an otherwise valid glob.
+    /// An import absent from this namespace does not shadow another namespace.
+    fn resolve_import_group(
+        &self,
+        namespace: DefinitionNamespace,
+        owner: &ModuleKey,
+        alias: &str,
+        requester: &ModuleKey,
+        require_public: bool,
+        visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
+        glob: bool,
+    ) -> ResolutionState {
         let Some(imports) = self.imports.get(owner) else {
             return ResolutionState::Unresolved;
         };
@@ -1544,6 +1607,7 @@ impl DefinitionIndex {
         let mut saw_inaccessible = false;
         for import in imports
             .iter()
+            .filter(|import| import.glob == glob)
             .filter(|import| !require_public || import.public)
             .filter(|import| import.glob || import.alias == alias)
         {
@@ -1633,7 +1697,7 @@ impl DefinitionIndex {
                 };
                 lexical.path = parent;
             }
-            return ResolutionState::Unresolved;
+            return self.resolve_prelude(namespace, lexical_owner, requester, name, visited);
         }
         let module = match self.lexical_module(lexical_owner, requester, &path[..path.len() - 1]) {
             ModuleLookup::Found(module) => module,
@@ -1649,6 +1713,39 @@ impl DefinitionIndex {
             !requester_has_lexical_authority(requester, &module),
             visited,
         )
+    }
+
+    fn prelude_for(&self, owner: &ModuleKey) -> Option<&ModuleKey> {
+        let prelude = self.library_prelude.as_ref()?;
+        if owner.package == prelude.package || !self.modules.contains_key(owner) {
+            return None;
+        }
+        let mut lexical = owner.clone();
+        loop {
+            if self.module_attributes.get(&lexical).is_some_and(|attributes| {
+                attributes.no_std || attributes.no_implicit_prelude
+            }) {
+                return None;
+            }
+            let Some(parent) = parent_module_path(&lexical.path) else { break };
+            lexical.path = parent;
+        }
+        Some(prelude)
+    }
+
+    fn resolve_prelude(
+        &self,
+        namespace: DefinitionNamespace,
+        owner: &ModuleKey,
+        requester: &ModuleKey,
+        name: &str,
+        visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
+    ) -> ResolutionState {
+        let Some(prelude) = self.prelude_for(owner) else { return ResolutionState::Unresolved };
+        if !self.module_path_visible_to(prelude, requester) {
+            return ResolutionState::Inaccessible(vec![]);
+        }
+        self.resolve_member(namespace, prelude, name, requester, true, visited)
     }
 
     fn resolve_inherent_path(
@@ -1887,12 +1984,27 @@ impl DefinitionIndex {
         alias: &str,
         visited_aliases: &mut BTreeSet<ImportBinding>,
     ) -> ModuleLookup {
+        let explicit = self.imported_module_group(owner, requester, alias, visited_aliases, false);
+        if !matches!(explicit, ModuleLookup::Absent) {
+            return explicit;
+        }
+        self.imported_module_group(owner, requester, alias, visited_aliases, true)
+    }
+
+    fn imported_module_group(
+        &self,
+        owner: &ModuleKey,
+        requester: &ModuleKey,
+        alias: &str,
+        visited_aliases: &mut BTreeSet<ImportBinding>,
+        glob: bool,
+    ) -> ModuleLookup {
         let Some(imports) = self.imports.get(owner) else {
             return ModuleLookup::Absent;
         };
         let mut candidates = BTreeSet::new();
         let mut inaccessible = false;
-        for import in imports {
+        for import in imports.iter().filter(|import| import.glob == glob) {
             // A private import is lexical to its declaring module.  It must
             // not become a module edge for an outside requester merely
             // because the final imported definition happens to be public.

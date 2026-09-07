@@ -65,6 +65,7 @@ pub struct InterfaceDiagnostic {
 pub struct PackageInterface {
     pub package: PackageKey,
     pub module: ModuleKey,
+    pub module_attributes: crate::scanner::ModuleAttributes,
     pub definitions: Vec<Definition>,
     /// Only exported facts participate in this fingerprint. Private body and
     /// private declaration changes do not cause a dependent package rebuild.
@@ -257,7 +258,11 @@ impl InterfaceSet {
             path: module_path.into(),
         };
         let mut definitions = vec![];
-        let mut diagnostics = vec![];
+        let mut diagnostics = scan.diagnostics.iter().map(|diagnostic| InterfaceDiagnostic {
+            code: diagnostic.code,
+            span: diagnostic.span,
+            message: diagnostic.message.to_owned(),
+        }).collect::<Vec<_>>();
 
         for (ordinal, shell) in scan.declarations.iter().enumerate() {
             let namespace = namespace(shell.kind);
@@ -387,6 +392,7 @@ impl InterfaceSet {
             interface: PackageInterface {
                 package,
                 module,
+                module_attributes: scan.module_attributes,
                 definitions,
                 public_fingerprint,
             },

@@ -1137,7 +1137,7 @@ impl Parser<'_> {
                 "<error>".into()
             });
             let operation_generics = self.generics();
-            let parameters = self.callable_parameters();
+            let parameters = self.operation_payloads();
             let (result, terminal) = if self.operator("->") {
                 if self.operator("!") {
                     (None, true)
@@ -1198,6 +1198,49 @@ impl Parser<'_> {
             operations,
         }
     }
+    /// Operation payloads are positional types, not callable body binders.
+    /// Keep their ordinal in the shared header representation; handler arms
+    /// introduce their own names independently of these slots.
+    fn operation_payloads(&mut self) -> Vec<HeaderParameter> {
+        if !self.punctuation('(') {
+            self.error("G3202", "expected operation payload list");
+        }
+        let mut parameters = Vec::new();
+        while self.current().is_some() && !self.at_punctuation(')') {
+            let start = self.current().unwrap();
+            // Existing named operation headers use the same type grammar.
+            // A qualified type path (`module::Type`) is not a named slot.
+            let named = self.word().is_some()
+                && self.tokens.get(self.position + 1).is_some_and(|index| {
+                    self.lexed.tokens[*index].kind == TokenKind::Punctuation(':')
+                })
+                && !self.tokens.get(self.position + 2).is_some_and(|index| {
+                    self.lexed.tokens[*index].kind == TokenKind::Punctuation(':')
+                });
+            let name = if named {
+                let name = self.identifier().unwrap();
+                self.punctuation(':');
+                name
+            } else {
+                parameters.len().to_string()
+            };
+            let ty = self.ty();
+            let end = self.previous().unwrap_or(start);
+            parameters.push(HeaderParameter {
+                name,
+                ty,
+                span: self.span(start, end),
+            });
+            if !self.punctuation(',') {
+                break;
+            }
+        }
+        if !self.punctuation(')') {
+            self.error("G3204", "expected `)` after operation payloads");
+        }
+        parameters
+    }
+
     fn callable_parameters(&mut self) -> Vec<HeaderParameter> {
         if !self.punctuation('(') {
             self.error("G3202", "expected callable parameter list");

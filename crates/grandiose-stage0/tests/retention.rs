@@ -124,7 +124,7 @@ fn failed_body_sessions_roll_back_all_request_local_products_before_their_pin_re
             .into_iter()
             .map(|entry| entry.status)
             .collect::<Vec<_>>(),
-        vec![PackageSessionStatus::RolledBack],
+        vec![PackageSessionStatus::RolledBack; 2], // Application and distributed std.
         "a failed body must not leave staged parser, Core, PlaceFlow, or MIR state reusable"
     );
     assert_eq!(compiler.interface_cache_stats().hits, 0);

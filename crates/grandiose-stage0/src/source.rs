@@ -746,6 +746,7 @@ fn is_operator(byte: u8) -> bool {
             // `@name(value)` transfer spellings.  Keep the sigil in the
             // operator family so it remains separate from its identifier.
             | b'@'
+            | b'#'
     )
 }
 
