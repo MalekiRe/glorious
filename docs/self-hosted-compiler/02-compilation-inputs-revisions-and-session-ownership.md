@@ -13,13 +13,13 @@ Boundaries](01-architecture-and-trust-boundaries.md).
 
 Related authoritative contracts:
 
-- [language core specification](../../glorious-branded-environment-core-spec.md);
+- [language core specification](../../glorious-language-specification.md);
 - [current compiler and VM architecture](../architecture.md);
-- [self-hosted compiler migration architecture](../../self-host/ARCHITECTURE.md);
+- [self-hosted compiler architecture](../../GSC-2-glorious-incremental-self-hosted-compiler-spec.md);
 - [frontend design](../frontend-design.md);
 - [MIR design](../mir-design.md);
 - [G1 bytecode contract](../bytecode.md);
-- [standard-library contract](../std-lib.md);
+- [standard-library contract](../../glorious-standard-library-specification.md);
 - [remaining implementation work](../remaining-work.md).
 
 Where this document disagrees with the language or bytecode specifications,

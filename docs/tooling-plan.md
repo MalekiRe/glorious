@@ -2,8 +2,9 @@
 
 Covers four deliverables: a build tool (`grand`), dependency management (GitHub + local
 path), an auto-formatter (`grand fmt`), and a language server (`grand lsp`). Written
-against `docs/frontend-design.md`, `docs/architecture.md`, `docs/std-lib.md`, and
-the core spec, with implementation status called out below.
+against the frontend and architecture designs, with implementation status called
+out below. The current semantic authorities are the [language specification](../glorious-language-specification.md)
+and [standard-library specification](../glorious-standard-library-specification.md).
 
 Current implementation note: the Rust `grand` crate provides the
 scaffold/build/check/run/test foundation, deterministic path and pinned-git

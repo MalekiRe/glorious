@@ -1,16 +1,20 @@
-# Grandiose
+# Glorious
 
-Grandiose is an experimental systems language built around quantitative
+Glorious is an experimental systems language built around quantitative
 ownership, algebraic effects, source-defined control flow, and portable verified
 bytecode. It aims to make resource usage and non-local control explicit without
 giving up higher-order functions, Rust-style borrowing, traits, or generics.
 
-The project is pre-alpha. Source and artifact compatibility are not stable yet.
+Grandiose is the compiler and toolchain implementation in this repository.
+
+The project is pre-alpha. There is no backward-compatibility requirement for
+source, standard-library APIs, compiler interfaces, ABI, or G1 artifacts. These
+unfinished components evolve together; old artifacts may need to be rebuilt.
 The independently implemented Stage0 compiler and verified VM are the active
 Rust toolchain. The former package tool, formatter, and language server are
 retained only as explicitly disabled legacy code while they are redesigned.
 
-The fresh Glorious compiler is being implemented in [compiler/](compiler/)
+The Grandiose compiler is being implemented in [compiler/](compiler/)
 under the [GSC-2 specification](GSC-2-glorious-incremental-self-hosted-compiler-spec.md).
 Its storage, revision, and query machinery precedes the semantic port. The old
 `self-host-stage0` implementation and its build scripts have been retired;
@@ -19,7 +23,7 @@ their historical coverage does not count toward GSC-2.
 The chosen [execution model](docs/unsafe-memory-and-native-abi.md) specializes the
 compiler and source libraries, including `Vec<T>` and unsafe memory operations,
 into bytecode over host-compatible storage. **Self-hosting comes before the
-Glorious LLVM backend**; native-precompiled std and native generic specialization
+Grandiose LLVM backend**; native-precompiled std and native generic specialization
 are not prerequisites. Shared native/VM objects target zero marshalling. The
 unsafe-enabled profile is not a memory sandbox. Current distribution ships source
 for local compilation; independent admission of untrusted distributed bytecode
@@ -29,29 +33,35 @@ compiler; pointer execution and general zero-marshalling interop are not
 available yet. The current bytecode format rejects unsafe requirements. See the
 [delivery gates](compiler/spec/unsafe-memory-progress.md).
 
+## Normative specifications
+
+- [Glorious language specification](glorious-language-specification.md)
+- [Glorious standard-library specification](glorious-standard-library-specification.md)
+- [Grandiose self-hosted compiler specification](GSC-2-glorious-incremental-self-hosted-compiler-spec.md)
+- [Grandiose bytecode specification](docs/bytecode.md)
+
 ## What makes the language different?
 
 ### Values describe how many times they may be used
 
-Grandiose generalizes affine and linear ownership with `Use<[lower, upper]>`.
-The interval is part of the type's evidence:
+Glorious exposes unrestricted, affine, and exact-linear ownership through `Use`.
+The selected principal class is part of the type's evidence:
 
 ```rust
 struct Ticket { serial: i64 }
 
 impl Use<[1,1]> for Ticket {}
 
-redeem(ticket: Ticket) -> i64 {
+fn redeem(ticket: Ticket) -> i64 {
     let Ticket { serial } = move ticket;
     serial
 }
 ```
 
 `Use<[1,1]>` means that a `Ticket` must be transferred or deconstructed exactly
-once. `Use<[0,1]>` describes an affine value, `[0,infinity]` a conventionally
-reusable value, and `[0,0]` a value that may be destroyed without being used.
-The compiler tracks these quantities through branches, loops, calls, closures,
-partial moves, cancellation, and continuation replay.
+once. `Use<[0,1]>` describes an affine value and `Use<[0,*]>` an unrestricted,
+duplicable value. Grandiose tracks path-sensitive use intervals internally through
+branches, loops, calls, closures, partial moves, cancellation, and continuation replay.
 
 Cleanup is not a loophole: destroying a value contributes zero uses and cannot
 satisfy a positive lower bound.
@@ -84,14 +94,14 @@ effect Ask {
     ask() -> i64
 }
 
-answer() -> i64 {
+fn answer() -> i64 {
     handle Ask::ask() {
         Ask::ask(continuation) => continuation(42)
     }
 }
 ```
 
-Grandiose supports terminal effects, one-shot and finite multi-shot resumptions,
+Glorious supports terminal effects, one-shot and finite multi-shot resumptions,
 deep handlers, explicit cancellation, nested suspension, effectful closures,
 and reference-bearing payloads. Resumption quantities participate in the same
 ownership arithmetic as ordinary values, so replaying a continuation also
@@ -500,10 +510,10 @@ CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=8 \
 
 Useful design references:
 
-- [language core specification](glorious-branded-environment-core-spec.md)
+- [Glorious language specification](glorious-language-specification.md)
 - [compiler and VM architecture](docs/architecture.md)
 - [frontend design](docs/frontend-design.md)
 - [MIR design](docs/mir-design.md)
 - [bytecode format and verifier contract](docs/bytecode.md)
-- [standard-library contract](docs/std-lib.md)
+- [Glorious standard-library specification](glorious-standard-library-specification.md)
 - [live remaining-work list](docs/remaining-work.md)

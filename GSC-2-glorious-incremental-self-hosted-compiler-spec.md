@@ -3,11 +3,23 @@
 **Status:** Proposed implementation specification; not an implementation or a claim of test completion.  
 **Prepared:** September 4, 2026.  
 **Repository snapshot checked:** `MalekiRe/glorious@8cf378a1f19617e3aeddb18cada22540730323cc`.  
-**Existing frozen Rust behavioral baseline:** `cfeab4b58d60754a70c819fdda25a1f1024907af`.  
+**Recorded Rust behavioral reference:** `cfeab4b58d60754a70c819fdda25a1f1024907af`.
 **Replacement source root:** `compiler/`.  
 **Implementation language:** Glorious, using a certified Stage0-compilable authoring profile.  
-**Compatibility:** The full frozen Stage0 compiler surface, including its incremental database and VM-facing APIs.  
-**Distribution target:** Source compiled locally on each user's machine. Untrusted bytecode distribution and independent admission of the new unsafe format are deferred; existing Stage0/G1 compatibility contracts remain explicit.
+**Functional scope:** The full compiler surface, including its incremental database and VM-facing APIs, under the current language/library/runtime contracts.
+**Distribution target:** Source compiled locally on each user's machine. Untrusted bytecode distribution and independent admission of the new unsafe format are deferred.
+
+**September 7, 2026 policy amendment:** The [consolidated language](glorious-language-specification.md)
+and [standard-library](glorious-standard-library-specification.md) specifications
+define the intended semantics. All components are pre-alpha: there is no legacy
+source/API/ABI/G1 backward-compatibility obligation. Compiler, library, runtime,
+formats, and their tests may change together; old decoders, adapters, and seeds
+need not be retained. References below to frozen baselines or compatibility are
+comparison evidence for the selected contract, not a veto on intentional design
+changes. Record such changes and update both oracle and source expectations;
+do not weaken tests just to hide a discrepancy. The complete incremental compiler,
+source-owned algorithms, safety checks, independent execution verification, and
+self-compilation/convergence gates remain required.
 
 This specification supersedes GSC-1. It rejects GSC-1's batch-core/optional-query-wrapper architecture, its reduced classification of Rust-facing functionality, and its proposal to preserve adapters to the current self-host implementation.
 
@@ -20,13 +32,13 @@ on host-compatible objects. Safe-only guest verification, trusted native library
 safe exports, and zero-marshalling compatible in-process values remain targets.
 The Glorious LLVM backend and native-precompiled Glorious std are deferred until
 after working, verified self-hosting; initial interop tests use native host ABI
-fixtures, not that backend. Existing artifact generations retain explicit
-compatibility; this is not an execution certificate.
+fixtures, not that backend. Artifact contracts evolve with their implementations;
+this is not an execution certificate or an old-format preservation requirement.
 
 **Source-distribution follow-up:** Independently certifying arbitrary untrusted
 bytecode is a later project, not a prerequisite of U0–U6 or initial self-hosting.
 Use trusted local compilation of the selected source closure. Keep existing
-source safety rules, bytecode checks, host capabilities, and compatibility tests;
+source safety rules, bytecode checks, host capabilities, and current-contract tests;
 do not add the unfinished two-phase unsafe admission API to this critical path.
 Earlier requirements for new unsafe-format admission/native-export certificates
 below are deferred by this follow-up. Existing G1 verification is not removed,
@@ -44,7 +56,7 @@ Repository facts are referenced as [R01]–[R17] at the end. Requirements, propo
 
 ### 1.1 What stays
 
-Preserve the Rust Stage0 compiler, its tests and fixtures, the independent Rust VM, the language and bytecode specifications, and the canonical standard library subject to certification. Preserve **every observable frozen Stage0 compiler behavior**: source acceptance and rejection; diagnostics; inspectable intermediate products; query results and completeness; memoization and parent reuse; dependency traces; revision and package lifecycles; cancellation; budgets; retention accounting; interface and persistent artifact caches; compiler modes; CLI behavior; bootstrap evidence; and candidate/verified VM encoding, decoding, verification, and execution APIs.
+Retain the Rust Stage0 compiler as an authoring/reference tool, its regression tests, the independent Rust VM, and the canonical source library subject to certification. Preserve the **full functional scope**: source checking; diagnostics; inspectable intermediate products; query results and completeness; memoization and parent reuse; dependency traces; revision and package lifecycles; cancellation; budgets; retention accounting; interface and persistent artifact caches; compiler modes; CLI behavior; bootstrap evidence; and candidate/verified VM encoding, decoding, verification, and execution APIs. Exact signatures, accepted syntax, and artifact representations follow the selected current specifications, not a backward-compatibility obligation to the earlier implementation.
 
 Source equivalents may use idiomatic Glorious types and a stable host protocol instead of Rust's concrete memory layouts. An exported behavior does not become optional because its existing API is written in Rust. There is no P2 exclusion category.
 
@@ -85,13 +97,13 @@ The host transports authorized bytes and operational signals. It does not implem
 
 ---
 
-## 2. Compatibility and specification authority
+## 2. Behavioral references and specification authority
 
 [R01] confirms the examined head. [R02] pins the existing baseline. A replacement lock file records independently: Rust behavior baseline, Stage0 authoring compiler revision, standard-library revision, VM revisions, artifact schemas, and new compiler source closure.
 
-The authoring compiler may receive narrowly scoped fixes before it can build the new source. Such fixes require exact tests and an explicit baseline decision. Never silently move the behavior target to make a port discrepancy disappear.
+The authoring compiler may receive fixes and deliberate language/library/runtime changes before it can build the new source. Such changes require exact tests and an explicit contract decision. Never silently move the behavior target to make an unexplained port discrepancy disappear.
 
-For an implementation/specification disagreement, record the exact case. Preserve existing contract behavior for compatibility unless a separately reviewed language change updates both the oracle and replacement targets. Documentation is not evidence that a path actually executes.
+For an implementation/specification disagreement, record the exact case and follow the current intended specification. Update both oracle and source targets when a design changes; historical behavior has no independent preservation priority. Documentation is not evidence that a path actually executes.
 
 The initial machine-readable contract inventory contains **all exports recursively reachable through the public modules**, not merely root `pub use` lines, plus modes, CLI flags, diagnostics, cache observations, source identities, query policies, codecs, and runtime limits. Each record names its comparator and one or more executable tests. Counts in the old baseline remain historical until regenerated from the pinned source.
 
