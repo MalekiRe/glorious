@@ -3,7 +3,7 @@
 Status: normative compiler-backend design companion to
 [architecture.md](architecture.md) and [bytecode.md](bytecode.md). The language
 semantics remain governed by
-[the language core](../glorious-branded-environment-core-spec.md).
+[the language core](../glorious-language-specification.md).
 
 This document fixes the representation and pass contracts used between Typed
 Core and bytecode. “MIR” below means this representation after Typed Core has

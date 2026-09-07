@@ -22,11 +22,11 @@ Existing G1 verification remains intact as a compatibility contract.
 
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by
-[the language core](../glorious-branded-environment-core-spec.md); where this
+[the language core](../glorious-language-specification.md); where this
 document disagrees with the language specification, the language specification
 wins.
 
-The standard-library and source-bundle contract is [std-lib.md](std-lib.md).
+The standard-library and source-bundle contract is [std-lib.md](../glorious-standard-library-specification.md).
 The compact implementation constraints are summarized in
 [size-speed-review.md](size-speed-review.md); the detailed frontend and MIR
 contracts are [frontend-design.md](frontend-design.md) and

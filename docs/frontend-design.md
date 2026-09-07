@@ -1,7 +1,7 @@
 # Grandiose Frontend Design
 
 Status: implementation design for Draft 0.1. The language specification in
-[the language core](../glorious-branded-environment-core-spec.md) is authoritative. The component
+[the language core](../glorious-language-specification.md) is authoritative. The component
 and bytecode contracts in [architecture.md](architecture.md) and
 [bytecode.md](bytecode.md) are normative boundaries. If this document conflicts
 with either, the language specification wins first and the normative bytecode

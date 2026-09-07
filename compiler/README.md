@@ -227,4 +227,4 @@ record intentional corrections and remaining substrate limitations.
 
 Explicit numeric conversions now use the ordinary library function
 `as<Target>(value)`, or `as(value)` when the result context supplies the target.
-See [conversion traits and policy](../docs/conversions.md).
+See [conversion traits and policy](../glorious-standard-library-specification.md).
