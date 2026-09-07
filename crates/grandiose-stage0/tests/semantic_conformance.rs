@@ -11,7 +11,11 @@ use grandiose_stage0::{
     PackageKey, SourceInput, StageZeroCompiler, TypedBody,
 };
 
-const CORE_SPEC: &str = include_str!("../../../glorious-branded-environment-core-spec.md");
+// This inventory indexes existing regressions from the earlier core draft.
+// It is not the acceptance inventory for the consolidated specifications.
+// Current intended-language/library plans and their source-drift gate live in
+// conformance/ and tooling/conformance_check.py; do not restore the deleted
+// draft or make its old acceptance behavior a compatibility requirement.
 const SEMANTIC_INVENTORY: &str =
     include_str!("../../../docs/self-hosted-compiler/stage0-semantic-inventory.tsv");
 
@@ -128,17 +132,6 @@ fn crate_path(relative: impl AsRef<Path>) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
-fn spec_section(start: &str, end: &str) -> &'static str {
-    let start = CORE_SPEC
-        .find(start)
-        .unwrap_or_else(|| panic!("missing normative section {start:?}"));
-    let end = CORE_SPEC[start..]
-        .find(end)
-        .map(|offset| start + offset)
-        .unwrap_or_else(|| panic!("missing normative section terminator {end:?}"));
-    &CORE_SPEC[start..end]
-}
-
 #[derive(Debug)]
 struct InventoryRow<'a> {
     id: &'a str,
@@ -185,41 +178,9 @@ fn anchor_test_source(anchor: &str) -> (PathBuf, String, String) {
 }
 
 #[test]
-fn semantic_inventory_is_total_enabled_and_machine_checkable() {
-    let safety = spec_section(
-        "## 17. Safety invariants",
-        "## 18. Required rejection examples",
-    );
-    for index in 1..=18 {
-        assert!(
-            safety
-                .lines()
-                .any(|line| line.starts_with(&format!("{index}. "))),
-            "section 17 no longer contains safety invariant {index}"
-        );
-    }
-    let rejections = spec_section(
-        "## 18. Required rejection examples",
-        "## 19. Conformance checklist",
-    );
-    assert_eq!(
-        rejections
-            .lines()
-            .filter(|line| line.starts_with("### "))
-            .count(),
-        8,
-        "section 18 rejection inventory changed"
-    );
-    let checklist = spec_section("## 19. Conformance checklist", "## 20. Compact formulation");
-    assert_eq!(
-        checklist
-            .lines()
-            .filter(|line| line.starts_with("- "))
-            .count(),
-        22,
-        "section 19 conformance inventory changed"
-    );
-
+fn regression_inventory_is_total_enabled_and_machine_checkable() {
+    // These IDs keep the old regression index internally consistent, not the
+    // current normative rule set. The L01-L48/S01-S96 plan is audited separately.
     let required = (1..=22)
         .map(|index| format!("C19-{index:02}"))
         .chain((1..=18).map(|index| format!("S17-{index:02}")))
@@ -232,7 +193,7 @@ fn semantic_inventory_is_total_enabled_and_machine_checkable() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         observed, required,
-        "the normative semantic rule set changed"
+        "the historical regression index changed"
     );
     assert_eq!(
         rows.len(),
@@ -311,13 +272,10 @@ fn semantic_inventory_is_total_enabled_and_machine_checkable() {
                 continue;
             };
             let full_name = format!("semantic_{name}");
-            if full_name == "semantic_inventory_is_total_enabled_and_machine_checkable" {
-                continue;
-            }
             let anchor = format!("{relative}::{full_name}");
             assert!(
                 mapped.contains(anchor.as_str()),
-                "new conformance test {full_name} is not mapped to a normative rule"
+                "regression test {full_name} is not mapped in the regression index"
             );
         }
     }

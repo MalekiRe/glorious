@@ -9,6 +9,16 @@ permissions:
   contents: read
 
 jobs:
+  conformance-plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v6
+      - name: Specification test-plan integrity (not semantic conformance)
+        run: |
+          tooling/test-with-budget.sh python3 tooling/conformance_check.py --check
+          tooling/test-with-budget.sh python3 -m unittest discover -s tooling/tests -p 'test_conformance_check.py'
+
   rust:
     runs-on: ubuntu-latest
     timeout-minutes: 10

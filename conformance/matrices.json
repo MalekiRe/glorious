@@ -1,0 +1,145 @@
+{
+  "schema": 1,
+  "matrices": {
+    "execution": {
+      "axes": {"engine": ["vm", "native"], "optimization": ["O0", "every-shipped-optimized-level"]},
+      "rule": "Execute the same valid source and oracle at every supported cell. Native absence is an open requirement, not a VM pass. Record the actual flags. Source rejection expectations must not depend on optimization."
+    },
+    "names": {
+      "axes": {"binding": ["canonical", "renamed", "qualified", "re-exported"], "enumeration": ["forward", "reversed"]},
+      "rule": "Change resolved library spellings, not structural keywords. Preserve provider identities through aliases. Include same-spelled unrelated providers, diamond re-exports and distinct explicit-import ambiguity. Compare semantics, not necessarily identical bytes after a real identity change."
+    },
+    "ownership": {
+      "axes": {"principal": ["duplicable", "affine", "exact-linear"], "resident": ["nonzero", "zero-sized"], "initialization": ["whole", "partial", "restored"]},
+      "rule": "Use independent logical IDs, not addresses, for residents. Instantiate both payload positions independently for two-parameter containers. Positive classes follow exact bounds; forbidden classes are negative compile cases. Hooks/Clone counters are separate from moves. Always complete successful test-owned linear values."
+    },
+    "callbacks": {
+      "axes": {"receiver": ["owned", "shared", "unique"], "formation": ["contextual", "materialized"], "path": ["skipped", "once", "sequential", "repeated", "diverging"]},
+      "rule": "Apply only combinations allowed by the selected signature, with the others explicit rejection tests. Log capture formation separately from invocation. Check complete Args, Effects, RunsIn Access/After, guarded result provenance, lifetime dependencies and unused capture disposition."
+    },
+    "control": {
+      "axes": {"left": ["Result", "BranchResult"], "right": ["Result", "BranchResult"], "operation": ["and", "or"], "left-tag": ["success", "failure"], "right-tag": ["success", "failure"]},
+      "rule": "The right tag is only observed on an invoked right path. Do not fabricate invocation to fill an unreachable cell. Check four disjoint carrier pairs, inherited-pack borrowing, binder identity, merge/projection disposal and the full path-state table. Add if/else/not separately as described in their case rows."
+    },
+    "exits": {
+      "axes": {"exit": ["normal", "label", "terminal-effect", "optional-cancel", "exact-resume", "tail", "partial-initialization-failure", "abort", "fatal-fault"]},
+      "rule": "Each exit has its own outcome and cleanup oracle. Abort/fatal faults are isolated and do not run ordinary cleanup. A terminal effect can return control elsewhere and cannot excuse a loan hole. Do not require a normal-return assertion after a diverging path."
+    },
+    "diagnostics": {
+      "axes": {"source-form": ["minimal", "nested", "cross-module"], "cause": ["single-error", "paired-valid-control"]},
+      "rule": "Require Source rejection for static semantic errors, a primary span at the violated obligation and relevant related declarations/origins. Exact English wording and numeric codes are not normative. Parser errors, internal invariant failures, timeouts and resource exhaustion cannot count as the expected ownership/type rejection."
+    },
+    "api": {
+      "axes": {"check": ["declaration-and-namespace", "positive-client", "bound-lifetime-row-negative-client", "implementation-body", "observable-contract", "completion"]},
+      "rule": "Expand for every declaration in the mapped specification sections, including prose-defined families and effect operations. Validate owner/member generic binders, safety, visibility, result/error types and effects. Interface-only code blocks are schemas, not standalone executable programs. A bodyless declaration or unused generic body is not implementation coverage."
+    },
+    "library": {
+      "axes": {"product": ["actual-library-source", "exported-interface", "concrete-instantiation-roots", "downstream-client-execution"]},
+      "rule": "The real standard library is a compiler acceptance suite. Build every selected module and body, force concrete lowering of each generic callable/trait instance via generated downstream roots, then execute behavior probes. Never replace the library under test with Rust/host collection/control implementations or empty stubs to make this gate green."
+    },
+    "profiles": {
+      "axes": {"closure": ["core", "core-plus-alloc", "std", "std-plus-compiler"], "prelude": ["selected-default", "no-implicit-prelude", "no-std-explicit-dependencies"]},
+      "rule": "Enumerate only valid dependency closures; missing dependencies are negative cases. No-std is not no-runtime. Allocation-dependent scalar formatting requires alloc. Optional codec/C-FFI capabilities must be advertised and reported; not-applicable requires a specification/profile reason, never silent skip."
+    },
+    "targets": {
+      "axes": {"pointer-width": ["32", "64"], "endianness": ["little", "big"]},
+      "rule": "Test layout/admission models for every declared target, and execute cells actually supported by the distribution. Record unsupported cells as open or explicitly outside the selected profile. Use target sizes rather than host usize/c_long defaults. No old G1 ABI support is required."
+    },
+    "integers": {
+      "axes": {"type": ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"]},
+      "rule": "Expand every I method; signed-only methods only for six signed members; U is the corresponding unsigned type and N is target width. Test boundaries 0,1,MIN,MAX and adjacent representable values, count/radix edges, sign combinations and a reproducible generated corpus against arbitrary-precision arithmetic."
+    },
+    "floats": {
+      "axes": {"type": ["f32", "f64"], "class": ["negative-infinity", "negative-normal", "negative-subnormal", "negative-zero", "positive-zero", "positive-subnormal", "positive-normal", "positive-infinity", "nan"]},
+      "rule": "For binary operations cross both operand classes, add adjacent values and rounding midpoints. Cover NaN sign/payload/signaling inputs before canonicalization. Use an exact rational/IEEE rounding oracle, not host formatting or a shared runtime leaf. Test the specified total, IEEE and approximate policies separately."
+    },
+    "scalars": {
+      "axes": {"family": ["all-integers", "both-floats", "char", "unit"]},
+      "rule": "Expand concrete names from integers/floats and their applicable trait/operator methods. char/unit are not members of the 196-pair scalar cast family. Preserve explicitly limited extra char conversions and reject implicit Bool/numeric promotion."
+    },
+    "conversions": {
+      "axes": {
+        "source": ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64"],
+        "destination": ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize", "f32", "f64"],
+        "policy": ["As", "TryAs", "ExactAs"]
+      },
+      "rule": "588 mandatory policy/pair cells before value/target/backend expansion. Generate direct typed calls, including identity conversions. Compute finite ranges and rounding independently. Pin exact error categories only where the spec defines them; never add removed width-named compatibility APIs."
+    },
+    "traits": {
+      "axes": {"schema": ["S3.1-fundamental-laws", "S4-operators", "S11-scalars-and-conversions", "S31.1-type-by-trait", "S31.2-adapter-by-trait"]},
+      "rule": "Expand every required table cell and family, all advertised tuple arities, arrays N=0/1/multiple, and positive/insufficient-bound instances. A dash means not required, not a prohibition. Verify selected identities and method laws, not just trait solver success. Do not implement alias-qualified duplicate instances."
+    },
+    "completion": {
+      "axes": {"owner-state": ["empty", "nonempty", "partial", "suspended", "completed"], "route": ["consuming-conversion", "finish-empty", "owning-step", "protocol-operation", "lawful-affine-drop"]},
+      "rule": "For every public opaque owner record its actual principal rule and at least one lawful route in each reachable state. Routes need not all exist. A next=None or is_empty observation does not consume an owner. Failed completion must identify whether the resource remains or is gone."
+    },
+    "allocation": {
+      "axes": {"failure-point": ["none", "each-allocation-or-resize", "capacity-overflow", "domain-or-alignment-rejection"]},
+      "rule": "Use deterministic allocator fail-after-N injection, enumerate through the successful allocation count, and assert resident/input/receiver state on each failure. Keep physical allocation counts separate from logical memory tickets. Exclude incidental harness allocations from boundary marshalling measurements."
+    },
+    "limits": {
+      "axes": {"budget": ["zero", "one-below", "exact", "one-above"], "scale": ["empty", "small", "geometric-input"]},
+      "rule": "Choose limits from documented logical work, not elapsed time. Check counters during input-sized loops. Use wall time only as a safety supervisor and report timeout as infrastructure failure. Overflow and exhaustion never produce semantic success or guessed proof."
+    },
+    "tail": {
+      "axes": {"shape": ["direct", "mutual", "indirect-proven", "loop", "nested-loop"], "iterations": ["100", "1000", "10000", "100000"]},
+      "rule": "After warmup compare high-water live frames, delimiters and retained control bytes with a documented constant envelope independent of iteration count. A known growing recursion/handler control validates the measurement. Total allocations/work may grow. Run valid and invalid tail sites at O0 and shipped optimization levels."
+    },
+    "mixed": {
+      "axes": {"direction": ["vm-to-native", "native-to-vm", "vm-native-vm", "native-vm-native"], "value": ["shared-borrow", "unique-borrow", "owned-argument", "owned-result", "borrowed-result", "callback", "zero-sized-resident"]},
+      "rule": "Actual calls share one addressable object and source-selected cleanup/domain contract; force VM growth and bytecode-only generic callback execution. Assert bidirectional mutation and zero boundary reconstruction. A native substrate shim or two independent equal-result runs do not satisfy the full LLVM/VM requirement."
+    },
+    "admission": {
+      "axes": {"mutation": ["identity", "layout", "safety", "lifetime", "use-and-drop", "control-and-effects", "manifest-and-grants", "encoding-bounds"]},
+      "rule": "Start with a valid artifact/interface/binding, mutate one safety-relevant fact and require rejection before execution/publication. Validate genuine canonical round-trip too. Run hostile lengths/indices in bounded isolated loaders; no historical-format acceptance obligation."
+    },
+    "unsafe": {
+      "axes": {"layer": ["safe-client-rejection", "valid-unsafe-execution", "instrumented-invalid-contract", "unsafe-invariant-review"]},
+      "rule": "Keep invalid unsafe probes out of ordinary execution; use supported instrumentation or explicit review gaps. Source unsafe is not a sandbox and the compiler need not statically detect arbitrary unsafe UB. Assert safe wrappers preserve their invariants under all legal inputs and safe but law-breaking Eq/Hash/iterator implementations."
+    },
+    "ffi": {
+      "axes": {"shape": ["scalar", "repr-C-record", "transparent", "opaque-owner", "synchronous-callback", "registered-callback"]},
+      "rule": "Only targets advertising C-FFI must run this capability-specific matrix. Use an actual compiled C shim for layout and calls. Validate concrete monomorphic signatures, c_bool, allocation matching and no unadapted foreign-frame effects/labels/unwinding. Capability absence is reported, not confused with full native ABI conformance."
+    },
+    "text": {
+      "axes": {"input": ["empty", "ASCII", "multibyte-boundaries", "supplementary-scalars", "embedded-NUL", "malformed", "truncated"]},
+      "rule": "Test all relevant offsets including invalid interior bytes, UTF-16 surrogate halves and EOF. Use exact byte/scalar models, sentinel tails and stable error precedence. Valid String never exposes a safe mutable byte view. Pin policy choices explicitly where the specification delegates them."
+    },
+    "collections": {
+      "axes": {"shape": ["empty", "singleton", "duplicates", "all-equal", "ordered", "reversed", "forced-collisions", "capacity-boundary"]},
+      "rule": "Compare contents/owner identities to independent small sequence/map/set/heap models. Check only specified order and complexity. Exercise two-payload ownership classes independently. Callback failure promises a valid permutation/progress, not an invented transaction rollback."
+    },
+    "iterators": {
+      "axes": {"source": ["empty", "finite", "non-fused", "double-ended", "lying-size-hint", "effectful", "linear-owning", "lending"]},
+      "rule": "Match supported protocols and reject unjustified adapters. Record every poll, output, cache and remainder. Interleave next/next_back where allowed. Treat size hints and safe trait laws as logical promises, never trusted unsafe writes."
+    },
+    "hashing": {
+      "axes": {"length": ["0", "1", "63", "64", "65", "1023", "1024", "1025", "multi-chunk"], "partition": ["one-shot", "single-byte", "all-small-splits", "seeded-splits"]},
+      "rule": "Pin authoritative BLAKE3 vectors and explicit fingerprint preimages. Assert Eq-compatible streams and framed components; unequal values may collide. Golden expected values cannot be generated solely by the implementation under test."
+    },
+    "codecs": {
+      "axes": {"form": ["fixed-little-endian", "fixed-big-endian", "var-u64", "hex", "base64-standard", "base64-url-safe"], "input": ["canonical", "truncated-at-each-byte", "noncanonical", "overflow", "invalid-byte"]},
+      "rule": "Expand all specified widths and Base64 padding policies. Assert no cursor advance/partial patch on failure, exact error location and whole-range arithmetic. Optional codecs need explicit capability selection."
+    },
+    "storage": {
+      "axes": {"sequence": ["insert-read-remove", "duplicate", "rollback", "reuse", "foreign-owner", "generation-exhaustion"]},
+      "rule": "Model every container/mark/ticket state and its documented order. Distinguish plain typed index domains from per-instance generative identities. Use small injectable index/generation limits to reach overflow without huge allocation."
+    },
+    "host": {
+      "axes": {"provider": ["success", "typed-error", "unsupported", "missing-grant", "wrong-contract", "fatal-violation"]},
+      "rule": "Use deterministic fake providers and record operation identity, payload, grants and resumption count. Real OS calls are optional isolated integration probes. Ordinary errors resume once; fatal violations are isolated terminal outcomes, not recoverable results."
+    },
+    "io": {
+      "axes": {"schedule": ["complete", "short-prefixes", "zero-progress", "EOF", "error-after-prefix", "overreported-count", "limit"]},
+      "rule": "Script each read/write/flush response. Verify committed prefixes, unread/unwritten remainders and inner owner identity. No retry of a whole already partially written buffer or effectful Drop flush."
+    },
+    "random": {
+      "axes": {"source": ["pinned-seeded", "uniform-small-model", "scripted-rejection", "exhausted", "unauthorized"]},
+      "rule": "Pin SeededRng version/seed only after the distribution documents its algorithm. Prove small-domain unbiased mapping with exact enumeration and supplement, not replace it, with reproducible statistical tests. Partial failed fills cannot be accepted as random values."
+    },
+    "tasks": {
+      "axes": {"event": ["before-start-cancel", "pending", "wake", "ready", "complete-then-cancel", "provider-close", "retired-wake"]},
+      "rule": "Use a deterministic bounded scheduler/provider model and enumerate meaningful orderings. Track worker/capture/future/continuation/handle/result ownership separately. No implicit threads, Send/Sync, fairness, deadlines or production executor requirement."
+    }
+  }
+}

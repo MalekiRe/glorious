@@ -7,6 +7,11 @@ giving up higher-order functions, Rust-style borrowing, traits, or generics.
 
 Grandiose is the compiler and toolchain implementation in this repository.
 
+The [specification conformance groundwork](conformance/README.md) maps the
+intended language and standard-library contracts to positive, negative,
+boundary and full-library implementation tests. Its integrity gate checks the
+plan, not completed semantic conformance.
+
 The project is pre-alpha. There is no backward-compatibility requirement for
 source, standard-library APIs, compiler interfaces, ABI, or G1 artifacts. These
 unfinished components evolve together; old artifacts may need to be rebuilt.

@@ -39,12 +39,12 @@ fn semantic_only_struct_and_enum_are_nominal_declaration_spellings() {
 #[test]
 fn semantic_canonical_callable_surface_and_compact_labels_execute() {
     let source = r#"
-        effect Exit { exit(value: i64) -> i64; }
-        relay(value: i64) -> i64 { value }
-        pub main() -> i64 {
+        effect Exit { exit(i64) -> i64; }
+        fn relay(value: i64) -> i64 { value }
+        pub fn main() -> i64 {
             @done: i64 {
-                handle Exit::exit(relay(41)) {
-                    Exit::exit(value) => @done(value + 1)
+                handle Exit::exit(relay(42)) {
+                    Exit::exit(value) => @done(value)
                 }
             }
         }
@@ -57,12 +57,12 @@ fn semantic_canonical_callable_surface_and_compact_labels_execute() {
 #[test]
 fn semantic_callable_omission_spellings_are_semantically_equivalent() {
     for declaration in [
-        "touch() -> { () }",
-        "touch() -> () { () }",
-        "touch() -> / {} { () }",
-        "touch() -> () / {} { () }",
+        "fn touch() { () }",
+        "fn touch() -> () { () }",
+        "fn touch() / {} { () }",
+        "fn touch() -> () / {} { () }",
     ] {
-        let source = format!("{declaration} pub main() -> i64 {{ touch(); 42 }}");
+        let source = format!("{declaration} pub fn main() -> i64 {{ touch(); 42 }}");
         let outcome = StageZeroCompiler::new()
             .compile(request(&source))
             .unwrap_or_else(|error| panic!("{declaration}: {error:#?}"));

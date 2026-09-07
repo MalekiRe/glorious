@@ -1,6 +1,6 @@
-# Stage-0 semantic coverage gate
+# Stage-0 semantic regression index
 
-This directory defines the executable language-semantics gate for the Rust
+This directory indexes an existing executable regression suite for the Rust
 Stage-0 compiler. The current normative source is the
 [language specification](../../glorious-language-specification.md), with library
 contracts in the [standard-library specification](../../glorious-standard-library-specification.md).
@@ -8,11 +8,15 @@ The inventory below was derived from the previous core draft; it is regression
 evidence, not complete conformance coverage for the consolidated specifications
 or a backward-compatibility obligation. Update expectations for intentional
 semantic changes. Optimizer breadth, compiler service lifecycle behavior, and
-self-hosting convergence remain separate gates.
+self-hosting convergence remain separate gates. The current complete test
+groundwork is [conformance/](../../conformance/README.md), including L01–L48,
+S01–S96, supplemental prose/API cases and an independent plan-integrity gate.
+This older index cannot certify those specifications. Some fixtures still use
+superseded syntax or semantics and must be rewritten before becoming evidence.
 
-## Authoritative inventory
+## Historical regression inventory
 
-`stage0-semantic-inventory.tsv` is the machine-readable source of truth. It has
+`stage0-semantic-inventory.tsv` is the machine-readable regression index. It has
 one row for every rule in the previous core draft's three acceptance sections
 ([recorded source](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/glorious-branded-environment-core-spec.md)):
 
@@ -21,29 +25,32 @@ one row for every rule in the previous core draft's three acceptance sections
 - 8 required rejection examples from section 18.
 
 Every row records a stable rule ID, the requirement, one or more enabled executable
-tests, and their current state:
+tests, and their recorded regression state (not fresh conformance results):
 
-- `anchor`: an existing passing test is the coverage witness;
+- `anchor`: a previously passing regression candidate;
 - `red`: an enabled conformance test specifies required behavior that is not
   yet implemented or has not yet been demonstrated green by the Stage-0 suite.
+  These labels do not establish alignment with the consolidated specifications.
 
 Composite tests are intentional. One carefully constructed source program can
 cover several mutually dependent rules more faithfully than isolated syntax
 micro-tests. A rule may share an anchor with another rule, but no rule may be
-left without an executable witness.
+left without an executable regression anchor while retained in this index.
 
 The `semantic_conformance` integration target—rooted at
 `crates/grandiose-stage0/tests/semantic_conformance.rs` with focused modules in
 `crates/grandiose-stage0/tests/semantic_conformance/`—enforces the inventory:
 
-1. the exact 48-rule normative set is present with no duplicate IDs;
+1. the existing 48 historical rule IDs are internally consistent and unique;
 2. every row points to an existing `#[test]` function;
 3. no mapped test is ignored;
 4. every new `semantic_*` conformance test is mapped back to at least one
-   normative rule.
+   row in this regression index.
 
 This makes omission itself a test failure. Adding, deleting, renaming, or
-ignoring a conformance anchor requires an explicit inventory update.
+ignoring an anchor requires an explicit inventory update. The harness no longer
+includes the deleted specification file. These IDs may be revised or removed
+with obsolete tests; they impose no backward-compatibility obligation.
 
 ## Existing semantic acceptance anchors
 
@@ -66,7 +73,7 @@ replacing them.
 The rule-level suite adds coverage where chapter-level references were too
 coarse. The composite fixtures cover:
 
-- canonical keywordless callable declarations, result/effect omission, compact
+- callable declarations, result/effect omission, compact
   labels, implicit function labels, and recursive activation freshness;
 - labels as generic diverging callables and label-indexed protocol identity;
 - nested lexical label brands through refutable handler forwarding, a generic
@@ -85,7 +92,7 @@ coarse. The composite fixtures cover:
   receiver-mode enum;
 - `Available<E>` creation and release restrictions plus unforgeability of all
   compiler-generated relations;
-- principal `Use` restriction, structural interval intersection, and the G1
+- principal `Use` restriction, structural interval intersection, and the
   ban on restricted-use memoized globals;
 - custom `Drop` eligibility, exactly-once cleanup, nonlocal cleanup, opacity to
   partial moves/deconstruction, and the prohibition on effects or label
@@ -114,8 +121,9 @@ coarse. The composite fixtures cover:
 - source-oriented diagnostics for label/environment escape;
 - one-shot over-resume, multi-shot unique-borrow capture, and multi-shot active
   label capture.
-- private nominal-field authority across source entries, including a permitted
-  same-entry construction/projection and rejected cross-entry access;
+- historical private nominal-field authority across source entries; these
+  fixtures require review against the current module-owned privacy contract,
+  which must not distinguish source entries within the same module;
 - mixed-polarity trait coherence at the service boundary, so contradictory
   positive and negative implementations cannot reach executable lowering.
 - recursive generic supertrait closures carry one selected associated type,

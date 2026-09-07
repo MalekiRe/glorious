@@ -1,9 +1,10 @@
-# Normative Stage-0 language-semantic coverage inventory.
-# state=anchor means an existing passing suite test is the coverage witness.
-# state=red means the enabled conformance test is a known or unvalidated implementation gap.
+# Historical Stage-0 regression index, not current specification coverage.
+# Current intended-language/library groundwork is in conformance/cases.tsv.
+# state=anchor records a previously passing regression, not freshly verified conformance.
+# state=red records a known or unvalidated regression gap. Neither state requires old semantics to be preserved.
 rule_id	section	requirement	anchor	state
 C19-01	19 conformance	Only struct and enum are nominal product and sum declaration spellings.	semantic_conformance/surface.rs::semantic_only_struct_and_enum_are_nominal_declaration_spellings	anchor
-C19-02	19 conformance	Callable result and empty-effect omission spellings preserve one semantic signature.	semantic_conformance/surface.rs::semantic_canonical_callable_surface_and_compact_labels_execute,semantic_conformance/surface.rs::semantic_callable_omission_spellings_are_semantically_equivalent	anchor
+C19-02	19 conformance	Callable result and empty-effect omission spellings preserve one semantic signature.	semantic_conformance/surface.rs::semantic_canonical_callable_surface_and_compact_labels_execute,semantic_conformance/surface.rs::semantic_callable_omission_spellings_are_semantically_equivalent	red
 C19-03	19 conformance	Lifetime syntax, higher-ranked regions, reborrowing, and variance obey Rust-style rules.	service.rs::service_keeps_shared_lifetime_covariance_but_rejects_mutable_nested_coercions,service.rs::service_preserves_imported_reference_lifetimes_through_closures_and_handlers	anchor
 C19-04	19 conformance	Each type has one principal Use interval and manual implementations may only restrict it.	semantic_conformance/ownership.rs::semantic_manual_use_may_restrict_but_never_widen_structure,semantic_conformance/ownership.rs::semantic_zero_only_principal_use_is_rejected,semantic_conformance/ownership.rs::semantic_restricted_use_globals_are_rejected,semantic_conformance/ownership.rs::semantic_plain_owned_arguments_do_not_require_move_spelling,semantic_conformance/ownership.rs::semantic_plain_owned_argument_cannot_be_used_after_implicit_move,semantic_conformance/ownership.rs::semantic_optional_move_capture_forces_an_owned_closure_environment,semantic_conformance/ownership.rs::semantic_optional_move_capture_copies_a_duplicable_source,semantic_conformance/ownership.rs::semantic_inferred_closure_capture_moves_an_owned_nonduplicable_value,semantic_conformance/ownership.rs::semantic_optional_move_capture_rejects_nonlocal_names	anchor
 C19-05	19 conformance	Positive-lower obligations propagate through whole moves and deconstruction while discarded subtrees require zero use.	service.rs::service_rejects_dropping_an_unprojected_nominal_callable_parameter	anchor
