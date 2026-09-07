@@ -5981,9 +5981,9 @@ struct VerifierState {
     resumptions: Vec<bool>,
     handlers: Vec<VerifierHandlerFrame>,
     pending_leave: Option<PendingLeave>,
-    /// Number of dynamic clause-return continuations currently being checked.
-    /// Their `Return` is consumed by `ResumeReturn`, not by the function.
-    resumption_return_depth: u32,
+    /// Whether `Return` belongs to a callable resumption rather than to the
+    /// enclosing function. Dynamic recursion depth is not a static fact.
+    resuming: bool,
     /// Handler brands that may remain active while the current protected
     /// replay returns to its clause. A nested operation can cancel its own
     /// frame and still leave an outer replay frame to be restored by that
@@ -5992,6 +5992,28 @@ struct VerifierState {
     /// Exact handler brand and result ABI of the pending callable resumption.
     resumption_return_result: Vec<(u32, VmType)>,
 }
+
+/// A handler dispatch PC can be entered both initially and by a deep
+/// resumption. These are separate return contexts, not an ordinary CFG join.
+/// Within each context all register, ownership and handler-stack joins remain
+/// strict. Call-site result ABIs are still merged and checked universally.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+struct VerifierContext {
+    resuming: bool,
+    handlers: Vec<u32>,
+}
+
+impl VerifierState {
+    fn context(&self) -> VerifierContext {
+        VerifierContext {
+            resuming: self.resuming,
+            handlers: self.resumption_return_handler_ids.clone(),
+        }
+    }
+}
+
+type VerifierIncoming = Vec<BTreeMap<VerifierContext, VerifierState>>;
+type VerifierWorklist = Vec<(usize, VerifierContext)>;
 
 impl Deref for VerifierState {
     type Target = [Option<bool>];
@@ -6197,9 +6219,9 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
         };
         *state = true;
     }
-    let mut incoming = vec![None; function.instructions.len()];
+    let mut incoming: VerifierIncoming = vec![BTreeMap::new(); function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
-        *entry = Some(VerifierState {
+        entry.insert(VerifierContext::default(), VerifierState {
             registers: initial,
             storage_live: initial_storage_live,
             source_storage,
@@ -6209,7 +6231,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
             resumptions: vec![false; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,
-            resumption_return_depth: 0,
+            resuming: false,
             resumption_return_handler_ids: Vec::new(),
             resumption_return_result: Vec::new(),
         });
@@ -6217,7 +6239,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
     let mut worklist = if function.instructions.is_empty() {
         vec![]
     } else {
-        vec![0usize]
+        vec![(0usize, VerifierContext::default())]
     };
     let mut returned: Option<VmType> = None;
     // A verified VM function may be intentionally terminal: `Trap` is the
@@ -6227,15 +6249,15 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
     let mut trapped = false;
     let mut terminal_audits = Vec::<(u32, VerifierState)>::new();
     loop {
-        let pc = if let Some(pc) = worklist.pop() { pc } else {
+        let (pc, context) = if let Some(entry) = worklist.pop() { entry } else {
             // Unreachable declared terminal entries still need an authority
             // audit. Do not seed already-reachable dispatch entries with an
             // unconstrained packet from the earlier installation point.
-            let Some((target, audit)) = terminal_audits.iter().find(|(target, _)| incoming[*target as usize].is_none()) else { break; };
+            let Some((target, audit)) = terminal_audits.iter().find(|(target, _)| incoming[*target as usize].is_empty()) else { break; };
             propagate_state(&mut incoming, &mut worklist, *target, audit)?;
             continue;
         };
-        let mut states = incoming[pc].clone().expect("scheduled verifier state");
+        let mut states = incoming[pc].get(&context).cloned().expect("scheduled verifier state");
         let mut advances = true;
         let instruction = &function.instructions[pc];
         if states.handlers.last().is_some_and(|frame| frame.payload_claim == Some(false))
@@ -7339,6 +7361,12 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 continuation,
                 target,
             } => {
+                // A function-local installation brand names one live frame.
+                // Re-entering an installation without closing its old frame
+                // cannot manufacture arbitrarily many static return contexts.
+                if states.handlers.iter().any(|frame| frame.id == pc as u32) {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
                 if matches!(continuation, VmContinuationPolicy::Replay { uses } if *uses < 2) {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
@@ -7488,7 +7516,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                         resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
-                        resumption_return_depth: states.resumption_return_depth,
+                        resuming: states.resuming,
                         resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
                         resumption_return_result: states.resumption_return_result.clone(),
                     };
@@ -7509,11 +7537,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let continuation = frame
-                    .continuations
-                    .first()
-                    .expect("nonempty replay continuation")
-                    .clone();
+                let continuations = frame.continuations.clone();
                 let found = register_type(function, *value)?;
                 if found != frame.resume_type {
                     return Err(VmArtifactError::TypeMismatch {
@@ -7538,25 +7562,36 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     .expect("active resumable handler exists")
                     .continuations
                     .clear();
-                resumed_handlers.extend(continuation.above.clone());
-                let resumption_return_handler_ids =
-                    resumed_handlers.iter().map(|frame| frame.id).collect();
-                let mut resumed = VerifierState {
-                    registers: continuation.registers,
-                    storage_live: continuation.storage_live,
-                    source_storage: states.source_storage.clone(),
-                    reference_origins: continuation.reference_origins,
-                    snapshots: continuation.snapshots,
-                    labels: continuation.labels,
-                    resumptions: continuation.resumptions,
-                    handlers: resumed_handlers,
-                    pending_leave: continuation.pending_leave,
-                    resumption_return_depth: states.resumption_return_depth.saturating_add(1),
-                    resumption_return_handler_ids,
-                    resumption_return_result,
-                };
-                write(&mut resumed, continuation.dst)?;
-                propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                // A shared clause can be reached from several performance
+                // sites. Every possible suspended suffix must satisfy the
+                // resumption ABI; checking only the first would miss paths.
+                for continuation in continuations {
+                    let mut handlers = resumed_handlers.clone();
+                    handlers.extend(continuation.above);
+                    let resumption_return_handler_ids =
+                        handlers.iter().map(|frame| frame.id).collect::<Vec<_>>();
+                    if resumption_return_handler_ids.iter().copied().collect::<BTreeSet<_>>().len()
+                        != resumption_return_handler_ids.len()
+                    {
+                        return Err(VmArtifactError::HandlerStateMismatch);
+                    }
+                    let mut resumed = VerifierState {
+                        registers: continuation.registers,
+                        storage_live: continuation.storage_live,
+                        source_storage: states.source_storage.clone(),
+                        reference_origins: continuation.reference_origins,
+                        snapshots: continuation.snapshots,
+                        labels: continuation.labels,
+                        resumptions: continuation.resumptions,
+                        handlers,
+                        pending_leave: continuation.pending_leave,
+                        resuming: true,
+                        resumption_return_handler_ids,
+                        resumption_return_result: resumption_return_result.clone(),
+                    };
+                    write(&mut resumed, continuation.dst)?;
+                    propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                }
                 if states.handlers[index].continuation == VmContinuationPolicy::Consume {
                     states.handlers[index].continuations.clear();
                 }
@@ -7673,7 +7708,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                         resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
-                        resumption_return_depth: states.resumption_return_depth,
+                        resuming: states.resuming,
                         resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
                         resumption_return_result: states.resumption_return_result.clone(),
                     };
@@ -7778,7 +7813,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 // through a pending `ResumeReturn` clause after a resumed
                 // callee performs its later terminal operation.
                 if frame.continuation == VmContinuationPolicy::Terminal {
-                    states.resumption_return_depth = 0;
+                    states.resuming = false;
                     states.resumption_return_handler_ids.clear();
                     states.resumption_return_result.clear();
                 }
@@ -8506,7 +8541,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 if states.resumptions[*value as usize] {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                if states.resumption_return_depth != 0 {
+                if states.resuming {
                     if states.resumption_return_result.is_empty() {
                         return Err(VmArtifactError::HandlerStateMismatch);
                     }
@@ -8857,26 +8892,22 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
     Ok(())
 }
 fn propagate_state(
-    incoming: &mut [Option<VerifierState>],
-    worklist: &mut Vec<usize>,
+    incoming: &mut [BTreeMap<VerifierContext, VerifierState>],
+    worklist: &mut VerifierWorklist,
     target: u32,
     state: &VerifierState,
 ) -> Result<(), VmArtifactError> {
     let Some(slot) = incoming.get_mut(target as usize) else {
         return Err(VmArtifactError::InvalidInstructionTarget { target });
     };
-    match slot {
+    let context = state.context();
+    match slot.get_mut(&context) {
         None => {
-            *slot = Some(state.clone());
-            worklist.push(target as usize);
+            slot.insert(context.clone(), state.clone());
+            worklist.push((target as usize, context));
             Ok(())
         }
         Some(existing) => {
-            if existing.resumption_return_depth != state.resumption_return_depth
-                || existing.resumption_return_handler_ids != state.resumption_return_handler_ids
-            {
-                return Err(VmArtifactError::HandlerStateMismatch);
-            }
             let handler_changed = merge_handler_states(&mut existing.handlers, &state.handlers)
                 .ok_or(VmArtifactError::HandlerStateMismatch)?;
             // Forwarding can resume one protected path from distinct arms.
@@ -8969,7 +9000,7 @@ fn propagate_state(
                 existing.labels = labels;
                 existing.resumptions = resumptions;
                 existing.pending_leave = pending_leave;
-                worklist.push(target as usize);
+                worklist.push((target as usize, context));
             }
             Ok(())
         }
@@ -8979,7 +9010,7 @@ fn propagate_state(
 /// call boundary, after all currently active handlers have been installed.
 fn seed_terminal_call_handlers(
     function: &VmFunction, pc: usize, dst: u32, arguments: &[u32], consumes: bool,
-    states: &VerifierState, incoming: &mut [Option<VerifierState>], worklist: &mut Vec<usize>,
+    states: &VerifierState, incoming: &mut [BTreeMap<VerifierContext, VerifierState>], worklist: &mut VerifierWorklist,
 ) -> Result<(), VmArtifactError> {
     let mut seen = Vec::new();
     for (index, frame) in states.handlers.iter().enumerate().rev() {

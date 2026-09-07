@@ -192,6 +192,43 @@ An aliased-but-uninvoked token is conservatively excluded, as are conditional
 zero-or-one invocation paths and unresolved nested handler-state issues. Those
 remain separate semantic work, not permission to weaken verification.
 
+## Fifth slice: deep handler verification contexts
+
+Language §10.5 requires deep handlers: a resumed continuation may perform the
+same operation again and re-enter the same clause. The machine verifier kept
+only one incoming state per instruction, so it rejected the initial clause
+entry and a later resumed entry as incompatible return contexts.
+
+The verifier now keeps separate incoming states for ordinary execution and
+resumption-return contexts, including their permitted handler brands. Within
+each context, ordinary CFG joins still check the same register initialization,
+ownership, provenance, and handler-stack constraints. Static analysis tracks
+whether a return belongs to a resumption, not an ever-increasing dynamic depth.
+Reinstalling an already live brand and restoring duplicate live brands remain
+errors rather than creating unbounded distinct return-context keys.
+
+Additionally, `ResumeReturn` now audits every suspended suffix reaching a shared
+clause, instead of choosing the first one. Each completion must satisfy every
+applicable resumption result ABI. This is a verification change, not a new
+runtime primitive or wire format; verifier generation 21 and cache generation
+25 distinguish it from the earlier implementation.
+
+Nine new integration tests cover three-site and twelve-site re-entry, ordered
+pattern forwarding, clause suffixes returning through their own resumptions,
+optional cancellation, and verified wire round trips. Hostile variants reject
+uninitialized reads and wrong completion types in later resumed suffixes,
+duplicate live-brand installation, and incompatible ordinary handler-stack
+joins. General captured-resumption support across callable frames and other
+remaining handler gaps are not certified by this slice.
+
+The full optimized non-GSC2 baseline executes 2,537 tests: 2,359 pass and 178
+fail. Ten old service failures are fixed, including repeated one-shot dispatch,
+Boolean pattern coverage, three-deep forwarding/replay, aliased inner snapshots,
+and optional cancellation before later performances. All nine new tests pass;
+suite-qualified comparison finds no regressions and no missing tests. The
+plan-integrity gate and all 22 checker tests remain green. These results do not
+establish complete language, standard-library, or self-hosting conformance.
+
 ## Next work
 
 1. Triage the remaining failures after default-prelude selection, separating

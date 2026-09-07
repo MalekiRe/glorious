@@ -127,12 +127,14 @@ pub struct CompilerBuildIdentity {
 /// source-selected default preludes in lexical resolution and interface identity.
 /// Cache twenty-four cancels provably unused optional resumption tokens at
 /// clause exit, using the existing checked cancellation and cleanup protocol.
+/// Cache twenty-five and verifier twenty-one separate deep resumption return
+/// contexts and audit every suspended suffix reaching a shared clause.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 4;
-pub const STAGE0_CACHE_GENERATION: u32 = 24;
+pub const STAGE0_CACHE_GENERATION: u32 = 25;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 64;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 20;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 21;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.
