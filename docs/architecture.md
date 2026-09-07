@@ -7,8 +7,9 @@ bytecode contracts below remain applicable.
 
 The [September 5 unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md)
 supersedes this document's exclusion of unsafe/raw-pointer language support and
-handle-only representation as a universal future requirement. Current G1
-contracts remain unchanged until a versioned implementation lands.
+handle-only representation as a universal future requirement. The language
+specification's pre-alpha evolution policy supersedes earlier promises to
+preserve old G1 formats, IDs, or behavior across compiler/VM changes.
 
 The selected next architecture specializes the compiler and ordinary source std
 to bytecode, including unsafe internals, over actual host-layout memory. The
@@ -18,7 +19,8 @@ fixtures, with the same objects/allocations and explicit call bridges. This
 unsafe-enabled profile is not an in-process memory sandbox. Current distribution
 ships source compiled locally; independent admission of untrusted bytecode and
 authenticated native safe exports are deferred, not implementation prerequisites.
-Existing G1 verification remains intact as a compatibility contract.
+Verification of the actively supported contract remains required; retaining
+obsolete G1 decoders or artifacts is not a compatibility obligation.
 
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by
@@ -26,7 +28,7 @@ specified in [bytecode.md](bytecode.md). Language semantics are specified by
 document disagrees with the language specification, the language specification
 wins.
 
-The standard-library and source-bundle contract is [std-lib.md](../glorious-standard-library-specification.md).
+The standard-library contract is the [standard-library specification](../glorious-standard-library-specification.md).
 The compact implementation constraints are summarized in
 [size-speed-review.md](size-speed-review.md); the detailed frontend and MIR
 contracts are [frontend-design.md](frontend-design.md) and
@@ -503,11 +505,12 @@ Bootstrap is reproducible:
 6. evaluator bootstrap remains a recovery test and, for compiler-accepted
    programs in its documented subset, a differential test.
 
-Bytecode changes are additive. A new VM lands first and must run every previously
-released valid artifact. The previous compiler then builds a bridge compiler that
-can optionally emit the new feature. Compiler source uses no new feature until
-that bridge exists. Existing IDs and semantics are never changed or reused; old
-encodings remain implemented. An older VM may reject a newer artifact cleanly.
+Bytecode changes may be incompatible during pre-alpha. Update the compiler,
+VM, contract identities, fixtures, and bootstrap inputs together; rebuild seeds
+with the selected authoring toolchain when necessary. Old decoders, numeric IDs,
+and artifacts need not be retained. Admission rejects unsupported contracts
+before execution. A bridge compiler is useful only when a particular bootstrap
+transition requires one, not as a permanent compatibility obligation.
 
 ### 5.1 Compact implementation profile
 
@@ -538,7 +541,7 @@ serialized intermediate format.
 
 ## 6. Delivery and acceptance gates
 
-1. **Contract:** freeze generation-1 bytecode IDs/layouts and golden hand-written
+1. **Contract:** specify current bytecode IDs/layouts and golden hand-written
    artifacts.
 2. **Runtime:** decoder, canonical encoder, verifier, VM, supervisor, labels,
    ownership/drop, handlers, resumptions, imports, and hostile-artifact tests.
@@ -552,8 +555,8 @@ serialized intermediate format.
    120 seconds and 4096 MiB.
 
 Each gate adds golden decode/encode cases, verifier rejection cases, VM semantic
-tests, compiler compile-fail cases, and MIR differential tests. The newest VM is
-continuously tested against every released compiler seed. Fuzzing requires that
+tests, compiler compile-fail cases, and MIR differential tests. The VM is
+tested against the selected current compiler/bootstrap inputs. Fuzzing requires that
 arbitrary input cannot panic the host or violate memory safety.
 
 ## 7. Command-line contracts

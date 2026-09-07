@@ -72,7 +72,8 @@ Float prefix lowering uses the existing negation operation for both widths;
 subtracting from positive zero was losing negative zero, and f32 prefixes
 previously had no MIR instruction. Matrix fixtures use bounded-size helper
 bodies: C0's large recursive MIR lowering stack remains a separate limitation.
-See `docs/conversions.md` and the independently verified `conversions` tests.
+See the [standard-library conversion contract](../../glorious-standard-library-specification.md#113-conversions)
+and the independently verified `conversions` tests.
 
 ## A06: borrowed self-tail calls in the authoring runtime
 

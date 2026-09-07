@@ -1,8 +1,11 @@
 # Glorious Language Specification
 
-**Consolidated intended-language draft 1.0 · 7 September 2026**  
-**Language:** Glorious. **Compiler/toolchain:** Grandiose. **Source suffix:** `.glorious`.  
-**Companion:** [Glorious Standard Library Specification](glorious-standard-library-specification.md).  
+**Consolidated intended-language draft 1.0 · 7 September 2026**
+
+**Language:** Glorious. **Compiler/toolchain:** Grandiose. **Source suffix:** `.glorious`.
+
+**Companion:** [Glorious Standard Library Specification](glorious-standard-library-specification.md).
+
 **Repository baseline:** `MalekiRe/glorious@7e4a021811b6a8e0d62b2899f10e602d037c3c14`.
 
 This is a proposed normative specification of the intended language, not a claim that the current compiler implements it. It consolidates the reviewed language contracts and the decisions made in the accompanying design conversation. Rules explicitly chosen during that conversation take precedence over historical repository prose. Additional resolutions made during consolidation are identified in the decision register. Examples illustrate intended source semantics; they have not been compiled against a conforming implementation.
@@ -51,6 +54,8 @@ The structural language provides nominal data, bindings, functions and calls, pa
 This document owns lexical and typing rules, equality of types, lifetime relations, control/cleanup semantics, trait coherence, effect operation semantics, intrinsic evidence, and ABI obligations. The companion owns ordinary data definitions, traits, function/operation signatures, default policies, operator fixities, and behavioral library laws.
 
 A library cannot relax this language's ownership or safety rules. A language implementation cannot silently replace a library declaration with an identically named intrinsic. The distribution binds genuine intrinsics by authenticated declaration identity and exact contract, not display path.
+
+**Pre-alpha evolution policy.** Glorious, its standard library, Grandiose, and the VM are unfinished. There is no legacy source, API, ABI, host-binding, or G1 artifact compatibility obligation. They may change together; obsolete formats, interfaces, and decoder paths may be removed rather than preserved behind compatibility layers. Update the current specifications, implementations, fixtures, and bootstrap inputs together when changing a contract. Version/contract identities still distinguish incompatible inputs so they fail closed; they do not promise support for older inputs. This policy supersedes contrary preservation promises in earlier engineering documents. Current safety, ownership, verification, and full self-hosting requirements are not waived.
 
 Compiler MIR structure, query scheduling, database revisions, optimization pass lists, build budgets, test totals, editor packaging, and bootstrap release milestones are not source-language semantics. Existing documents about those subjects remain engineering records. Their language-facing requirements are incorporated here; their internal algorithms are deliberately not promoted into this specification.
 
@@ -191,7 +196,7 @@ Floating-point constants are not structural equality patterns in version 1. Use 
 
 ### 4.4 Layout and target sizes
 
-The intended native Glorious ABI uses `usize/isize` with the selected target's pointer width. Fixed integer types remain fixed. This is a deliberate consolidation decision for Rust-like indexing and native interoperability, **not** a reinterpretation of released G1's fixed-64-bit `usize/isize` encoding. Execution of legacy G1 remains governed by its frozen contract; emitting the intended target-width contract requires a new explicitly versioned artifact profile.
+The Glorious ABI uses `usize/isize` with the selected target's pointer width. Fixed integer types remain fixed. Compiler lowering, VM operations, native layout, artifact contracts, and tests must adopt this rule together. The current fixed-64-bit G1 implementation is not a legacy compatibility target. Inputs built for an incompatible contract are rejected or rebuilt, not silently interpreted using a different width.
 
 Tuple/record field order, enum layout, alignment, and calling convention follow §17's Glorious ABI. Private fields have ordinary runtime storage. Static evidence erases only when it has no resident runtime payload or observable cleanup. Padding is not a source value and cannot be assumed initialized.
 
@@ -801,13 +806,13 @@ Glorious-to-Glorious mixed execution must preserve deep handlers, one-shot and a
 
 Tail calls must satisfy the same bounded-live-control guarantee on both engines. A language-level `tail` may lower to verified native mandatory tail transfer, a direct CFG backedge, or another proven constant-space transfer. It must not depend on optional LLVM optimization.
 
-### 17.5 Artifacts and compatibility
+### 17.5 Artifacts and contract admission
 
 Portable artifact encoding is not native object layout. It stores relocatable identities, bounds, canonical scalar encodings, and target requirements, not arbitrary serialized native addresses. A loader checks the target and ABI before materializing addressable objects or resolving imports.
 
-Released artifact generations retain their specified decoding and scalar meaning. New source-language or raw-memory features require explicit feature/version admission and cannot reuse old numeric IDs with new semantics. Unsupported required features, malformed encodings, mismatched layouts, untrusted imports, or failed ownership/control checks fail closed.
+Artifact formats may change incompatibly during pre-alpha. No implementation is required to retain an old decoder, old numeric assignments, or old scalar semantics. Changes must identify the new contract so an incompatible artifact cannot accidentally pass admission. Unsupported required features, malformed encodings, mismatched layouts, untrusted imports, or failed ownership/control checks fail closed.
 
-The historical G1 wire tables, compiler query schemas, and authoring format numbers are not recopied as the new language's syntax. Their compatibility contracts remain engineering obligations; a new intended-language artifact profile must document its encoding separately without contradicting these semantic requirements.
+G1 wire tables, compiler query schemas, and authoring format numbers describe implementation contracts, not permanent language syntax. Keep the actively supported producer/consumer contract documented and tested; regenerate dependent artifacts when it changes. Maintaining historical artifact or seed execution is not a requirement.
 
 ### 17.6 Conformance evidence
 
@@ -925,7 +930,7 @@ The following are acceptance obligations, not claims about tests already execute
 | L41 | No bytes/addresses/FFI values forge intrinsic brands, callable identity, or host authority. |
 | L42 | C ABI rejects non-C layouts, foreign unwinding, and unregistered retained callbacks. |
 | L43 | VM/native calls share backing storage and source-selected cleanup identity with no reconstruction. |
-| L44 | Legacy G1 fixed-width semantics are not silently changed by intended target-sized usize. |
+| L44 | Compiler/VM/native operations agree on target-sized usize; incompatible artifacts are rejected or rebuilt without requiring old-format support. |
 | L45 | A no-std build still checks its required intrinsic/runtime dependencies. |
 | L46 | Solver/resource-limit exhaustion fails explicitly rather than manufacturing evidence. |
 | L47 | Runtime faults, handled source failure, abort, and cancellation remain distinguishable. |
@@ -953,7 +958,7 @@ The following are acceptance obligations, not claims about tests already execute
 | D14 | U/C | Canonical functions use fn; unit arrows may be omitted; both let and let mut exist; assignment is =. |
 | D15 | C | Fields private by default, exposed with pub, to make module-owned representation protection consistent. |
 | D16 | U/C | Bool/constructor aliases work in patterns through structural constants; true/false are closed Bool constants, None is a generic structural constant scheme. |
-| D17 | C | Target-size usize/isize in the intended ABI, with an explicit new artifact profile; legacy G1 remains unchanged. |
+| D17 | C/U | Target-size usize/isize in the intended ABI; compiler and VM contracts change together with no legacy G1 preservation requirement. |
 | D18 | U | Multi-clause pattern callables are exhaustive ordinary callables; `_` is available but obeys ownership. |
 | D19 | U | Only duplicable, affine, and exact-linear ordinary principal use classes. |
 | D20 | C | Public Drop/discard bounds use affine; actual zero-use checking is an internal predicate, not a fourth class. |
@@ -972,10 +977,11 @@ The following are acceptance obligations, not claims about tests already execute
 | D33 | U | return remains an ordinary label-invoking readability helper. |
 | D34 | U | Arithmetic dispatch uses independent Rust-like operator traits, not one giant Arithmetic trait. |
 | D35 | U/P | VM/native Glorious ABI agreement and source-owned libraries are requirements, not copied Rust layout assumptions. |
-| D36 | C | Ordinary external failures use typed hosted results; fatal HostFault is not silently caught by wrappers over legacy imports. |
+| D36 | C | Ordinary external failures use typed hosted results; implement the host boundary directly rather than pretending a wrapper can catch a fatal HostFault. |
 | D37 | C | No unbraced implicit thunk conversion is added for else-if/while; use ordinary explicit callable blocks. |
 | D38 | C | Explicit fixity-to-function binding distinguishes unary and binary punctuation without arity overloading. |
 | D39 | C | Generative loop callbacks include their proof-only L in Args, so distinct label-dependent effect rows do not conflict on the same Fn<()> head. |
+| D40 | U | No backward-compatibility obligation during pre-alpha for source, library APIs, ABI, host bindings, compiler formats, or G1; current components and tests evolve together. |
 
 ### 22.1 Corrections to the experimental conversation
 
@@ -1007,7 +1013,7 @@ The earlier `glorious-standard-library-proposal.md` was used as an idea inventor
 | R08 | [Label unification](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/optional-label-unification.md) | Generative Label, directness and control fusion. |
 | R09 | [Unsafe memory and native ABI](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/unsafe-memory-and-native-abi.md) | Source-owned libraries, genuine shared storage, trust boundaries. |
 | R10 | [Conversions](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/conversions.md) | Explicit As policy and coherence. |
-| R11 | [Architecture](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/architecture.md) and [bytecode](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/bytecode.md) | Runtime invariants and legacy-format distinction. |
+| R11 | [Architecture](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/architecture.md) and [bytecode](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/bytecode.md) | Runtime invariants and implementation-format context; prior backward-compatibility promises are superseded by D40. |
 | R12 | [LLVM backend](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/docs/llvm-backend.md) | Cross-backend implementation descriptions; not proof of intended conformance. |
 | R13 | [GSC-2](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/GSC-2-glorious-incremental-self-hosted-compiler-spec.md) and [compiler README](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/compiler/README.md) | Compiler scope and implementation-status separation; selective consultation. |
 | R14 | [Call-context lifetimes](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/compiler/spec/call-context-lifetimes.md) | Reference-origin and higher-ranked boundary caveats. |

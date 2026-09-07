@@ -7,7 +7,9 @@ giving up higher-order functions, Rust-style borrowing, traits, or generics.
 
 Grandiose is the compiler and toolchain implementation in this repository.
 
-The project is pre-alpha. Source and artifact compatibility are not stable yet.
+The project is pre-alpha. There is no backward-compatibility requirement for
+source, standard-library APIs, compiler interfaces, ABI, or G1 artifacts. These
+unfinished components evolve together; old artifacts may need to be rebuilt.
 The independently implemented Stage0 compiler and verified VM are the active
 Rust toolchain. The former package tool, formatter, and language server are
 retained only as explicitly disabled legacy code while they are redesigned.

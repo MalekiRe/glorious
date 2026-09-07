@@ -17,9 +17,10 @@ reconstructing an ABI-compatible object.
 
 This decision supersedes earlier exclusions of source-language unsafe and raw
 pointers, and the treatment of collection, UTF-8, and hashing algorithms as a
-permanent VM primitive surface. Existing artifact generations remain explicit
-compatibility targets during migration; instruction meanings do not silently
-change. See [implementation gates](../compiler/spec/unsafe-memory-progress.md).
+permanent VM primitive surface. Under the [pre-alpha evolution policy](../glorious-language-specification.md#12-two-authorities-not-two-competing-definitions),
+there are no legacy artifact compatibility targets. Compiler, VM, library, and
+format contracts may change together; mismatched inputs must still be rejected.
+See [implementation gates](../compiler/spec/unsafe-memory-progress.md).
 
 ## 1. Library implementation means source implementation
 
@@ -40,8 +41,8 @@ trait-backed library function.
 Standard-library inclusion is a library/build choice, not a special source-name
 privilege. Programs may omit std subject to their actual dependencies; the
 minimal machine/runtime and ABI contracts still apply. This requires an explicit
-implementation change to existing fixed source-bundle contracts, not a silent
-reinterpretation of already-versioned artifacts.
+implementation change to source-bundle contracts and their consumers, with
+incompatible artifacts rejected or rebuilt rather than preserved as legacy inputs.
 
 ## 2. Unsafe establishes programmer-owned obligations
 
@@ -256,7 +257,7 @@ The implementation order is:
    untrusted distributed bytecode is deferred, not on this critical path.
 2. Specialize and run ordinary source libraries as bytecode. Prove actual
    VM/native storage and call interoperability using explicit host ABI fixtures.
-3. Complete the full GSC-2 incremental compiler and its Stage0/G1 compatibility,
+3. Complete the full GSC-2 incremental compiler and its current runtime contract,
    independent verification, self-compilation, and C2/C3 convergence gates using
    the bytecode path. This does not replace the production query/database plan
    with a smaller compiler prototype.

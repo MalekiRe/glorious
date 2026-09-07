@@ -1,15 +1,20 @@
 # Stage-0 semantic coverage gate
 
 This directory defines the executable language-semantics gate for the Rust
-Stage-0 compiler. The normative source is the generation-1 core specification
-in `glorious-branded-environment-core-spec.md`; optimizer breadth, compiler
-service lifecycle behavior, and self-hosting convergence remain separate gates.
+Stage-0 compiler. The current normative source is the
+[language specification](../../glorious-language-specification.md), with library
+contracts in the [standard-library specification](../../glorious-standard-library-specification.md).
+The inventory below was derived from the previous core draft; it is regression
+evidence, not complete conformance coverage for the consolidated specifications
+or a backward-compatibility obligation. Update expectations for intentional
+semantic changes. Optimizer breadth, compiler service lifecycle behavior, and
+self-hosting convergence remain separate gates.
 
 ## Authoritative inventory
 
 `stage0-semantic-inventory.tsv` is the machine-readable source of truth. It has
-one row for every explicit normative rule in the core specification's three
-acceptance sections:
+one row for every rule in the previous core draft's three acceptance sections
+([recorded source](https://github.com/MalekiRe/glorious/blob/7e4a021811b6a8e0d62b2899f10e602d037c3c14/glorious-branded-environment-core-spec.md)):
 
 - 22 conformance requirements from section 19;
 - 18 safety invariants from section 17;

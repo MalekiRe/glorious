@@ -11,7 +11,7 @@ Related authoritative contracts:
 
 - [language core specification](../../glorious-language-specification.md);
 - [current compiler and VM architecture](../architecture.md);
-- [self-hosted compiler migration architecture](../../self-host/ARCHITECTURE.md);
+- [self-hosted compiler architecture](../../GSC-2-glorious-incremental-self-hosted-compiler-spec.md);
 - [G1 bytecode contract](../bytecode.md);
 - [standard-library contract](../../glorious-standard-library-specification.md);
 - [remaining implementation work](../remaining-work.md).

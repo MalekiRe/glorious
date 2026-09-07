@@ -1,19 +1,22 @@
 # Grandiose Bytecode Generation 1
 
 The [unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md) defines future
-versioned raw-memory, guest-safety, and shared-layout requirements. It does not
-reassign or weaken the existing G1 encodings and verifier contracts below.
+raw-memory, guest-safety, and shared-layout requirements. The tables below
+describe the current implementation, not a legacy format that must be preserved.
+The [language specification's pre-alpha policy](../glorious-language-specification.md#12-two-authorities-not-two-competing-definitions)
+allows compiler and VM contracts to change together without backward compatibility.
 
 The selected extension must execute concrete source-library specializations,
 including unsafe memory operations, as bytecode over host-compatible storage.
 Unsafe-enabled execution is not an in-process memory sandbox. Current distribution
 ships source for local compilation; independent admission of untrusted new-format
-bytecode is deferred. Existing G1 checks below remain intact. Shared native calls need
+bytecode is deferred. Checks for the actively supported contract remain required. Shared native calls need
 target/layout and call/ownership contracts plus actual VM/host tests, not a
 Glorious LLVM backend. LLVM is deferred until after verified self-hosting.
-This decision allocates no opcode, feature bit, profile flag, or CLI switch.
-In particular, it does not reinterpret existing fixed-width `usize`/`isize`
-values or portable container fields as native pointer representations.
+Documentation adoption alone changes no opcode, feature bit, or running program.
+Implement target-width `usize`/`isize` and native representations by updating the
+producer, consumer, contract identity, and tests together; reject or rebuild
+incompatible inputs instead of retaining a legacy execution path.
 
 The separate Stage0 authoring format now has schema 95 raw-memory/reference execution for
 locally compiled source; see its [implementation state](../compiler/spec/unsafe-memory-progress.md#u3-initial-locally-compiled-raw-memory-execution).
@@ -22,13 +25,13 @@ That extension is not a G1 opcode assignment or independent G1 safety certificat
 Status: normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to
 be interpreted as requirements. Generation 1 is abbreviated G1.
 
-## 1. Compatibility contract
+## 1. Current-contract admission
 
-A valid released artifact remains valid and has the same observable behavior on
-every newer conforming VM, except for explicitly external host state. Existing
-section, feature, type, primitive, opcode, flag, and host-symbol identifiers are
-never reassigned. Their accepted encodings and semantics are never narrowed or
-changed. New encodings are additive.
+There are no stable released-artifact or backward-compatibility guarantees during
+pre-alpha. Section, feature, type, primitive, opcode, flag, and host-symbol
+assignments may change with the compiler/VM contract. Record incompatible changes
+in the admitted format/contract identity and update encoders, decoders, tests,
+and bootstrap inputs together. Obsolete decoder paths may be removed.
 
 A VM MUST reject, before execution, an artifact with an unknown required feature,
 unknown critical section, unsupported format major, noncanonical encoding, or
@@ -37,9 +40,10 @@ not a host panic. Unknown noncritical sections MUST be skipped.
 
 An artifact declares the minimum features it uses, not every feature understood
 by its producer. G1 writers MUST set feature bit 0 and exactly the other G1 bits
-whose facilities appear. A newer VM MUST continue decoding major version 1.
-If a future incompatible container needs major version 2, that VM MUST also retain
-its major-1 decoder. Minor version is informational and does not alter semantics.
+whose facilities appear. A VM need only decode the formats its current contract
+explicitly supports. A change to major version 2 does not require retaining a
+major-1 decoder. Minor version is informational in the current layout and does
+not authorize interpreting incompatible bytes under unchanged admission metadata.
 
 ## 2. Scalar conventions
 
@@ -950,14 +954,14 @@ environment cannot affect portable execution. Host calls are explicitly outside 
 semantics; reproducible compilation therefore uses only deterministic file,
 argument, and diagnostic inputs.
 
-## 10. Release discipline
+## 10. Pre-alpha change discipline
 
-Before assigning an unassigned ID, a change must update this document, add its
-feature bit, land VM decode/verify/execute support, and add a golden artifact.
-Only then may a compiler emit it. Released IDs are never deleted, and every
-released compiler seed remains in the newest VM's compatibility suite.
+An encoding change must update this document, the applicable format/feature
+identity, VM decode/verify/execute support, compiler emission, and affected golden
+artifacts. Superseded IDs, encodings, and bootstrap seeds may be replaced or
+removed; changes are not restricted to additive extensions.
 
-The native bootstrap tools negotiate released-seed compatibility before a
+The native bootstrap tools negotiate current-contract agreement before a
 bytecode artifact is compiled, reused, or executed. `grc --capabilities`
 advertises a versioned identity whose inputs are the compiler and VM contract
 revisions, artifact major/minor, and supported feature mask; `grvm
@@ -965,17 +969,17 @@ revisions, artifact major/minor, and supported feature mask; `grvm
 driver rejects partial metadata, protocol mismatches, or an unaccepted identity
 before consulting cache freshness, fingerprints the complete compiler/VM/seed
 tuple, and forwards the selected identity to `grvm run`, which checks it before
-loading the artifact. A pre-negotiation compiler and VM may interoperate only
-when both omit seed metadata. This deployment check does not add a field to the
-G1 bytecode container or weaken normal decoder/verifier compatibility checks.
+loading the artifact. This protocol is itself pre-alpha and may change with the
+toolchain; no metadata-free fallback or old-seed support is required. Admission
+and decoder/verifier checks must agree on the selected current contract.
 
-A bytecode extension is bootstrap-safe in this order:
+A bytecode change is bootstrap-ready when:
 
-1. new VM accepts old artifacts and implements the additive feature;
-2. the previous compiler builds a bridge compiler using only old bytecode;
-3. the bridge optionally emits the new feature;
-4. compiler source adopts the feature only after the bridge seed is reproducible.
+1. the compiler and VM implement the same selected contract;
+2. the recorded authoring toolchain can rebuild the required seed and libraries;
+3. incompatible cached artifacts are rejected and regenerated;
+4. the resulting bootstrap chain is reproducible.
 
 Canonical stage-2/stage-3 equality, golden encode/decode round trips, hostile
-verification tests, MIR-before/after differential tests, and newest-VM/old-seed
-execution are release gates.
+verification tests, MIR-before/after differential tests, and current-toolchain
+bootstrap execution are acceptance gates. Old-seed execution is not a requirement.

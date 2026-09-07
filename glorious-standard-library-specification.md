@@ -1,13 +1,18 @@
 # Glorious Standard Library Specification
 
-**Consolidated interface draft 1.0 · 7 September 2026**  
-**Companion:** [Glorious Language Specification](glorious-language-specification.md).  
-**Language:** Glorious. **Compiler/toolchain:** Grandiose.  
+**Consolidated interface draft 1.0 · 7 September 2026**
+
+**Companion:** [Glorious Language Specification](glorious-language-specification.md).
+
+**Language:** Glorious. **Compiler/toolchain:** Grandiose.
+
 **Baseline:** `MalekiRe/glorious@7e4a021811b6a8e0d62b2899f10e602d037c3c14` plus the design decisions in this conversation.
 
 This document specifies intended public types, traits, effect operations, function signatures, and observable contracts. It contains no library implementation bodies, collection algorithms, private growth strategies, or executor implementation. A declaration ending in `;` is an interface declaration here, not a claim that an unbound bodyless definition is legal in an application source file.
 
 The draft is not a claim of current compiler support, binary compatibility, formal soundness proof, or executed conformance tests. Its control contracts rely on the complete static interface model in the companion, including checked guarded postconditions; they are not claimed to work by merely adding a single RunsIn bound to the old sources.
+
+The companion's pre-alpha evolution policy applies: there is no legacy library, compiler, VM, ABI, or G1 compatibility requirement. Replace superseded interfaces and update their implementations and tests together instead of retaining compatibility wrappers. Runtime contract checks still reject mismatched inputs.
 
 ## Contents
 
@@ -963,7 +968,7 @@ TryAs<T> scalar instances return ConversionError. Integer-to-integer requires ex
 
 ExactAs rejects fractional float-to-integer inputs and any finite precision loss in other scalar conversions. Infinity may convert to the same-signed floating infinity; canonical NaN may convert between float widths as canonical NaN; neither converts exactly to an integer. The separately named `exact_convert` function therefore differs from both checked representability and As lossiness.
 
-Width-explicit legacy names `checked_<S>_to_<T>` and `wrapping_convert_to_<T>` are not additional mandatory exports of this canonical namespace. A separately selected compatibility module may preserve their original signatures and policies, including Option-returning checks. An alias cannot change Option to Result or otherwise claim compatibility with a different contract. The canonical general interface is as/try_as/exact_convert.
+The canonical conversion interface is as/try_as/exact_convert. Width-explicit names such as `checked_<S>_to_<T>` and `wrapping_convert_to_<T>` are superseded, not additional exports or a required compatibility module. Migrate callers and tests to the selected signatures and policies; an alias cannot change Option into Result.
 
 No As implementation converts arbitrary u32 to char, pointers to references, or numbers to truth. Char-to-u32 and u8-to-char are total explicitly supported conversions; validating other scalar values uses checked constructors.
 
@@ -1893,6 +1898,10 @@ pub struct DiagnosticCode(u32);
 pub struct SourceSpan { pub source: SourceId, pub range: Range<usize> }
 pub struct RenderOptions { pub maximum_notes: usize, pub maximum_bytes: usize }
 
+impl DiagnosticCode {
+    pub fn from_u32(value: u32) -> Self;
+    pub fn to_u32(value: Self) -> u32;
+}
 impl Diagnostic {
     pub fn new(severity: Severity, code: DiagnosticCode, message: String) -> Self;
     pub fn primary(value: &mut Self, span: SourceSpan, label: String);
@@ -2418,7 +2427,7 @@ where
 
 **Control contract.** Invoke main exactly once; handle the four listed families; forward only e and any explicitly declared adapter effects. The implementation may not borrow the same host state incompatibly in the handled body and its handlers. CompilerHost construction is an embedding/driver operation; no safe source constructor can manufacture OS authority. Empty outward effects of an executable entry are a closure requirement, not an instruction to inject arbitrary handlers automatically.
 
-The typed-host contract supersedes uncatchable ordinary file failures for this intended-library version. Existing G1 `(capability,symbol,signature)` triples retain their released meaning. Adapting them to these recoverable results requires new host bindings; no source wrapper can catch a catchless legacy HostFault. The language's version/authority checks apply.
+The typed-host contract requires ordinary file failures to return structured results. Update the compiler, runtime manifests, and host bindings together to implement it; retaining the old G1 `(capability,symbol,signature)` triples is not required. A source wrapper cannot turn an uncatchable HostFault into a recoverable result. The provider must implement that result contract, and admission must reject mismatched bindings.
 
 ### 27.3 Capability minimums
 
@@ -2942,7 +2951,7 @@ These are acceptance requirements for future implementations, not a report of te
 | S53 | Iterator None does not magically consume its owning state. |
 | S54 | Owning Step::Done finalizes the exhausted shell exactly once. |
 | S55 | Zip returns a polled unmatched item and both source remainders. |
-| S56 | Early consuming-fold failure returns accumulator, failed item, and remaining stepper. |
+| S56 | Try-fold failure returns the accumulator and remaining iterator; the callback accounts for the item it consumed through its result or authorized deconstruction. |
 | S57 | Filter/take/skip/scan abandonment accounts for retained sources/caches/callbacks. |
 | S58 | Sorting preserves a valid permutation on comparator failure; stable ties retain order on success. |
 | S59 | Stable-sort scratch preconditions are checked without silently discarding residents. |
@@ -2968,7 +2977,7 @@ These are acceptance requirements for future implementations, not a report of te
 | S79 | Graph/worklist traversal checks logical budgets during input-sized work. |
 | S80 | Importing an effect exposes its operations without granting host authority. |
 | S81 | Hosted ordinary I/O failures return typed results without cancelling exact-once continuations. |
-| S82 | Legacy uncatchable host faults are not falsely advertised as caught by a source wrapper. |
+| S82 | Typed host results are implemented at the provider boundary; wrappers do not pretend to catch fatal host faults. |
 | S83 | Stream error reports retain exact committed prefixes; write-zero cannot spin forever. |
 | S84 | Buffered finish failure retains both writer and unwritten bytes. |
 | S85 | File close/child wait distinguish lost external resource from a safely reusable owner. |
@@ -3000,7 +3009,7 @@ The canonical library has no lazy parameter notation, no public choose, no free-
 | Truth constants | Closed Bool true/false; generic structural None; alias equality is not arbitrary Result error-type coercion. |
 | Disposal | Public affine bounds; exact-linear completion paths on owning containers. |
 | Profiles | Optional core/alloc/std dependency closures; host facilities do not become mandatory in every program. |
-| Host errors | Recoverable typed ordinary OS failures; legacy HostFault compatibility remains explicit. |
+| Host errors | Recoverable typed ordinary OS failures; replace incompatible bindings rather than preserve a legacy HostFault interface. |
 | File/process owners | Exact-linear completion through explicit operations rather than effectful Drop. |
 | Future polling | An owning step protocol handles linear pending states; await directly performs its generic effect. |
 | Task cancellation | Separate cancellable-work and linear-work protocols; cancellation races return completed output. |
@@ -3014,7 +3023,7 @@ The most novel static obligations are guarded conditional contracts, refinement-
 
 Networking transports, a concrete async executor, cross-thread memory-model APIs, arbitrary-precision arithmetic, full locale/Unicode property frameworks, regex, general serialization, reflection, macros, derive and runtime trait-object dispatch are not required by this version. This is not a prohibition on separately versioned libraries implementing appropriate source-level facilities. Their existence must not be implied by an undeclared placeholder type in the mandatory interface.
 
-VM opcode assignments, binary-container layout, compiler queries, optimizer pass schedules, self-host bootstrapping steps, tool packaging and performance reports are engineering specifications outside these two semantic documents. The shared target ABI requirements remain normative in the companion. No existing artifact is silently reinterpreted by adopting a new library interface.
+VM opcode assignments, binary-container layout, compiler queries, optimizer pass schedules, self-host bootstrapping steps, tool packaging and performance reports are engineering specifications outside these two semantic documents. The shared target ABI requirements remain normative in the companion. Those components may change together without backward compatibility; incompatible artifacts and caches are rejected or rebuilt, not silently reinterpreted.
 
 ### 34.4 Source register
 
