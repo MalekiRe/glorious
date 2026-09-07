@@ -129,10 +129,11 @@ pub struct CompilerBuildIdentity {
 /// clause exit, using the existing checked cancellation and cleanup protocol.
 /// Cache twenty-five and verifier twenty-one separate deep resumption return
 /// contexts and audit every suspended suffix reaching a shared clause.
+/// Cache twenty-six checks pattern binder uniqueness after constant resolution.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 4;
-pub const STAGE0_CACHE_GENERATION: u32 = 25;
+pub const STAGE0_CACHE_GENERATION: u32 = 26;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 64;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 21;
 

@@ -4117,13 +4117,7 @@ fn typed_core_rejects_a_continuation_that_shadows_a_payload_binder() {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    assert!(
-        body.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4017"),
-        "parser accepted duplicate handler binder: {:#?}",
-        body.diagnostics
-    );
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
     let core = TypedBody::elaborate(
         definition,
         &body,

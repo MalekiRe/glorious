@@ -213,16 +213,27 @@ fn binding_a_projected_owner_separates_it_from_later_source_replacement() {
 }
 
 #[test]
-fn truth_constants_leave_the_absent_variant_polymorphic() {
+fn truth_constants_are_closed_but_none_and_constructors_remain_polymorphic() {
+    // Language §4.3 closes both slots of Bool. Generic absence and success
+    // remain available through None and ordinary Result constructors.
+    for source in [
+        "use std::*; enum Failure { Broken } fn succeed() -> Result<(), Failure> { true } fn empty() -> Option<i64> { false } pub fn main() -> i64 { 42 }",
+        "use std::*; fn empty<T>() -> Option<T> { false } fn succeed<E>() -> Result<(), E> { true } pub fn main() -> i64 { 42 }",
+    ] {
+        let Err(ServiceError::Failed(diagnostics)) = compile(source) else {
+            panic!("closed truth constants widened to other Result types");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4107"), "{diagnostics:#?}");
+    }
     assert_eq!(
         run(
-            "use std::*; enum Failure { Broken } fn succeed() -> Result<(), Failure> { true } fn empty() -> Option<i64> { false } pub fn main() -> i64 { handle succeed() { true => handle empty() { false => 42; Result::Ok(_) => 0 }; Result::Err(_) => 0 } }"
+            "use std::*; enum Failure { Broken } fn succeed() -> Result<(), Failure> { Result::Ok(()) } fn empty() -> Option<i64> { None } pub fn main() -> i64 { handle succeed() { Result::Ok(_) => handle empty() { None => 42; Result::Ok(_) => 0 }; Result::Err(_) => 0 } }"
         ),
         42
     );
     assert_eq!(
         run(
-            "use std::*; fn empty<T>() -> Option<T> { false } fn succeed<E>() -> Result<(), E> { true } pub fn main() -> i64 { handle empty<i64>() { false => handle succeed<i64>() { true => 42; Result::Err(_) => 0 }; Result::Ok(_) => 0 } }"
+            "use std::*; fn empty<T>() -> Option<T> { None } fn succeed<E>() -> Result<(), E> { Result::Ok(()) } pub fn main() -> i64 { handle empty<i64>() { None => handle succeed<i64>() { Result::Ok(_) => 42; Result::Err(_) => 0 }; Result::Ok(_) => 0 } }"
         ),
         42
     );

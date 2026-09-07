@@ -12619,11 +12619,17 @@ impl Elaborator<'_> {
                 elaboration
             })
             .collect::<Vec<_>>();
-        // `BodySyntax` normally rejects this while parsing, but Typed Core is
-        // also an API boundary used by recovered and tooling syntax.  Keep
-        // the handler environment sound even when a caller supplies a body
-        // directly: an explicit generated continuation must not overwrite a
-        // payload binder in the same clause scope.
+        // Payloads are elaborated independently, but their resolved binders
+        // share one clause scope. Repeated constants introduce no bindings.
+        let mut payload_names = std::collections::BTreeSet::new();
+        for binding in patterns.iter().flat_map(|pattern| &pattern.plan.bindings) {
+            if !payload_names.insert(&binding.name) {
+                self.error(binding.span, "G4017", "duplicate binder in one handler clause");
+                self.recovered = true;
+            }
+        }
+        // A generated continuation must not overwrite a resolved payload
+        // binder, for either explicit `with` or positional source spelling.
         if let Some(resumption) = &source.resumption
             && patterns
                 .iter()

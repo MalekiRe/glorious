@@ -129,6 +129,7 @@ pub fn elaborate_pattern_with_scope(
         module,
         scope,
         bindings: vec![],
+        binding_names: std::collections::BTreeSet::new(),
         discarded: vec![],
         diagnostics: vec![],
         next_binder: 0,
@@ -215,6 +216,7 @@ struct Elaborator<'a> {
     module: &'a ModuleKey,
     scope: &'a PatternGenericScope,
     bindings: Vec<PatternBinding>,
+    binding_names: std::collections::BTreeSet<String>,
     discarded: Vec<Type>,
     diagnostics: Vec<PatternDiagnostic>,
     next_binder: u32,
@@ -244,6 +246,10 @@ impl Elaborator<'_> {
                         self.error(pattern.span, "G4201", "pattern value requires a frozen structural initializer");
                         return PatternDecision::Error;
                     }
+                }
+                if !self.binding_names.insert(name.clone()) {
+                    self.error(pattern.span, "G4017", "duplicate binder in one pattern");
+                    return PatternDecision::Error;
                 }
                 let key = BinderKey(self.next_binder);
                 self.next_binder += 1;

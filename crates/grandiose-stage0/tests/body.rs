@@ -139,7 +139,7 @@ fn assignments_are_block_statements_with_a_required_terminator() {
 }
 
 #[test]
-fn body_parser_preserves_structural_is_patterns_and_rejects_duplicate_binders() {
+fn body_parser_preserves_structural_is_patterns_and_defers_name_resolution() {
     let body = parse("{ subject is Result::Ok((left, right)) }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
     let ExprKind::Block(values) = &body.expression(body.root).kind else {
@@ -156,13 +156,9 @@ fn body_parser_preserves_structural_is_patterns_and_rejects_duplicate_binders() 
     ));
 
     let duplicate = parse("{ subject is (value, value) }");
-    assert!(duplicate.recovered);
-    assert!(
-        duplicate
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4017")
-    );
+    // `value` might be a structural constant; elaboration owns uniqueness.
+    assert!(!duplicate.recovered);
+    assert!(duplicate.diagnostics.is_empty());
 }
 
 #[test]
@@ -295,16 +291,11 @@ fn body_parser_treats_with_wildcard_as_an_explicit_continuation_discard() {
 }
 
 #[test]
-fn body_parser_rejects_continuation_name_that_duplicates_a_payload_binder() {
+fn body_parser_defers_payload_and_continuation_name_conflicts_to_core() {
     let body =
         parse("{ handle perform Console::read(1) { Console::read(value) with value => 0 } }");
-    assert!(
-        body.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4017"),
-        "duplicate handler binder was accepted: {:#?}",
-        body.diagnostics
-    );
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    assert!(!body.recovered);
 }
 
 #[test]

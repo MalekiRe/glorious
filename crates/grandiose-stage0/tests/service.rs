@@ -38,6 +38,28 @@ fn request(source: &str) -> CompilationRequest {
     }
 }
 
+// Library Bool is a nominal Result<(), ()>, not the VM's private predicate
+// scalar. Observe its ordinary constructors in source, then cross the host
+// boundary with an integer. Check both the produced and verified wire forms.
+fn assert_source_bool(declarations: &str, expression: &str, expected: bool) {
+    let source = format!(
+        "{declarations} fn checked_value() -> Bool {{ {expression} }} \
+         pub fn main() -> i64 {{ handle checked_value() {{ true => 1, false => 0 }} }}"
+    );
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let expected = i64::from(expected);
+    assert_eq!(artifact.run_i64().unwrap(), expected);
+    assert_eq!(
+        decode_and_verify_program(&artifact.canonical_bytes())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        expected
+    );
+}
+
 #[test]
 fn qualified_trait_calls_infer_self_from_the_declared_borrow_shape() {
     let source = r#"
@@ -15027,12 +15049,8 @@ fn service_lowers_source_defined_prefix_numeric_operators() {
 
 #[test]
 fn service_lowers_boolean_prefix_negation() {
-    let artifact = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { !false }"))
-        .unwrap()
-        .artifact
-        .unwrap();
-    assert!(artifact.run_bool().unwrap());
+    assert_source_bool("", "!false", true);
+    assert_source_bool("", "!true", false);
 }
 
 #[test]
@@ -15044,19 +15062,8 @@ fn service_lowers_char_literals_and_scalar_comparisons() {
         .unwrap();
     assert_eq!(character.run_char().unwrap(), '🦀');
 
-    let comparison = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { 'a' < 'z' }"))
-        .unwrap()
-        .artifact
-        .unwrap();
-    assert!(comparison.run_bool().unwrap());
-
-    let boolean = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { true != false }"))
-        .unwrap()
-        .artifact
-        .unwrap();
-    assert!(boolean.run_bool().unwrap());
+    assert_source_bool("", "'a' < 'z'", true);
+    assert_source_bool("", "true != false", true);
 }
 
 #[test]
@@ -15113,26 +15120,11 @@ fn prefix_operators_reject_incompatible_operand_types_before_mir() {
 
 #[test]
 fn service_lowers_bool_literals_and_typed_numeric_comparisons() {
-    let integer = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { 20 + 22 == 42 }"))
-        .unwrap()
-        .artifact
-        .unwrap();
-    assert!(integer.run_bool().unwrap());
-    let float = StageZeroCompiler::new()
-        .compile(request(
-            "pub fn below(value: f64) -> Bool { value < 2.0 } pub fn main() -> Bool { below(1.5) }",
-        ))
-        .unwrap()
-        .artifact
-        .unwrap();
-    assert!(float.run_bool().unwrap());
-    let literal = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { true }"))
-        .unwrap()
-        .artifact
-        .unwrap();
-    assert!(literal.run_bool().unwrap());
+    assert_source_bool("", "20 + 22 == 42", true);
+    assert_source_bool("", "20 + 22 != 42", false);
+    assert_source_bool("fn below(value: f64) -> Bool { value < 2.0 }", "below(1.5)", true);
+    assert_source_bool("", "true", true);
+    assert_source_bool("", "false", false);
 }
 
 #[test]

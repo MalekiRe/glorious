@@ -31,6 +31,30 @@ fn parsed(
 }
 
 #[test]
+fn is_pattern_elaboration_rejects_duplicate_resolved_binders() {
+    let source = "pub fn main() -> () { (1, 2) is (value, value) }";
+    let (interface, signatures, body) = parsed(source);
+    assert!(body.diagnostics.is_empty());
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected body block");
+    };
+    let ExprKind::Is { pattern, .. } = body.expression(values[0]).kind else {
+        panic!("expected structural test");
+    };
+    let result = elaborate_pattern(
+        &body,
+        pattern,
+        Type::Tuple(vec![Type::Scalar(ScalarType::I64); 2]),
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+        &interface.module,
+    );
+    assert!(result.recovered);
+    assert!(result.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4017"));
+    assert_eq!(result.plan.bindings.len(), 1);
+}
+
+#[test]
 fn enum_pattern_elaboration_uses_frozen_layouts_and_fresh_binder_keys() {
     let source = "pub enum Result { Ok(i64), Err(Text) } pub fn main(value: Result) -> () { value is Result::Ok(found) }";
     let (interface, signatures, body) = parsed(source);

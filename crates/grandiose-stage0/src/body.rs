@@ -395,9 +395,8 @@ impl Parser<'_> {
     fn finish_expression_at(&mut self, mut expression: ExprId, minimum: u8) -> Option<ExprId> {
         if self.word() == Some("is") {
             let is_token = self.advance()?;
-            let mut binders = std::collections::BTreeSet::new();
             let pattern = self
-                .parse_pattern(&mut binders)
+                .parse_pattern()
                 .unwrap_or_else(|| self.recover_pattern());
             let span = join(self.expression(expression).span, self.pattern(pattern).span);
             expression = self.alloc(
@@ -731,10 +730,9 @@ impl Parser<'_> {
                 return None;
             }
             let mut patterns = vec![];
-            let mut binders = std::collections::BTreeSet::new();
             while !self.at_punctuation(')') && self.current().is_some() {
                 patterns.push(
-                    self.parse_pattern(&mut binders)
+                    self.parse_pattern()
                         .unwrap_or_else(|| self.recover_pattern()),
                 );
                 if !self.at_punctuation(',') {
@@ -756,7 +754,6 @@ impl Parser<'_> {
             );
             let (resumption, discard_resumption) = if self.word() == Some("with") {
                 self.position += 1;
-                let continuation = self.current()?;
                 let name = self.expect_identifier()?;
                 // `_` is the explicit full-control spelling for abandoning a
                 // continuation.  It is not a source-level callable named
@@ -765,16 +762,8 @@ impl Parser<'_> {
                 if name == "_" {
                     (None, true)
                 } else {
-                    // Payload patterns and the explicit continuation inhabit
-                    // one handler-clause scope.  Do not silently shadow a
-                    // payload binder with the generated callable identity.
-                    if !binders.insert(name.clone()) {
-                        self.error_at(
-                            self.lexed.tokens[continuation].span,
-                            "G4017",
-                            "duplicate binder in one handler clause",
-                        );
-                    }
+                    // Core checks clause-scope uniqueness after resolving
+                    // payload names as constants or actual binders.
                     (Some(name), false)
                 }
             } else {
@@ -822,8 +811,7 @@ impl Parser<'_> {
     }
 
     fn parse_completion_clause(&mut self, clause_start: usize) -> Option<HandlerClause> {
-        let mut binders = std::collections::BTreeSet::new();
-        let pattern = self.parse_pattern(&mut binders)?;
+        let pattern = self.parse_pattern()?;
         if !self.at_operator("=>") {
             self.error_current("G4024", "expected `=>` before handler clause body");
             return None;
@@ -1953,10 +1941,9 @@ impl Parser<'_> {
         ))
     }
 
-    fn parse_pattern(
-        &mut self,
-        binders: &mut std::collections::BTreeSet<String>,
-    ) -> Option<PatternId> {
+    // Bare names may denote structural constants. Only semantic resolution
+    // can decide which names introduce binders and must be unique (§4.3).
+    fn parse_pattern(&mut self) -> Option<PatternId> {
         let start = self.current()?;
         let token = &self.lexed.tokens[start];
         match token.kind {
@@ -1975,7 +1962,7 @@ impl Parser<'_> {
                 self.position += 1;
                 let mut values = vec![];
                 while !self.at_punctuation(')') && self.current().is_some() {
-                    values.push(self.parse_pattern(binders)?);
+                    values.push(self.parse_pattern()?);
                     if !self.at_punctuation(',') {
                         break;
                     }
@@ -1991,7 +1978,7 @@ impl Parser<'_> {
                 self.position += 1;
                 let mut values = vec![];
                 while !self.at_punctuation(']') && self.current().is_some() {
-                    values.push(self.parse_pattern(binders)?);
+                    values.push(self.parse_pattern()?);
                     if !self.at_punctuation(',') {
                         break;
                     }
@@ -2031,7 +2018,7 @@ impl Parser<'_> {
                         let name = self.expect_identifier()?;
                         if self.at_punctuation(':') {
                             self.position += 1;
-                            fields.push((name, self.parse_pattern(binders)?));
+                            fields.push((name, self.parse_pattern()?));
                         } else {
                             // Record patterns use the same field shorthand as
                             // record values: `Pair { left }` binds the field
@@ -2039,13 +2026,6 @@ impl Parser<'_> {
                             // carries the explicit field identity, so this is
                             // pure surface sugar rather than a name-based
                             // projection later in Core.
-                            if !binders.insert(name.clone()) {
-                                self.error_at(
-                                    field_span,
-                                    "G4017",
-                                    "duplicate binder in one pattern",
-                                );
-                            }
                             let binding =
                                 self.alloc_pattern(PatternKind::Binding(name.clone()), field_span);
                             fields.push((name, binding));
@@ -2069,7 +2049,7 @@ impl Parser<'_> {
                     self.position += 1;
                     let mut fields = vec![];
                     while !self.at_punctuation(')') && self.current().is_some() {
-                        fields.push(self.parse_pattern(binders)?);
+                        fields.push(self.parse_pattern()?);
                         if !self.at_punctuation(',') {
                             break;
                         }
@@ -2094,9 +2074,6 @@ impl Parser<'_> {
                         },
                         token.span,
                     ));
-                }
-                if !binders.insert(path[0].clone()) {
-                    self.error_at(token.span, "G4017", "duplicate binder in one pattern");
                 }
                 Some(self.alloc_pattern(PatternKind::Binding(path.remove(0)), token.span))
             }
@@ -2243,14 +2220,6 @@ impl Parser<'_> {
                 message,
             });
         }
-        self.recovered = true;
-    }
-    fn error_at(&mut self, span: Span, code: &'static str, message: &'static str) {
-        self.diagnostics.push(BodyDiagnostic {
-            code,
-            span,
-            message,
-        });
         self.recovered = true;
     }
 }

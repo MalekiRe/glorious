@@ -202,10 +202,10 @@ pub let Some = Result::Ok;
 pub let None = Result::Err(());
 
 pub type Bool = Option<()>;
-// The absent variant stays polymorphic: true also inhabits Result<(), E>,
-// and false also inhabits Option<T>. Bool closes both slots only when needed.
-pub let true = Result::Ok(());
-pub let false = Result::Err(());
+// Truth constants are closed Bool values; unlike None, neither carries an
+// inferred type parameter for its absent variant (language §4.3).
+pub let true = Result<(), ()>::Ok(());
+pub let false = Result<(), ()>::Err(());
 
 // Arithmetic syntax and policy are source declarations. The machine leaves
 // return integer predicates; their conversion to this library's Bool is local.
@@ -3404,7 +3404,7 @@ impl<T> Option<T> {
         where F: Fn<(), Output = T>, F: Use<[0, 1]> {
         handle *target {
             Result::Ok(_) => &mut target.0,
-            false => {
+            None => {
                 *target = Some(make());
                 &mut target.0
             },
@@ -3418,7 +3418,7 @@ impl<T> Option<T> {
         where T: Default {
         handle *target {
             Result::Ok(_) => &mut target.0,
-            false => {
+            None => {
                 *target = Some(default_value<T>());
                 &mut target.0
             },

@@ -82,6 +82,64 @@ fn default_prelude_resolves_result_based_boolean_types_and_constants() {
 }
 
 #[test]
+fn boolean_constants_infer_closed_types_without_context() {
+    runs(
+        "pub fn main() -> i64 { let yes = true; let no = false; handle (yes, no) { (true, false) => 42, _ => 0 } }",
+    );
+}
+
+#[test]
+fn boolean_constants_infer_inside_unannotated_nested_tuples() {
+    runs(
+        "pub fn main() -> i64 { handle ((true, true), false) { ((true, true), false) => 42, _ => 0 } }",
+    );
+}
+
+#[test]
+fn boolean_constants_infer_inside_unannotated_arrays() {
+    runs("pub fn main() -> i64 { handle [true, true] { [true, true] => 42, _ => 0 } }");
+}
+
+#[test]
+fn boolean_constants_cannot_inhabit_other_result_instantiations() {
+    for source in [
+        "pub fn main() -> Result<(), i64> { true }",
+        "pub fn main() -> Option<i64> { false }",
+        "pub fn main() -> i64 { handle Result<(), i64>::Ok(()) { true => 42, _ => 0 } }",
+        "pub fn main() -> i64 { handle Result<i64, ()>::Err(()) { false => 42, _ => 0 } }",
+    ] {
+        let input = request(source);
+        let file = input.sources[0].key;
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+            StageZeroCompiler::new().compile(input)
+        else {
+            panic!("Boolean constant widened to another Result instantiation: {source}");
+        };
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| matches!(diagnostic.code, "G4107" | "G4201")
+                    && diagnostic.primary.is_some_and(|span| span.file == file)),
+            "{diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn none_remains_generic_across_distinct_option_instantiations() {
+    runs(
+        "fn number() -> Option<i64> { None } fn flag() -> Option<Bool> { None } pub fn main() -> i64 { handle (number(), flag()) { (None, None) => 42, _ => 0 } }",
+    );
+}
+
+#[test]
+fn explicit_result_constructors_remain_polymorphic() {
+    runs(
+        "fn yes() -> Result<(), i64> { Ok(()) } fn no() -> Option<i64> { Err(()) } pub fn main() -> i64 { handle (yes(), no()) { (Result::Ok(_), Result::Err(_)) => 42, _ => 0 } }",
+    );
+}
+
+#[test]
 fn selected_prelude_tracks_public_contracts_but_not_private_provider_bodies() {
     use grandiose_stage0::{DependencyNode, DependencyStatus, ModuleKey};
     let compiler = StageZeroCompiler::new();

@@ -229,6 +229,108 @@ suite-qualified comparison finds no regressions and no missing tests. The
 plan-integrity gate and all 22 checker tests remain green. These results do not
 establish complete language, standard-library, or self-hosting conformance.
 
+## Sixth slice: resolved pattern-name uniqueness
+
+Language §4.3 resolves bare pattern names as structural constants when those
+values are in scope; only otherwise do they introduce binders. The body parser
+previously counted every bare name as a binder, so repeated Boolean constants
+and imported constants failed with G4017 before resolution.
+
+Uniqueness is now checked after structural-constant resolution in pattern
+elaboration. Independently elaborated operation payloads also check their
+combined clause scope. Actual payload binders still cannot shadow a generated
+continuation, for either positional or explicit `with` spelling. Neither
+constant names nor Boolean spellings are special-cased in the parser. Cache
+generation 26 identifies the changed body/elaboration contract; verifier,
+bytecode, language, and interface generations are unchanged.
+
+New tests cover repeated constants in nested tuples, arrays, records, enum
+payloads and operation clauses, including imported constants and verified wire
+round trips. Negative cases retain rejection of duplicate actual binders,
+continuation conflicts, mismatched constant types, and repeated unimported
+names. A direct `is` pattern-elaboration test verifies duplicate rejection
+without depending on the separate contextual-refinement implementation.
+
+Two parser tests are renamed to reflect deferred name resolution; their
+semantic rejection obligations are covered by the pattern/Core and service
+tests. The historical frozen compiler oracle and M19 evidence are unchanged.
+This slice does not certify `let name` forced-binder syntax, closed Boolean
+constant schemes, or the current specification's contextual `Test` carrier.
+The new Boolean integration fixtures use explicit subject types to isolate
+pattern-name resolution from the remaining unconstrained-tuple inference gap.
+
+The full optimized non-GSC2 run executes 2,549 tests: 2,375 pass and 174 fail.
+Four old service failures now pass: exhaustive nested Boolean tuple coverage
+and the typed integer comparison regressions for `u8`, `u64`, and `usize`.
+All twelve new tests pass. Suite-qualified comparison, accounting for the two
+documented parser-test renames, finds no regressions and no missing tests.
+The plan-integrity check and all 22 checker tests also pass. This remains a
+bounded Stage 0 result, not complete language or self-hosting conformance.
+
+Reproduction uses the same profile and resource guards as the prior baseline:
+
+```sh
+CARGO_TARGET_DIR=target/conformance-groundwork CARGO_PROFILE_TEST_DEBUG=0 \
+  CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 CARGO_PROFILE_TEST_OPT_LEVEL=1 \
+  tooling/test-with-budget.sh tooling/ram-gate.sh \
+  cargo test -p grandiose-stage0 --lib --tests --no-fail-fast -- --skip gsc2
+```
+
+## Seventh slice: closed Boolean constants
+
+Language §4.3 and library §3 require `true` and `false` to be monomorphic
+`Result<(), ()>` values. The distributed library instead declared open
+constructor applications, allowing `true` to inhabit `Result<(), E>` and
+`false` to inhabit `Option<T>`. Besides admitting invalid programs, those open
+parameters prevented inference in otherwise ordinary unannotated aggregates.
+
+Both declarations now supply explicit unit type arguments. This uses the
+existing ordinary initializer/type machinery, not compiler recognition of
+Boolean names. `None` remains an open structural constant scheme. The two
+generic Option lazy-insertion helpers now match their vacant branch with
+`None`, not the formerly polymorphic `false` constant. Source fingerprints
+identify this library-only semantic change; artifact generations are unchanged.
+
+Six new prelude tests exercise unannotated locals, nested tuples and arrays,
+reject incompatible Result types in both expressions and patterns, and retain
+independent generic None and constructor instantiations. Positive cases execute
+both the original artifact and a verified canonical-wire round trip. Negative
+assertions require the type error to originate in the calling source file.
+The old `truth_constants_leave_the_absent_variant_polymorphic` boundary test
+contradicted the consolidated contract. Its replacement rejects those old
+uses and preserves the two generic execution/round-trip scenarios with `None`
+and `Result::Ok`; it is an explicit fixture migration, not an ignored failure.
+The earlier slice's unannotated Boolean-aggregate inference limitation is
+resolved here; forced-binder syntax and the contextual Test carrier remain
+outside this work. Unit-payload constructor patterns in the new fixtures use
+`_`: direct `()` pattern elaboration remains a separate gap.
+
+Following the explicit request to migrate tests whose semantics are obsolete,
+three service fixtures no longer call the VM-predicate `run_bool` helper on a
+nominal library Bool. They observe `true`/`false` through an exhaustive source
+dispatch and check the resulting integer in both original and verified wire
+artifacts. Negation and numeric-comparison/literal tests additionally check
+false outcomes. The character/comparison fixture retains its Boolean `!=`
+assertion: it now exposes the missing applicable operator implementation,
+rather than stopping at the obsolete host-result assumption. It remains a
+failure, not a deleted or ignored semantic obligation.
+
+The completed optimized non-GSC2 run executes 2,555 tests: 2,384 pass and 171
+fail. Closing the constants fixes the compact-label result-inference test;
+the migrated negation and numeric-comparison/literal service tests also pass.
+All six new tests pass, as do both existing Option lazy-insertion regressions.
+Suite-qualified comparison against the sixth slice, accounting for the one
+documented boundary-test replacement, finds no regressions and no missing
+tests. The plan-integrity check and all 22 checker tests remain green. No
+acceptance-family or self-hosting completion status is changed.
+
+An intermediate rerun exhausted filesystem space and did not complete; it is
+not used as full-run evidence. With explicit cleanup permission, `cargo clean
+--profile dev --target-dir /home/malek/Projects/grandiose/target` removed
+54.2 GiB of reproducible default-profile build artifacts. The separate
+`target/conformance-groundwork` build and comparison logs were preserved, and
+the complete baseline was rerun using the sixth slice's command and guards.
+
 ## Next work
 
 1. Triage the remaining failures after default-prelude selection, separating
