@@ -1,0 +1,80 @@
+use std::*;
+use kernel::operation;
+use kernel::operation::budget;
+use kernel::storage;
+pub mod kernel;
+
+fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+fn ok(value: Result<(), budget::Failure>) -> i64 { handle value { Result::Ok(_) => 1, _ => -1000 } }
+fn busy(value: Result<(), budget::Failure>) -> i64 { handle value { Result::Err(budget::Failure::Busy) => 1, _ => -1000 } }
+fn spent(pool: &budget::Pool, value: budget::Budget, expected: u64) -> i64 {
+    handle budget::spent(pool, value) { Result::Ok(value) => check(value == expected), _ => -1000 }
+}
+fn zero(pool: &mut budget::Pool, controls: &mut operation::Controls, root: budget::Budget, child: budget::Budget) -> i64 {
+    handle budget::lease(&mut *pool, child, 0, &mut *controls) {
+        Result::Err(_) => -1000,
+        Result::Ok(lease) => {
+            let score = busy(budget::retire(&mut *pool, child));
+            let score = score + ok(budget::release_lease(&mut *pool, &mut lease));
+            let score = score + ok(budget::retire(&mut *pool, child));
+            let score = score + handle budget::spent(& *pool, child) {
+                Result::Err(budget::Failure::Storage(storage::StorageError::StaleHandle)) => 1, _ => -1000,
+            };
+            handle budget::child(&mut *pool, root, 3, 5) {
+                Result::Err(_) => -1000,
+                Result::Ok(replacement) => {
+                    let score = score + handle budget::spent(& *pool, child) {
+                        Result::Err(budget::Failure::Storage(storage::StorageError::StaleHandle)) => 1, _ => -1000,
+                    };
+                    score + ok(budget::retire(&mut *pool, replacement)) + ok(budget::retire(&mut *pool, root))
+                },
+            }
+        },
+    }
+}
+fn run(pool: &mut budget::Pool, controls: &mut operation::Controls, root: budget::Budget,
+    child: budget::Budget, lease: budget::Lease) -> i64 {
+    let score = spent(& *pool, root, 3) + spent(& *pool, child, 3);
+    let score = score + busy(budget::retire(&mut *pool, root)) + busy(budget::retire(&mut *pool, child));
+    let score = score + handle budget::release(&mut *pool, child, 1) {
+        Result::Err(budget::Failure::Invariant) => 1, _ => -1000,
+    };
+    let score = score + handle budget::lease(&mut *pool, child, 1, &mut *controls) {
+        Result::Err(budget::Failure::Storage(storage::StorageError::Capacity)) => 1, _ => -1000,
+    };
+    let score = score + spent(& *pool, root, 3);
+    let foreign = budget::create(101, 1, 8, 1);
+    let score = score + handle budget::release_lease(&mut foreign, &mut lease) {
+        Result::Err(budget::Failure::Storage(storage::StorageError::ForeignOwner)) => 1, _ => -1000,
+    };
+    operation::cancel(&mut *controls);
+    let score = score + handle budget::charge(&mut *pool, child, 0, &mut *controls) {
+        Result::Err(budget::Failure::Control(operation::Failure::Cancelled)) => 1, _ => -1000,
+    };
+    let score = score + handle budget::lease(&mut *pool, child, 0, &mut *controls) {
+        Result::Err(budget::Failure::Control(operation::Failure::Cancelled)) => 1, _ => -1000,
+    };
+    let work = operation::work_spent(& *controls);
+    let score = score + ok(budget::release_lease(&mut *pool, &mut lease));
+    let score = score + check(operation::work_spent(& *controls) == work);
+    let score = score + handle budget::release_lease(&mut *pool, &mut lease) {
+        Result::Err(budget::Failure::Released) => 1, _ => -1000,
+    };
+    let score = score + spent(& *pool, root, 0) + spent(& *pool, child, 0);
+    let fresh = operation::create(1000, 1000);
+    score + zero(pool, &mut fresh, root, child)
+}
+pub fn main() -> i64 {
+    let pool = budget::create(100, 1, 8, 1);
+    let controls = operation::create(1000, 1000);
+    handle budget::root(&mut pool, 1, 10) {
+        Result::Err(_) => -1,
+        Result::Ok(root) => handle budget::child(&mut pool, root, 2, 7) {
+            Result::Err(_) => -2,
+            Result::Ok(child) => handle budget::lease(&mut pool, child, 3, &mut controls) {
+                Result::Err(_) => -3,
+                Result::Ok(lease) => run(&mut pool, &mut controls, root, child, lease),
+            },
+        },
+    }
+}

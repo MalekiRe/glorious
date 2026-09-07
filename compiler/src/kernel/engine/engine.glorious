@@ -45,9 +45,16 @@ struct Contract { schema: u64, recovery: RecoveryPolicy, reuse: ReusePolicy }
 pub struct Key { private identity: ReadIdentity }
 pub struct Session { private handle: Handle }
 pub struct Ticket { private handle: Handle }
+pub struct RetainedMemory { private key: Option<Handle> }
+pub impl Use<[0, 1]> for RetainedMemory {}
+struct MemoryOwner { session: Option<Session>, controls: Option<operation::Controls>, leases: usize }
+struct MemoryLease { owner: Handle, amount: u64 }
+pub struct MemoryStats { owners: usize, leases: usize, closed_owners: usize }
+pub struct MemoryInfo { amount: u64, spent: u64, retained: u64, closed: Bool }
 struct Request {
     revision: RevisionId, parent: Option<RevisionId>, recovery: RecoveryPolicy,
     controls: operation::Controls, attempts: usize, packages: package::Registry, publication: publication::Frame,
+    memory_owner: Option<Handle>,
 }
 impl Use<[0, 1]> for Request {}
 struct MemoKey { revision: RevisionId, identity: ReadIdentity }
@@ -58,6 +65,7 @@ struct Attempt {
     request: Session, key: MemoKey, parent: Option<Ticket>, phase: Phase,
     cell: Option<Handle>, candidate: Option<Handle>, replay: Option<query::Replay>,
     frame: query::Frame, execution: Execution,
+    memory: Option<RetainedMemory>,
 }
 enum CellState { Pending { owner: Ticket }, Ready { memo: query::Memo<Handle>, execution: Execution } }
 struct Cell { key: MemoKey, schema: u64, state: CellState }
@@ -79,6 +87,7 @@ pub struct Engine {
     private database: u64, private families: Vec<Contract>, private sessions: Arena<Request>,
     private attempts: Arena<Attempt>, private cells: Arena<Cell>,
     private index: HashMap<MemoKey, Handle>, private reads: usize, private stats: Stats, private ledger: dependency::Ledger,
+    private memory_owners: Arena<MemoryOwner>, private memory_leases: Arena<MemoryLease>, private memory_closed: usize,
 }
 
 pub impl Eq for MemoKey {
@@ -102,6 +111,7 @@ fn same_key(left: MemoKey, right: MemoKey) -> Bool {
 pub fn create(database: u64, revisions: usize, sessions: usize, attempts: usize, memos: usize, reads: usize) -> Engine {
     Engine { database: database, families: Vec::new(), sessions: storage::namespace(database, 2, sessions),
         attempts: storage::namespace(database, 3, attempts), cells: storage::namespace(database, 4, memos),
+        memory_owners: storage::namespace(database, 6, memos), memory_leases: storage::namespace(database, 7, memos), memory_closed: 0,
         index: HashMap::new(), reads: reads, ledger: dependency::create(database, revisions),
         stats: Stats { sessions: 0, attempts: 0, memos: 0, edges: 0, explanations: 0 } }
 }
@@ -224,7 +234,7 @@ pub fn admit(engine: &mut Engine, revision: RevisionId, parent: Option<RevisionI
         false => Result::Err(Failure::Foreign),
         true => handle storage::insert(&mut engine.sessions, Request { revision: revision, parent: parent,
             recovery: recovery, controls: controls, attempts: 0, publication: publication::create(),
-            packages: package::create(package::Limits { packages: engine.reads, bodies: engine.reads }) }) {
+            packages: package::create(package::Limits { packages: engine.reads, bodies: engine.reads }), memory_owner: None }) {
             Result::Err(_) => Result::Err(Failure::Capacity),
             Result::Ok(slot) => {
                 (*engine).stats.sessions = engine.stats.sessions + 1;
@@ -253,6 +263,352 @@ pub fn request_controls<'a>(engine: &'a mut Engine, session: Session) -> Result<
         },
     }
 }
+pub fn request_controls_shared<'a>(engine: &'a Engine, session: Session) -> Result<&'a operation::Controls, Failure> {
+    handle storage::get(&engine.sessions, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed), Result::Ok(request) => Result::Ok(&request.controls),
+    }
+}
+
+// Releasing already-admitted storage is valid after cancellation. Do not use
+// request_controls here: its cancellation check deliberately blocks new work.
+pub fn release_memory(engine: &mut Engine, session: Session, amount: u64) -> Result<(), Failure> {
+    handle storage::get_mut(&mut engine.sessions, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => handle operation::release(&mut request.controls, amount) {
+            Result::Err(error) => Result::Err(Failure::Control(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+pub fn memory_spent(engine: &Engine, session: Session) -> Result<u64, Failure> {
+    handle storage::get(&engine.sessions, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => Result::Ok(operation::memory_spent(&request.controls)),
+    }
+}
+
+pub fn memory_stats(engine: &Engine) -> MemoryStats {
+    MemoryStats { owners: storage::count(&engine.memory_owners), leases: storage::count(&engine.memory_leases),
+        closed_owners: engine.memory_closed }
+}
+
+fn owner_controls(engine: &Engine, key: Handle) -> Result<operation::Controls, Failure> {
+    handle storage::get(&engine.memory_owners, key) {
+        Result::Err(_) => Result::Err(Failure::Foreign),
+        Result::Ok(owner) => handle owner.session {
+            Result::Ok(session) => controls(engine, session),
+            Result::Err(_) => handle owner.controls {
+                Result::Ok(value) => Result::Ok(value), Result::Err(_) => Result::Err(Failure::Invariant),
+            },
+        },
+    }
+}
+
+fn refund_owner(engine: &mut Engine, key: Handle, session: Option<Session>, amount: u64) -> Result<(), Failure> {
+    let result = handle session {
+        Result::Ok(session) => handle storage::get_mut(&mut engine.sessions, session.handle) {
+            Result::Err(_) => Result::Err(operation::Failure::Invariant(2)),
+            Result::Ok(request) => operation::release_retained(&mut request.controls, amount),
+        },
+        Result::Err(_) => handle storage::get_mut(&mut engine.memory_owners, key) {
+            Result::Err(_) => Result::Err(operation::Failure::Invariant(2)),
+            Result::Ok(owner) => handle Option::as_mut(&mut owner.controls) {
+                Result::Err(_) => Result::Err(operation::Failure::Invariant(2)),
+                Result::Ok(value) => operation::release_retained(value, amount),
+            },
+        },
+    };
+    handle result { Result::Err(error) => Result::Err(Failure::Control(error)), Result::Ok(_) => Result::Ok(()) }
+}
+
+fn ensure_memory_owner(engine: &mut Engine, session: Session) -> Result<Handle, Failure> {
+    let existing = handle storage::get(&engine.sessions, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed), Result::Ok(request) => Result::Ok(request.memory_owner),
+    };
+    handle existing {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(existing) => handle existing {
+        Result::Ok(key) => Result::Ok(key),
+        Result::Err(_) => handle storage::insert(&mut engine.memory_owners,
+            MemoryOwner { session: Result::Ok(session), controls: None, leases: 0 }) {
+            Result::Err(_) => Result::Err(Failure::Capacity),
+            Result::Ok(key) => handle storage::get_mut(&mut engine.sessions, session.handle) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(request) => { (*request).memory_owner = Result::Ok(key); Result::Ok(key) },
+            },
+        },
+        },
+    }
+}
+
+fn reserve_request_retained(engine: &mut Engine, session: Session, amount: u64) -> Result<(), Failure> {
+    handle storage::get_mut(&mut engine.sessions, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => handle operation::reserve_retained(&mut request.controls, amount) {
+            Result::Err(error) => Result::Err(Failure::Control(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
+fn allocate_retained_memory(engine: &mut Engine, session: Session, amount: u64) -> Result<RetainedMemory, Failure> {
+    handle reserve_request_retained(&mut *engine, session, amount) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle ensure_memory_owner(&mut *engine, session) {
+            Result::Err(error) => {
+                handle storage::get_mut(&mut engine.sessions, session.handle) {
+                    Result::Err(_) => (), Result::Ok(request) => { operation::release_retained(&mut request.controls, amount); () },
+                };
+                Result::Err(error)
+            },
+            Result::Ok(owner) => handle storage::insert(&mut engine.memory_leases, MemoryLease { owner: owner, amount: amount }) {
+                Result::Err(_) => {
+                    refund_owner(&mut *engine, owner, Result::Ok(session), amount);
+                    let empty = handle storage::get(&engine.memory_owners, owner) {
+                        Result::Err(_) => false, Result::Ok(value) => value.leases == 0,
+                    };
+                    handle empty {
+                        false => (),
+                        true => {
+                            storage::remove(&mut engine.memory_owners, owner);
+                            handle storage::get_mut(&mut engine.sessions, session.handle) {
+                                Result::Err(_) => (), Result::Ok(request) => { (*request).memory_owner = None; },
+                            }
+                        },
+                    };
+                    Result::Err(Failure::Capacity)
+                },
+                Result::Ok(key) => handle storage::get_mut(&mut engine.memory_owners, owner) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(value) => {
+                        (*value).leases = value.leases + 1;
+                        Result::Ok(RetainedMemory { key: Result::Ok(key) })
+                    },
+                },
+            },
+        },
+    }
+}
+
+pub fn reserve_product_memory(engine: &mut Engine, ticket: Ticket, amount: u64) -> Result<(), Failure> {
+    handle info(& *engine, ticket) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(current) => handle check(& *engine, current.request) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle current.phase {
+                Phase::Computing => reserve_attempt_memory(engine, ticket, current.request, amount),
+                _ => Result::Err(Failure::Busy),
+            },
+        },
+    }
+}
+
+fn reserve_attempt_memory(engine: &mut Engine, ticket: Ticket, session: Session, amount: u64) -> Result<(), Failure> {
+    let key = handle storage::get(&engine.attempts, ticket.handle) {
+        Result::Err(_) => None,
+        Result::Ok(attempt) => handle Result::as_ref(&attempt.memory) {
+            Result::Err(_) => None, Result::Ok(memory) => memory.key,
+        },
+    };
+    handle key {
+        Result::Ok(key) => handle reserve_request_retained(&mut *engine, session, amount) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle storage::get_mut(&mut engine.memory_leases, key) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(lease) => {
+                    (*lease).amount = wrapping_add(lease.amount, amount);
+                    Result::Ok(())
+                },
+            },
+        },
+        Result::Err(_) => handle allocate_retained_memory(&mut *engine, session, amount) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(memory) => handle storage::get_mut(&mut engine.attempts, ticket.handle) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(attempt) => { (*attempt).memory = Result::Ok(memory); Result::Ok(()) },
+            },
+        },
+    }
+}
+
+// The database adopts the charge immediately after commit, before delivery can
+// remove the attempt. Reused products already carry their producer's charge.
+pub fn take_product_memory(engine: &mut Engine, ticket: Ticket) -> Result<Option<RetainedMemory>, Failure> {
+    handle storage::get_mut(&mut engine.attempts, ticket.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(attempt) => handle attempt.phase {
+            Phase::Deliver => Result::Ok(Option::take(&mut attempt.memory)),
+            _ => Result::Err(Failure::Busy),
+        },
+    }
+}
+
+// Trusted provider admission rolls back only the unmaterialized growth when a
+// later phase ceiling rejects it. Cleanup is legal after cancellation, but not
+// after commit has transferred ownership to a product.
+pub fn shrink_product_memory(engine: &mut Engine, ticket: Ticket, amount: u64) -> Result<(), Failure> {
+    handle info(& *engine, ticket) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(current) => handle current.phase {
+            Phase::Computing => shrink_attempt_memory(engine, ticket, amount),
+            _ => Result::Err(Failure::Busy),
+        },
+    }
+}
+fn shrink_attempt_memory(engine: &mut Engine, ticket: Ticket, amount: u64) -> Result<(), Failure> {
+    let key = handle storage::get(&engine.attempts, ticket.handle) {
+        Result::Err(_) => None,
+        Result::Ok(attempt) => handle Result::as_ref(&attempt.memory) {
+            Result::Err(_) => None, Result::Ok(memory) => memory.key,
+        },
+    };
+    handle key {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(key) => {
+            let state = handle storage::get(&engine.memory_leases, key) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(lease) => handle storage::get(&engine.memory_owners, lease.owner) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(owner) => Result::Ok((lease.owner, owner.session, lease.amount)),
+                },
+            };
+            handle state {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok((owner, session, held)) => handle amount <= held {
+                    false => Result::Err(Failure::Invariant),
+                    true => handle refund_owner(&mut *engine, owner, session, amount) {
+                        Result::Err(error) => Result::Err(error),
+                        Result::Ok(_) => handle storage::get_mut(&mut engine.memory_leases, key) {
+                            Result::Err(_) => Result::Err(Failure::Invariant),
+                            Result::Ok(lease) => { (*lease).amount = wrapping_sub(held, amount); Result::Ok(()) },
+                        },
+                    },
+                },
+            }
+        },
+    }
+}
+pub fn discard_product_memory(engine: &mut Engine, ticket: Ticket) -> Result<(), Failure> {
+    let memory = handle storage::get_mut(&mut engine.attempts, ticket.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(attempt) => handle attempt.phase {
+            Phase::Computing => Result::Ok(Option::take(&mut attempt.memory)),
+            _ => Result::Err(Failure::Busy),
+        },
+    };
+    handle memory {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(memory) => handle memory {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(memory) => handle release_retained_memory(&mut *engine, &mut memory) {
+                Result::Ok(_) => Result::Ok(()),
+                Result::Err(error) => {
+                    handle storage::get_mut(&mut engine.attempts, ticket.handle) {
+                        Result::Err(_) => (), Result::Ok(attempt) => { (*attempt).memory = Result::Ok(memory); },
+                    };
+                    Result::Err(error)
+                },
+            },
+        },
+    }
+}
+
+// Validate the token before changing either the value's charge or its owner.
+// Cleanup remains legal after cancellation and after the producing session closes.
+pub fn release_retained_memory(engine: &mut Engine, memory: &mut RetainedMemory) -> Result<(), Failure> {
+    handle memory.key {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(key) => {
+            let state = handle storage::get(&engine.memory_leases, key) {
+                Result::Err(_) => Result::Err(Failure::Foreign),
+                Result::Ok(lease) => handle storage::get(&engine.memory_owners, lease.owner) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(owner) => Result::Ok((lease.owner, lease.amount, owner.session, owner.leases)),
+                },
+            };
+            handle state {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok((owner, amount, session, leases)) => handle leases == 0 {
+                    true => Result::Err(Failure::Invariant),
+                    false => handle refund_owner(&mut *engine, owner, session, amount) {
+                        Result::Err(error) => Result::Err(error),
+                        Result::Ok(_) => {
+                            storage::remove(&mut engine.memory_leases, key);
+                            (*memory).key = None;
+                            handle leases == 1 {
+                                false => handle storage::get_mut(&mut engine.memory_owners, owner) {
+                                    Result::Err(_) => (), Result::Ok(value) => { (*value).leases = leases - 1; },
+                                },
+                                true => {
+                                    storage::remove(&mut engine.memory_owners, owner);
+                                    handle session {
+                                        Result::Err(_) => { (*engine).memory_closed = engine.memory_closed - 1; },
+                                        Result::Ok(session) => handle storage::get_mut(&mut engine.sessions, session.handle) {
+                                            Result::Err(_) => (), Result::Ok(request) => { (*request).memory_owner = None; },
+                                        },
+                                    }
+                                },
+                            };
+                            Result::Ok(())
+                        },
+                    },
+                },
+            }
+        },
+    }
+}
+
+pub fn retained_memory_info(engine: &Engine, memory: &RetainedMemory) -> Result<MemoryInfo, Failure> {
+    handle memory.key {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(key) => handle storage::get(&engine.memory_leases, key) {
+            Result::Err(_) => Result::Err(Failure::Foreign),
+            Result::Ok(lease) => handle owner_controls(engine, lease.owner) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(value) => handle storage::get(&engine.memory_owners, lease.owner) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(owner) => Result::Ok(MemoryInfo { amount: lease.amount,
+                        spent: operation::memory_spent(&value), retained: operation::memory_retained(&value),
+                        closed: handle owner.session { Result::Ok(_) => false, Result::Err(_) => true } }),
+                },
+            },
+        },
+    }
+}
+
+// Move only the counter, never the request's packages or revision ownership.
+// There is no callback between this transfer and removing the closed request.
+fn detach_memory(engine: &mut Engine, session: Session) -> Result<(), Failure> {
+    let state = handle storage::get(&engine.sessions, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => Result::Ok((request.memory_owner, request.controls)),
+    };
+    handle state {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok((key, value)) => handle key {
+            Result::Err(_) => Result::Ok(()),
+            Result::Ok(key) => handle storage::get_mut(&mut engine.memory_owners, key) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(owner) => handle owner.session {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(current) => handle storage::equal(current.handle, session.handle) {
+                        false => Result::Err(Failure::Invariant),
+                        true => {
+                            let temporary = wrapping_sub(operation::memory_spent(&value), operation::memory_retained(&value));
+                            handle operation::release(&mut value, temporary) {
+                                Result::Err(error) => Result::Err(Failure::Control(error)),
+                                Result::Ok(_) => {
+                                    (*owner).controls = Result::Ok(value);
+                                    (*owner).session = None;
+                                    (*engine).memory_closed = engine.memory_closed + 1;
+                                    Result::Ok(())
+                                },
+                            }
+                        },
+                    },
+                },
+            },
+        },
+    }
+}
 
 pub fn cancel(engine: &mut Engine, session: Session) -> Result<(), Failure> {
     handle storage::get_mut(&mut engine.sessions, session.handle) {
@@ -269,10 +625,13 @@ pub fn cancel(engine: &mut Engine, session: Session) -> Result<(), Failure> {
 pub fn close(engine: &mut Engine, session: Session) -> Result<(), Failure> {
     handle request_attempts(& *engine, session) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(0) => {
+        Result::Ok(0) => handle detach_memory(&mut *engine, session) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => {
             storage::remove(&mut engine.sessions, session.handle);
             (*engine).stats.sessions = engine.stats.sessions - 1;
             Result::Ok(())
+            },
         },
         Result::Ok(_) => Result::Err(Failure::Busy),
     }
@@ -482,7 +841,7 @@ fn start_attempt(engine: &mut Engine, session: Session, key: Key, parent: Option
     handle storage::insert(&mut engine.attempts, Attempt { request: session,
         key: MemoKey { revision: revision, identity: key.identity }, parent: parent,
         phase: Phase::Ancestry { cursor: parent }, cell: None, candidate: None, replay: None,
-        frame: query::frame(contract.recovery, engine.reads), execution: Execution::Recomputed(Reason::Cold) }) {
+        frame: query::frame(contract.recovery, engine.reads), execution: Execution::Recomputed(Reason::Cold), memory: None }) {
         Result::Err(_) => Result::Err(Failure::Capacity),
         Result::Ok(slot) => {
             let request = storage::get_mut(&mut engine.sessions, session.handle);
@@ -819,6 +1178,9 @@ pub fn observe(engine: &mut Engine, ticket: Ticket, read: Read) -> Result<(), Fa
         Result::Err(error) => { abort(&mut *engine, ticket); Result::Err(error) } }
 }
 
+pub fn observe_staged(engine: &mut Engine, ticket: Ticket, read: Read) -> Result<(), Failure> {
+    observe_checked(engine, ticket, read)
+}
 fn observe_checked(engine: &mut Engine, ticket: Ticket, read: Read) -> Result<(), Failure> {
     handle info(& *engine, ticket) {
         Result::Err(error) => Result::Err(error),
@@ -887,6 +1249,12 @@ pub fn publish(engine: &mut Engine, ticket: Ticket, product: Handle, fingerprint
     let result = publish_checked(&mut *engine, ticket, product, fingerprint, completeness, PublicationMode::Fresh);
     handle result { Result::Ok(_) => Result::Ok(()),
         Result::Err(error) => { abort(&mut *engine, ticket); Result::Err(error) } }
+}
+
+// A staged value must be destroyed before abort refunds its pending charge.
+pub fn publish_staged(engine: &mut Engine, ticket: Ticket, product: Handle, fingerprint: Digest, completeness: Completeness)
+    -> Result<(), Failure> {
+    publish_checked(engine, ticket, product, fingerprint, completeness, PublicationMode::Fresh)
 }
 
 // Only validated reuse may publish an existing product. A provider cannot
@@ -1097,12 +1465,17 @@ fn pending_owned(engine: &Engine, key: Handle, ticket: Ticket) -> Bool {
 fn release_attempt(engine: &mut Engine, ticket: Ticket) -> () {
     handle storage::remove(&mut engine.attempts, ticket.handle) {
         Result::Err(_) => (),
-        Result::Ok(attempt) => handle storage::get_mut(&mut engine.sessions, attempt.request.handle) {
+        Result::Ok(attempt) => {
+            handle Option::take(&mut attempt.memory) {
+                Result::Err(_) => (), Result::Ok(memory) => { release_retained_memory(&mut *engine, &mut memory); () },
+            };
+            handle storage::get_mut(&mut engine.sessions, attempt.request.handle) {
             Result::Err(_) => (),
             Result::Ok(request) => {
                 (*request).attempts = request.attempts - 1;
                 (*engine).stats.attempts = engine.stats.attempts - 1;
             },
+            }
         },
     }
 }

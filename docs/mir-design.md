@@ -143,13 +143,59 @@ after the complete pattern gate. Rejected clauses may observe and forward an
 unclaimed packet but cannot consume it; acceptance removes the packet's
 forwarding owner exactly once. Native projected initialization now follows
 logical paths shared by checked aliases, including distinct zero-sized fields.
+The bytecode verifier tracks a bounded over-approximation of each untouched
+payload packet through pattern branches and forwarding. Joins union possible
+payloads; unknown or oversized domains remain conservative. This proves closed
+coverage from actual dispatch paths, not a lexical prefix that a fresh effect
+raised inside a clause might bypass. Terminal effects from ordinary calls enter
+analysis at the active first-match handler, after installation is complete.
 The focused source drop-count and independent bytecode regressions pass.
+Core completion and operation-pattern coverage now retain finite constructors
+around open payload leaves. An integer, generic parameter, or other open leaf
+is an unknown set, not a concrete representative: a partial pattern may match
+it but cannot prove it covered. The bounded matrix preserves payload
+correlations and rejects rows collectively covered by earlier constructors,
+including redundant Boolean catch-alls. Type-depth, row, structural-size, and
+shared generation-fuel limits keep the proof conservative on large domains.
+The source-copy provider now uses the directly nested `Result<Event, Failure>`
+patterns that exposed this authoring blocker.
+
+Calls returning `!` still require their declared effects and generic evidence.
+Only a callee/argument that does not finish evaluating makes the invocation
+itself unreachable; a nonreturning result does not waive call-time authority.
+The new positive, missing-case, correlation, unreachable-row, nonreturning-call,
+and decoded-bytecode execution regressions pass. A broader authoring run passes
+210 unit, 256 Core, 109 destruction, 81 signature, 168 standard-library, and
+166 VM tests; the same eight Core, two destruction, and three VM failures remain
+(`target/nested-coverage-authoring-full.log`). This is not a workspace-wide pass.
+First-class label capabilities are minted at their lexical delimiter, before
+nested handlers are installed. Cleanup owns a separately validated reverse
+owner inventory for each label exit, protecting the transferred result.
+Runtime lowering routes the capability through a concrete cleanup landing
+block in the surviving destination frame before normal completion executes.
+Direct and first-class exits of the same label share this destination; deeper
+ordinary frames and suspended handlers retain their existing unwind plans.
+Clause abandonment likewise carries an independently checked lexical cleanup
+inventory. It runs after cancellation unwinds deeper suspended frames and
+before the surviving frame rejoins the handler result, with that result
+protected from destruction. Already-moved or already-destroyed residents are
+skipped by the concrete initialization guards.
 Saved-frame and replay ownership remain under audit. Returning resumptions
 now retire their outgoing value before saving the clause, and Runtime MIR
 checks consumed carriers in dynamic handler and lexical-label entries as well
-as ordinary CFG entries. Focused drop-count regressions now pass for independent
+as ordinary CFG entries. First-class returning calls use the ordinary indirect
+call ABI and select the exact captured handler activation. Deep reinstallation
+retains call-site effect handlers outside that delimiter; completion recognizes
+the captured activation, then restores the original clause-side handler order.
+Independent encoded-bytecode tests exercise both VM engines, owned and legacy
+handlers, caller-provided effects, delimiter completion, and consumed arguments.
+Focused drop-count regressions now pass for independent
 replay residents, suspended ordinary callees, and outer bindings consumed by
-the protected computation. Cleanup checks Copy permission across suspended
+the protected computation. Outer-owner consumption is classified from the
+resumed suffix of a matching perform or effectful call, not from unrelated
+handler branches or consumption completed before suspension. Protected
+lexical owners still require their ordinary replay-copy permission.
+Cleanup checks Copy permission across suspended
 call inventories and provides explicit owned roots to Runtime and VM handler
 installation (schema 108); lexical allocation time does not decide capture
 ownership. Nested handler snapshots, closure environments, and independent
@@ -256,6 +302,100 @@ sequence is to finish the end-to-end pipeline first, then close explicit gaps
 using whole-pipeline failures and independent mutation tests. Remaining
 Ownership proof gaps and refinement-pack work remain tracked; the completed
 phase sequence is not a claim that those semantics have already been repaired.
+
+The subsequent delimiter-cleanup rerun passes 201 unit tests, all 166
+standard-library tests, and all 24 library-boundary tests. Core integration
+is 228/243 after replacing block-number expectations with actual ordered
+pattern and handler edges; destruction is 98/105 with the same six refinement
+failures and nested label-capture failure. Refinement carriers, replay-owner
+classification, and remaining legacy boundary fixtures are still unfinished;
+these focused gates do not establish self-hosting or a green workspace.
+
+Refinement groundwork now gives each pattern binder an environment-branded
+key, retained in Core fingerprints and PlaceFlow facts. Frozen Core rejects
+noncanonical keys, reused producer brands, stale subject names, and binder
+types that cannot be independently derived from the actual subject pattern,
+including standalone tests with no completion consumer. `Bindings<'a, P>` now
+has a sealed nominal ABI: positive and negative environment identities differ,
+brands occupy no resident fields, and layout and Use intervals are derived from
+the carried field types. Specialization, Cleanup, Runtime, and decoded VM
+descriptors reject inconsistent pack layouts. Generic signatures can transport
+the intrinsic type, but source definitions cannot replace its identity or
+implement its evidence. Encoded VM tests construct and pass a pack through an
+ordinary consuming call. Surface `is` now constructs an ordinary lexical
+`Test<Y, N>` enum (provided by the standard library), carrying sealed positive
+or negative binding packs. Its Core completion evaluates the subject once;
+noncopy binders borrow the subject. Frozen Core independently checks the
+producer's pattern, pack fields, branch ownership, and generative identities,
+and rejects forged or reused carriers. These values use ordinary enum and
+record lowering, with no new VM operation. Source-to-VM tests cover both
+outcomes, generic transport of copied and borrowed packs, single subject
+evaluation, and continued access to an observed noncopy owner. PlaceFlow
+records observational producer loans and retains projected loans while their
+aggregate owner remains live. Escape analysis distinguishes absent enum-variant
+residents from unknown provenance, retaining every present loan across joins.
+Source tests reject packs escaping local owners and moves or writes conflicting
+with borrowed projections transported through generic calls. Evaluation lowers
+observations of existing aggregate and unique-reference places through ordinary shared borrows,
+instead of consuming reads. Runtime and VM pattern checks inspect those borrowed
+subjects; an affine owner can be moved after its pack's last use. A live shared
+view of a unique-reference carrier prevents mutation through the original
+handle without forbidding shared reads. Tests cover both that suspension and
+restored unique access after consuming the pack, including explicit referent
+patterns.
+
+The borrowed-pack gate passes all 167 standard-library tests, 210 unit tests,
+and 109/111 destruction tests. Contextual binding activation now adds an
+ordinary hidden parameter when a callable expectation supplies a known sealed
+pack (or a shared borrow of it). Its fields become scoped local projections;
+the names are not captured from the producer's outer scope. Explicit user
+parameters follow the hidden parameter in the normal callable ABI. Ordinary
+source-defined generic `Fn` consumers pass source-to-VM tests for copied and
+borrowed binders, generic transport, shared-pack arguments, multiple binders,
+and explicit user arguments. Negative contexts, foreign producer contexts,
+out-of-context references, and conflicting incoming names do not gain positive
+bindings. Higher-ranked shared-pack callbacks preserve their public lifetime
+binders while opening body-local parameter, result, and effect metadata.
+Both trailing blocks and explicit closures pass source-to-VM tests; frozen Core
+rejects reintroducing a bound lifetime into the hidden body parameter.
+Activation also preserves observational access: borrowing uniquely through, or
+assigning through, an activated shared view is rejected. The latest Core rerun
+is 248/256 tests, with all 210 unit and 81 signature tests passing. Frozen Core
+checks binding-pack projection types, indices, arities, and dereference types
+against canonical pack layouts, including unused arena expressions. Scoped
+checks tie pack locals to their declarations and hidden body parameters to
+their callable contracts, opening higher-ranked lifetimes before comparison.
+Mutation tests reject coordinated field/local/parameter relabeling, invented
+unique access, and cyclic access paths before Evaluation MIR. Repeated lexical
+contexts are memoized without merging different scopes.
+
+Contextual callable checking resolves known argument types independently when
+the callback's output is still an inference variable. A generic `Fn<(Y),
+Output = B>` consumer can therefore activate a known binding pack and infer
+`B` from the body. Source-to-VM tests cover scalar and tuple outputs, a failed
+test taking the non-callback path, and a returned closure retaining an ordinary
+copied binding after the callback has finished. This does not establish that
+an observational borrow may escape its owner.
+
+The remaining legacy refinement-consumer fixtures still use the former Boolean
+representation. Temporary-owner guards, composed contexts and refinement-fact
+evidence remain unfinished. These milestones do not establish complete refinement semantics,
+a green workspace, or self-hosting.
+
+The standard-library copy fixture now uses distinct source and destination
+buffers. Its former self-aliasing call is retained as a negative `G5006` test:
+`Vec::extend_from_slice` may reallocate its destination, so a live slice borrowed
+from that destination cannot accompany the mutable borrow.
+
+The migrated destruction fixtures now consume ordinary `Test` values or invoke
+source-defined generic `Fn` consumers. They verify that refinement packs leave
+their original owners intact and do not duplicate custom destruction. Move
+captures now use the normal projected-move check, and copy captures reject live
+unique field loans. A callback that captures an owner conflicting with an
+earlier binding-pack argument is rejected at capture construction; a unique
+capture reports `G5006` there, before its body could reach an assignment.
+The copy-capture regression also permits the capture after the field loan's
+last use.
 
 ## 2. Identity and storage model
 

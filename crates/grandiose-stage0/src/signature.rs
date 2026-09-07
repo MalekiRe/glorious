@@ -1335,6 +1335,11 @@ impl ElaboratedInterface {
     }
 
     fn structural_principal_use(&self, ty: &Type, active: &mut Vec<Type>, solver: Option<&crate::TraitSolver>) -> Option<Quantity> {
+        if let Some(fields) = crate::refinement::binding_pack_fields(ty) {
+            return fields.iter().try_fold(Quantity::UNRESTRICTED, |quantity, field| {
+                quantity.intersection(self.principal_use(field, active, solver)?).ok()
+            });
+        }
         match ty {
             Type::Unit | Type::Never | Type::Scalar(_) => Some(Quantity::UNRESTRICTED),
             Type::Tuple(values) => {
@@ -1885,6 +1890,9 @@ impl ElaboratedInterface {
         let mut diagnostics = Vec::new();
 
         for (definition, header) in &definitions {
+            if *definition == crate::refinement::bindings_definition() {
+                diagnostics.push(SignatureDiagnostic { code: "G4173", message: "frozen interfaces cannot define the intrinsic `Bindings` identity".into() });
+            }
             if *definition == intrinsic_callable_trait_definition() {
                 diagnostics.push(SignatureDiagnostic {
                     code: "G4169",
@@ -2009,6 +2017,9 @@ impl ElaboratedInterface {
                     }
                 }
                 ElaboratedHeader::Implementation(implementation) => {
+                    if matches!(&implementation.self_ty, Type::Nominal { definition, .. } if *definition == crate::refinement::bindings_definition()) {
+                        diagnostics.push(SignatureDiagnostic { code: "G4173", message: "binding-pack evidence is compiler-owned and cannot have a source implementation".into() });
+                    }
                     if is_intrinsic_callable_trait(&implementation.relation) {
                         diagnostics.push(SignatureDiagnostic {
                             code: "G4169",
@@ -2650,6 +2661,13 @@ impl ElaboratedInterface {
         definition: DefKey,
         arguments: &[GenericArgument],
     ) -> Result<Vec<NominalField>, InstantiationError> {
+        if definition == crate::refinement::bindings_definition() {
+            let ty = Type::Nominal { definition, arguments: arguments.to_vec() };
+            let fields = crate::refinement::binding_pack_fields(&ty).ok_or(InstantiationError::WrongLayout)?;
+            return Ok(fields.iter().enumerate().map(|(index, ty)| NominalField {
+                name: format!("$binding{index}"), ty: ty.clone(), private_authority: Some(crate::FileKey(definition.0)),
+            }).collect());
+        }
         let kinds = self.nominal_kinds(definition)?;
         validate_runtime_nominal_arguments(kinds, arguments)?;
         let Some(ElaboratedHeader::Nominal {
@@ -5843,6 +5861,13 @@ impl Elaborator<'_> {
             return Type::Error;
         };
         if path.len() == 1 {
+            if name == "Bindings" {
+                let arguments = self.elaborate_unresolved_generic_arguments(&arguments);
+                if !matches!(arguments.as_slice(), [GenericArgument::Lifetime(_), GenericArgument::Type(_)]) {
+                    self.error("G4173", "intrinsic `Bindings` requires a lifetime and environment type argument".into());
+                }
+                return Type::Nominal { definition: crate::refinement::bindings_definition(), arguments };
+            }
             if name == "Available" {
                 let arguments = self.elaborate_unresolved_generic_arguments(&arguments);
                 if !matches!(

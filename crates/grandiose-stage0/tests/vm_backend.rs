@@ -146,6 +146,50 @@ fn owned_effect_packets_round_trip_forward_and_resume_without_outgoing_ghosts() 
 }
 
 #[test]
+fn owned_packet_pattern_facts_survive_forwarding_but_not_forged_branching() {
+    for value in [true, false] {
+        let mut candidate = owned_effect_candidate(true);
+        candidate.function.registers = vec![VmType::Bool, VmType::Bool, VmType::Bool,
+            VmType::I64, VmType::Bool, VmType::Bool, VmType::I64, VmType::Bool];
+        candidate.function.instructions[0] = VmInstruction::ConstBool { dst: 0, value };
+        if let VmInstruction::InstallHandlerOwned { target, .. } = &mut candidate.function.instructions[1] { *target = 16; }
+        candidate.function.instructions.truncate(10);
+        candidate.function.instructions.extend([
+            VmInstruction::PatternTest { dst: 5, subject: 2, pattern: VmPattern::Literal("true".into()) },
+            VmInstruction::BranchBool { condition: 5, then_target: 12, else_target: 15 },
+            VmInstruction::ClaimEffectPayloads { payloads: vec![2] },
+            VmInstruction::ConstI64 { dst: 6, value: 1 },
+            VmInstruction::Resume { value: 6 },
+            VmInstruction::Forward,
+            VmInstruction::PatternTest { dst: 7, subject: 1, pattern: VmPattern::Literal("false".into()) },
+            VmInstruction::BranchBool { condition: 7, then_target: 18, else_target: 21 },
+            VmInstruction::ClaimEffectPayloads { payloads: vec![1] },
+            VmInstruction::ConstI64 { dst: 6, value: 2 },
+            VmInstruction::Resume { value: 6 },
+            VmInstruction::Forward,
+        ]);
+        candidate.fingerprint = candidate.computed_fingerprint();
+        let expected = if value { 1 } else { 2 };
+        assert_eq!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64().unwrap(), expected);
+        let mut program = CandidateVmProgram { schema: candidate.schema, runtime_manifest: None,
+            entry: candidate.function.definition, functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
+            host_capabilities: vec![], callable_environments: BTreeMap::new(), fingerprint: candidate.fingerprint };
+        program.fingerprint = program.computed_fingerprint();
+        assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), expected);
+        for reversed in [false, true] {
+            let mut forged = candidate.clone();
+            if reversed {
+                forged.function.instructions[11] = VmInstruction::BranchBool { condition: 5, then_target: 15, else_target: 12 };
+            } else {
+                forged.function.instructions[16] = VmInstruction::PatternTest { dst: 7, subject: 1, pattern: VmPattern::Literal("true".into()) };
+            }
+            forged.fingerprint = forged.computed_fingerprint();
+            assert!(matches!(decode_and_verify_artifact(&encode_artifact(&forged)), Err(VmArtifactError::UnhandledEffect { .. })));
+        }
+    }
+}
+
+#[test]
 fn owned_effect_packets_cross_ordinary_calls_without_reviving_either_outgoing_carrier() {
     let candidate = owned_effect_candidate(false);
     let mut entry = candidate.function;
@@ -251,6 +295,87 @@ fn runtime_owned_calls_round_trip_and_empty_outgoing_slots() {
         forged.fingerprint = forged.computed_fingerprint();
         assert!(matches!(decode_and_verify_program(&encode_program(&forged)),
             Err(VmArtifactError::UseAfterMove { register: 0 })));
+    }
+}
+
+#[test]
+fn captured_resumption_calls_restore_intervening_handlers_and_retire_arguments() {
+    let mut candidate = owned_effect_candidate(false);
+    let VmInstruction::PerformOwned { effect, .. } = candidate.function.instructions[2] else { panic!() };
+    let inner = DefKey(Digest::of_bytes(b"intervening-handler"));
+    candidate.function.registers = vec![VmType::I64, VmType::I64, VmType::I64, VmType::Bool,
+        VmType::Callable { safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
+            result: Box::new(VmType::I64), effects: Box::default() }, VmType::I64];
+    candidate.function.instructions = vec![
+        VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
+            payload_destinations: vec![], resume_type: VmType::I64,
+            continuation: VmContinuationPolicy::Consume, target: 5, replay_owned: vec![] },
+        VmInstruction::PerformOwned { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
+        VmInstruction::CompleteHandler { value: 0 },
+        VmInstruction::UninstallHandler,
+        VmInstruction::Return { value: 0 },
+        VmInstruction::ClaimEffectPayloads { payloads: vec![] },
+        VmInstruction::CaptureResumption { dst: 4 },
+        VmInstruction::InstallHandlerOwned { effect: inner, effect_arguments: vec![], operation: 0,
+            payload_destinations: vec![], resume_type: VmType::I64,
+            continuation: VmContinuationPolicy::Consume, target: 17, replay_owned: vec![] },
+        VmInstruction::ConstI64 { dst: 1, value: 42 },
+        VmInstruction::CallIndirectOwned { dst: 2, callee: 4, arguments: vec![1] },
+        VmInstruction::IsInitialized { dst: 3, base: 1, fields: vec![] },
+        VmInstruction::BranchBool { condition: 3, then_target: 12, else_target: 13 },
+        VmInstruction::Trap,
+        VmInstruction::UninstallHandler,
+        VmInstruction::CompleteHandler { value: 2 },
+        VmInstruction::UninstallHandler,
+        VmInstruction::Return { value: 2 },
+        VmInstruction::ClaimEffectPayloads { payloads: vec![] },
+        VmInstruction::ConstI64 { dst: 5, value: 99 },
+        VmInstruction::Resume { value: 5 },
+    ];
+    for (owned_handler, caller_effect) in [(true, false), (false, false), (true, true), (false, true)] {
+        let mut candidate = candidate.clone();
+        // Completing the captured delimiter must return to the indirect call,
+        // not fall through into the surrounding computation.
+        candidate.function.instructions[3] = VmInstruction::Trap;
+        if !owned_handler {
+            candidate.function.instructions[0] = VmInstruction::InstallHandler { effect, effect_arguments: vec![], operation: 0,
+                payload_destinations: vec![], resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume, target: 5 };
+            candidate.function.instructions[1] = VmInstruction::Perform { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] };
+            candidate.function.instructions[5] = VmInstruction::ConstI64 { dst: 5, value: 0 };
+        }
+        if caller_effect {
+            // The resumed computation must see the handler installed by its
+            // caller, even though that handler is newer than the captured one.
+            for instruction in &mut candidate.function.instructions {
+                match instruction {
+                    VmInstruction::InstallHandler { target, .. }
+                    | VmInstruction::InstallHandlerOwned { target, .. } => *target += 1,
+                    VmInstruction::BranchBool { then_target, else_target, .. } => {
+                        *then_target += 1;
+                        *else_target += 1;
+                    }
+                    _ => {}
+                }
+            }
+            candidate.function.instructions.insert(2, VmInstruction::PerformOwned {
+                dst: 5, effect: inner, effect_arguments: vec![], operation: 0, arguments: vec![],
+            });
+            candidate.function.instructions[3] = VmInstruction::CompleteHandler { value: 5 };
+            candidate.function.instructions[5] = VmInstruction::Return { value: 5 };
+        }
+        let expected = if caller_effect { 99 } else { 42 };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        assert_eq!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64().unwrap(), expected);
+        let mut program = CandidateVmProgram { schema: candidate.schema, runtime_manifest: None,
+            entry: candidate.function.definition,
+            functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
+            host_capabilities: vec![], callable_environments: BTreeMap::new(), fingerprint: candidate.fingerprint };
+        program.fingerprint = program.computed_fingerprint();
+        assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), expected);
+        candidate.function.instructions[10 + usize::from(caller_effect)] = VmInstruction::Copy { dst: 0, src: 1 };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        assert!(matches!(decode_and_verify_artifact(&encode_artifact(&candidate)), Err(VmArtifactError::UseAfterMove { register: 1 })));
     }
 }
 

@@ -91,6 +91,9 @@ enum Value {
         root: String,
     },
     Aggregate(Vec<Value>),
+    /// A known constructor may lack a resident path present in another
+    /// variant. That absence is not unknown reference provenance.
+    Variant(Vec<Value>),
     Closure {
         environment: EnvironmentBrand,
         captures: Vec<Capture>,
@@ -162,9 +165,10 @@ impl Analyzer<'_> {
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
                 Value::Aggregate(self.strict_values(values))
             }
-            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+            CoreKind::Record { fields, .. } => {
                 Value::Aggregate(self.strict_values(fields))
             }
+            CoreKind::Enum { fields, .. } => Value::Variant(self.strict_values(fields)),
             CoreKind::Field { base, index, .. } => match self.value(base) {
                 // Opaque parameter layouts may carry a static/caller-owned
                 // reference at any declaration-approved field path. Keep
@@ -172,14 +176,14 @@ impl Analyzer<'_> {
                 // projection; the concrete path is independently frozen on
                 // the call boundary.
                 Value::ExternalBorrowed => Value::ExternalBorrowed,
-                Value::Aggregate(fields) => {
+                Value::Aggregate(fields) | Value::Variant(fields) => {
                     fields.get(index as usize).cloned().unwrap_or(Value::None)
                 }
                 Value::Joined(values) => Value::Joined(
                     values
                         .into_iter()
                         .map(|value| match value {
-                            Value::Aggregate(fields) => {
+                            Value::Aggregate(fields) | Value::Variant(fields) => {
                                 fields.get(index as usize).cloned().unwrap_or(Value::None)
                             }
                             _ => Value::None,
@@ -377,8 +381,10 @@ impl Analyzer<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                refinement_test,
                 ..
             } => {
+                let subject = computation;
                 let computation = self.value(computation);
                 let incoming = self.values.clone();
                 // Core admits a Completion only after its pattern matrix has
@@ -388,9 +394,20 @@ impl Analyzer<'_> {
                 // temporary `Option<&T>` look like the enclosing function's
                 // return value even when every arm consumed the reference.
                 let mut exits = Vec::with_capacity(clauses.len());
-                for clause in clauses {
+                for (index, clause) in clauses.into_iter().enumerate() {
                     self.values = incoming.clone();
                     self.bind_pattern_value(&clause.pattern, computation.clone());
+                    if index == 0 && refinement_test.is_some() {
+                        let mut types = vec![];
+                        let _ = crate::core::collect_pattern_binding_types(&clause.pattern,
+                            &self.body.expression(subject).ty, &mut types);
+                        for (name, ty) in types {
+                            if crate::core::refinement_binding_type(ty.clone()) != ty {
+                                let borrowed = self.borrowed_value(subject);
+                                self.values.insert(name, borrowed);
+                            }
+                        }
+                    }
                     // A boolean completion pattern alone cannot carry a
                     // reference, but a positive refinement can.  Its subject
                     // and projection plan are frozen Core facts, so bind it
@@ -816,7 +833,7 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         if matches!(current, Value::ExternalBorrowed) {
             *current = Value::Aggregate(vec![Value::ExternalBorrowed; *field_count as usize]);
         }
-        let Value::Aggregate(fields) = current else {
+        let (Value::Aggregate(fields) | Value::Variant(fields)) = current else {
             return false;
         };
         if fields.len() != *field_count as usize {
@@ -833,8 +850,12 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
 }
 
 fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
+    value_at_variant_path(value, path, false)
+}
+
+fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Option<Value> {
     if let Value::Joined(values) = value {
-        return values.iter().map(|value| value_at_path(value, path))
+        return values.iter().map(|value| value_at_variant_path(value, path, known_variant))
             .collect::<Option<Vec<_>>>().map(join);
     }
     // `ExternalBorrowed` is the sealed marker for a call whose *every*
@@ -847,14 +868,16 @@ fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
     if matches!(value, Value::ExternalBorrowed) {
         return Some(Value::ExternalBorrowed);
     }
-    let mut value = value;
-    for field in path {
-        let Value::Aggregate(fields) = value else {
-            return None;
-        };
-        value = fields.get(*field as usize)?;
-    }
-    Some(value.clone())
+    let Some((field, tail)) = path.split_first() else { return Some(value.clone()); };
+    let (fields, known_variant) = match value {
+        Value::Aggregate(fields) => (fields, known_variant),
+        Value::Variant(fields) => (fields, true),
+        _ => return None,
+    };
+    let Some(next) = fields.get(*field as usize) else {
+        return known_variant.then_some(Value::None);
+    };
+    value_at_variant_path(next, tail, known_variant)
 }
 
 fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
@@ -899,7 +922,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
         Value::Borrowed { root } => {
             roots.insert(root.clone());
         }
-        Value::Aggregate(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
             for value in values {
                 collect_borrowed_roots(value, roots);
             }
@@ -1006,7 +1029,7 @@ fn effect_row_contains_open_type_parameter(row: &EffectRow) -> bool {
 fn value_contains_external_reference(value: &Value) -> bool {
     match value {
         Value::ExternalBorrowed => true,
-        Value::Aggregate(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
             values.iter().any(value_contains_external_reference)
         }
         Value::None | Value::Borrowed { .. } | Value::Closure { .. } => false,
@@ -1026,11 +1049,29 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
         Value::Closure {
             captures: values, ..
         } => captures.extend(values.clone()),
-        Value::Aggregate(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
             for value in values {
                 collect_closure_captures(value, captures);
             }
         }
         Value::None | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn variant_provenance_keeps_present_loans_and_only_omits_absent_residents() {
+        let loan = Value::Borrowed { root: "owner".into() };
+        let yes = Value::Variant(vec![Value::Aggregate(vec![loan.clone()])]);
+        let no = Value::Variant(vec![Value::Aggregate(vec![])]);
+        let selected = value_at_path(&join(vec![yes, no]), &[0, 0]).unwrap();
+        assert_eq!(borrowed_roots(&selected), BTreeSet::from(["owner".into()]));
+        assert_eq!(value_at_path(&Value::Aggregate(vec![]), &[0]), None);
+        assert_eq!(value_at_path(&Value::Variant(vec![Value::None]), &[0, 0]), None);
+        let unknown = join(vec![Value::Aggregate(vec![loan]), Value::None]);
+        assert_eq!(value_at_path(&unknown, &[0]), None);
     }
 }

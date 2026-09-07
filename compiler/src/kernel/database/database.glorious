@@ -43,7 +43,7 @@ pub struct Family<K> { private core: engine::Family, private keys: HashMap<K, Ha
 pub struct Key<K> { private core: engine::Key }
 pub struct KeyStats { live: usize, slots: usize }
 pub enum KeySweepStep { Continue { next: usize }, Done }
-struct Product<V> { value: V, owners: usize }
+struct Product<V> { value: V, owners: usize, memory: Option<engine::RetainedMemory> }
 impl<V> Use<[0, 1]> for Product<V> where V: Use<[0, 1]> {}
 pub struct Stats { revisions: revision::Stats, queries: engine::Stats, products: usize }
 pub struct Collected { revisions: usize, memos: usize, edges: usize, products: usize, explanations: usize }
@@ -54,7 +54,7 @@ enum Collection {
     Releasing { product: Handle, revision: RevisionId, next_revision: usize, cursor: usize, collected: Collected },
 }
 pub enum CollectionStep { Continue, Done(Collected) }
-pub struct Released<V> { private product: Handle, private value: Option<V> }
+pub struct Released<V> { private product: Handle, private value: Option<V>, private memory: Option<engine::RetainedMemory>, private active: Bool }
 pub impl<V> Use<[0, 1]> for Released<V> where V: Use<[0, 1]> {}
 pub enum ProductCollectionStep<V> { Continue, Release(Released<V>), Done(Collected) }
 pub impl<V> Use<[0, 1]> for ProductCollectionStep<V> where V: Use<[0, 1]> {}
@@ -100,6 +100,73 @@ pub fn request_controls<'a, W, V>(database: &'a mut Database<W, V>, session: Ses
             Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(controls) => Result::Ok(controls),
         },
     }
+}
+pub fn release_memory<W, V>(database: &mut Database<W, V>, session: Session, amount: u64) -> Result<(), Failure> {
+    handle available(& *database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::release_memory(&mut database.engine, session.core, amount) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+pub fn request_controls_shared<'a, W, V>(database: &'a Database<W, V>, session: Session) -> Result<&'a operation::Controls, Failure> {
+    handle available(database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::request_controls_shared(&database.engine, session.core) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(controls) => Result::Ok(controls),
+        },
+    }
+}
+pub fn memory_spent<W, V>(database: &Database<W, V>, session: Session) -> Result<u64, Failure> {
+    handle available(database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::memory_spent(&database.engine, session.core) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(spent) => Result::Ok(spent),
+        },
+    }
+}
+pub fn reserve_product_memory<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, amount: u64) -> Result<(), Failure> {
+    handle available(& *database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::reserve_product_memory(&mut database.engine, ticket, amount) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+pub fn memory_stats<W, V>(database: &Database<W, V>) -> Result<engine::MemoryStats, Failure> {
+    handle available(database) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(engine::memory_stats(&database.engine)),
+    }
+}
+pub fn shrink_product_memory<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, amount: u64) -> Result<(), Failure> {
+    handle available(& *database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::shrink_product_memory(&mut database.engine, ticket, amount) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+pub fn discard_product_memory<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket) -> Result<(), Failure> {
+    handle available(& *database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::discard_product_memory(&mut database.engine, ticket) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
+fn release_product_memory(core: &mut engine::Engine, memory: &mut Option<engine::RetainedMemory>) -> Result<(), Failure> {
+    handle Result::as_mut(memory) {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(memory) => handle engine::release_retained_memory(core, memory) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+fn dispose_value<V>(value: V) -> () where V: Use<[0, 1]> { () }
+fn dispose_product<V>(core: &mut engine::Engine, product: Product<V>) -> Result<(), Failure> where V: Use<[0, 1]> {
+    dispose_value(product.value);
+    release_product_memory(core, &mut product.memory)
 }
 pub fn key_identity<K>(key: Key<K>) -> query::ReadIdentity { engine::key_identity(key.core) }
 pub fn key_value<'a, K>(family: &'a Family<K>, identity: query::ReadIdentity) -> Result<&'a K, Failure> {
@@ -490,21 +557,49 @@ pub fn observe<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, read
 
 pub fn abort<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket) -> () { engine::abort(&mut database.engine, ticket); }
 
+// Provider-owned staged values must be destroyed before abort refunds them.
+pub fn observe_staged<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, read: query::Read) -> Result<(), Failure> {
+    handle available(& *database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::observe_staged(&mut database.engine, ticket, read) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
 pub fn publish<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, value: V, fingerprint: Digest,
     completeness: query::Completeness) -> Result<(), Failure> where V: Use<[0, 1]> {
     handle available(& *database) {
         Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => handle storage::insert(&mut database.products, Product { value: value, owners: 1 }) {
+        Result::Ok(_) => handle publish_staged(&mut *database, ticket, value, fingerprint, completeness) {
+            Result::Err(error) => { engine::abort(&mut database.engine, ticket); Result::Err(error) },
+            Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
+// Trusted typed-store owners may stage a handle here. On failure they must
+// destroy the concrete value before aborting the attempt and refunding memory.
+pub fn publish_staged<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, value: V, fingerprint: Digest,
+    completeness: query::Completeness) -> Result<(), Failure> where V: Use<[0, 1]> {
+    handle available(& *database) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle storage::insert(&mut database.products, Product { value: value, owners: 1, memory: None }) {
             Result::Err(_) => {
-                engine::abort(&mut database.engine, ticket);
                 Result::Err(Failure::Engine(engine::Failure::Capacity))
             },
-            Result::Ok(product) => handle engine::publish(&mut database.engine, ticket, product, fingerprint, completeness) {
+            Result::Ok(product) => handle engine::publish_staged(&mut database.engine, ticket, product, fingerprint, completeness) {
                 Result::Err(error) => {
                     storage::remove(&mut database.products, product);
                     Result::Err(Failure::Engine(error))
                 },
-                Result::Ok(_) => Result::Ok(()),
+                Result::Ok(_) => handle engine::take_product_memory(&mut database.engine, ticket) {
+                    Result::Err(error) => Result::Err(Failure::Engine(error)),
+                    Result::Ok(memory) => handle storage::get_mut(&mut database.products, product) {
+                        Result::Err(_) => Result::Err(Failure::Invariant),
+                        Result::Ok(value) => { (*value).memory = memory; Result::Ok(()) },
+                    },
+                },
             },
         },
     }
@@ -530,11 +625,11 @@ fn remaining<V>(products: &mut Arena<Product<V>>, key: Handle) -> Result<usize, 
     }
 }
 
-fn release<V>(products: &mut Arena<Product<V>>, key: Handle) -> Result<Option<V>, Failure> where V: Use<[0, 1]> {
+fn release<V>(products: &mut Arena<Product<V>>, key: Handle) -> Result<Option<Product<V>>, Failure> where V: Use<[0, 1]> {
     handle remaining(&mut *products, key) {
         Result::Err(error) => Result::Err(error),
         Result::Ok(0) => handle storage::remove(&mut *products, key) {
-            Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(product) => Result::Ok(Result::Ok(product.value)),
+            Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(product) => Result::Ok(Result::Ok(product)),
         },
         Result::Ok(_) => Result::Ok(None),
     }
@@ -546,7 +641,10 @@ fn reuse<W, V>(database: &mut Database<W, V>, ticket: engine::Ticket, product: H
         Result::Err(error) => { engine::abort(&mut database.engine, ticket); Result::Err(error) },
         Result::Ok(_) => handle engine::publish_reused(&mut database.engine, ticket, product) {
             Result::Err(error) => {
-                release(&mut database.products, product);
+                handle release(&mut database.products, product) {
+                    Result::Ok(Result::Ok(value)) => { dispose_product(&mut database.engine, value); () },
+                    _ => (),
+                };
                 Result::Err(Failure::Engine(error))
             },
             Result::Ok(_) => Result::Ok(engine::Event::Continue),
@@ -627,11 +725,26 @@ pub fn released_value<'a, V>(released: &'a Released<V>) -> Result<&'a V, Failure
         Result::Err(_) => Result::Err(Failure::Engine(engine::Failure::Closed)), Result::Ok(value) => Result::Ok(value),
     }
 }
+pub fn released_memory_info<W, V>(database: &Database<W, V>, released: &Released<V>) -> Result<engine::MemoryInfo, Failure> {
+    handle database.collection {
+        Collection::Releasing { product: product, revision: _, next_revision: _, cursor: _, collected: _ } =>
+            handle storage::equal(product, released.product) {
+                false => Result::Err(Failure::Engine(engine::Failure::Foreign)),
+                true => handle Result::as_ref(&released.memory) {
+                    Result::Err(_) => Result::Err(Failure::Engine(engine::Failure::Closed)),
+                    Result::Ok(memory) => handle engine::retained_memory_info(&database.engine, memory) {
+                        Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(info) => Result::Ok(info),
+                    },
+                },
+            },
+        _ => Result::Err(Failure::Engine(engine::Failure::Closed)),
+    }
+}
 pub fn finish_release<W, V>(database: &mut Database<W, V>, released: &mut Released<V>) -> Result<(), Failure>
     where V: Use<[0, 1]> {
-    handle released_value(& *released) {
-        Result::Err(error) => Result::Err(error),
-        Result::Ok(_) => finish_live_release(database, released),
+    handle released.active {
+        false => Result::Err(Failure::Engine(engine::Failure::Closed)),
+        true => finish_live_release(database, released),
     }
 }
 fn finish_live_release<W, V>(database: &mut Database<W, V>, released: &mut Released<V>) -> Result<(), Failure>
@@ -642,8 +755,14 @@ fn finish_live_release<W, V>(database: &mut Database<W, V>, released: &mut Relea
                 false => Result::Err(Failure::Engine(engine::Failure::Foreign)),
                 true => {
                     (*released).value = None;
-                    (*database).collection = Collection::Memos { revision: revision, next_revision: next, cursor: cursor, collected: collected };
-                    Result::Ok(())
+                    handle release_product_memory(&mut database.engine, &mut released.memory) {
+                        Result::Err(error) => Result::Err(error),
+                        Result::Ok(_) => {
+                            (*released).active = false;
+                            (*database).collection = Collection::Memos { revision: revision, next_revision: next, cursor: cursor, collected: collected };
+                            Result::Ok(())
+                        },
+                    }
                 },
             },
         _ => Result::Err(Failure::Engine(engine::Failure::Closed)),
@@ -705,7 +824,7 @@ fn collect_product<W, V>(database: &mut Database<W, V>, revision: RevisionId, ne
     }
 }
 fn collect_released<W, V>(database: &mut Database<W, V>, revision: RevisionId, next: usize, cursor: usize,
-    collected: Collected, product: Handle, edges: usize, released: Option<V>) -> Result<ProductCollectionStep<V>, Failure>
+    collected: Collected, product: Handle, edges: usize, released: Option<Product<V>>) -> Result<ProductCollectionStep<V>, Failure>
     where V: Use<[0, 1]> {
     let counted = Collected { revisions: collected.revisions, memos: collected.memos + 1,
         edges: collected.edges + edges, products: collected.products, explanations: collected.explanations + 1 };
@@ -718,7 +837,7 @@ fn collect_released<W, V>(database: &mut Database<W, V>, revision: RevisionId, n
             (*database).collection = Collection::Releasing { product: product, revision: revision, next_revision: next, cursor: cursor,
                 collected: Collected { revisions: counted.revisions, memos: counted.memos, edges: counted.edges,
                     products: counted.products + 1, explanations: counted.explanations } };
-            Result::Ok(ProductCollectionStep::Release(Released { product: product, value: Result::Ok(value) }))
+            Result::Ok(ProductCollectionStep::Release(Released { product: product, value: Result::Ok(value.value), memory: value.memory, active: true }))
         },
     }
 }

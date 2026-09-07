@@ -131,6 +131,27 @@ impl CleanupMir {
             Ok(())
         };
         check_plan(self.frame_cleanup)?;
+        if self.label_cleanup.len() != self.labels.len() {
+            return Err(invalid("label cleanup inventory is incomplete"));
+        }
+        if self.clause_cleanup.keys().any(|block| block.0 as usize >= self.blocks.len()) {
+            return Err(invalid("clause cleanup references an absent block"));
+        }
+        for (label, plan) in self.labels.iter().zip(&self.label_cleanup) {
+            check_plan(*plan)?;
+            let plan = &self.plans[plan.0 as usize];
+            let expected = self.owners.iter().rev()
+                .filter(|owner| self.frame_owner(owner) && self.below_scope(owner, label.scope)
+                    && owner.value != self.canonical_value(label.result))
+                .map(|owner| owner.value).collect::<Vec<_>>();
+            let actual = plan.actions.iter().filter_map(|action| match action {
+                CleanupAction::StorageDead(flag) => Some(self.flags[flag.0 as usize].place.root()),
+                _ => None,
+            }).collect::<Vec<_>>();
+            if actual != expected || plan.protected != vec![self.canonical_value(label.result)] {
+                return Err(invalid("label cleanup is not its exact lexical owner inventory"));
+            }
+        }
         let frame = &self.plans[self.frame_cleanup.0 as usize];
         let expected_frame = self
             .owners
@@ -153,6 +174,27 @@ impl CleanupMir {
             ));
         }
         for (block_index, block) in self.blocks.iter().enumerate() {
+            if let CleanupControl::Transfer(ControlTransfer::FinishClause { handler, value, .. }) = &block.terminator.control {
+                let id = self.clause_cleanup.get(&ControlBlockId(block_index as u32))
+                    .ok_or_else(|| invalid("clause abandonment cleanup is absent"))?;
+                check_plan(*id)?;
+                let plan = &self.plans[id.0 as usize];
+                let protected = self.canonical_value(*value);
+                let expected = self.owners.iter().rev()
+                    .filter(|owner| self.frame_owner(owner)
+                        && self.below_scope(owner, self.handlers[handler.0 as usize].scope)
+                        && owner.value != protected)
+                    .map(|owner| owner.value).collect::<Vec<_>>();
+                let actual = plan.actions.iter().filter_map(|action| match action {
+                    CleanupAction::StorageDead(flag) => Some(self.flags[flag.0 as usize].place.root()),
+                    _ => None,
+                }).collect::<Vec<_>>();
+                if actual != expected || plan.protected != vec![protected] {
+                    return Err(invalid("clause abandonment cleanup is not its lexical owner inventory"));
+                }
+            } else if self.clause_cleanup.contains_key(&ControlBlockId(block_index as u32)) {
+                return Err(invalid("clause cleanup is attached to a non-clause exit"));
+            }
             let term = &block.terminator;
             if term.control.inputs()
                 != term

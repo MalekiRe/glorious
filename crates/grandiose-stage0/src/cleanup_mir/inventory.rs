@@ -30,10 +30,38 @@ impl CleanupMir {
             })
             .collect::<Vec<_>>();
         let mut visited = BTreeSet::new();
+        let mut resumed = Vec::new();
         while let Some(target) = pending.pop() {
             if !visited.insert(target) {
                 continue;
             }
+            let block = &self.blocks[target.0 as usize];
+            if matches!(&block.terminator.control,
+                CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
+                    | ControlTransfer::FinishClause { handler: exited, .. }) if *exited == handler)
+            {
+                continue;
+            }
+            let suspends = match &block.terminator.control {
+                CleanupControl::Transfer(ControlTransfer::Perform { effect, operation, .. }) =>
+                    delimiter.clauses.iter().any(|clause| clause.effect == *effect && clause.operation == *operation),
+                CleanupControl::Invoke { callee, .. } => match &self.values[callee.0 as usize].ty {
+                    Type::Callable { effects, .. } => delimiter.clauses.iter().any(|clause| effects.effects.contains(&clause.effect)),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if suspends {
+                resumed.extend(block.terminator.successors.iter().map(|edge| edge.target));
+            }
+            pending.extend(block.terminator.successors.iter().map(|edge| edge.target));
+        }
+        // Only consumption in a resumed suffix requires duplication of an
+        // outer owner. Consuming it before suspension, or in the selected
+        // clause rather than its continuation, does not capture that owner.
+        let mut visited = BTreeSet::new();
+        while let Some(target) = resumed.pop() {
+            if !visited.insert(target) { continue; }
             let block = &self.blocks[target.0 as usize];
             for flags in block
                 .instructions
@@ -54,7 +82,7 @@ impl CleanupMir {
             {
                 continue;
             }
-            pending.extend(block.terminator.successors.iter().map(|edge| edge.target));
+            resumed.extend(block.terminator.successors.iter().map(|edge| edge.target));
         }
         roots
     }

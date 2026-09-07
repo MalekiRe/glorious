@@ -1,0 +1,72 @@
+use std::*;
+use kernel::{identity, operation};
+use source::lex;
+pub mod kernel;
+pub mod source;
+
+fn owned(value: Slice<u8>) -> Vec<u8> { let bytes = Vec<u8>::new(); Vec::extend_from_slice(&mut bytes, value); bytes }
+fn inputs() -> Vec<Vec<u8>> { let inputs = Vec<Vec<u8>>::new(); @CASES@ inputs }
+fn word(buffer: &mut ByteBuf, value: u64) -> () { ByteBuf::put_u64(buffer, value); () }
+fn message(buffer: &mut ByteBuf, code: u32) -> () {
+    handle lex::diagnostic_message(code) { Result::Err(_) => word(buffer, 0), Result::Ok(value) => {
+        word(&mut *buffer, as<u64>(Str::len(value))); ByteBuf::append(buffer, Str::as_bytes(value)); () } }
+}
+fn scan(builder: &mut lex::Builder, blob: &source::Blob, controls: &mut operation::Controls, fuel: usize) -> Result<(), source::Failure> {
+    handle fuel == 0 { true => Result::Err(source::Failure::Busy), false => handle lex::step(&mut *builder, blob, &mut *controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(event) => handle event {
+            source::Event::Ready => Result::Ok(()), source::Event::Continue => scan(builder, blob, controls, fuel - 1) } } }
+}
+fn kind(value: lex::TokenKind) -> u64 { handle value {
+    lex::TokenKind::Identifier => 0, lex::TokenKind::Integer => 1, lex::TokenKind::Float => 2,
+    lex::TokenKind::String => 3, lex::TokenKind::ByteString => 4, lex::TokenKind::Character => 5,
+    lex::TokenKind::Operator => 6, lex::TokenKind::Punctuation(_) => 7, lex::TokenKind::Whitespace => 8,
+    lex::TokenKind::LineComment => 9, lex::TokenKind::BlockComment => 10, lex::TokenKind::Invalid => 11, lex::TokenKind::End => 12 }
+}
+fn dump_tokens(buffer: &mut ByteBuf, product: &lex::LexedFile, blob: &source::Blob, values: Slice<lex::Token>, index: usize) -> Result<(), source::Failure> {
+    handle index == Slice::len(&values) { true => Result::Ok(()), false => {
+        let token = Slice::get_unchecked(values, index);
+        word(&mut *buffer, kind(token.kind));
+        word(&mut *buffer, handle token.kind { lex::TokenKind::Punctuation(value) => as<u64>(value), _ => 0 });
+        word(&mut *buffer, as<u64>(token.start)); word(&mut *buffer, as<u64>(token.end));
+        word(&mut *buffer, as<u64>(token.lexical_code)); word(&mut *buffer, as<u64>(token.delimiter_code));
+        message(&mut *buffer, token.lexical_code); message(&mut *buffer, token.delimiter_code);
+        word(&mut *buffer, handle token.matching { Result::Err(_) => 0, Result::Ok(pair) => as<u64>(pair) + 1 });
+        handle lex::text(product, blob, index) {
+            Result::Err(error) => Result::Err(error), Result::Ok(text) => {
+                word(&mut *buffer, as<u64>(Str::len(text))); ByteBuf::append(&mut *buffer, Str::as_bytes(text));
+                dump_tokens(buffer, product, blob, values, index + 1)
+            },
+        }
+    } }
+}
+fn dump(buffer: &mut ByteBuf, blob: &source::Blob, controls: &mut operation::Controls) -> Result<(), source::Failure> {
+    handle lex::begin(blob, 65536, &mut *controls) { Result::Err(error) => Result::Err(error),
+        Result::Ok(builder) => handle scan(&mut builder, blob, &mut *controls, 100000) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => handle lex::finish(&mut builder, & *controls) {
+                Result::Err(error) => Result::Err(error), Result::Ok(product) => {
+                    identity::write_digest(&mut *buffer, lex::file(&product).digest);
+                    identity::write_digest(&mut *buffer, lex::fingerprint(&product));
+                    let values = lex::tokens(&product); word(&mut *buffer, as<u64>(Slice::len(&values)));
+                    dump_tokens(buffer, &product, blob, values, 0)
+                },
+            },
+        },
+    }
+}
+fn one_case(buffer: &mut ByteBuf, bytes: &Vec<u8>, file: identity::FileKey, controls: &mut operation::Controls) -> Result<(), source::Failure> {
+    handle source::create(file, Clone::clone(bytes), 65536, &mut *controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(blob) => dump(buffer, &blob, controls) }
+}
+fn cases(buffer: &mut ByteBuf, inputs: &Vec<Vec<u8>>, file: identity::FileKey, controls: &mut operation::Controls, index: usize) -> Result<(), source::Failure> {
+    handle Vec::get(inputs, index) { Result::Err(_) => Result::Ok(()),
+        Result::Ok(bytes) => handle one_case(&mut *buffer, bytes, file, &mut *controls) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => cases(buffer, inputs, file, controls, index + 1) } }
+}
+pub fn main() -> i64 {
+    let inputs = inputs(); let buffer = ByteBuf::new(@CAPACITY@); let controls = operation::create(1000000, 1000000);
+    handle identity::hash(b"lex-fixture") { Result::Err(_) => -1, Result::Ok(file) =>
+        handle cases(&mut buffer, &inputs, identity::FileKey { digest: file }, &mut controls, 0) {
+            Result::Err(_) => -2, Result::Ok(_) => handle identity::hash(ByteBuf::view(&buffer)) {
+                Result::Err(_) => -3, Result::Ok(actual) => handle identity::decode(b"@ORACLE@") {
+                    Result::Err(_) => -4, Result::Ok(expected) => handle identity::equal(actual, expected) { true => 42, false => -5 } } } } }
+}

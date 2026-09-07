@@ -160,6 +160,8 @@ __g1_f64_to_i128_checked(value: f64) -> i128;
 __g1_f64_to_isize_checked(value: f64) -> isize;
 
 pub enum Result<T, E> { Ok(T), Err(E) }
+// Structural pattern tests carry separate positive and negative contexts.
+pub enum Test<Y, N> { Yes(Y), No(N) }
 
 // Option has Result's representation; it is the ordinary ownership-aware
 // temporary storage type rather than a separate Slot abstraction.
@@ -627,8 +629,8 @@ impl<'a, T> SliceMut<'a, T> {
     }
 }
 
-impl<T> SliceMut<'_, T> {
-    pub fn get_unchecked(value: Self, index: usize) -> &mut T {
+impl<'a, T> SliceMut<'a, T> {
+    pub fn get_unchecked(value: Self, index: usize) -> &'a mut T {
         handle index < value.length {
             false => __g1_abort(),
             true => unsafe {
@@ -639,7 +641,7 @@ impl<T> SliceMut<'_, T> {
         }
     }
 
-    pub fn get(value: Self, index: usize) -> Option<&mut T> {
+    pub fn get(value: Self, index: usize) -> Option<&'a mut T> {
         handle index < value.length {
             true => Result::Ok(SliceMut::get_unchecked(value, index)),
             false => Result::Err(()),
@@ -688,7 +690,7 @@ impl<T> SliceMut<'_, T> {
     // This is an ordinary reborrow into the existing lending iterator: no element
     // is copied, and the caller cannot mutate through the original SliceMut while
     // any yielded reference may still be live.
-    pub fn iter(value: Self) -> SliceIter<'_, T> {
+    pub fn iter(value: Self) -> SliceIter<'a, T> {
         SliceIter {
             slice: Slice {
                 // Spell out the shared reborrow.  A `SliceMut` owns its unique
@@ -702,7 +704,7 @@ impl<T> SliceMut<'_, T> {
     }
 }
 
-impl<T> Slice<'_, T> {
+impl<'a, T> Slice<'a, T> {
     pub fn slice(value: Self, range: Range<usize>) -> Result<Self, SliceRangeError> {
         handle range.start > range.end {
             true => Result::Err(SliceRangeError::Reversed),
@@ -739,10 +741,12 @@ impl<T> Slice<'_, T> {
         }
     }
 
-    pub fn iter(value: Self) -> SliceIter<'_, T> {
+    pub fn iter(value: Self) -> SliceIter<'a, T> {
         SliceIter { slice: value, position: 0 }
     }
+}
 
+impl<T> Slice<'_, T> {
     pub fn lower_bound(value: Slice<T>, needle: &T) -> usize
         where T: Ord {
         slice_lower_bound_from(value, needle, 0, value.length)
@@ -770,7 +774,13 @@ impl<T> Slice<'_, T> {
 
     pub fn lex_compare(left: Slice<T>, right: Slice<T>) -> Ordering
         where T: Ord {
-        slice_lex_compare_from(left, right, 0)
+        let common = handle left.length < right.length {
+            true => left.length, false => right.length,
+        };
+        handle slice_lex_compare_range(left, right, 0, common) {
+            Ordering::Equal => Ord::compare(&left.length, &right.length),
+            result => result,
+        }
     }
 }
 
@@ -818,21 +828,23 @@ fn slice_upper_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
     }
 }
 
-fn slice_lex_compare_from<T>(left: Slice<T>, right: Slice<T>, index: usize) -> Ordering
+// Traverse left to right, but bound stack depth logarithmically without
+// relying on an executor recycling frames that carry borrowed slice homes.
+fn slice_lex_compare_range<T>(left: Slice<T>, right: Slice<T>, start: usize, end: usize) -> Ordering
     where T: Ord {
-    handle index >= left.length {
-        true => handle index >= right.length {
-            true => Ordering::Equal,
-            false => Ordering::Less,
-        },
-        false => handle index >= right.length {
-            true => Ordering::Greater,
-            false => handle Ord::compare(
-                Slice::get_unchecked(left, index),
-                Slice::get_unchecked(right, index),
-            ) {
-                Ordering::Equal => slice_lex_compare_from(left, right, index + 1),
-                value => value,
+    handle start >= end {
+        true => Ordering::Equal,
+        false => handle end - start == 1 {
+            true => Ord::compare(
+                Slice::get_unchecked(left, start),
+                Slice::get_unchecked(right, start),
+            ),
+            false => {
+                let middle = start + ((end - start) / 2);
+                handle slice_lex_compare_range(left, right, start, middle) {
+                    Ordering::Equal => slice_lex_compare_range(left, right, middle, end),
+                    result => result,
+                }
             },
         },
     }
@@ -931,16 +943,32 @@ fn utf8_decode(value: Slice<u8>, index: usize) -> Option<(char, usize)> {
     }
 }
 fn utf8_valid_up_to(value: Slice<u8>, index: usize) -> usize {
-    handle index < value.length {
-        false => index,
-        true => handle utf8_decode(value, index) {
-            Result::Err(_) => index,
-            Result::Ok((_, width)) => utf8_valid_up_to(value, index + width),
+    utf8_valid_range(value, index, value.length)
+}
+// A decoded character can cross the subdivision boundary. Return its real
+// end to the right traversal; an error before the boundary stops immediately.
+// Decoding always sees the whole slice, never an artificially truncated one.
+fn utf8_valid_range(value: Slice<u8>, start: usize, end: usize) -> usize {
+    handle start >= end {
+        true => start,
+        false => handle end - start == 1 {
+            true => handle utf8_decode(value, start) {
+                Result::Err(_) => start,
+                Result::Ok((_, width)) => start + width,
+            },
+            false => {
+                let middle = start + ((end - start) / 2);
+                let next = utf8_valid_range(value, start, middle);
+                handle next < middle {
+                    true => next,
+                    false => utf8_valid_range(value, next, end),
+                }
+            },
         },
     }
 }
 
-impl Str {
+impl<'a> Str<'a> {
     pub fn len(value: Self) -> usize { value.bytes.length }
 
     pub fn is_empty(value: Self) -> Bool {
@@ -1019,7 +1047,7 @@ impl Str {
         }
     }
 
-    pub fn chars(value: Self) -> Chars { Chars { text: value, position: 0 } }
+    pub fn chars(value: Self) -> Chars<'a> { Chars { text: value, position: 0 } }
 
     pub fn to_string(source: Self) -> String {
         let value = String::new();
@@ -1034,8 +1062,8 @@ impl<'a> Str<'a> {
     }
 }
 
-impl Chars {
-    pub fn next(value: &mut Self) -> Option<char> {
+impl<'a> Chars<'a> {
+    pub fn next<'b>(value: &'b mut Self) -> Option<char> {
         handle utf8_decode(value.text.bytes, value.position) {
             Result::Err(_) => Result::Err(()),
             Result::Ok((character, width)) => {
@@ -1317,14 +1345,21 @@ fn byte_buf_has_room(buffer: &ByteBuf, width: usize) -> Bool {
     }
 }
 fn byte_buf_push_word(bytes: &mut Vec<u8>, word: u64) -> () {
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(word));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 8)));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 16)));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 24)));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 32)));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 40)));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 48)));
-    Vec::push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 56)))
+    // One capacity admission for the whole word. The backing is byte-aligned:
+    // use eight byte stores, not an unaligned native u64 write or host codec.
+    Vec::reserve(&mut *bytes, 8);
+    let start = bytes.length;
+    unsafe {
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start), __g1_int_convert_wrapping_to_u8(word));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 1), __g1_int_convert_wrapping_to_u8(bit_shr(word, 8)));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 2), __g1_int_convert_wrapping_to_u8(bit_shr(word, 16)));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 3), __g1_int_convert_wrapping_to_u8(bit_shr(word, 24)));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 4), __g1_int_convert_wrapping_to_u8(bit_shr(word, 32)));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 5), __g1_int_convert_wrapping_to_u8(bit_shr(word, 40)));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 6), __g1_int_convert_wrapping_to_u8(bit_shr(word, 48)));
+        __g1_memory_write(__g1_memory_offset(bytes.pointer, start + 7), __g1_int_convert_wrapping_to_u8(bit_shr(word, 56)));
+    };
+    (*bytes).length = start + 8;
 }
 
 // A cursor owns positions, not a borrowed view. Callers lend the immutable
@@ -1415,6 +1450,39 @@ impl<T> Vec<T> {
 
     pub fn capacity(value: &Self) -> usize { value.capacity }
 
+    // Physical backing extent, using the same concrete layout as grow().
+    // Preflight performs no allocation and includes zero-sized residents.
+    pub fn backing_bytes(value: &Self) -> usize { value.capacity * __g1_memory_size_of<T>() }
+    pub fn reserved_backing_bytes(value: &Self, additional: usize) -> usize {
+        Vec::reserved_capacity(value, additional) * __g1_memory_size_of<T>()
+    }
+
+    // Allocation preflight and the allocator share one capacity policy.
+    pub fn initial_capacity(length: usize) -> usize {
+        handle __g1_memory_size_of<T>() {
+            0 => 18446744073709551615,
+            _ => handle length == 0 { true => 0, false => Vec<T>::grown_capacity(0, length) },
+        }
+    }
+    pub fn reserved_capacity(value: &Self, additional: usize) -> usize {
+        let required = value.length + additional;
+        handle required > value.capacity {
+            false => value.capacity, true => Vec<T>::grown_capacity(value.capacity, required),
+        }
+    }
+    fn grown_capacity(current: usize, required: usize) -> usize {
+        let maximum = 9223372036854775807 / __g1_memory_size_of<T>();
+        handle required > maximum {
+            true => __g1_abort(),
+            false => {
+                let doubled = handle current > maximum / 2 {
+                    true => maximum, false => handle current { 0 => as<usize>(4), _ => current * 2 },
+                };
+                handle doubled < required { true => required, false => doubled }
+            },
+        }
+    }
+
     pub fn reserve(value: &mut Self, additional: usize) -> () {
         let required = value.length + additional;
         handle required > value.capacity {
@@ -1428,30 +1496,20 @@ impl<T> Vec<T> {
     // allocator temporaries must not be materialized by every push/append.
     fn grow(value: &mut Self, required: usize) -> () {
         let size = __g1_memory_size_of<T>();
-        let maximum = 9223372036854775807 / size;
-        handle required > maximum {
-            true => __g1_abort(),
-            false => {
-                let doubled = handle value.capacity > maximum / 2 {
-                    true => maximum,
-                    false => handle value.capacity { 0 => as<usize>(4), _ => value.capacity * 2 },
-                };
-                let capacity = handle doubled < required { true => required, false => doubled };
-                unsafe {
-                    let pointer = __g1_memory_reallocate(
-                        __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
-                        __g1_memory_align_of<T>(), capacity * size,
-                    );
-                    let typed = __g1_memory_cast<u8, T>(pointer);
-                    handle __g1_memory_is_null(pointer) {
-                        0 => {
-                            (*value).pointer = typed;
-                            (*value).capacity = capacity;
-                        },
-                        _ => __g1_abort(),
-                    }
-                }
-            },
+        let capacity = Vec<T>::grown_capacity(value.capacity, required);
+        unsafe {
+            let pointer = __g1_memory_reallocate(
+                __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
+                __g1_memory_align_of<T>(), capacity * size,
+            );
+            let typed = __g1_memory_cast<u8, T>(pointer);
+            handle __g1_memory_is_null(pointer) {
+                0 => {
+                    (*value).pointer = typed;
+                    (*value).capacity = capacity;
+                },
+                _ => __g1_abort(),
+            }
         }
     }
 
@@ -1740,8 +1798,15 @@ fn vec_resize_grow<T>(value: &mut Vec<T>, length: usize, fill: &T) -> ()
     handle Vec::len(& *value) < length {
         false => (),
         true => {
-            Vec::push(&mut *value, *fill);
-            vec_resize_grow(&mut *value, length, fill)
+            let remaining = length - Vec::len(& *value);
+            handle remaining == 1 {
+                true => Vec::push(&mut *value, *fill),
+                false => {
+                    let middle = Vec::len(& *value) + (remaining / 2);
+                    vec_resize_grow(&mut *value, middle, fill);
+                    vec_resize_grow(&mut *value, length, fill)
+                },
+            }
         },
     }
 }
@@ -2231,6 +2296,7 @@ pub struct Utf8Error {
 
 impl String {
     pub fn new() -> Self { String { storage: Vec::new() } }
+    pub fn with_capacity(capacity: usize) -> Self { String { storage: Vec::with_capacity(capacity) } }
 
     pub fn from_utf8(value: Vec<u8>) -> Result<Self, Utf8Error> {
         let valid_up_to = utf8_valid_up_to(Vec::as_slice(&value), 0);

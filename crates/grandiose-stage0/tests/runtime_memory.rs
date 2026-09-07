@@ -2,8 +2,8 @@
 
 use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath,
-    MemoryPrimitive, PackageKey, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
-    SourceInput, StageZeroCompiler, VerifiedVmProgram, VmExecutionLimits,
+    MemoryPrimitive, PackageKey, PrimitiveRole,
+    SourceInput, StageZeroCompiler, VerifiedVmProgram, VmExecutionLimits, decode_and_verify_program,
 };
 use std::collections::BTreeMap;
 
@@ -78,45 +78,112 @@ const NATIVE_VIEWS: &str = r#"
 
 fn request(source: &str) -> CompilationRequest {
     let package = PackageKey("memory-fixture@0.1.0".into());
-    CompilationRequest {
+    let standard = PackageKey("std@0.1.0".into());
+    let canonical = include_str!("../../../stdlib/src/lib.glorious");
+    let mut request = CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"runtime-memory-tests")),
         mode: CompilationMode::Build,
         root_package: package.clone(),
-        sources: vec![SourceInput::new(
-            package.clone(),
-            LogicalPath::parse("src/lib.glorious").unwrap(),
-            format!("{DECLARATIONS}\n{source}").as_bytes(),
-        )],
+        sources: vec![
+            SourceInput::new(package, LogicalPath::parse("src/lib.glorious").unwrap(),
+                format!("use std::*; use std::memory_fixture::*;\n{source}").as_bytes()),
+            SourceInput::new(standard.clone(), LogicalPath::parse("src/lib.glorious").unwrap(), canonical.as_bytes()),
+        ],
         target: "stage0-vm".into(),
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
         capability_manifest: vec![],
-        runtime_manifest: Some(RuntimeManifestInput {
-            standard_library: package,
-            selectors: MemoryPrimitive::ALL
-                .into_iter()
-                // Static-data spellings are sealed to canonical std. Their
-                // address leaves are exercised by the standard-library suite.
-                .filter(|primitive| !matches!(primitive, MemoryPrimitive::StaticUtf8Address | MemoryPrimitive::StaticBytesAddress | MemoryPrimitive::StaticBytesLen))
-                .map(|primitive| PrimitiveSelector {
-                    role: PrimitiveRole::Memory(primitive),
-                    module_path: "crate".into(),
-                    name: primitive
-                        .selector_name()
-                        .strip_prefix("memory-")
-                        .unwrap()
-                        .replace('-', "_"),
-                })
-                .collect(),
-            host_imports: vec![],
-        }),
+        runtime_manifest: None,
+    };
+    // Keep canonical operators/Bool and all their finite machine bindings.
+    // Replace only general memory declarations with the test-owned, bodyless
+    // names above, rebinding the exact roles rather than introducing compiler
+    // spellings or forwarding bodies. Static-data authority stays unchanged.
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler.import_revision(request.clone(), None).unwrap();
+    let mut manifest = compiler.open_session(revision).unwrap()
+        .snapshot().world().runtime_manifest.clone().unwrap();
+    let mut replacements = Vec::new();
+    for selector in &mut manifest.selectors {
+        if matches!(selector.role, PrimitiveRole::Memory(primitive)
+            if !matches!(primitive, MemoryPrimitive::StaticUtf8Address | MemoryPrimitive::StaticBytesAddress | MemoryPrimitive::StaticBytesLen)) {
+            let short = selector.name.strip_prefix("__g1_memory_").unwrap().to_owned();
+            replacements.push((selector.name.clone(), short.clone()));
+            selector.name = short;
+            selector.module_path = "crate::memory_fixture".into();
+        }
     }
+    let mut library = canonical.lines().filter(|line| !replacements.iter().any(|(name, _)| {
+        let line = line.trim_start().strip_prefix("unsafe fn ").unwrap_or(line.trim_start());
+        line.ends_with(';') && line.contains(" -> ")
+            && (line.starts_with(&format!("{name}<")) || line.starts_with(&format!("{name}(")))
+    })).collect::<Vec<_>>().join("\n");
+    // Long names first avoids accidentally treating `offset_const` as `offset`.
+    replacements.sort_by_key(|(name, _)| std::cmp::Reverse(name.len()));
+    for (name, short) in replacements { library = library.replace(&name, &format!("memory_fixture::{short}")); }
+    let declarations = DECLARATIONS.replace("    fn ", "    pub fn ")
+        .replace("    unsafe fn ", "    pub unsafe fn ");
+    request.sources[1] = SourceInput::new(standard, LogicalPath::parse("src/lib.glorious").unwrap(),
+        format!("{library}\npub mod memory_fixture {{ {declarations} }}").as_bytes());
+    request.runtime_manifest = Some(manifest);
+    request
 }
 
 fn compile(source: &str) -> VerifiedVmProgram {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     outcome.artifact.unwrap()
+}
+
+#[test]
+fn authoring_native_profile_measures_raw_extents_and_bulk_copy_bytes() {
+    let candidate = compile(r#"
+        pub fn main() -> i64 {
+            unsafe {
+                let source = allocate(16, 8);
+                write(cast<u8, i64>(source), 42);
+                let destination = allocate(16, 8);
+                copy_nonoverlapping(as_const(cast<u8, i64>(source)), cast<u8, i64>(destination), 1);
+                let result = read(as_const(cast<u8, i64>(destination)));
+                copy(as_const(destination), offset(destination, 1), 7);
+                let grown = reallocate(destination, 16, 8, 32);
+                copy(as_const(grown), grown, 0);
+                deallocate(source, 16, 8);
+                deallocate(grown, 32, 8);
+                result
+            }
+        }
+    "#);
+    let program = decode_and_verify_program(&candidate.canonical_bytes()).unwrap();
+    // SAFETY: the local fixture initializes every byte it copies/reads, uses
+    // the overlapping leaf only for overlap, and releases both owned buffers.
+    let (value, profile) = unsafe { program.run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+    assert_eq!(value, 42);
+    let native = profile.native_memory;
+    assert_eq!((native.raw_allocations, native.raw_reallocations, native.raw_deallocations), (2, 1, 2));
+    assert_eq!((native.raw_live_bytes, native.raw_peak_bytes), (0, 48));
+    assert_eq!(native.raw_bulk_copy_bytes, 15, "8 disjoint + 7 overlapping bytes; allocator relocation is not counted");
+    assert_eq!(native.home_live_bytes, 0);
+    assert!(native.peak_live_bytes >= native.raw_peak_bytes);
+    assert!(native.peak_live_bytes <= VmExecutionLimits::default().max_native_bytes);
+    assert!(!native.counters_saturated);
+    // SAFETY: each run has the same local source obligations and a new domain.
+    let (again, second) = unsafe { program.run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+    assert_eq!(again, 42);
+    assert_eq!(second.native_memory, native, "measurements cannot leak across runs");
+}
+
+#[test]
+fn authoring_native_profile_keeps_outstanding_raw_bytes_visible_before_domain_teardown() {
+    let candidate = compile("pub fn main() -> i64 { unsafe { let abandoned = allocate(8, 8); 42 } }");
+    let program = decode_and_verify_program(&candidate.canonical_bytes()).unwrap();
+    // SAFETY: no residents are initialized, borrowed, or accessed. The fixture
+    // deliberately leaves its raw owner to the execution domain's final drop.
+    let (value, profile) = unsafe { program.run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+    assert_eq!(value, 42);
+    assert_eq!(profile.native_memory.raw_live_bytes, 8);
+    assert_eq!((profile.native_memory.raw_allocations, profile.native_memory.raw_deallocations), (1, 0));
+    assert_eq!(profile.native_memory.home_live_bytes, 0);
 }
 
 #[test]
@@ -417,12 +484,15 @@ fn native_record_fields_follow_natural_host_padding() {
 
 #[test]
 fn single_and_multiple_variant_enums_retain_discriminants_and_payloads() {
-    for (declaration, constructor) in [
-        ("enum Choice { Value(i64) }", "Choice::Value(42)"),
+    const MULTIPLE: &str = "enum Choice { Empty, Value(i64), Pair(u8, i64) }";
+    const ARMS: &str = "Choice::Empty => 7, Choice::Value(found) => found, Choice::Pair(first, second) => as<i64>(first) + second";
+    for (declaration, constructor, arms, expected) in [
+        ("enum Choice { Value(i64) }", "Choice::Value(42)", "Choice::Value(found) => found", 42),
         (
-            "enum Choice { Empty, Value(i64), Pair(u8, i64) }",
-            "Choice::Value(42)",
+            MULTIPLE, "Choice::Value(42)", ARMS, 42,
         ),
+        (MULTIPLE, "Choice::Pair(7, 35)", ARMS, 42),
+        (MULTIPLE, "Choice::Empty", ARMS, 7),
     ] {
         let program = compile(&format!(
             r#"
@@ -434,7 +504,7 @@ fn single_and_multiple_variant_enums_retain_discriminants_and_payloads() {
                     write(pointer, {constructor});
                     let value = read(as_const(pointer));
                     deallocate(bytes, size_of<Choice>(), align_of<Choice>());
-                    handle value {{ Choice::Value(found) => found, _ => 0 }}
+                    handle value {{ {arms} }}
                 }}
             }}
         "#
@@ -443,7 +513,7 @@ fn single_and_multiple_variant_enums_retain_discriminants_and_payloads() {
         // concrete type, with the allocation released after the move.
         assert_eq!(
             unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(),
-            42
+            expected
         );
     }
 }

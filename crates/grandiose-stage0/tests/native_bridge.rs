@@ -49,7 +49,9 @@ fn request(source: &str) -> CompilationRequest {
             SourceInput::new(
                 app,
                 LogicalPath::parse("src/main.glorious").unwrap(),
-                source.as_bytes(),
+                // Operators and Boolean control flow are canonical source
+                // library bindings, not an implicit compiler prelude.
+                format!("use std::*;\n{source}").as_bytes(),
             ),
             SourceInput::new(
                 std.clone(),
@@ -282,6 +284,10 @@ fn native_resident_operation_metadata_is_structurally_checked() {
                     symbol,
                     resident_operations,
                     ..
+                } | grandiose_stage0::VmInstruction::HostCallOwned {
+                    symbol,
+                    resident_operations,
+                    ..
                 } = instruction
                     && symbol == "inspect"
                 {
@@ -484,7 +490,7 @@ fn native_owned_pair_uses_existing_argument_and_caller_result_slots() {
         unsafe {
             output.write(NativePair {
                 first: value.first + 1,
-                second: value.second + 2,
+                second: value.first + value.second + 3,
             });
         }
     }
@@ -494,7 +500,9 @@ fn native_owned_pair_uses_existing_argument_and_caller_result_slots() {
         host interop fn transform(value: Pair) -> Pair;
         pub fn main() -> i64 {
             let value = transform(Pair { first: 19, second: 20 });
-            value.first + value.second
+            // Keep this two-Pair storage bound specific to the ABI slots;
+            // source operators borrow scalar homes of their own.
+            value.second
         }
     "#,
     );
@@ -512,6 +520,7 @@ fn native_owned_pair_uses_existing_argument_and_caller_result_slots() {
                 assert_ne!(input, output);
                 assert!(call.take_argument(0).is_err(), "owned input is taken once");
                 transform(input, output);
+                assert_eq!((*output).first, 20);
                 observed.set(observed.get() + 1);
                 call.finish_result()
             })
@@ -548,12 +557,18 @@ fn native_owned_result_checks_initialization_and_argument_transfer() {
     );
     for case in 0..4 {
         let mut imports = VmNativeImports::default();
-        // SAFETY: all slots have their declared extent/alignment. The invalid
-        // boolean test writes an initialized u8, never reads an invalid Rust
-        // bool, and asks the bridge to reject it before source execution.
+        let contract = program.native_imports().unwrap().remove(0);
+        let layout = contract.layout_of(&contract.result).unwrap();
+        assert_eq!((layout.size, layout.alignment), (size_of::<u32>(), align_of::<u32>()));
+        let VmNativeLayoutShape::Product(fields) = &layout.shape else { panic!("Flags is a record"); };
+        let VmNativeLayoutShape::Enum { variants, .. } = &fields[0].layout.shape else { panic!("canonical Bool is a two-variant enum"); };
+        assert_eq!(variants.len(), 2);
+        // SAFETY: canonical Bool is Result<(), ()>, not C/Rust bool. Initialize
+        // its entire u32 discriminant, including in the invalid-tag case.
+        // No uninitialized upper bytes or invalid Rust bool are read.
         unsafe {
             imports
-                .insert(program.native_imports().unwrap().remove(0), move |call| {
+                .insert(contract, move |call| {
                     if case != 1 {
                         call.take_argument(0)?;
                     }
@@ -561,7 +576,7 @@ fn native_owned_result_checks_initialization_and_argument_transfer() {
                         return Ok(());
                     }
                     let result = call.result_pointer()?;
-                    result.write(if case == 0 { 2 } else { 1 });
+                    result.cast::<u32>().write(if case == 0 { 2 } else { 0 });
                     call.finish_result()?;
                     assert!(
                         call.finish_result().is_err(),
@@ -581,7 +596,7 @@ fn native_owned_result_checks_initialization_and_argument_transfer() {
             0 => assert!(matches!(
                 outcome,
                 Err(VmArtifactError::NativeMemory {
-                    message: "invalid native boolean"
+                    message: "invalid native enum discriminant"
                 })
             )),
             1 => assert!(matches!(
@@ -1037,8 +1052,8 @@ fn native_layout_contracts_terminate_pointer_cycles_and_reject_expanding_generic
         failure
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "G6005"
-                && diagnostic.message.contains("finite layout closure limit")),
+            .any(|diagnostic| diagnostic.code == "G7032"
+                && diagnostic.message == "concrete nominal layout expansion exceeds its finite representation budget"),
         "{failure:#?}"
     );
 }

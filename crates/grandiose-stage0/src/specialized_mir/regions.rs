@@ -99,3 +99,42 @@ pub(super) fn body_type(value: &Type) -> Type {
 pub(super) fn body_row(value: &crate::EffectRow) -> crate::EffectRow {
     row(value, 0)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detached_nominal_layout_opens_its_outer_region_without_relaxing_validation() {
+        let detached = Type::Nominal {
+            definition: DefKey(crate::Digest::of_bytes(b"detached-layout-region")),
+            arguments: vec![GenericArgument::Lifetime(crate::Lifetime::Bound { depth: 0, index: 0 })],
+        };
+        assert!(super::super::validate::closed_type(&detached).is_err());
+        let opened = body_type(&detached);
+        assert!(matches!(&opened, Type::Nominal { arguments, .. }
+            if arguments == &[GenericArgument::Lifetime(crate::Lifetime::Elided)]));
+        assert!(super::super::validate::closed_type(&opened).is_ok());
+    }
+
+    #[test]
+    fn detached_callable_layout_preserves_its_own_nested_binder() {
+        let reference = |depth| Type::Reference {
+            mutability: crate::Mutability::Shared,
+            lifetime: crate::Lifetime::Bound { depth, index: 0 },
+            referent: Box::new(Type::Scalar(crate::ScalarType::I64)),
+        };
+        let detached = Type::Callable {
+            safety: crate::Safety::Safe, lifetime_binders: 1,
+            parameters: vec![reference(1)], result: Box::new(reference(0)),
+            effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE,
+        };
+        assert!(super::super::validate::closed_type(&detached).is_err());
+        let opened = body_type(&detached);
+        let Type::Callable { parameters, result, lifetime_binders, .. } = &opened else { unreachable!(); };
+        assert_eq!(*lifetime_binders, 1);
+        assert!(matches!(parameters.as_slice(), [Type::Reference { lifetime: crate::Lifetime::Elided, .. }]));
+        assert_eq!(result.as_ref(), &reference(0));
+        assert!(super::super::validate::closed_type(&opened).is_ok());
+    }
+}

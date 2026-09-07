@@ -11,7 +11,7 @@ struct Root { revision: identity::RevisionId, session: registry::Session,
 @WITNESSES@
 fn db_limits() -> registry::Limits {
     registry::Limits { revisions: 8, sessions: 8, attempts: 16, memos: 32, reads: 16, keys: 16,
-        source_products: 16, line_products: 16, drivers: 8, frames: 8, source_bytes: 1024, lines: 64 }
+        source_products: 16, line_products: 16, lex_products: 16, drivers: 8, frames: 8, source_bytes: 1024, lines: 64, tokens: 1025 }
 }
 fn imported(db: &mut Db, index: usize, parent: Option<identity::RevisionId>) -> Result<identity::RevisionId, registry::Failure> {
     let raw = fixture(index); let valid = raw.valid;

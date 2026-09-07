@@ -28,10 +28,14 @@ impl SpecializedMir {
                 Type::Callable {
                     parameters, result, ..
                 } => {
+                    // These types are leaving their callable binder when
+                    // they become standalone layout obligations. Open that
+                    // binder for layout collection only; retain the complete
+                    // higher-ranked contract on the original callable value.
                     for parameter in parameters {
-                        collect(parameter, signatures, layouts, building)?;
+                        collect(&regions::body_type(parameter), signatures, layouts, building)?;
                     }
-                    collect(result, signatures, layouts, building)?;
+                    collect(&regions::body_type(result), signatures, layouts, building)?;
                 }
                 Type::Nominal {
                     definition,
@@ -45,6 +49,15 @@ impl SpecializedMir {
                         return Err(SpecializedError("concrete nominal layout expansion exceeds its finite representation budget".into()));
                     }
                     if !building.insert(key.clone()) {
+                        return Ok(());
+                    }
+                    if *definition == crate::refinement::bindings_definition() {
+                        let fields = crate::refinement::binding_pack_fields(ty)
+                            .ok_or_else(|| SpecializedError("binding pack lacks a canonical sealed environment layout".into()))?.to_vec();
+                        let source_contract = crate::refinement::binding_pack_contract(ty).expect("checked binding pack");
+                        layouts.push(SpecializedLayout { ty: ty.clone(), source_contract, is_enum: false, variants: vec![fields.clone()] });
+                        for field in fields { collect(&field, signatures, layouts, building)?; }
+                        building.remove(&key);
                         return Ok(());
                     }
                     let header = signatures.definitions.get(definition);
@@ -192,6 +205,14 @@ pub(crate) fn validate_layout_closure(
         Ok(())
     }
     for layout in layouts {
+        if matches!(&layout.ty, Type::Nominal { definition, .. } if *definition == crate::refinement::bindings_definition()) {
+            let expected = crate::refinement::binding_pack_fields(&layout.ty)
+                .ok_or_else(|| SpecializedError("binding pack has no canonical environment layout".into()))?;
+            if layout.is_enum || layout.variants.as_slice() != [expected.to_vec()]
+                || Some(layout.source_contract) != crate::refinement::binding_pack_contract(&layout.ty) {
+                return Err(SpecializedError("binding pack layout disagrees with its sealed environment".into()));
+            }
+        }
         for ty in layout.variants.iter().flatten() {
             field(ty, layouts, &definitions)?;
         }

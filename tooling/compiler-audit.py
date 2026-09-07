@@ -19,6 +19,17 @@ def closure():
     return {str(p.relative_to(ROOT)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
 
 
+def authoring_closure(root):
+    # The authoring implementation is split across lowering/verifier modules.
+    # A hand-maintained allowlist can silently omit new phases and retain
+    # deleted bridges. Lock every source module, including uncommitted files,
+    # and the crate manifest that selects its dependencies and entry points.
+    crate = root / "crates/grandiose-stage0"
+    paths = [crate / "Cargo.toml", *sorted((crate / "src").rglob("*.rs"))]
+    return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in paths}
+
+
 def frozen_tests(baseline):
     paths = subprocess.check_output(
         ["git", "ls-tree", "-r", "--name-only", baseline, "crates/grandiose-stage0"], cwd=ROOT, text=True
@@ -42,28 +53,8 @@ def main():
     for name in ("behavior", "authoring", "standard_library", "stage0_verifier", "g1_verifier"):
         subprocess.run(["git", "cat-file", "-e", pins[name] + "^{commit}"], cwd=ROOT, check=True)
     lock = COMPILER / "sources.lock"
-    authoring_paths = ["crates/grandiose-stage0/src/core.rs", "crates/grandiose-stage0/src/service.rs",
-                       "crates/grandiose-stage0/src/vm_backend.rs", "crates/grandiose-stage0/src/mir.rs",
-                       "crates/grandiose-stage0/src/request.rs", "crates/grandiose-stage0/src/runtime_manifest.rs",
-                       "crates/grandiose-stage0/src/memory_primitive.rs", "crates/grandiose-stage0/src/vm_backend/native_memory.rs",
-                       "crates/grandiose-stage0/src/vm_backend/native_bridge.rs",
-                       "crates/grandiose-stage0/src/vm_backend/native_storage.rs",
-                       "crates/grandiose-stage0/src/source.rs",
-                       "crates/grandiose-stage0/src/bootstrap.rs", "crates/grandiose-stage0/src/placeflow.rs",
-                       "crates/grandiose-stage0/src/signature.rs", "crates/grandiose-stage0/src/trait_solver.rs",
-                       "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs",
-                       "crates/grandiose-stage0/src/destruction.rs",
-                       "crates/grandiose-stage0/src/ownership.rs",
-                       "crates/grandiose-stage0/src/evaluation_mir.rs",
-                       "crates/grandiose-stage0/src/control_mir.rs",
-                       "crates/grandiose-stage0/src/control_mir/legacy_bridge.rs",
-                       "crates/grandiose-stage0/src/types.rs", "crates/grandiose-stage0/src/header.rs",
-                       "crates/grandiose-stage0/src/interface.rs", "crates/grandiose-stage0/src/lib.rs",
-                       "crates/grandiose-stage0/src/body.rs", "crates/grandiose-stage0/src/instance.rs",
-                       "crates/grandiose-stage0/src/escape.rs", "crates/grandiose-stage0/src/pattern.rs",
-                       "crates/grandiose-stage0/src/scanner.rs", "crates/grandiose-stage0/src/useflow.rs"]
     expected = {"schema": 1, "algorithm": "sha256", "files": closure(),
-                "authoring_overrides": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in authoring_paths}}
+                "authoring_overrides": authoring_closure(ROOT)}
     # Shared raw storage is a native/runtime prerequisite, not compiler source
     # or a certificate that Glorious bytecode can use unsafe operations yet.
     runtime_paths = [ROOT / "Cargo.toml", ROOT / "Cargo.lock",

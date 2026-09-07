@@ -2505,6 +2505,9 @@ impl TraitSolver {
         definition: DefKey,
         arguments: &[GenericArgument],
     ) -> Option<Vec<Type>> {
+        if definition == crate::refinement::bindings_definition() {
+            return crate::refinement::binding_pack_fields(&Type::Nominal { definition, arguments: arguments.to_vec() }).map(<[Type]>::to_vec);
+        }
         let ElaboratedHeader::Nominal {
             generics, layout, ..
         } = self.definitions.get(&definition)?

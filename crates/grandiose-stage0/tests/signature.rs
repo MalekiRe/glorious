@@ -23,6 +23,30 @@ fn ownership_fixture(source: &str) -> (ElaboratedInterface, BTreeMap<String, Def
 }
 
 #[test]
+fn bindings_signatures_are_intrinsic_but_source_cannot_replace_their_evidence() {
+    let (mut signatures, names) = ownership_fixture("pub fn carry<'a, P>(value: Bindings<'a, P>) -> Bindings<'a, P>;");
+    let ElaboratedHeader::Callable(signature) = &signatures.definitions[&names["carry"]] else { unreachable!() };
+    assert!(matches!(&signature.parameters[0], Type::Nominal { definition, arguments }
+        if *definition == grandiose_stage0::refinement::bindings_definition() && arguments.len() == 2));
+    signatures.definitions.insert(grandiose_stage0::refinement::bindings_definition(), ElaboratedHeader::Nominal {
+        generics: 0, generic_kinds: vec![], layout: ElaboratedNominalLayout::Struct(vec![]),
+    });
+    signatures.validate_projection_obligations();
+    assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.message.contains("intrinsic `Bindings` identity")));
+
+    let mut interface = ElaboratedInterface::default();
+    interface.definitions.insert(DefKey(Digest::of_bytes(b"forged-binding-pack-implementation")),
+        ElaboratedHeader::Implementation(ElaboratedImplementation {
+            safety: grandiose_stage0::Safety::Safe, generics: 0, generic_kinds: vec![], negative: false,
+            relation: ElaboratedTraitReference { definition: grandiose_stage0::intrinsic_environment_trait_definition(), arguments: vec![] },
+            self_ty: Type::Nominal { definition: grandiose_stage0::refinement::bindings_definition(), arguments: vec![GenericArgument::Lifetime(Lifetime::Static), GenericArgument::Type(Type::Unit)] },
+            where_bounds: vec![], associated_types: BTreeMap::new(), associated_effect_rows: BTreeMap::new(), associated_consts: BTreeMap::new(), methods: BTreeMap::new(),
+        }));
+    interface.validate_projection_obligations();
+    assert!(interface.diagnostics.iter().any(|diagnostic| diagnostic.message.contains("binding-pack evidence is compiler-owned")));
+}
+
+#[test]
 fn principal_use_instantiates_generic_manual_rules_and_conditional_bounds() {
     let (signatures, names) = ownership_fixture(r#"
         trait Mark: Use<[0, 1]> {}

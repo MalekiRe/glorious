@@ -245,7 +245,7 @@ fn query(db: &mut registry::Registry<World>, session: registry::Session, file: F
 }
 fn integrated(value: request::AdmittedSource, key: FileKey, fingerprint: Digest) -> i64 {
     let limits = registry::Limits { revisions: 2, sessions: 2, attempts: 4, memos: 4, reads: 4, keys: 4,
-        source_products: 2, line_products: 2, drivers: 2, frames: 4, source_bytes: 1000, lines: 100 };
+        source_products: 2, line_products: 2, lex_products: 2, drivers: 2, frames: 4, source_bytes: 1000, lines: 100, tokens: 1001 };
     handle registry::create<World>(9, limits) {
         Result::Err(_) => 0,
         Result::Ok(db) => handle registry::import(&mut db, World { value: value }, fingerprint, None) {

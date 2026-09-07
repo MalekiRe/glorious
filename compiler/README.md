@@ -10,8 +10,8 @@ products, **not yet a self-hosted compiler**. It contains generational storage, 
 request controls, revision retention, nested undo/publication, and a shared
 query engine with waiting, cycle detection, recovery propagation, ordered
 parent replay, and combined memo/product retirement. Immutable UTF-8 blobs and
-stepped line/UTF-16 indexes are implemented and reference-tested. The first
-closed typed registry connects `SourceBytes` and `LineIndex` to tracked child
+stepped line/UTF-16 indexes and a lossless lexer are implemented and reference-tested.
+The closed typed registry connects `SourceBytes`, `LineIndex`, and `Lex` to tracked child
 demands, parent reuse, and final-owner disposal. Source histories exercise
 real product sharing, pinned retirement, waiting/cancellation, and abandoned
 builder cleanup. Stepped key collection preserves active journals/replays and
@@ -55,6 +55,16 @@ self-host coverage is historical. `spec/contracts.tsv` inventories the frozen
 public surface, including fields, variants, methods, traits, and reexports.
 Unimplemented contracts remain open until a source comparator passes.
 
+The source, line-index, and lexical providers now reserve their backing capacities
+before allocation and retain root/phase charges through shared-product disposal.
+This is not a complete physical allocation census; see
+[provider memory ownership](spec/operation-budgets.md#initial-provider-backing-storage-integration).
+See [lossless lexical products](spec/lossless-lex.md) for token/recovery parity,
+stepped cancellation, typed publication, and the remaining frontend boundary.
+Authoring execution now also records [native backing extents and bulk copies](spec/native-costs.md),
+separately from logical allocation charges. These measurements exclude allocator
+internals and Rust metadata; they are not a complete physical memory census.
+
 Run `tooling/compiler-check.sh` for the current source tests and closure audit.
 It creates a fresh execution report under `target/compiler-check/run-*/report.json`;
 failed runs cannot produce a passing capability report. These reports explicitly
@@ -63,6 +73,11 @@ source suite defaults to 12 test workers under the 590-second command guard and
 24 GiB cargo-test address-space ceiling; `RUST_TEST_THREADS` overrides the worker
 count. Use `python3 tooling/compiler-audit.py --refresh`
 after changing the source/test closure. `--release` remains fail-closed.
+The authoring lock includes the Stage0 crate manifest and every Rust file below
+its `src/` directory, including nested lowering/verifier modules and newly added
+files. It does not rely on a manually maintained list of authoring overrides.
+Run `python3 -m unittest discover -s tooling/tests -v` for the closure-tracking
+regression checks. Refreshing the lock records inputs; it certifies no milestone.
 For a focused run, use `tooling/compiler-check.sh --filter gsc2_registry`.
 Reports record the filters and mark this as selected-test evidence, never a
 complete-suite pass. A filter matching no executed fixtures fails closed.

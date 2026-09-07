@@ -44,6 +44,8 @@ impl CleanupMir {
                 protected: vec![],
             }],
             frame_cleanup: CleanupPlanId(0),
+            label_cleanup: vec![],
+            clause_cleanup: BTreeMap::new(),
             destruction: destruction.clone(),
             native_operations: BTreeMap::new(),
         };
@@ -61,6 +63,13 @@ impl CleanupMir {
             .map(|owner| OwnerId(owner.value.0))
             .collect::<Vec<_>>();
         body.frame_cleanup = body.owner_plan(&frame, vec![])?;
+        for label in &source.labels {
+            let owners = source.owners.iter().rev()
+                .filter(|owner| body.frame_owner(owner) && body.below_scope(owner, label.scope))
+                .map(|owner| OwnerId(owner.value.0)).collect::<Vec<_>>();
+            let plan = body.owner_plan(&owners, vec![label.result])?;
+            body.label_cleanup.push(plan);
+        }
         for closure in &source.closures {
             let child = Self::lower(&closure.body, signatures, destruction)?;
             let cleanup = closure
@@ -238,6 +247,14 @@ impl CleanupMir {
                     CleanupControl::Transfer(transfer.clone())
                 }
             };
+            if let CleanupControl::Transfer(ControlTransfer::FinishClause { handler, value, .. }) = &control {
+                let scope = body.handlers[handler.0 as usize].scope;
+                let owners = body.owners.iter().rev()
+                    .filter(|owner| body.frame_owner(owner) && body.below_scope(owner, scope))
+                    .map(|owner| OwnerId(owner.value.0)).collect::<Vec<_>>();
+                let plan = body.owner_plan(&owners, vec![*value])?;
+                body.clause_cleanup.insert(ControlBlockId(block_index as u32), plan);
+            }
             let protected = term
                 .operands
                 .iter()

@@ -1267,7 +1267,7 @@ fn a_positive_record_refinement_does_not_duplicate_destruction() {
             let second = 0;
             {
                 let owner = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
-                handle owner is Pair { first: selected } { true => (), false => () };
+                handle owner is Pair { first: selected } { Test::Yes(_) => (), Test::No(_) => () };
                 ()
             };
             first * 10 + second
@@ -1284,7 +1284,7 @@ fn an_observational_refinement_leaves_its_subject_owned() {
             let second = 0;
             {
                 let owner = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
-                handle owner is Pair { first: selected } { true => (), false => () };
+                handle owner is Pair { first: selected } { Test::Yes(_) => (), Test::No(_) => () };
                 let remaining = owner;
                 ()
             };
@@ -1301,15 +1301,69 @@ fn a_refinement_binder_borrows_the_selected_noncopy_owner() {
             impl Use<[0, 1]> for Owner {{}}
             struct Pair {{ field: Owner }}
             fn inspect(value: &Owner) -> i64 {{ value.value }}
+            fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+                where F: Fn<(Y), Output = i64> {{
+                handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
+            }}
             pub fn main() -> i64 {{
                 let owner = Pair {{ field: Owner {{ value: 42 }} }};
                 let reference = &owner;
-                handle {subject} is Pair {{ field: selected }} {{
-                    true => inspect(selected), false => 0
-                }}
+                visit({subject} is Pair {{ field: selected }}) {{ inspect(selected) }}
             }}
         "#)), 42, "{subject}");
     }
+}
+
+#[test]
+fn first_class_refinement_packs_keep_borrowed_owners_in_scope() {
+    for source in [
+        "pub fn main() -> i64 { let test = { let owner = Owner { value: 42 }; owner is selected }; handle test { Test::Yes(_) => 1, Test::No(_) => 0 } }",
+        "fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { let test = { let owner = Owner { value: 42 }; identity(owner is selected) }; handle test { Test::Yes(_) => 1, Test::No(_) => 0 } }",
+    ] {
+        let outcome = compile(&format!("struct Owner {{ value: i64 }} {source}"));
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+            panic!("a binding pack escaped its borrowed owner");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"), "{diagnostics:#?}");
+    }
+}
+
+#[test]
+fn first_class_refinement_packs_protect_borrowed_projections_across_calls() {
+    for (action, code) in [
+        ("let moved = owner", "G5004"),
+        ("owner.field = Owner { value: 100 }", "G5007"),
+    ] {
+        let outcome = compile(&format!(r#"
+            struct Owner {{ value: i64 }}
+            impl Use<[0, 1]> for Owner {{}}
+            struct Pair {{ field: Owner }}
+            fn identity<T>(value: T) -> T {{ value }}
+            pub fn main() -> i64 {{
+                let owner = Pair {{ field: Owner {{ value: 42 }} }};
+                let test = identity(owner is Pair {{ field: selected }});
+                {action};
+                handle test {{ Test::Yes(_) => 1, Test::No(_) => 0 }}
+            }}
+        "#));
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+            panic!("a live binding pack lost its borrowed projection for {action}");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == code), "{diagnostics:#?}");
+    }
+    assert_eq!(run(r#"
+        struct Owner { value: i64 }
+        impl Use<[0, 1]> for Owner {}
+        struct Pair { field: Owner }
+        fn identity<T>(value: T) -> T { value }
+        pub fn main() -> i64 {
+            let owner = Pair { field: Owner { value: 42 } };
+            let test = identity(owner is Pair { field: selected });
+            let matched = handle test { Test::Yes(_) => 1, Test::No(_) => 0 };
+            let moved = owner;
+            moved.field.value + matched
+        }
+    "#), 43);
 }
 
 #[test]
@@ -1331,14 +1385,106 @@ fn a_refinement_borrow_cannot_escape_its_owning_scope() {
 }
 
 #[test]
+fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed() {
+    assert_eq!(run(r#"
+        fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+            where F: Fn<(Y), Output = i64> {
+            handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
+        }
+        pub fn main() -> i64 {
+            let value = 21;
+            let reference = &mut value;
+            let observed = visit(reference is selected) { *(*selected) };
+            *reference = 21;
+            observed + *reference
+        }
+    "#), 42);
+    assert_eq!(run(r#"
+        struct Owner { value: i64 }
+        fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+            where F: Fn<(Y), Output = i64> {
+            handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
+        }
+        pub fn main() -> i64 {
+            let owner = Owner { value: 21 };
+            let reference = &mut owner;
+            let observed = visit(*reference is Owner { value: selected }) { selected };
+            (*reference).value = 21;
+            observed + reference.value
+        }
+    "#), 42);
+}
+
+#[test]
+fn a_live_observational_pack_suspends_its_unique_reference_subject() {
+    let outcome = compile(r#"
+        fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+            where F: Fn<(Y), Output = i64> {
+            handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
+        }
+        pub fn main() -> i64 {
+            let value = 42;
+            let reference = &mut value;
+            let test = reference is selected;
+            *reference = 100;
+            visit(test) { *(*selected) }
+        }
+    "#);
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+        panic!("a unique reference remained writable while its observational pack was live");
+    };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"), "{diagnostics:#?}");
+    assert_eq!(run(r#"
+        fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+            where F: Fn<(Y), Output = i64> {
+            handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
+        }
+        pub fn main() -> i64 {
+            let value = 42;
+            let reference = &mut value;
+            let test = reference is selected;
+            let observed = *reference;
+            visit(test) { *(*selected) } + observed
+        }
+    "#), 84);
+}
+
+#[test]
+fn hidden_refinement_arguments_do_not_grant_unique_access() {
+    for action in ["let child = &mut *(*selected); ()", "*(*selected) = 100"] {
+        let outcome = compile(&format!(r#"
+            enum Holder<'a> {{ Held(&'a mut i64), Empty }}
+            fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+                where F: Fn<(Y), Output = i64> {{
+                handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
+            }}
+            pub fn main() -> i64 {{
+                let value = 42;
+                let holder = Holder::Held(&mut value);
+                visit(holder is Holder::Held(selected)) {{ {action}; 0 }}
+            }}
+        "#));
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+            panic!("a hidden observational argument granted unique access");
+        };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4141"), "{diagnostics:#?}");
+    }
+}
+
+#[test]
 fn an_observational_refinement_cannot_recover_unique_access() {
     for action in ["let child = &mut *(*selected); ()", "*(*selected) = 100"] {
         let outcome = compile(&format!(r#"
             enum Holder<'a> {{ Held(&'a mut i64), Empty }}
+            fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+                where F: Fn<(Y), Output = i64> {{
+                handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
+            }}
             pub fn main() -> i64 {{
                 let value = 42;
                 let holder = Holder::Held(&mut value);
-                handle holder is Holder::Held(selected) {{ true => {{ {action}; () }}, false => () }};
+                let reference = &holder;
+                visit(*reference is Holder::Held(selected)) {{ {action}; 0 }};
                 0
             }}
         "#));
@@ -1350,21 +1496,51 @@ fn an_observational_refinement_cannot_recover_unique_access() {
 }
 
 #[test]
+fn copying_a_closure_capture_cannot_bypass_a_unique_field_loan() {
+    let outcome = compile(r#"
+        struct Pair { left: i64, right: i64 }
+        pub fn main() -> i64 {
+            let owner = Pair { left: 1, right: 2 };
+            let loan = &mut owner.left;
+            let delayed = (ignored: i64) -> i64 { owner.left + owner.right };
+            *loan = 40;
+            delayed(0)
+        }
+    "#);
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
+        panic!("an owned closure copy bypassed a live unique field loan");
+    };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5008"), "{diagnostics:#?}");
+    assert_eq!(run(r#"
+        struct Pair { left: i64, right: i64 }
+        pub fn main() -> i64 {
+            let owner = Pair { left: 1, right: 2 };
+            let loan = &mut owner.left;
+            *loan = 40;
+            let delayed = (ignored: i64) -> i64 { owner.left + owner.right };
+            delayed(0)
+        }
+    "#), 42);
+}
+
+#[test]
 fn a_live_refinement_view_protects_its_source_place() {
     for (action, code) in [
         ("let moved = owner", "G5004"),
-        ("owner.field = Owner { value: 100 }", "G5007"),
+        ("owner.field = Owner { value: 100 }", "G5006"),
     ] {
         let outcome = compile(&format!(r#"
             struct Owner {{ value: i64 }}
             impl Use<[0, 1]> for Owner {{}}
             struct Pair {{ field: Owner }}
             fn inspect(value: &Owner) -> i64 {{ value.value }}
+            fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
+                where F: Fn<(Y), Output = i64> {{
+                handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
+            }}
             pub fn main() -> i64 {{
                 let owner = Pair {{ field: Owner {{ value: 42 }} }};
-                handle owner is Pair {{ field: selected }} {{
-                    true => {{ {action}; inspect(selected) }}, false => 0
-                }}
+                visit(owner is Pair {{ field: selected }}) {{ {action}; inspect(selected) }}
             }}
         "#));
         let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {

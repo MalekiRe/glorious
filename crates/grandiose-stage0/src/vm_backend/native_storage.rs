@@ -3,6 +3,7 @@
 //! the separate state records only initialization and checked-reference origins.
 
 use super::native_memory::{NativeLayout, NativeReference, NativeShape};
+use super::native_profile::{AllocationKind, NativeAllocation, NativeMemoryMeasurements};
 use super::{
     ExecutionBudget, ReferenceTarget, VmArtifactError, VmFunction, VmInstruction,
     VmNominalCopyDescriptor, VmType, VmValue,
@@ -801,7 +802,7 @@ struct Initialization {
 /// the home; outstanding runtime references cannot read a cleared resident.
 #[derive(Debug)]
 pub(super) struct NativeHome {
-    allocation: RefCell<Option<RawAllocation>>,
+    allocation: RefCell<Option<NativeAllocation>>,
     pointer: *mut u8,
     live: Cell<bool>,
     external: bool,
@@ -809,6 +810,7 @@ pub(super) struct NativeHome {
     state: RefCell<Initialization>,
     address_exposed: Cell<bool>,
     live_bytes: Rc<Cell<usize>>,
+    measurements: Option<Rc<NativeMemoryMeasurements>>,
     registry: HomeRegistry,
 }
 
@@ -834,6 +836,10 @@ impl NativeHome {
             usize::try_from(available).unwrap_or(usize::MAX),
         )
         .map_err(super::native_memory::memory_error)?;
+        // Track immediately: a later logical-budget rejection still allocated
+        // and then released these bytes. The owner handles both return paths.
+        let allocation = NativeAllocation::new(allocation,
+            budget.native_memory.measurements.clone(), AllocationKind::Home);
         budget.reserve_value("native storage home", 1)?;
         let live_bytes = budget.native_memory.home_bytes.clone();
         live_bytes.set(
@@ -851,6 +857,7 @@ impl NativeHome {
             state: RefCell::new(Initialization::default()),
             address_exposed: Cell::new(false),
             live_bytes,
+            measurements: budget.native_memory.measurements.clone(),
             registry: budget.native_memory.homes.clone(),
         });
         if bytes != 0 {
@@ -888,6 +895,7 @@ impl NativeHome {
             state: RefCell::new(Initialization::default()),
             address_exposed: Cell::new(true),
             live_bytes: budget.native_memory.home_bytes.clone(),
+            measurements: budget.native_memory.measurements.clone(),
             registry: budget.native_memory.homes.clone(),
         });
         unsafe {
@@ -990,7 +998,9 @@ impl NativeHome {
     pub(super) fn retire(&self) {
         self.clear(&[]);
         self.live.set(false);
-        if self.allocation.borrow_mut().take().is_some() {
+        let allocation = self.allocation.borrow_mut().take();
+        if let Some(allocation) = allocation {
+            drop(allocation);
             self.live_bytes
                 .set(self.live_bytes.get() - self.layout.memory.size());
             if self.layout.memory.size() != 0 {
@@ -1021,6 +1031,9 @@ impl NativeHome {
         }
         unsafe {
             std::ptr::copy(self.pointer(), destination, self.layout.memory.size());
+        }
+        if let Some(measurements) = &self.measurements {
+            measurements.copied(AllocationKind::Home, self.layout.memory.size());
         }
         Ok(())
     }
@@ -1397,6 +1410,9 @@ impl NativeHome {
                     unsafe {
                         std::ptr::copy(source.pointer(), pointer, layout.memory.size());
                     }
+                    if let Some(measurements) = &self.measurements {
+                        measurements.copied(AllocationKind::Home, layout.memory.size());
+                    }
                     *self.state.borrow_mut() = source.state.borrow().clone();
                 }
                 return Ok(());
@@ -1433,6 +1449,9 @@ impl NativeHome {
             let origin = source.state.borrow().clone();
             unsafe {
                 std::ptr::copy(source_pointer, pointer, layout.memory.size());
+            }
+            if let Some(measurements) = &self.measurements {
+                measurements.copied(AllocationKind::Home, layout.memory.size());
             }
             let mut state = self.state.borrow_mut();
             let prefixed =
@@ -1670,6 +1689,139 @@ mod tests {
             instructions: 0,
             allocated_elements: 0,
         }
+    }
+
+    #[test]
+    fn native_owner_move_transfers_only_unique_unexposed_vacant_homes() {
+        use super::super::RuntimeRegisters;
+        for mode in ["vacant", "exposed", "shared", "destination"] {
+            let mut budget = budget(if mode == "vacant" { 16 } else { 32 });
+            budget.native_memory = super::super::native_memory::NativeMemory::profiled();
+            let measurements = budget.native_memory.measurements.clone().unwrap();
+            let tuple = VmType::Tuple(vec![VmType::I64, VmType::I64]);
+            let reference = VmType::Reference { unique: false, referent: Box::new(tuple.clone()) };
+            let function = VmFunction {
+                definition: crate::DefKey(crate::Digest::of_bytes(b"native-owner-move")),
+                safety: crate::Safety::Safe, unsafe_execution: false,
+                nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+                registers: vec![tuple.clone(), tuple, reference.clone(), reference],
+                // Demand native storage for both slots. We exercise the move
+                // directly; an actual borrow is introduced only in its case.
+                instructions: vec![
+                    VmInstruction::Borrow { dst: 2, src: 0, fields: vec![], unique: false, reborrow: false },
+                    VmInstruction::Borrow { dst: 3, src: 1, fields: vec![], unique: false, reborrow: false },
+                ],
+            };
+            let mut registers = RuntimeRegisters::for_function(&function, &mut budget).unwrap();
+            let value = VmValue::Tuple(vec![VmValue::I64(19), VmValue::I64(23)].into());
+            registers.values[0] = Some(registers.materialize_native(0, &value, &mut budget).unwrap());
+            let source_pointer = registers.native_homes[&0].pointer();
+            if mode == "exposed" { registers.native_homes[&0].expose_address(); }
+            let shared = (mode == "shared").then(|| registers.native_homes[&0].clone());
+            let destination = (mode == "destination").then(|| {
+                registers.native_home(1, &mut budget).unwrap().pointer()
+            });
+            registers.move_into(1, 0, &mut budget).unwrap();
+            registers.native_write(1);
+            registers.finish_native_writes(&mut budget).unwrap();
+            assert!(registers.values[0].is_none());
+            let moved = registers.native_homes[&1].load(&[], &mut budget).unwrap();
+            assert_eq!(super::super::expect_tuple_i64(moved).unwrap(), [19, 23]);
+            let profile = measurements.snapshot();
+            if mode == "vacant" {
+                assert_eq!(registers.native_homes[&1].pointer(), source_pointer);
+                assert_eq!((profile.home_allocations, profile.home_deallocations, profile.home_peak_bytes), (1, 0, 16));
+                assert_eq!(profile.home_bulk_copy_bytes, 0);
+            } else {
+                assert_ne!(registers.native_homes[&1].pointer(), source_pointer);
+                assert_eq!(profile.home_allocations, 2);
+                assert_eq!(profile.home_bulk_copy_bytes, 16);
+                if let Some(destination) = destination {
+                    assert_eq!(registers.native_homes[&1].pointer(), destination);
+                }
+                if mode == "exposed" {
+                    assert_eq!(registers.native_homes[&0].pointer(), source_pointer);
+                    assert_eq!(profile.home_deallocations, 0);
+                }
+            }
+            drop(registers);
+            drop(shared);
+            let final_profile = measurements.snapshot();
+            assert_eq!(final_profile.home_live_bytes, 0);
+            assert_eq!(final_profile.home_allocations, final_profile.home_deallocations);
+        }
+    }
+
+    #[test]
+    fn native_profile_counts_rejected_temporary_homes_and_one_shot_retirement() {
+        let mut budget = budget(16);
+        budget.native_memory = super::super::native_memory::NativeMemory::profiled();
+        budget.limits.max_allocation_elements = 0;
+        let measurements = budget.native_memory.measurements.clone().unwrap();
+        let layout = Arc::new(super::super::native_memory::native_layout(
+            &VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        assert!(NativeHome::new(layout.clone(), &mut budget).is_err());
+        let temporary = measurements.snapshot();
+        assert_eq!((temporary.home_allocations, temporary.home_deallocations), (1, 1));
+        assert_eq!((temporary.home_live_bytes, temporary.home_peak_bytes), (0, 8));
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
+        let too_large = Arc::new(super::super::native_memory::native_layout(
+            &VmType::Tuple(vec![VmType::I64; 3]), &Arc::from([]), &mut vec![]).unwrap());
+        assert!(NativeHome::new(too_large, &mut budget).is_err());
+        assert_eq!(measurements.snapshot(), temporary, "byte admission rejected before allocation");
+
+        budget.limits.max_allocation_elements = 100;
+        let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        let stale = home.clone();
+        home.retire();
+        let retired = measurements.snapshot();
+        assert_eq!((retired.home_allocations, retired.home_deallocations), (2, 2));
+        home.retire();
+        drop(home);
+        drop(stale);
+        assert_eq!(measurements.snapshot(), retired);
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
+
+        let unit = Arc::new(super::super::native_memory::native_layout(
+            &VmType::Unit, &Arc::from([]), &mut vec![]).unwrap());
+        drop(NativeHome::new(unit, &mut budget).unwrap());
+        let mut native = 42i64;
+        // SAFETY: this initialized local outlives the synchronous external view.
+        let external = unsafe { NativeHome::external_argument(layout, (&raw mut native).cast(), &mut budget) }.unwrap();
+        external.retire();
+        drop(external);
+        assert_eq!(native, 42);
+        assert_eq!(measurements.snapshot(), retired, "zero-size and external storage acquire no backing bytes");
+    }
+
+    #[test]
+    fn native_profile_counts_bulk_home_transfers_and_exports_not_scalar_stores() {
+        let mut budget = budget(64);
+        budget.native_memory = super::super::native_memory::NativeMemory::profiled();
+        let measurements = budget.native_memory.measurements.clone().unwrap();
+        let layout = Arc::new(super::super::native_memory::native_layout(
+            &VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let source = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        source.store(&[], &VmValue::I64(42), &mut budget).unwrap();
+        assert_eq!(measurements.snapshot().home_bulk_copy_bytes, 0);
+        let destination = NativeHome::new(layout, &mut budget).unwrap();
+        destination.store(&[], &VmValue::Resident(source.clone()), &mut budget).unwrap();
+        assert_eq!(measurements.snapshot().home_bulk_copy_bytes, 8);
+        destination.store(&[], &VmValue::Resident(destination.clone()), &mut budget).unwrap();
+        assert_eq!(measurements.snapshot().home_bulk_copy_bytes, 8, "self store has no bulk copy");
+        let tuple = Arc::new(super::super::native_memory::native_layout(
+            &VmType::Tuple(vec![VmType::I64; 2]), &Arc::from([]), &mut vec![]).unwrap());
+        let tuple = NativeHome::new(tuple, &mut budget).unwrap();
+        tuple.store(&[], &VmValue::Tuple(vec![VmValue::Resident(source), VmValue::I64(19)].into()), &mut budget).unwrap();
+        assert_eq!(measurements.snapshot().home_bulk_copy_bytes, 16);
+        let mut output = std::mem::MaybeUninit::<[i64; 2]>::uninit();
+        // SAFETY: two aligned i64 slots exactly match the complete tuple layout.
+        unsafe { tuple.write_bytes(output.as_mut_ptr().cast()).unwrap(); }
+        assert_eq!(unsafe { output.assume_init() }, [42, 19]);
+        assert_eq!(measurements.snapshot().home_bulk_copy_bytes, 32);
+        tuple.clear(&[0]);
+        assert!(unsafe { tuple.write_bytes(output.as_mut_ptr().cast()) }.is_err());
+        assert_eq!(measurements.snapshot().home_bulk_copy_bytes, 32, "rejected exports copy nothing");
     }
 
     #[test]

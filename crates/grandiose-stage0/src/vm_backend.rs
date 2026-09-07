@@ -31,14 +31,17 @@ use crate::{
 use crate::MemoryPrimitive;
 
 mod native_memory;
+mod native_profile;
 mod native_bridge;
 mod native_storage;
 mod replay;
+mod coverage;
 pub use native_bridge::{
     VmNativeAbi, VmNativeCall, VmNativeCallback, VmNativeImport, VmNativeImports,
     VmNativeLayout, VmNativeLayoutField, VmNativeLayoutShape, VmNativeResidentContract, VmNativeStatus,
 };
 use native_memory::{NativeMemory, NativeReference, execute_memory_intrinsic};
+pub use native_profile::VmNativeMemoryProfile;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmType {
@@ -1976,7 +1979,8 @@ impl VmHost for SystemVmHost {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmExecutionLimits {
-    /// Live raw allocation bytes, separate from logical register/element charges.
+    /// Live raw-buffer + native-home backing bytes, separate from logical
+    /// register/element charges. This is not allocator overhead or RSS.
     pub max_native_bytes: u64,
     pub max_native_allocation_bytes: u64,
     pub max_call_depth: u32,
@@ -1990,8 +1994,9 @@ pub struct VmExecutionLimits {
     pub max_allocation_elements: u64,
 }
 
-/// Authoring-runtime measurements, not compiler semantic counters. Allocation
-/// charges are logical VM-budget counts, not a Rust allocator census.
+/// Authoring-runtime measurements, not compiler semantic counters. Logical
+/// VM-budget charges and observed native backing extents are separate; neither
+/// is a Rust allocator census.
 /// The opt-in authoring runner can recycle caller-preserving self-tail calls
 /// and reuse cleared register buffers from normally returned callees;
 /// ordinary execution retains its existing call-depth behavior.
@@ -2003,6 +2008,7 @@ pub struct VmAuthoringProfile {
     pub recycled_tail_calls: u64,
     pub reused_call_register_buffers: u64,
     pub inspected_tail_argument_elements: u64,
+    pub native_memory: VmNativeMemoryProfile,
 }
 impl Default for VmExecutionLimits {
     fn default() -> Self {
@@ -2568,7 +2574,7 @@ impl VerifiedVmProgram {
         unsafe_execution: bool,
     ) -> Result<(VmValue, VmAuthoringProfile), VmArtifactError> {
         let mut budget = ExecutionBudget {
-            native_memory: NativeMemory::default(),
+            native_memory: NativeMemory::profiled(),
             unsafe_execution,
             limits,
             instructions: 0,
@@ -2589,6 +2595,8 @@ impl VerifiedVmProgram {
         )?;
         profile.work_ticks = budget.instructions;
         profile.charged_allocation_elements = budget.allocated_elements;
+        profile.native_memory = budget.native_memory.measurements.as_ref()
+            .expect("authoring execution owns native measurements").snapshot();
         Ok((result, profile))
     }
     pub fn run_i64(&self) -> Result<i64, VmArtifactError> {
@@ -8131,6 +8139,9 @@ fn compare_char(dst: u32, left: u32, right: u32, op: VmCompare) -> VmInstruction
     }
 }
 fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifactError> {
+    if !matches!(pattern, VmPattern::Any) && let VmType::Reference { referent, .. } = subject {
+        return verify_pattern(pattern, referent);
+    }
     match pattern {
         VmPattern::Any => Ok(()),
         VmPattern::Literal(value) => {
@@ -8283,6 +8294,8 @@ struct VerifierHandlerFrame {
     owned_payloads: bool,
     /// None while active, false while testing a packet, true after its claim.
     payload_claim: Option<bool>,
+    payload_domain: Option<coverage::Domain>,
+    payload_probe: Option<(u32, usize, VmPattern)>,
     /// A verifier join can represent several concrete one-shot suspensions
     /// reaching one shared handler body. Runtime execution has exactly one.
     continuations: Vec<VerifierContinuation>,
@@ -8603,13 +8616,50 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
     // a function has no return edge, but it is still a complete control-flow
     // graph and must not be rejected as a malformed fallthrough.
     let mut trapped = false;
-    while let Some(pc) = worklist.pop() {
+    let mut terminal_audits = Vec::<(u32, VerifierState)>::new();
+    loop {
+        let pc = if let Some(pc) = worklist.pop() { pc } else {
+            // Unreachable declared terminal entries still need an authority
+            // audit. Do not seed already-reachable dispatch entries with an
+            // unconstrained packet from the earlier installation point.
+            let Some((target, audit)) = terminal_audits.iter().find(|(target, _)| incoming[*target as usize].is_none()) else { break; };
+            propagate_state(&mut incoming, &mut worklist, *target, audit)?;
+            continue;
+        };
         let mut states = incoming[pc].clone().expect("scheduled verifier state");
         let mut advances = true;
         let instruction = &function.instructions[pc];
         if states.handlers.last().is_some_and(|frame| frame.payload_claim == Some(false))
             && !allowed_before_payload_claim(instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
+        }
+        // First-class resumptions use the ordinary callable ABI, but select
+        // the captured activation rather than the newest installed handler.
+        let captured_call = match instruction {
+            VmInstruction::CallIndirect { dst, callee, arguments }
+            | VmInstruction::CallIndirectOwned { dst, callee, arguments }
+                if states.resumptions.get(*callee as usize) == Some(&true) => {
+                read(&states, *callee)?;
+                let [value] = arguments.as_slice() else { return Err(VmArtifactError::CallArity { expected: 1, found: arguments.len() as u32 }); };
+                let frame = states.snapshots[*callee as usize].ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let index = states.handlers.iter().rposition(|handler| handler.id == frame)
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let VmType::Callable { safety: Safety::Safe, parameters, result, .. } = register_type(function, *callee)? else {
+                    return Err(VmArtifactError::NotCallable { register: *callee });
+                };
+                if parameters.len() != 1 { return Err(VmArtifactError::CallArity { expected: 1, found: parameters.len() as u32 }); }
+                expect_type(function, *value, parameters[0].clone())?;
+                expect_type(function, *dst, *result)?;
+                Some((VmInstruction::ResumeReturn { dst: *dst, value: *value }, index))
+            }
+            _ => None,
+        };
+        let resumption_index = captured_call.as_ref().map(|(_, index)| *index);
+        let resumption_consumes = instruction.consumed_arguments().is_some();
+        let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
+        if let VmInstruction::Call { dst, arguments, .. } | VmInstruction::CallOwned { dst, arguments, .. }
+            | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. } = instruction {
+            seed_terminal_call_handlers(function, pc, *dst, arguments, resumption_consumes, &states, &mut incoming, &mut worklist)?;
         }
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {
@@ -9544,7 +9594,12 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 }
                 expect_type(function, *dst, VmType::Bool)?;
                 verify_pattern(pattern, &register_type(function, *subject)?)?;
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                if let Some(frame) = states.handlers.last_mut()
+                    && frame.payload_claim == Some(false)
+                    && let Some(column) = frame.payload_destinations.iter().position(|payload| payload == subject) {
+                    frame.payload_probe = Some((*dst, column, pattern.clone()));
+                }
             }
             VmInstruction::PerformOwned {
                 dst,
@@ -9610,6 +9665,8 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                         }
                     }
                     states.handlers[index].payload_claim = owned_payloads.then_some(false);
+                    states.handlers[index].payload_domain = if owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
+                    states.handlers[index].payload_probe = None;
                     states.handlers[index].continuations = vec![VerifierContinuation {
                         target: (pc + 1) as u32,
                         dst: *dst,
@@ -9644,6 +9701,8 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 frame.payload_claim = Some(true);
+                frame.payload_domain = None;
+                frame.payload_probe = None;
                 for payload in payloads {
                     if states.registers[*payload as usize] != Some(false) { return Err(VmArtifactError::HandlerStateMismatch); }
                     let origins = states.reference_origins[*payload as usize].clone();
@@ -9718,25 +9777,25 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     target: *target,
                     owned_payloads: matches!(instruction, VmInstruction::InstallHandlerOwned { .. }),
                     payload_claim: None,
+                    payload_domain: None,
+                    payload_probe: None,
                     continuations: Vec::new(),
                 });
                 if *continuation == VmContinuationPolicy::Terminal {
-                    // A terminal performance may happen in an ordinary callee
-                    // rather than in this function's visible CFG. Model that
-                    // exceptional transfer with initialized payload registers
-                    // so the terminal target and its mandatory cancellation
-                    // are verified even though the normal call edge cannot
-                    // return successfully.
-                    let mut terminal = states.clone();
-                    for destination in payload_destinations {
-                        write(&mut terminal, *destination)?;
+                    let mut audit = states.clone();
+                    for payload in payload_destinations {
+                        write(&mut audit, *payload)?;
                         if matches!(instruction, VmInstruction::InstallHandlerOwned { .. }) {
-                            terminal.registers[*destination as usize] = Some(false);
+                            audit.registers[*payload as usize] = Some(false);
                         }
                     }
-                    terminal.handlers.last_mut().unwrap().payload_claim =
+                    audit.handlers.last_mut().unwrap().payload_claim =
                         matches!(instruction, VmInstruction::InstallHandlerOwned { .. }).then_some(false);
-                    propagate_state(&mut incoming, &mut worklist, *target, &terminal)?;
+                    audit.handlers.last_mut().unwrap().payload_domain =
+                        if matches!(instruction, VmInstruction::InstallHandlerOwned { .. }) { coverage::packet(function, payload_destinations) } else { None };
+                    if !terminal_audits.iter().any(|(entry, state)| entry == target && state == &audit) {
+                        terminal_audits.push((*target, audit));
+                    }
                 }
             }
             VmInstruction::CompleteHandler { value } => {
@@ -9831,7 +9890,9 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
             }
             VmInstruction::ResumeReturn { dst, value } => {
                 read(&states, *value)?;
-                let Some(frame) = states.handlers.last() else {
+                let index = resumption_index.or_else(|| states.handlers.len().checked_sub(1))
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let Some(frame) = states.handlers.get(index) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 if frame.continuation == VmContinuationPolicy::Terminal
@@ -9855,11 +9916,13 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 // The destination ABI is checked at the completion boundary,
                 // not against the operation parameter or enclosing function.
                 let result = register_type(function, *dst)?;
-                if frame.owned_payloads {
+                if frame.owned_payloads || resumption_consumes {
                     states.registers[*value as usize] = Some(false);
                 }
                 let resumption_return_result = vec![(frame.id, result)];
-                let mut resumed_handlers = states.handlers.clone();
+                let mut resumed_handlers = states.handlers[..index].to_vec();
+                resumed_handlers.extend_from_slice(&states.handlers[index + 1..]);
+                resumed_handlers.push(states.handlers[index].clone());
                 resumed_handlers.last_mut().unwrap().payload_claim = None;
                 resumed_handlers
                     .last_mut()
@@ -9885,8 +9948,8 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 };
                 write(&mut resumed, continuation.dst)?;
                 propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
-                if states.handlers.last().is_some_and(|frame| frame.continuation == VmContinuationPolicy::Consume) {
-                    states.handlers.last_mut().expect("checked handler exists").continuations.clear();
+                if states.handlers[index].continuation == VmContinuationPolicy::Consume {
+                    states.handlers[index].continuations.clear();
                 }
                 write(&mut states, *dst)?;
             }
@@ -10069,6 +10132,8 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                         }
                     }
                     forwarded.handlers[index].payload_claim = outer.owned_payloads.then_some(false);
+                    forwarded.handlers[index].payload_domain = declined.payload_domain.clone();
+                    forwarded.handlers[index].payload_probe = None;
                     let declined_active = declined.clone();
                     crossed.push(declined_active);
                     crossed.extend(continuation.above.clone());
@@ -10811,8 +10876,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     then_states[*base as usize] = Some(true);
                     if fields.is_empty() { else_states[*base as usize] = Some(false); }
                 }
-                propagate_state(&mut incoming, &mut worklist, *then_target, &then_states)?;
-                propagate_state(&mut incoming, &mut worklist, *else_target, &else_states)?;
+                for (outcome, target, mut branch) in [(true, *then_target, then_states), (false, *else_target, else_states)] {
+                    if let Some(frame) = branch.handlers.last_mut()
+                        && frame.payload_claim == Some(false)
+                        && let Some((probe, column, pattern)) = &frame.payload_probe
+                        && probe == condition
+                        && let Some(domain) = &mut frame.payload_domain {
+                        coverage::refine(domain, *column, pattern, outcome);
+                        if domain.is_empty() { continue; }
+                    }
+                    propagate_state(&mut incoming, &mut worklist, target, &branch)?;
+                }
                 advances = false;
             }
             VmInstruction::Return { value } => {
@@ -11292,6 +11366,52 @@ fn propagate_state(
         }
     }
 }
+/// A callee can perform terminal effects. Seed first-match dispatch at the
+/// call boundary, after all currently active handlers have been installed.
+fn seed_terminal_call_handlers(
+    function: &VmFunction, pc: usize, dst: u32, arguments: &[u32], consumes: bool,
+    states: &VerifierState, incoming: &mut [Option<VerifierState>], worklist: &mut Vec<usize>,
+) -> Result<(), VmArtifactError> {
+    let mut seen = Vec::new();
+    for (index, frame) in states.handlers.iter().enumerate().rev() {
+        if !frame.continuations.is_empty() { continue; }
+        let key = (frame.effect, frame.effect_arguments.clone(), frame.operation);
+        if seen.contains(&key) { continue; }
+        seen.push(key);
+        if frame.continuation != VmContinuationPolicy::Terminal { continue; }
+        let mut terminal = states.clone();
+        for argument in arguments {
+            read(&terminal, *argument)?;
+            if consumes {
+                let slot = *argument as usize;
+                terminal.registers[slot] = Some(false);
+                terminal.reference_origins[slot].clear();
+                terminal.snapshots[slot] = None;
+                terminal.labels[slot] = false;
+                terminal.resumptions[slot] = false;
+            }
+        }
+        let above = terminal.handlers.split_off(index + 1);
+        for payload in &frame.payload_destinations {
+            write(&mut terminal, *payload)?;
+            if frame.owned_payloads { terminal.registers[*payload as usize] = Some(false); }
+        }
+        terminal.handlers[index].payload_claim = frame.owned_payloads.then_some(false);
+        terminal.handlers[index].payload_domain = if frame.owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
+        terminal.handlers[index].payload_probe = None;
+        terminal.handlers[index].continuations = vec![VerifierContinuation {
+            target: (pc + 1) as u32, dst, registers: terminal.registers.clone(),
+            storage_live: terminal.storage_live.clone(), reference_origins: terminal.reference_origins.clone(),
+            snapshots: terminal.snapshots.clone(), labels: terminal.labels.clone(), resumptions: terminal.resumptions.clone(),
+            performed: VerifierPerformed { effect: frame.effect, effect_arguments: frame.effect_arguments.clone(),
+                operation: frame.operation, arguments: frame.payload_destinations.clone() },
+            above, pending_leave: terminal.pending_leave.clone(),
+        }];
+        propagate_state(incoming, worklist, frame.target, &terminal)?;
+    }
+    Ok(())
+}
+
 fn merge_handler_states(
     existing: &mut [VerifierHandlerFrame],
     incoming: &[VerifierHandlerFrame],
@@ -11318,6 +11438,10 @@ fn merge_handler_states(
                 left.continuations.push(continuation.clone());
                 changed = true;
             }
+        }
+        changed |= coverage::merge(&mut left.payload_domain, &right.payload_domain);
+        if left.payload_probe != right.payload_probe && left.payload_probe.take().is_some() {
+            changed = true;
         }
         left.continuations.sort_by_key(|continuation| {
             (
@@ -11353,6 +11477,16 @@ fn validate_vm_nominal_copy_descriptors(
 ) -> Result<(), VmArtifactError> {
     let mut previous_key: Option<Vec<u8>> = None;
     for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.definition == crate::refinement::bindings_definition() {
+            let ty = VmType::Nominal { definition: descriptor.definition, arguments: descriptor.arguments.clone() };
+            let fields = crate::refinement::vm_binding_pack_fields(&ty).ok_or(VmArtifactError::MalformedEncoding {
+                message: "binding pack has no canonical environment layout",
+            })?;
+            if descriptor.is_enum || descriptor.variants.as_slice() != [fields.to_vec()]
+                || descriptor.source_contract != crate::refinement::bindings_layout_contract() {
+                return Err(VmArtifactError::MalformedEncoding { message: "binding pack layout disagrees with its sealed environment" });
+            }
+        }
         let key = vm_nominal_copy_descriptor_key(descriptor);
         if descriptor.variants.is_empty()
             || (!descriptor.is_enum && descriptor.variants.len() != 1)
@@ -11641,6 +11775,11 @@ fn same_type(function: &VmFunction, destination: u32, source: u32) -> Result<(),
 }
 
 fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactError> {
+    for frame in &mut states.handlers {
+        if frame.payload_probe.as_ref().is_some_and(|(probe, _, _)| *probe == register) {
+            frame.payload_probe = None;
+        }
+    }
     let index = register as usize;
     let storage_live = *states
         .storage_live
@@ -11755,8 +11894,8 @@ enum VmValue {
         handler_depth: usize,
         signature: VmType,
     },
-    /// A frame-branded callable token. Only `ResumeSnapshot` may consume it;
-    /// ordinary indirect calls reject it.
+    /// A frame-branded callable token. Returning indirect calls and terminal
+    /// `ResumeSnapshot` transfers both resolve this exact activation.
     Resumption {
         frame: u64,
         signature: VmType,
@@ -12022,6 +12161,24 @@ impl RuntimeRegisters {
         if dst == src { return Ok(()); }
         let value = self.values[src as usize].take().ok_or(VmArtifactError::UseAfterMove { register: src })?;
         let value = if let VmValue::Resident(home) = &value {
+            // A uniquely owned, never-exposed temporary has no address
+            // identity to preserve. Transfer its backing to an as-yet-vacant
+            // destination instead of allocating a second block just to move
+            // its bytes. The two strong owners are this value and the source
+            // home table; references, captures, or continuation snapshots
+            // conservatively keep the ordinary copy/retirement path.
+            if !home.address_was_exposed()
+                && Arc::strong_count(home) == 2
+                && self.native_homes.get(&src).is_some_and(|owner| Arc::ptr_eq(owner, home))
+                && !self.native_homes.contains_key(&dst)
+                && self.native_plan.as_ref().and_then(|plan| plan.layouts[dst as usize].as_ref())
+                    .is_some_and(|layout| layout.ty == home.layout.ty)
+            {
+                let owner = self.native_homes.remove(&src).expect("checked source owner");
+                self.native_homes.insert(dst, owner);
+                self.values[dst as usize] = Some(value);
+                return Ok(());
+            }
             let moved = if self.native_plan.as_ref().is_some_and(|plan| plan.layouts[dst as usize].is_some()) {
                 let moved = self.materialize_native(dst, &value, budget)?;
                 home.clear(&[]); moved
@@ -12141,6 +12298,8 @@ fn synchronize_saved_source_storage(
 struct RuntimeResumptionReturn {
     pc: usize,
     dst: u32,
+    /// The captured delimiter may precede newer call-site handlers.
+    handler_id: u64,
     registers: RuntimeRegisters,
     handlers: Vec<RuntimeHandlerFrame>,
     /// A replayed continuation can cross ordinary calls. Restoring only its
@@ -13989,6 +14148,20 @@ fn expect_bool(value: impl Borrow<VmValue>) -> Result<bool, VmArtifactError> {
         }),
     }
 }
+
+fn returning_resumption_call(
+    instruction: &VmInstruction,
+    registers: &RuntimeRegisters,
+) -> Result<Option<(VmInstruction, u64)>, VmArtifactError> {
+    let (dst, callee, arguments) = match instruction {
+        VmInstruction::CallIndirect { dst, callee, arguments }
+        | VmInstruction::CallIndirectOwned { dst, callee, arguments } => (*dst, *callee, arguments),
+        _ => return Ok(None),
+    };
+    let Some(Some(VmValue::Resumption { frame, .. })) = registers.values.get(callee as usize) else { return Ok(None); };
+    let [value] = arguments.as_slice() else { return Err(VmArtifactError::CallArity { expected: 1, found: arguments.len() as u32 }); };
+    Ok(Some((VmInstruction::ResumeReturn { dst, value: *value }, *frame)))
+}
 fn expect_char(value: impl Borrow<VmValue>) -> Result<char, VmArtifactError> {
     match value.borrow() {
         VmValue::Resident(home) => expect_char(home.scalar_value()?),
@@ -14146,9 +14319,18 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
     }
 }
 
-fn matches_runtime_pattern(value: &VmValue, pattern: &VmPattern, budget: &mut ExecutionBudget) -> Result<bool, VmArtifactError> {
+fn matches_runtime_pattern(value: &VmValue, pattern: &VmPattern,
+    registers: &[Option<VmValue>], callers: &[RuntimeProgramCaller],
+    budget: &mut ExecutionBudget) -> Result<bool, VmArtifactError> {
+    if matches!(pattern, VmPattern::Any) { return Ok(true); }
     match value {
         VmValue::Resident(home) => home.matches_pattern(&mut vec![], pattern, budget),
+        VmValue::Reference { target: ReferenceTarget::Home(home), fields, .. } =>
+            home.matches_pattern(&mut fields.to_vec(), pattern, budget),
+        VmValue::Reference { target, fields, .. } => {
+            let value = load_reference_target(registers, callers, target, fields, budget)?;
+            matches_runtime_pattern(&value, pattern, registers, callers, budget)
+        }
         _ => Ok(matches_pattern(value, pattern)),
     }
 }
@@ -14564,6 +14746,10 @@ fn execute(
             && !allowed_before_payload_claim(&instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
+        let captured_call = returning_resumption_call(&instruction, &registers)?;
+        let resumption_index = captured_call.as_ref().map(|(_, id)| handlers.iter().rposition(|frame| frame.id == *id)
+            .ok_or(VmArtifactError::HandlerResumeUnavailable)).transpose()?;
+        let instruction = captured_call.map_or(instruction, |(instruction, _)| instruction);
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
@@ -15321,7 +15507,7 @@ fn execute(
                     registers[subject as usize]
                         .as_ref()
                         .expect("verified register"),
-                    &pattern, budget,
+                    &pattern, &registers, &[], budget,
                 )?));
             }
             VmInstruction::PerformOwned {
@@ -15461,7 +15647,7 @@ fn execute(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if resumption_returns.last().is_some_and(|pending| {
-                    pending.handlers.last().is_some_and(|owner| owner.id == frame.id)
+                    pending.handler_id == frame.id
                 }) {
                     let result = registers.copy_value(value, budget)?;
                     let mut pending = resumption_returns.pop().expect("checked pending resumption");
@@ -15531,7 +15717,9 @@ fn execute(
             }
             VmInstruction::ResumeReturn { dst, value } => {
                 let resumed = registers.copy_value(value, budget)?;
-                let Some(frame) = handlers.last_mut() else {
+                let index = resumption_index.or_else(|| handlers.len().checked_sub(1))
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let Some(frame) = handlers.get_mut(index) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 if frame.continuation == VmContinuationPolicy::Terminal {
@@ -15553,7 +15741,7 @@ fn execute(
                 budget.reserve_allocation(registers.len())?;
                 // The clause snapshot must not retain the carrier just
                 // transferred to the resumed computation.
-                if frame.owned_payloads {
+                if frame.owned_payloads || consumes_arguments {
                     registers.retire_call_arguments(&[value]);
                 }
                 let RuntimeContinuation {
@@ -15568,7 +15756,10 @@ fn execute(
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
-                let resumed_handler_ids = handlers
+                let mut active_handlers = handlers[..index].to_vec();
+                active_handlers.extend_from_slice(&handlers[index + 1..]);
+                active_handlers.push(handlers[index].clone());
+                let resumed_handler_ids = active_handlers
                     .iter()
                     .map(|frame| frame.id)
                     .chain(above.iter().map(|frame| frame.id))
@@ -15576,7 +15767,7 @@ fn execute(
                 let mut return_handlers = handlers.clone();
                 if replaying {
                     return_handlers
-                        .last_mut()
+                        .get_mut(index)
                         .and_then(|frame| frame.suspended.as_mut())
                         .expect("checked suspended replay handler")
                         .remaining_replays -= 1;
@@ -15584,6 +15775,7 @@ fn execute(
                 resumption_returns.push(RuntimeResumptionReturn {
                     pc: pc + 1,
                     dst,
+                    handler_id: handlers[index].id,
                     registers: registers.clone(),
                     handlers: return_handlers,
                     program: None,
@@ -15592,6 +15784,7 @@ fn execute(
                 // The active execution gets a clean handler frame so its
                 // protected `UninstallHandler` can run. The clause snapshot
                 // above retains the suspended continuation for the next use.
+                handlers = active_handlers;
                 if replaying {
                     handlers.last_mut().expect("active frame exists").suspended = None;
                 }
@@ -17951,7 +18144,11 @@ fn tail_cleanup_suffix(
                 dst, subject, pattern: pattern @ VmPattern::Enum { fields, .. },
             } if fields.is_empty() => {
                 let Some(Value::Known(value)) = read(&values, registers, *subject) else { return Ok(false); };
-                let matched = matches_runtime_pattern(&value, pattern, budget)?;
+                // This optimization does not own the caller-reference
+                // coordinate system. Let normal execution inspect those
+                // borrowed subjects instead of speculating through them.
+                if matches!(value, VmValue::Reference { .. }) { return Ok(false); }
+                let matched = matches_runtime_pattern(&value, pattern, registers, &[], budget)?;
                 write(&mut values, *dst, Some(Value::Known(VmValue::Bool(matched))), budget)?;
             }
             VmInstruction::BranchBool { condition, then_target, else_target } => {
@@ -18265,6 +18462,10 @@ fn execute_program_profiled(
             && !allowed_before_payload_claim(instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
+        let captured_call = returning_resumption_call(instruction, &registers)?;
+        let resumption_index = captured_call.as_ref().map(|(_, id)| handlers.iter().rposition(|frame| frame.id == *id)
+            .ok_or(VmArtifactError::HandlerResumeUnavailable)).transpose()?;
+        let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
@@ -19030,7 +19231,7 @@ fn execute_program_profiled(
                     registers[*subject as usize]
                         .as_ref()
                         .expect("verified register"),
-                    pattern, budget,
+                    pattern, &registers, &callers, budget,
                 )?));
             }
             VmInstruction::PerformOwned {
@@ -19191,7 +19392,7 @@ fn execute_program_profiled(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if resumption_returns.last().is_some_and(|pending| {
-                    pending.handlers.last().is_some_and(|owner| owner.id == frame.id)
+                    pending.handler_id == frame.id
                 }) {
                     let result = registers.copy_value(*value, budget)?;
                     let mut pending = resumption_returns.pop().expect("checked pending resumption");
@@ -19278,7 +19479,9 @@ fn execute_program_profiled(
             }
             VmInstruction::ResumeReturn { dst, value } => {
                 let resumed = registers.copy_value(*value, budget)?;
-                let Some(frame) = handlers.last_mut() else {
+                let index = resumption_index.or_else(|| handlers.len().checked_sub(1))
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let Some(frame) = handlers.get_mut(index) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 if frame.continuation == VmContinuationPolicy::Terminal {
@@ -19303,7 +19506,7 @@ fn execute_program_profiled(
                     continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
                     budget,
                 )?;
-                if frame.owned_payloads {
+                if frame.owned_payloads || consumes_arguments {
                     registers.retire_call_arguments(&[*value]);
                 }
                 let RuntimeContinuation {
@@ -19319,7 +19522,10 @@ fn execute_program_profiled(
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
-                let resumed_handler_ids = handlers
+                let mut active_handlers = handlers[..index].to_vec();
+                active_handlers.extend_from_slice(&handlers[index + 1..]);
+                active_handlers.push(handlers[index].clone());
+                let resumed_handler_ids = active_handlers
                     .iter()
                     .map(|frame| frame.id)
                     .chain(above.iter().map(|frame| frame.id))
@@ -19327,7 +19533,7 @@ fn execute_program_profiled(
                 let mut return_handlers = handlers.clone();
                 if replaying {
                     return_handlers
-                        .last_mut()
+                        .get_mut(index)
                         .and_then(|frame| frame.suspended.as_mut())
                         .expect("checked suspended replay handler")
                         .remaining_replays -= 1;
@@ -19335,6 +19541,7 @@ fn execute_program_profiled(
                 resumption_returns.push(RuntimeResumptionReturn {
                     pc: pc + 1,
                     dst: *dst,
+                    handler_id: handlers[index].id,
                     registers: registers.clone(),
                     handlers: return_handlers,
                     program: Some(RuntimeProgramContinuation {
@@ -19343,6 +19550,7 @@ fn execute_program_profiled(
                     }),
                     resumed_handler_ids,
                 });
+                handlers = active_handlers;
                 if replaying {
                     handlers.last_mut().expect("active frame exists").suspended = None;
                 }

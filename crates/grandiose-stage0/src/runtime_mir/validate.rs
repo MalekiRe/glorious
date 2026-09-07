@@ -525,14 +525,16 @@ impl RuntimeMir {
             }
         }
         for (index, perform) in self.control.performs.iter().enumerate() {
-            let mut previous = None;
+            let mut seen = BTreeSet::new();
             for candidate in &perform.handler_candidates {
-                if previous.is_some_and(|previous| previous <= candidate.0) {
+                if !seen.insert(*candidate) {
                     return Err(format!(
                         "MIR perform site {index} has non-canonical handler candidates"
                     ));
                 }
-                previous = Some(candidate.0);
+                // IDs follow block allocation, not lexical nesting. The
+                // instruction check below verifies exact innermost-first
+                // scope order independently of those incidental numbers.
                 let handler = self
                     .control
                     .handlers

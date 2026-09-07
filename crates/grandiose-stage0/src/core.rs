@@ -55,6 +55,13 @@ pub struct RefinementBrand {
     pub owner: DefKey,
     pub refinement: u32,
 }
+/// A binder belongs to one generative refinement environment. Equal source
+/// spellings in different tests never identify interchangeable evidence.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RefinementBindingKey {
+    pub environment: RefinementBrand,
+    pub binder: u32,
+}
 /// A generative lexical destination identity. A source spelling is resolved
 /// only while its label scope is active; transfers carry this brand rather
 /// than a name so shadowing cannot retarget nonlocal control.
@@ -173,6 +180,7 @@ pub struct RefinementEnvironment {
     pub brand: RefinementBrand,
     pub subject: Option<String>,
     pub bindings: Vec<String>,
+    pub binding_keys: Vec<RefinementBindingKey>,
     /// The source-level types behind `bindings`.  Names alone are retained
     /// for inspection, while completion dispatch needs the frozen types to
     /// open the positive branch as an ordinary lexical scope.
@@ -667,6 +675,10 @@ pub enum CoreKind {
     Completion {
         computation: CoreId,
         clauses: Vec<CoreCompletionClause>,
+        /// Checked compiler-owned pack construction on this immediate
+        /// structural decision. The executable nodes remain ordinary records
+        /// and enum constructors; this metadata grants no source constructor.
+        refinement_test: Option<RefinementEnvironment>,
         /// This dispatch belongs to the directly wrapped operation handler,
         /// whose full-control clauses bypass normal-completion dispatch.
         /// A distinct outer completion must observe the inner handler result.
@@ -809,9 +821,29 @@ impl TypedBody {
                 });
             }
         }
+        let mut authorized_binding_packs = std::collections::BTreeSet::new();
         for (index, expression) in self.expressions.iter().enumerate() {
+            if matches!(expression.kind, CoreKind::Completion { refinement_test: Some(_), .. }) {
+                match refinement_test_construction(self, CoreId(index as u32)) {
+                    Ok(packs) => authorized_binding_packs.extend(packs),
+                    Err(message) => diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span, message }),
+                }
+            }
+        }
+        let mut refinement_producers = std::collections::BTreeMap::new();
+        for (index, expression) in self.expressions.iter().enumerate() {
+            if let CoreKind::PatternTest { refinement, .. } | CoreKind::Completion { refinement_test: Some(refinement), .. } = &expression.kind
+                && refinement_producers.insert(refinement.brand, index).is_some() {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core reuses one refinement environment brand for distinct test producers".into() });
+            }
             needs_unsafe_validation |= matches!(expression.ty, Type::Callable { safety: crate::Safety::Unsafe, .. });
             let owner = CoreId(index as u32);
+            if matches!(&expression.kind, CoreKind::Record { definition, .. } if *definition == crate::refinement::bindings_definition())
+                && !authorized_binding_packs.contains(&owner) {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "binding-pack construction lacks an immediate checked pattern decision".into() });
+            }
             let mut check = |child: CoreId| {
                 if !self.contains(child) {
                     diagnostics.push(CoreDiagnostic {
@@ -884,6 +916,9 @@ impl TypedBody {
                     message,
                 });
             }
+            if let Some(message) = pattern_refinement_error(self, &expression.kind) {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span, message });
+            }
             if let Some(message) = perform_payload_contract_error(self, &expression.kind) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4183",
@@ -904,7 +939,117 @@ impl TypedBody {
         if needs_unsafe_validation {
             self.validate_unsafe_scopes(&mut diagnostics);
         }
+        self.validate_binding_pack_accesses(&mut diagnostics);
         diagnostics
+    }
+
+    fn validate_binding_pack_accesses(&self, diagnostics: &mut Vec<CoreDiagnostic>) {
+        fn is_pack(ty: &Type) -> bool {
+            match ty {
+                Type::Nominal { definition, .. } => *definition == crate::refinement::bindings_definition(),
+                Type::Reference { referent, .. } => is_pack(referent),
+                _ => false,
+            }
+        }
+        if !self.expressions.iter().any(|expression| is_pack(&expression.ty)) { return; }
+        // Layout facts apply to the entire frozen arena, including unused
+        // expressions. Lexical declaration checks below follow scoped paths.
+        for expression in &self.expressions {
+            let invalid = match &expression.kind {
+                CoreKind::Field { base, index, field_count } => self.expressions.get(base.0 as usize)
+                    .filter(|base| is_pack(&base.ty)).is_some_and(|base|
+                        !crate::refinement::binding_pack_fields(&base.ty).is_some_and(|fields|
+                            fields.len() == *field_count as usize && fields.get(*index as usize) == Some(&expression.ty))),
+                CoreKind::Deref(reference) => self.expressions.get(reference.0 as usize)
+                    .filter(|reference| is_pack(&reference.ty) || is_pack(&expression.ty)).is_some_and(|reference|
+                        !matches!(&reference.ty, Type::Reference { referent, .. } if referent.as_ref() == &expression.ty)),
+                _ => false,
+            };
+            if invalid {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "binding-pack access does not match its sealed field or referent layout".into() });
+            }
+        }
+        type Locals = std::collections::BTreeMap<String, Type>;
+        type CheckedScopes = std::collections::BTreeMap<CoreId, Vec<(Locals, Locals)>>;
+        fn visit(body: &TypedBody, id: CoreId, locals: &mut Locals,
+            active: &mut std::collections::BTreeSet<CoreId>, checked: &mut CheckedScopes,
+            diagnostics: &mut Vec<CoreDiagnostic>) {
+            let Some(expression) = body.expressions.get(id.0 as usize) else { return; };
+            if let Some((_, output)) = checked.get(&id).into_iter().flatten().find(|(input, _)| input == locals) {
+                *locals = output.clone();
+                return;
+            }
+            if !active.insert(id) {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "binding-pack access has a cyclic lexical Core path".into() });
+                return;
+            }
+            let input = locals.clone();
+            let mut error = |message: &str| diagnostics.push(CoreDiagnostic {
+                code: "G4183", span: expression.span, message: message.into(),
+            });
+            match &expression.kind {
+                CoreKind::Local(name) if is_pack(&expression.ty) || locals.get(name).is_some_and(is_pack) => {
+                    if locals.get(name) != Some(&expression.ty) {
+                        error("binding-pack local does not match its lexical declaration");
+                    }
+                }
+                _ => {},
+            }
+            match &expression.kind {
+                CoreKind::Block(values) => {
+                    let mut scoped = locals.clone();
+                    for value in values { visit(body, *value, &mut scoped, active, checked, diagnostics); }
+                }
+                CoreKind::Let { name, value } => {
+                    visit(body, *value, locals, active, checked, diagnostics);
+                    if let Some(value) = body.expressions.get(value.0 as usize) {
+                        locals.insert(name.clone(), value.ty.clone());
+                    }
+                }
+                CoreKind::Closure { parameters, environment, body: closure_body, .. } => {
+                    if parameters.iter().any(|(_, ty)| is_pack(ty))
+                        || matches!(&expression.ty, Type::Callable { parameters, .. } if parameters.iter().any(is_pack)) {
+                        let matches = match &expression.ty {
+                            Type::Callable { parameters: expected, .. } => expected.len() == parameters.len()
+                                && parameters.iter().zip(expected).all(|((_, actual), expected)|
+                                    !is_pack(actual) && !is_pack(expected)
+                                        || *actual == open_hrtb_callable_body_type(expected.clone(), 0)),
+                            _ => false,
+                        };
+                        if !matches {
+                            diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                                message: "binding-pack body parameter differs from its callable contract".into() });
+                        }
+                    }
+                    let mut scoped = environment.captures.iter().map(|capture| (capture.name.clone(), capture.ty.clone()))
+                        .chain(parameters.iter().cloned()).collect();
+                    visit(body, *closure_body, &mut scoped, active, checked, diagnostics);
+                }
+                CoreKind::Completion { computation, clauses, .. } => {
+                    visit(body, *computation, locals, active, checked, diagnostics);
+                    for clause in clauses {
+                        let mut scoped = locals.clone();
+                        scoped.extend(clause.bindings.iter().cloned());
+                        visit(body, clause.body, &mut scoped, active, checked, diagnostics);
+                    }
+                }
+                CoreKind::Handle { computation, clauses } => {
+                    visit(body, *computation, locals, active, checked, diagnostics);
+                    for clause in clauses {
+                        let mut scoped = locals.clone();
+                        scoped.extend(clause.bindings.iter().cloned());
+                        visit(body, clause.body, &mut scoped, active, checked, diagnostics);
+                    }
+                }
+                _ => for child in core_children(&expression.kind) { visit(body, child, locals, active, checked, diagnostics); },
+            }
+            active.remove(&id);
+            checked.entry(id).or_default().push((input, locals.clone()));
+        }
+        visit(self, self.root, &mut self.parameters.iter().cloned().collect(),
+            &mut std::collections::BTreeSet::new(), &mut CheckedScopes::new(), diagnostics);
     }
 
     fn validate_unsafe_scopes(&self, diagnostics: &mut Vec<CoreDiagnostic>) {
@@ -1323,6 +1468,7 @@ impl CoreFingerprintEncoder<'_> {
             self.bytes(binding.as_bytes());
         }
         self.bindings(&value.binding_types);
+        self.debug(&value.binding_keys);
         self.bytes(&[value.sealed as u8]);
     }
 
@@ -1624,8 +1770,10 @@ impl CoreFingerprintEncoder<'_> {
                 computation,
                 clauses,
                 handles_operations,
+                refinement_test,
             } => {
                 self.bytes(b"completion");
+                if let Some(environment) = refinement_test { self.bytes(b"binding-pack-producer"); self.refinement(environment); }
                 self.bytes(&[*handles_operations as u8]);
                 self.id(*computation);
                 self.bytes(&(clauses.len() as u64).to_le_bytes());
@@ -1793,6 +1941,67 @@ fn core_structural_error(kind: &CoreKind, ty: &Type) -> Option<String> {
 /// forged Core graph must not be able to attach a copied environment to an
 /// unrelated completion arm and thereby introduce its binders into PlaceFlow
 /// or MIR without the deciding boolean edge.
+fn refinement_test_construction(body: &TypedBody, producer: CoreId) -> Result<Vec<CoreId>, String> {
+    let invalid = || "Typed Core binding-pack producer does not preserve its immediate pattern decision".to_string();
+    let expression = body.expressions.get(producer.0 as usize).ok_or_else(invalid)?;
+    let CoreKind::Completion { computation, clauses, refinement_test: Some(environment), handles_operations: false } = &expression.kind else { return Err(invalid()); };
+    if let Some(error) = refinement_environment_error(environment) { return Err(error); }
+    let [yes, no] = clauses.as_slice() else { return Err(invalid()); };
+    if !matches!(no.pattern, CorePattern::Any) || !no.bindings.is_empty() || yes.refinement.is_some() || no.refinement.is_some() { return Err(invalid()); }
+    let subject = body.expressions.get(computation.0 as usize).ok_or_else(invalid)?;
+    let mut bindings = vec![];
+    collect_pattern_binding_types(&yes.pattern, &subject.ty, &mut bindings).ok_or_else(invalid)?;
+    for (_, ty) in &mut bindings { *ty = refinement_binding_type(ty.clone()); }
+    if bindings != environment.binding_types || yes.bindings != bindings { return Err(invalid()); }
+    let name = match &subject.kind { CoreKind::Local(name) => Some(name), _ => None };
+    if name != environment.subject.as_ref() { return Err(invalid()); }
+    let Type::Nominal { definition: test, arguments } = &expression.ty else { return Err(invalid()); };
+    let parents = |value: CoreId| body.expressions.iter().enumerate().flat_map(|(index, expression)| {
+        core_children(&expression.kind).into_iter().filter(move |child| *child == value).map(move |_| CoreId(index as u32))
+    }).collect::<Vec<_>>();
+    let mut packs = vec![];
+    let mut variants = vec![];
+    for (index, clause) in clauses.iter().enumerate() {
+        let positive = index == 0;
+        let expected = environment.binding_pack_type(positive, Lifetime::Elided)?;
+        if arguments.get(index) != Some(&GenericArgument::Type(expected.clone())) || arguments.len() != 2 { return Err(invalid()); }
+        let constructor = body.expressions.get(clause.body.0 as usize).ok_or_else(invalid)?;
+        let CoreKind::Enum { definition, variant, fields } = &constructor.kind else { return Err(invalid()); };
+        if definition != test || constructor.ty != expression.ty || fields.len() != 1 || parents(clause.body) != [producer] { return Err(invalid()); }
+        variants.push(*variant);
+        let pack = fields[0];
+        let record = body.expressions.get(pack.0 as usize).ok_or_else(invalid)?;
+        let CoreKind::Record { definition, fields } = &record.kind else { return Err(invalid()); };
+        if *definition != crate::refinement::bindings_definition() || record.ty != expected || parents(pack) != [clause.body]
+            || fields.len() != clause.bindings.len() { return Err(invalid()); }
+        for (field, (name, ty)) in fields.iter().zip(&clause.bindings) {
+            let field = body.expressions.get(field.0 as usize).ok_or_else(invalid)?;
+            if !matches!(&field.kind, CoreKind::Local(actual) if actual == name) || &field.ty != ty { return Err(invalid()); }
+        }
+        packs.push(pack);
+    }
+    if variants[0] == variants[1] { return Err(invalid()); }
+    Ok(packs)
+}
+
+fn pattern_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<String> {
+    let CoreKind::PatternTest { subject, pattern, refinement } = kind else { return None; };
+    let subject = body.expressions.get(subject.0 as usize)?;
+    let mut bindings = Vec::new();
+    if collect_pattern_binding_types(pattern, &subject.ty, &mut bindings).is_none() {
+        return Some("Typed Core refinement cannot derive bindings from its subject's structural pattern".into());
+    }
+    for (_, ty) in &mut bindings { *ty = refinement_binding_type(ty.clone()); }
+    if bindings != refinement.binding_types {
+        return Some("Typed Core refinement binding types do not match the originating structural pattern".into());
+    }
+    let name = match &subject.kind { CoreKind::Local(name) => Some(name), _ => None };
+    if refinement.subject.as_ref() != name {
+        return Some("Typed Core refinement subject does not match its once-evaluated producer".into());
+    }
+    None
+}
+
 fn completion_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<String> {
     let CoreKind::Completion {
         computation,
@@ -2124,9 +2333,15 @@ fn known_reference_bearing_type(value: &Type) -> bool {
         || matches!(value, Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
 }
 
-fn refinement_environment_error(environment: &RefinementEnvironment) -> Option<String> {
+pub(crate) fn refinement_environment_error(environment: &RefinementEnvironment) -> Option<String> {
     if !environment.sealed {
         return Some("Typed Core pattern test has an unsealed refinement environment".into());
+    }
+    if environment.binding_keys.len() != environment.bindings.len()
+        || environment.binding_keys.iter().enumerate().any(|(index, key)| {
+            key.environment != environment.brand || key.binder as usize != index
+        }) {
+        return Some("Typed Core refinement environment has noncanonical branded binding keys".into());
     }
     let mut bindings = std::collections::BTreeSet::new();
     for binding in &environment.bindings {
@@ -4416,15 +4631,7 @@ impl Elaborator<'_> {
                     .map(|binding| (binding.name.clone(), binding.ty.clone()))
                     .collect();
                 let refinement = self.refinement_environment(subject, &pattern, binding_types);
-                self.alloc(
-                    CoreKind::PatternTest {
-                        subject,
-                        pattern,
-                        refinement,
-                    },
-                    Type::Scalar(ScalarType::Bool),
-                    expression.span,
-                )
+                self.refinement_test_value(subject, pattern, refinement, expression.span)
             }
             ExprKind::Handle {
                 computation,
@@ -4725,7 +4932,23 @@ impl Elaborator<'_> {
     fn expression_expected_with_open_lifetimes(&mut self, id: ExprId, expected: Option<Type>, open_call_lifetimes: bool) -> CoreId {
         // Context may already have solved a nominal's type parameter. Expose
         // that contract before selecting literal/callable elaboration rules.
-        let expected = expected.map(|ty| self.inference.zonk(ty.clone()).unwrap_or(ty));
+        let expected = expected.map(|ty| {
+            let ty = self.inference.zonk(ty.clone()).unwrap_or(ty);
+            // A callback's output may still be inferred from its body even
+            // after earlier operands have solved its argument types. Preserve
+            // those independently known shapes (including hidden Bindings)
+            // instead of requiring the whole callable to be frozen first.
+            match ty {
+                Type::Callable { safety, lifetime_binders, parameters, result, effects, invocation } => Type::Callable {
+                    safety, lifetime_binders,
+                    parameters: parameters.into_iter().map(|parameter|
+                        self.inference.zonk(parameter.clone()).unwrap_or(parameter)).collect(),
+                    result: Box::new(self.inference.zonk((*result).clone()).unwrap_or(*result)),
+                    effects, invocation,
+                },
+                ty => ty,
+            }
+        });
         // A callee's region binders are not rigid names in this body. Supply
         // fresh contextual holes while elaborating an argument (including
         // nested aggregate literals); the eventual call jointly checks the
@@ -4959,20 +5182,27 @@ impl Elaborator<'_> {
                     result,
                     effects,
                     invocation,
-                    ..
-                }) if parameters.is_empty() => self.contextual_zero_arg_closure(
+                    lifetime_binders,
+                }) if parameters.is_empty() => self.contextual_callable_block(
                     values,
                     safety,
                     *result,
                     effects,
                     invocation,
+                    lifetime_binders,
+                    None,
                     expression.span,
                 ),
-                Some(Type::Callable { .. }) => self.fail(
-                    expression.span,
-                    "G4118",
-                    "contextual block requires explicit parameters for a nonzero-argument callable",
-                ),
+                Some(Type::Callable { safety, parameters, result, effects, invocation, lifetime_binders }) => {
+                    let context = parameters.first().filter(|_| parameters.len() == 1)
+                        .and_then(|parameter| self.refinement_context_bindings(parameter)
+                            .map(|bindings| (parameter.clone(), bindings)));
+                    let Some(context) = context else {
+                        return self.fail(expression.span, "G4118",
+                            "contextual block requires explicit parameters unless its expected argument is a known binding pack");
+                    };
+                    self.contextual_callable_block(values, safety, *result, effects, invocation, lifetime_binders, Some(context), expression.span)
+                },
                 Some(expected) => self.block_expected(values, Some(expected), expression.span),
                 None => self.block_expected(values, None, expression.span),
             },
@@ -5534,16 +5764,72 @@ impl Elaborator<'_> {
         let ty = self.strict_result(&values, Type::Array(Box::new(element)));
         self.alloc(CoreKind::Array(values), ty, span)
     }
-    fn contextual_zero_arg_closure(
+    fn refinement_context_bindings(&self, parameter: &Type) -> Option<Vec<(String, Type)>> {
+        let parameter = match parameter {
+            Type::Reference { mutability: Mutability::Shared, referent, .. } => referent.as_ref(),
+            parameter => parameter,
+        };
+        let (brand, positive) = crate::refinement::binding_pack_brand(parameter)?;
+        let fields = crate::refinement::binding_pack_fields(parameter)?;
+        let environment = self.expressions.iter().find_map(|expression| match &expression.kind {
+            CoreKind::Completion { refinement_test: Some(environment), .. } if environment.brand == brand => Some(environment),
+            _ => None,
+        })?;
+        if !positive { return Some(vec![]); }
+        if fields.len() != environment.bindings.len() { return None; }
+        Some(environment.bindings.iter().cloned().zip(fields.iter().cloned()).collect())
+    }
+
+    fn activate_refinement_context(&mut self, pack_type: Type, bindings: Vec<(String, Type)>, span: Span)
+        -> ((String, Type), Vec<CoreId>) {
+        let parameter = format!("<bindings-{}>", self.next_callable);
+        self.locals.define(parameter.clone(), pack_type.clone());
+        let mut pack = self.alloc(CoreKind::Local(parameter.clone()), pack_type.clone(), span);
+        if let Type::Reference { referent, .. } = &pack_type {
+            pack = self.alloc(CoreKind::Deref(pack), (**referent).clone(), span);
+        }
+        let field_count = bindings.len() as u32;
+        let mut prefix = vec![];
+        for (index, (name, ty)) in bindings.into_iter().enumerate() {
+            if self.locals.lookup(&name).is_some() {
+                self.error(span, "G4170", "refinement binder cannot shadow an incoming local in a contextual body");
+                self.recovered = true;
+            }
+            let value = self.alloc(CoreKind::Field { base: pack, index: index as u32, field_count }, ty.clone(), span);
+            prefix.push(self.alloc(CoreKind::Let { name: name.clone(), value }, Type::Unit, span));
+            self.locals.define(name, ty);
+        }
+        ((parameter, pack_type), prefix)
+    }
+
+    fn contextual_callable_block(
         &mut self,
         values: Vec<ExprId>,
         safety: crate::Safety,
         result: Type,
         effects: crate::types::EffectRow,
         invocation: crate::quantity::Quantity,
+        lifetime_binders: u32,
+        refinement_context: Option<(Type, Vec<(String, Type)>)>,
         span: Span,
     ) -> CoreId {
+        let contract = Type::Callable {
+            safety, lifetime_binders,
+            parameters: refinement_context.as_ref().map(|(ty, _)| vec![ty.clone()]).unwrap_or_default(),
+            result: Box::new(result.clone()), effects: effects.clone(), invocation,
+        };
+        let result = open_hrtb_callable_body_type(result, 0);
+        let effects = if lifetime_binders == 0 { effects } else { open_hrtb_callable_body_effect_row(effects, 0) };
         self.locals.enter();
+        let mut parameters = vec![];
+        let mut prefix = vec![];
+        if let Some((pack_type, bindings)) = refinement_context {
+            let pack_type = open_hrtb_callable_body_type(pack_type, 0);
+            let bindings = bindings.into_iter().map(|(name, ty)| (name, open_hrtb_callable_body_type(ty, 0))).collect();
+            let (parameter, bindings) = self.activate_refinement_context(pack_type, bindings, span);
+            parameters.push(parameter);
+            prefix = bindings;
+        }
         let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
         // A contextual block is a callable body, not an eager continuation
         // of its enclosing expression. Its expected callable row therefore
@@ -5572,7 +5858,8 @@ impl Elaborator<'_> {
             .last()
             .map(|value| self.expressions[value.0 as usize].ty.clone())
             .unwrap_or(Type::Unit);
-        let body = self.alloc(CoreKind::Block(values), body_ty.clone(), span);
+        prefix.extend(values);
+        let body = self.alloc(CoreKind::Block(prefix), body_ty.clone(), span);
         self.locals.leave();
         if self
             .unify_rigid_lifetimes(result.clone(), body_ty, span)
@@ -5585,7 +5872,6 @@ impl Elaborator<'_> {
             );
             self.recovered = true;
         }
-        let parameters = vec![];
         let captures = self.closure_captures(body, &parameters);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
@@ -5593,7 +5879,7 @@ impl Elaborator<'_> {
         self.alloc(
             CoreKind::Closure {
                 callable,
-                parameters,
+                parameters: parameters.clone(),
                 environment: CaptureEnvironment::seal(
                     self.definition,
                     callable,
@@ -5602,14 +5888,7 @@ impl Elaborator<'_> {
                 ),
                 body,
             },
-            Type::Callable {
-                safety,
-                lifetime_binders: 0,
-                parameters: vec![],
-                result: Box::new(result),
-                effects,
-                invocation,
-            },
+            contract,
             span,
         )
     }
@@ -5625,9 +5904,17 @@ impl Elaborator<'_> {
     ) -> CoreId {
         // Compact closures deliberately omit a source signature.  A callable
         // expectation provides that signature without creating a general
-        // implicit conversion: arity must still match exactly, and annotated
-        // closures retain their own explicit contract.
+        // implicit conversion: user arity must match after the one permitted
+        // hidden binding-pack argument. Annotations still constrain the
+        // ordinary user parameters and result.
         let parameter_count = parameters.len();
+        let refinement_context = expected.as_ref().and_then(|expected| {
+            let Type::Callable { parameters, .. } = expected else { return None; };
+            parameters.first().filter(|_| parameters.len() == parameter_count + 1)
+                .and_then(|parameter| self.refinement_context_bindings(parameter)
+                    .map(|bindings| (parameter.clone(), bindings)))
+        });
+        let hidden_parameters = usize::from(refinement_context.is_some());
         let expected_callable = expected.as_ref().and_then(|expected| {
             let Type::Callable {
                 safety: _,
@@ -5640,7 +5927,7 @@ impl Elaborator<'_> {
             else {
                 return None;
             };
-            if parameters.len() != parameter_count {
+            if parameters.len() != parameter_count + hidden_parameters {
                 return None;
             }
             // A closure body executes only after its own `for<'a>` contract
@@ -5670,8 +5957,8 @@ impl Elaborator<'_> {
         });
         let expected_parameters = expected_callable
             .as_ref()
-            .map(|(_, parameters, _, _, _)| parameters);
-        let parameters = parameters
+            .map(|(_, parameters, _, _, _)| &parameters[hidden_parameters..]);
+        let mut parameters = parameters
             .into_iter()
             .enumerate()
             .map(|(index, parameter)| {
@@ -5695,6 +5982,14 @@ impl Elaborator<'_> {
         self.locals.enter();
         for (name, ty) in &parameters {
             self.locals.define(name.clone(), ty.clone());
+        }
+        let mut prefix = vec![];
+        if let Some((pack_type, bindings)) = refinement_context {
+            let pack_type = open_hrtb_callable_body_type(pack_type, 0);
+            let bindings = bindings.into_iter().map(|(name, ty)| (name, open_hrtb_callable_body_type(ty, 0))).collect();
+            let (parameter, bindings) = self.activate_refinement_context(pack_type, bindings, span);
+            parameters.insert(0, parameter);
+            prefix = bindings;
         }
         // A typed closure freezes an independent callable contract. Check
         // its body against that contract and do not let an enclosing handler
@@ -5728,6 +6023,10 @@ impl Elaborator<'_> {
         let expected_result = contextual_result.or(declared_result);
         let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
         let body = self.expression_expected(body, expected_result.clone());
+        let body = if prefix.is_empty() { body } else {
+            prefix.push(body);
+            self.alloc(CoreKind::Block(prefix), self.expressions[body.0 as usize].ty.clone(), span)
+        };
         self.unsafe_context = previous_unsafe;
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
@@ -7394,6 +7693,42 @@ impl Elaborator<'_> {
         }
         resolved
     }
+    fn refinement_test_value(&mut self, subject: CoreId, pattern: CorePattern, environment: RefinementEnvironment, span: Span) -> CoreId {
+        let ResolutionState::Resolved(definition) = self.index.resolve_path(DefinitionNamespace::Type, self.module, &["Test".into()]) else {
+            return self.fail(span, "G4183", "`is` requires the ordinary `Test<Y, N>` enum in type scope");
+        };
+        let Some(ElaboratedHeader::Nominal { generic_kinds, layout: ElaboratedNominalLayout::Enum(variants), .. }) = self.signatures.definitions.get(&definition) else {
+            return self.fail(span, "G4183", "`Test` must be an ordinary two-parameter enum");
+        };
+        if generic_kinds != &[crate::GenericKind::Type, crate::GenericKind::Type] || variants.len() != 2 {
+            return self.fail(span, "G4183", "`Test` must have two type parameters and two variants");
+        }
+        let Some(yes) = variants.iter().position(|variant| variant.name == "Yes") else { return self.fail(span, "G4183", "`Test` lacks its `Yes` constructor"); };
+        let Some(no) = variants.iter().position(|variant| variant.name == "No") else { return self.fail(span, "G4183", "`Test` lacks its `No` constructor"); };
+        let Ok(yes_type) = environment.binding_pack_type(true, Lifetime::Elided) else { return self.fail(span, "G4183", "invalid positive binding environment"); };
+        let Ok(no_type) = environment.binding_pack_type(false, Lifetime::Elided) else { return self.fail(span, "G4183", "invalid negative binding environment"); };
+        let arguments = vec![GenericArgument::Type(yes_type.clone()), GenericArgument::Type(no_type.clone())];
+        for (variant, expected) in [(yes, &yes_type), (no, &no_type)] {
+            let Ok(fields) = self.signatures.instantiate_enum_fields_generic(definition, &arguments, variant as u32) else {
+                return self.fail(span, "G4183", "`Test` constructor has an invalid payload contract");
+            };
+            if fields.len() != 1 || &fields[0].ty != expected {
+                return self.fail(span, "G4183", "`Test::Yes` and `Test::No` must carry their respective context parameters");
+            }
+        }
+        let result = Type::Nominal { definition, arguments };
+        let mut clauses = vec![];
+        for (positive, variant, pack_type) in [(true, yes, yes_type), (false, no, no_type)] {
+            let bindings = if positive { environment.binding_types.clone() } else { vec![] };
+            let fields = bindings.iter().map(|(name, ty)| self.alloc(CoreKind::Local(name.clone()), ty.clone(), span)).collect();
+            let pack = self.alloc(CoreKind::Record { definition: crate::refinement::bindings_definition(), fields }, pack_type, span);
+            let body = self.alloc(CoreKind::Enum { definition, variant: variant as u32, fields: vec![pack] }, result.clone(), span);
+            clauses.push(CoreCompletionClause { pattern: if positive { pattern.clone() } else { CorePattern::Any }, bindings,
+                refinement: None, body, span });
+        }
+        self.alloc(CoreKind::Completion { computation: subject, clauses, refinement_test: Some(environment), handles_operations: false }, result, span)
+    }
+
     fn refinement_environment(
         &mut self,
         subject: CoreId,
@@ -7414,6 +7749,7 @@ impl Elaborator<'_> {
         RefinementEnvironment {
             brand,
             subject,
+            binding_keys: (0..bindings.len()).map(|binder| RefinementBindingKey { environment: brand, binder: binder as u32 }).collect(),
             bindings,
             binding_types: binding_types.into_iter()
                 .map(|(name, ty)| (name, refinement_binding_type(ty))).collect(),
@@ -8097,7 +8433,10 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            CoreKind::Completion { clauses, .. } => {
+            CoreKind::Completion { clauses, refinement_test, .. } => {
+                if let Some(environment) = refinement_test {
+                    for (_, ty) in &mut environment.binding_types { *ty = self.zonk_type(ty.clone(), span); }
+                }
                 for clause in clauses {
                     self.zonk_pattern(&mut clause.pattern, span);
                     for (_, ty) in &mut clause.bindings {
@@ -10575,8 +10914,13 @@ impl Elaborator<'_> {
         let strict_operands = std::iter::once(callee)
             .chain(arguments.iter().copied())
             .collect::<Vec<_>>();
+        // A nonreturning callee is still entered and must satisfy its full
+        // effect/evidence contract. Only divergence while evaluating the
+        // callee or an argument makes the invocation itself unreachable.
+        let reaches_call = strict_operands.iter()
+            .all(|value| self.expressions[value.0 as usize].ty != Type::Never);
         let result = self.strict_result(&strict_operands, result);
-        if !matches!(result, Type::Never) {
+        if reaches_call {
             self.check_effects(&effects, span);
             self.check_call_where_bounds(callee, &arguments, span);
         }
@@ -10663,13 +11007,21 @@ impl Elaborator<'_> {
         parameters: &[Type],
         arguments: Vec<ExprId>,
     ) -> Vec<CoreId> {
+        // Contextual type unification must use caller-local holes, never the
+        // callee's declaration region names. Open the whole parameter pack
+        // together so repeated regions constrain the same hole across operands.
+        // The callee expression retains its original contract for the final
+        // joint lifetime/provenance check in `call_with_expected`.
+        let Type::Tuple(contextual_parameters) = self.freshen_call_context_lifetimes(Type::Tuple(parameters.to_vec())) else {
+            unreachable!("freshening preserves the parameter pack shape");
+        };
         arguments
             .into_iter()
             .enumerate()
             .map(|(index, value)| {
-                let parameter = parameters.get(index).cloned();
+                let parameter = contextual_parameters.get(index).cloned();
                 let expected = parameter.as_ref().map(|parameter| {
-                    self.direct_bound_callable_contract(callee, parameter)
+                    self.direct_bound_callable_contract(callee, &parameters[index])
                         .unwrap_or_else(|| parameter.clone())
                 });
                 // Generic parameters begin as inference variables. Expose a
@@ -12243,6 +12595,7 @@ impl Elaborator<'_> {
             CoreKind::Completion {
                 computation: subject,
                 clauses: core_clauses,
+                refinement_test: None,
                 handles_operations,
             },
             result,
@@ -12279,9 +12632,9 @@ impl Elaborator<'_> {
     }
     /// Check an ordered pattern matrix against the finite structural domains
     /// available to Stage 0.  Unlike the former constructor-only check, this
-    /// follows nested tuple, record, and enum payload decisions.  It is a
-    /// proof procedure, not a heuristic: unknown/infinite/recursive domains
-    /// are left open and still require an irrefutable arm.
+    /// follows nested tuple, record, and enum payload decisions. Open leaves
+    /// represent every possible resident, not an invented concrete value:
+    /// partial matches may be useful but cannot prove those leaves covered.
     fn analyze_core_pattern_matrix(
         &self,
         patterns: &[CorePattern],
@@ -12300,20 +12653,7 @@ impl Elaborator<'_> {
                 covered_by_catch_all = true;
             }
         }
-        if covered_by_catch_all {
-            for (index, pattern) in patterns.iter().enumerate() {
-                if patterns[..index]
-                    .iter()
-                    .any(|earlier| core_pattern_subsumes(earlier, pattern))
-                {
-                    analysis.unreachable.push(index);
-                }
-            }
-            analysis.exhaustive = true;
-            analysis.unreachable.sort_unstable();
-            analysis.unreachable.dedup();
-            return analysis;
-        }
+        analysis.exhaustive = covered_by_catch_all;
 
         // This structural subsumption check also handles unbounded literal
         // domains.  Finite enumeration below proves broader combinations,
@@ -12332,35 +12672,33 @@ impl Elaborator<'_> {
         // domains are not.  Do not require us to enumerate every `i64` or
         // `Text` merely to prove that `Ok(_)` and `Err(_)` cover their two
         // complete variants.  This proof is intentionally narrower than the
-        // finite-value matrix below: one source row must cover every payload
-        // slot of its constructor.  More refined partitions (such as
-        // `Ok(true)` plus `Ok(false)`) remain the responsibility of the
-        // bounded structural enumeration when their payload domain is known.
-        if self.enum_constructor_patterns_exhaustive(patterns, subject) {
-            analysis.exhaustive = true;
-            analysis.unreachable.sort_unstable();
-            analysis.unreachable.dedup();
-            return analysis;
-        }
+        // structural matrix below: one source row must cover every payload
+        // slot of its constructor. Preserve this proof if a large matrix
+        // exceeds its bounds, but still inspect bounded matrices for rows
+        // covered collectively by several predecessors.
+        analysis.exhaustive |= self.enum_constructor_patterns_exhaustive(patterns, subject);
+        analysis.unreachable.sort_unstable();
+        analysis.unreachable.dedup();
 
-        let Some(values) = self.finite_pattern_values(subject, 0) else {
+        let mut fuel = 131_072;
+        let Some(values) = self.finite_pattern_values(subject, 0, &mut fuel) else {
             return analysis;
         };
         for (index, pattern) in patterns.iter().enumerate() {
             let useful = values.iter().any(|value| {
-                core_pattern_matches_value(pattern, value)
+                core_pattern_matches_value(pattern, value) != Some(false)
                     && !patterns[..index]
                         .iter()
-                        .any(|earlier| core_pattern_matches_value(earlier, value))
+                        .any(|earlier| core_pattern_matches_value(earlier, value) == Some(true))
             });
             if !useful {
                 analysis.unreachable.push(index);
             }
         }
-        analysis.exhaustive = values.iter().all(|value| {
+        analysis.exhaustive |= values.iter().all(|value| {
             patterns
                 .iter()
-                .any(|pattern| core_pattern_matches_value(pattern, value))
+                .any(|pattern| core_pattern_matches_value(pattern, value) == Some(true))
         });
         analysis.unreachable.sort_unstable();
         analysis.unreachable.dedup();
@@ -12393,17 +12731,27 @@ impl Elaborator<'_> {
         })
     }
 
-    /// Enumerate a closed structural domain with a deliberately modest cap.
-    /// The cap preserves predictable compilation while keeping the proof
-    /// complete for all domains it accepts; exceeding it means "unknown",
-    /// never a false claim of coverage.
-    fn finite_pattern_values(&self, subject: &Type, depth: u8) -> Option<Vec<FinitePatternValue>> {
+    /// Enumerate a finite structural over-approximation. An open payload does
+    /// not erase its surrounding constructors: `Err(_)` covers all integers
+    /// in that branch while the matrix can still partition `Ok(Event)`.
+    /// Bound both row count and aggregate intermediate storage. Exhausting
+    /// the proof budget means unknown coverage, never an accepted omission.
+    fn finite_pattern_values(
+        &self,
+        subject: &Type,
+        depth: u8,
+        fuel: &mut usize,
+    ) -> Option<Vec<FinitePatternValue>> {
         const MAX_VALUES: usize = 4096;
         const MAX_DEPTH: u8 = 16;
-        if depth >= MAX_DEPTH {
+        if *fuel == 0 {
             return None;
         }
-        match subject {
+        *fuel -= 1;
+        if depth >= MAX_DEPTH {
+            return Some(vec![FinitePatternValue::Unknown]);
+        }
+        let values = match subject {
             Type::Unit => Some(vec![FinitePatternValue::Unit]),
             Type::Scalar(ScalarType::Bool) => Some(vec![
                 FinitePatternValue::Bool(false),
@@ -12412,7 +12760,7 @@ impl Elaborator<'_> {
             Type::Tuple(fields) => {
                 let fields = fields
                     .iter()
-                    .map(|field| self.finite_pattern_values(field, depth + 1))
+                    .map(|field| self.finite_pattern_values(field, depth + 1, fuel))
                     .collect::<Option<Vec<_>>>()?;
                 finite_pattern_products(fields, MAX_VALUES)
                     .map(|values| values.into_iter().map(FinitePatternValue::Tuple).collect())
@@ -12431,7 +12779,7 @@ impl Elaborator<'_> {
                         .ok()?;
                     let values = fields
                         .iter()
-                        .map(|field| self.finite_pattern_values(&field.ty, depth + 1))
+                        .map(|field| self.finite_pattern_values(&field.ty, depth + 1, fuel))
                         .collect::<Option<Vec<_>>>()?;
                     finite_pattern_products(values, MAX_VALUES).map(|values| {
                         values
@@ -12448,6 +12796,7 @@ impl Elaborator<'_> {
                     ..
                 } => {
                     let mut values = vec![];
+                    let mut nodes = 0usize;
                     for (variant, _) in variants.iter().enumerate() {
                         let fields = self
                             .signatures
@@ -12455,10 +12804,15 @@ impl Elaborator<'_> {
                             .ok()?;
                         let fields = fields
                             .iter()
-                            .map(|field| self.finite_pattern_values(&field.ty, depth + 1))
+                            .map(|field| self.finite_pattern_values(&field.ty, depth + 1, fuel))
                             .collect::<Option<Vec<_>>>()?;
                         let products = finite_pattern_products(fields, MAX_VALUES)?;
                         if values.len().checked_add(products.len())? > MAX_VALUES {
+                            return None;
+                        }
+                        nodes = nodes.checked_add(products.len())?
+                            .checked_add(products.iter().flatten().map(finite_pattern_weight).sum())?;
+                        if nodes > 65_536 {
                             return None;
                         }
                         values.extend(products.into_iter().map(|fields| {
@@ -12474,11 +12828,13 @@ impl Elaborator<'_> {
                 ElaboratedHeader::Nominal {
                     layout: crate::signature::ElaboratedNominalLayout::Opaque,
                     ..
-                } => None,
+                } => Some(vec![FinitePatternValue::Unknown]),
                 _ => None,
             },
-            _ => None,
-        }
+            _ => Some(vec![FinitePatternValue::Unknown]),
+        }?;
+        *fuel = fuel.checked_sub(values.iter().map(finite_pattern_weight).sum())?;
+        Some(values)
     }
     fn residual_effects(&self) -> EffectRow {
         let mut effects = self.declared_effects.clone();
@@ -12833,11 +13189,11 @@ impl Elaborator<'_> {
             .collect()
     }
     /// A bounded structural matrix proof for operation payloads.  This uses
-    /// the same finite inhabitant domain as normal-completion coverage, so a
+    /// the same finite abstract domain as normal-completion coverage, so a
     /// handler can discharge an operation through nested enum/record/tuple
     /// patterns without falsely treating a partially refined payload as total.
-    /// Unknown, recursive, or over-large domains remain conservatively
-    /// outward-facing.
+    /// Uncovered open leaves and over-large domains remain conservatively
+    /// outward-facing; irrefutable payloads need no concrete enumeration.
     fn handler_operation_is_exhaustive(&self, rows: &[&ResolvedHandlerClause]) -> bool {
         self.analyze_handler_operation_patterns(rows).exhaustive
     }
@@ -12902,20 +13258,7 @@ impl Elaborator<'_> {
                 covered_by_catch_all = true;
             }
         }
-        if covered_by_catch_all {
-            for (index, row) in rows.iter().enumerate() {
-                if rows[..index]
-                    .iter()
-                    .any(|earlier| handler_patterns_subsume(&earlier.patterns, &row.patterns))
-                {
-                    analysis.unreachable.push(index);
-                }
-            }
-            analysis.exhaustive = true;
-            analysis.unreachable.sort_unstable();
-            analysis.unreachable.dedup();
-            return analysis;
-        }
+        analysis.exhaustive = covered_by_catch_all;
         for (index, row) in rows.iter().enumerate() {
             if rows[..index]
                 .iter()
@@ -12924,16 +13267,14 @@ impl Elaborator<'_> {
                 analysis.unreachable.push(index);
             }
         }
-        if self.handler_enum_constructor_patterns_exhaustive(rows) {
-            analysis.exhaustive = true;
-            analysis.unreachable.sort_unstable();
-            analysis.unreachable.dedup();
-            return analysis;
-        }
+        analysis.exhaustive |= self.handler_enum_constructor_patterns_exhaustive(rows);
+        analysis.unreachable.sort_unstable();
+        analysis.unreachable.dedup();
+        let mut fuel = 131_072;
         let domains = first
             .patterns
             .iter()
-            .map(|pattern| self.finite_pattern_values(&pattern.plan.subject, 0))
+            .map(|pattern| self.finite_pattern_values(&pattern.plan.subject, 0, &mut fuel))
             .collect::<Option<Vec<_>>>();
         let Some(domains) = domains else {
             return analysis;
@@ -12944,14 +13285,14 @@ impl Elaborator<'_> {
         for (index, row) in rows.iter().enumerate() {
             let useful = assignments.iter().any(|assignment| {
                 row.patterns.iter().zip(assignment).all(|(pattern, value)| {
-                    pattern_decision_matches_value(&pattern.plan.decision, value)
+                    pattern_decision_matches_value(&pattern.plan.decision, value) != Some(false)
                 }) && !rows[..index].iter().any(|earlier| {
                     earlier
                         .patterns
                         .iter()
                         .zip(assignment)
                         .all(|(pattern, value)| {
-                            pattern_decision_matches_value(&pattern.plan.decision, value)
+                            pattern_decision_matches_value(&pattern.plan.decision, value) == Some(true)
                         })
                 })
             });
@@ -12959,10 +13300,10 @@ impl Elaborator<'_> {
                 analysis.unreachable.push(index);
             }
         }
-        analysis.exhaustive = assignments.iter().all(|assignment| {
+        analysis.exhaustive |= assignments.iter().all(|assignment| {
             rows.iter().any(|row| {
                 row.patterns.iter().zip(assignment).all(|(pattern, value)| {
-                    pattern_decision_matches_value(&pattern.plan.decision, value)
+                    pattern_decision_matches_value(&pattern.plan.decision, value) == Some(true)
                 })
             })
         });
@@ -14511,13 +14852,7 @@ fn align_lifetime_types(
             // could permit a later write through the unique outer loan to
             // violate the promised longer inner lifetime.
             if *expected_mutability == Mutability::Unique {
-                align_lifetime_types(
-                    actual_referent,
-                    expected_referent,
-                    substitution,
-                    mode,
-                    depth,
-                )?;
+                check_invariant_lifetimes(expected_referent, actual_referent, substitution, mode, depth)?;
             }
             Ok(Type::Reference {
                 mutability: *expected_mutability,
@@ -14525,8 +14860,7 @@ fn align_lifetime_types(
                 // longer `'static` argument may satisfy an elided parameter;
                 // ordinary type unification must not turn that safe coercion
                 // back into an equality failure.
-                lifetime: if matches!(expected_lifetime, Lifetime::Infer(_))
-                    || matches!(actual_lifetime, Lifetime::Infer(_)) { *expected_lifetime } else { *actual_lifetime },
+                lifetime: aligned_lifetime(*expected_lifetime, *actual_lifetime, mode, depth),
                 referent: Box::new(referent),
             })
         }
@@ -14553,7 +14887,7 @@ fn align_lifetime_types(
             // an embedded reference could otherwise enable an invalid write.
             // Const pointers allow the ordinary covariant lifetime relation.
             if *expected_mutability == crate::PointerMutability::Mut {
-                align_lifetime_types(actual_pointee, expected_pointee, substitution, mode, depth)?;
+                check_invariant_lifetimes(expected_pointee, actual_pointee, substitution, mode, depth)?;
             }
             Ok(Type::RawPointer { mutability: *expected_mutability, pointee: Box::new(pointee) })
         }
@@ -14687,6 +15021,26 @@ fn align_lifetime_types(
         // inferable at the same locations as before this lifetime pass.
         _ => Ok(expected.clone()),
     }
+}
+
+fn check_invariant_lifetimes(
+    expected: &Type,
+    actual: &Type,
+    substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode,
+    depth: u32,
+) -> Result<(), LifetimeError> {
+    // The forward pass has opened callee regions into caller coordinates.
+    // Reverse variance must compare that instantiated contract rigidly: a
+    // callee `'a` already bound to `'static` is not a caller-local short loan,
+    // and caller Generic indices must never become new callee substitutions.
+    // Use the original contract, not the aligned type (which already contains
+    // coercions), so fixed nested regions still enforce real invariance.
+    let expected = match mode {
+        LifetimeMode::Instantiate => substitute_call_lifetimes(expected.clone(), substitution, depth)?,
+        LifetimeMode::Rigid => expected.clone(),
+    };
+    align_lifetime_types(actual, &expected, substitution, LifetimeMode::Rigid, depth).map(|_| ())
 }
 
 /// Open the selected binder of a higher-ranked callable for elaborating its
@@ -14854,8 +15208,7 @@ fn align_lifetime_generic_argument(
         }
         (GenericArgument::Lifetime(expected), GenericArgument::Lifetime(actual)) => {
             bind_lifetime(*expected, *actual, substitution, mode, depth)?;
-            Ok(GenericArgument::Lifetime(if matches!(expected, Lifetime::Infer(_))
-                || matches!(actual, Lifetime::Infer(_)) { *expected } else { *actual }))
+            Ok(GenericArgument::Lifetime(aligned_lifetime(*expected, *actual, mode, depth)))
         }
         (GenericArgument::EffectRow(expected), GenericArgument::EffectRow(actual)) => {
             align_lifetime_effect_row(expected, actual, substitution, mode, depth)
@@ -15027,6 +15380,19 @@ fn align_lifetime_effect_row(
     .canonicalized())
 }
 
+fn opens_call_lifetime(value: Lifetime, mode: LifetimeMode, depth: u32) -> bool {
+    matches!(mode, LifetimeMode::Instantiate)
+        && (matches!(value, Lifetime::Generic(_))
+            || matches!(value, Lifetime::Bound { depth: binder, .. } if binder == depth))
+}
+
+fn aligned_lifetime(expected: Lifetime, actual: Lifetime, mode: LifetimeMode, depth: u32) -> Lifetime {
+    if matches!(expected, Lifetime::Infer(_))
+        || (matches!(actual, Lifetime::Infer(_)) && !opens_call_lifetime(expected, mode, depth)) {
+        expected
+    } else { actual }
+}
+
 fn bind_lifetime(
     expected: Lifetime,
     actual: Lifetime,
@@ -15034,7 +15400,13 @@ fn bind_lifetime(
     mode: LifetimeMode,
     depth: u32,
 ) -> Result<(), LifetimeError> {
-    if matches!(actual, Lifetime::Infer(_)) { return Ok(()); }
+    // An unsolved caller hole can still open a callee binder. Retain that
+    // hole in the application until body inference seals it; feeding the
+    // declaration's Generic/Bound name back into unification would instead
+    // capture the hole and poison earlier generic instances sharing it.
+    if matches!(actual, Lifetime::Infer(_)) && !opens_call_lifetime(expected, mode, depth) {
+        return Ok(());
+    }
     match expected {
         Lifetime::Infer(_) => Ok(()),
         Lifetime::Static => (actual == Lifetime::Static)
@@ -15560,11 +15932,12 @@ struct CorePatternMatrixAnalysis {
     unreachable: Vec<usize>,
 }
 
-/// A concrete inhabitant of a small, closed structural type.  This exists
-/// only during Core validation: neither MIR nor the VM receives an invented
-/// value, only the already typed pattern decision that this proof validates.
+/// A cell in a bounded structural over-approximation. `Unknown` contains all
+/// residents of an open leaf (such as i64), not one representative integer.
+/// This is proof-only data: neither MIR nor the VM receives an invented value.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FinitePatternValue {
+    Unknown,
     Unit,
     Bool(bool),
     Tuple(Vec<FinitePatternValue>),
@@ -15579,14 +15952,35 @@ enum FinitePatternValue {
     },
 }
 
+fn finite_pattern_weight(value: &FinitePatternValue) -> usize {
+    1 + match value {
+        FinitePatternValue::Tuple(fields)
+        | FinitePatternValue::Record { fields, .. }
+        | FinitePatternValue::Enum { fields, .. } => fields.iter().map(finite_pattern_weight).sum(),
+        _ => 0,
+    }
+}
+
 fn finite_pattern_products(
     columns: Vec<Vec<FinitePatternValue>>,
     limit: usize,
 ) -> Option<Vec<Vec<FinitePatternValue>>> {
+    if columns.len() > limit {
+        return None;
+    }
     let mut products = vec![vec![]];
     for column in columns {
         let count = products.len().checked_mul(column.len())?;
         if count > limit {
+            return None;
+        }
+        let prefix_weight: usize = products.iter().flatten().map(finite_pattern_weight).sum();
+        let column_weight: usize = column.iter().map(finite_pattern_weight).sum();
+        if prefix_weight
+            .checked_mul(column.len())?
+            .checked_add(column_weight.checked_mul(products.len())?)?
+            > 65_536
+        {
             return None;
         }
         let mut next = Vec::with_capacity(count);
@@ -15602,18 +15996,34 @@ fn finite_pattern_products(
     Some(products)
 }
 
-fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue) -> bool {
-    match (pattern, value) {
-        (CorePattern::Any | CorePattern::Bind { .. }, _) => true,
-        (CorePattern::Literal(literal), FinitePatternValue::Bool(value)) => {
-            matches!((literal.as_str(), value), ("true", true) | ("false", false))
+/// Conjunction in a three-valued coverage proof. A known mismatch dominates
+/// an open sibling, while a possible match never becomes a total match.
+fn pattern_matches_all(results: impl Iterator<Item = Option<bool>>) -> Option<bool> {
+    let mut unknown = false;
+    for result in results {
+        match result {
+            Some(false) => return Some(false),
+            None => unknown = true,
+            Some(true) => {}
         }
+    }
+    if unknown { None } else { Some(true) }
+}
+
+fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue) -> Option<bool> {
+    match (pattern, value) {
+        (CorePattern::Any | CorePattern::Bind { .. }, _) => Some(true),
+        (_, FinitePatternValue::Unknown) => None,
+        (CorePattern::Literal(literal), FinitePatternValue::Bool(value)) => {
+            Some(matches!((literal.as_str(), value), ("true", true) | ("false", false)))
+        }
+        (CorePattern::Tuple(patterns), FinitePatternValue::Unit) => Some(patterns.is_empty()),
         (CorePattern::Tuple(patterns), FinitePatternValue::Tuple(values)) => {
-            patterns.len() == values.len()
-                && patterns
-                    .iter()
-                    .zip(values)
-                    .all(|(pattern, value)| core_pattern_matches_value(pattern, value))
+            if patterns.len() != values.len() {
+                return Some(false);
+            }
+            pattern_matches_all(patterns.iter().zip(values)
+                .map(|(pattern, value)| core_pattern_matches_value(pattern, value)))
         }
         (
             CorePattern::Record {
@@ -15624,12 +16034,13 @@ fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue)
                 fields: values,
             },
         ) => {
-            definition == actual
-                && fields.iter().all(|field| {
-                    values
-                        .get(field.index as usize)
-                        .is_some_and(|value| core_pattern_matches_value(&field.pattern, value))
-                })
+            if definition != actual {
+                return Some(false);
+            }
+            pattern_matches_all(fields.iter().map(|field| {
+                values.get(field.index as usize)
+                    .and_then(|value| core_pattern_matches_value(&field.pattern, value))
+            }))
         }
         (
             CorePattern::Enum {
@@ -15644,15 +16055,15 @@ fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue)
                 fields: values,
             },
         ) => {
-            definition == actual_definition
-                && variant == actual_variant
-                && fields.iter().all(|field| {
-                    values
-                        .get(field.index as usize)
-                        .is_some_and(|value| core_pattern_matches_value(&field.pattern, value))
-                })
+            if definition != actual_definition || variant != actual_variant {
+                return Some(false);
+            }
+            pattern_matches_all(fields.iter().map(|field| {
+                values.get(field.index as usize)
+                    .and_then(|value| core_pattern_matches_value(&field.pattern, value))
+            }))
         }
-        _ => false,
+        _ => Some(false),
     }
 }
 
@@ -15853,20 +16264,22 @@ fn pattern_decision_covers_enum_constructor(
 fn pattern_decision_matches_value(
     decision: &crate::pattern::PatternDecision,
     value: &FinitePatternValue,
-) -> bool {
+) -> Option<bool> {
     match (decision, value) {
         (crate::pattern::PatternDecision::Any | crate::pattern::PatternDecision::Bind(_), _) => {
-            true
+            Some(true)
         }
+        (_, FinitePatternValue::Unknown) => None,
         (crate::pattern::PatternDecision::Literal(literal), FinitePatternValue::Bool(value)) => {
-            matches!((literal.as_str(), value), ("true", true) | ("false", false))
+            Some(matches!((literal.as_str(), value), ("true", true) | ("false", false)))
         }
+        (crate::pattern::PatternDecision::Tuple(patterns), FinitePatternValue::Unit) => Some(patterns.is_empty()),
         (crate::pattern::PatternDecision::Tuple(patterns), FinitePatternValue::Tuple(values)) => {
-            patterns.len() == values.len()
-                && patterns
-                    .iter()
-                    .zip(values)
-                    .all(|(pattern, value)| pattern_decision_matches_value(pattern, value))
+            if patterns.len() != values.len() {
+                return Some(false);
+            }
+            pattern_matches_all(patterns.iter().zip(values)
+                .map(|(pattern, value)| pattern_decision_matches_value(pattern, value)))
         }
         (
             crate::pattern::PatternDecision::Record { definition, fields },
@@ -15875,12 +16288,13 @@ fn pattern_decision_matches_value(
                 fields: values,
             },
         ) => {
-            definition == actual
-                && fields.iter().all(|(index, pattern)| {
-                    values
-                        .get(*index as usize)
-                        .is_some_and(|value| pattern_decision_matches_value(pattern, value))
-                })
+            if definition != actual {
+                return Some(false);
+            }
+            pattern_matches_all(fields.iter().map(|(index, pattern)| {
+                values.get(*index as usize)
+                    .and_then(|value| pattern_decision_matches_value(pattern, value))
+            }))
         }
         (
             crate::pattern::PatternDecision::Enum {
@@ -15894,15 +16308,15 @@ fn pattern_decision_matches_value(
                 fields: values,
             },
         ) => {
-            definition == actual_definition
-                && variant == actual_variant
-                && fields.iter().all(|(index, pattern)| {
-                    values
-                        .get(*index as usize)
-                        .is_some_and(|value| pattern_decision_matches_value(pattern, value))
-                })
+            if definition != actual_definition || variant != actual_variant {
+                return Some(false);
+            }
+            pattern_matches_all(fields.iter().map(|(index, pattern)| {
+                values.get(*index as usize)
+                    .and_then(|value| pattern_decision_matches_value(pattern, value))
+            }))
         }
-        _ => false,
+        _ => Some(false),
     }
 }
 
@@ -16123,6 +16537,14 @@ pub(crate) fn reference_leaf_paths(
     path: &mut Vec<u32>,
     leaves: &mut Vec<(Vec<u32>, Type)>,
 ) -> Result<(), ()> {
+    if let Some(fields) = crate::refinement::binding_pack_fields(ty) {
+        for (index, field) in fields.iter().enumerate() {
+            path.push(index as u32);
+            reference_leaf_paths(signatures, field, path, leaves)?;
+            path.pop();
+        }
+        return Ok(());
+    }
     match ty {
         Type::Reference { .. } => leaves.push((path.clone(), ty.clone())),
         Type::Tuple(fields) => {
@@ -16458,4 +16880,54 @@ fn closure_scalar(name: &str) -> Option<ScalarType> {
         "Bytes" => Bytes,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod invariant_call_lifetime_tests {
+    use super::*;
+
+    fn inner(lifetime: Lifetime) -> Type {
+        Type::Reference { mutability: Mutability::Shared, lifetime, referent: Box::new(Type::Scalar(ScalarType::I64)) }
+    }
+
+    fn storage(lifetime: Lifetime, pointer: bool) -> Type {
+        if pointer {
+            Type::RawPointer { mutability: crate::PointerMutability::Mut, pointee: Box::new(inner(lifetime)) }
+        } else {
+            Type::Reference { mutability: Mutability::Unique, lifetime: Lifetime::Elided, referent: Box::new(inner(lifetime)) }
+        }
+    }
+
+    #[test]
+    fn reverse_invariance_uses_the_opened_callee_contract() {
+        for pointer in [false, true] {
+            for expected in [Lifetime::Generic(0), Lifetime::Bound { depth: 0, index: 0 }] {
+                for actual in [Lifetime::Static, Lifetime::Generic(7)] {
+                    let mut substitution = CallLifetimeSubstitution::default();
+                    // An unrelated callee binder shares an index with the
+                    // caller's rigid name. Reverse checking must not open it.
+                    substitution.generics.insert(7, Lifetime::Elided);
+                    let found = align_lifetime_types(&storage(expected, pointer), &storage(actual, pointer),
+                        &mut substitution, LifetimeMode::Instantiate, 0);
+                    assert!(found.is_ok(), "{expected:?}, {actual:?}, pointer={pointer}");
+                    assert_eq!(substitution.generics[&7], Lifetime::Elided);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reverse_invariance_does_not_erase_fixed_or_rigid_region_requirements() {
+        for pointer in [false, true] {
+            for (expected, actual, mode) in [
+                (Lifetime::Static, Lifetime::Elided, LifetimeMode::Instantiate),
+                (Lifetime::Elided, Lifetime::Static, LifetimeMode::Instantiate),
+                (Lifetime::Generic(0), Lifetime::Generic(1), LifetimeMode::Rigid),
+            ] {
+                let result = align_lifetime_types(&storage(expected, pointer), &storage(actual, pointer),
+                    &mut CallLifetimeSubstitution::default(), mode, 0);
+                assert!(matches!(result, Err(LifetimeError::UnsatisfiedOutlives)), "{expected:?}, {actual:?}, pointer={pointer}");
+            }
+        }
+    }
 }

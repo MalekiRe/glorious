@@ -2603,6 +2603,7 @@ mod tests {
                 },
                 CoreExpr {
                     kind: CoreKind::Completion {
+                        refinement_test: None,
                         computation: CoreId(8),
                         handles_operations: false,
                         clauses: vec![

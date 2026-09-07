@@ -597,6 +597,25 @@ mod tests {
         assert_ne!(target, key.callable);
     }
     #[test]
+    fn freezes_and_rechecks_sealed_binding_pack_layouts() {
+        let ty = crate::refinement::tests::environment(Type::Scalar(ScalarType::I64))
+            .binding_pack_type(true, crate::Lifetime::Static).unwrap();
+        let mut body = fixture("pub fn main<T>(value: T) -> T { value }", vec![GenericArgument::Type(ty.clone())]);
+        let index = body.layouts.iter().position(|layout| layout.ty == ty).expect("binding pack layout");
+        assert_eq!(body.layouts[index].variants, vec![vec![Type::Scalar(ScalarType::I64)]]);
+        let signatures = crate::ElaboratedInterface::default();
+        let mut cleanup = crate::cleanup_mir::CleanupMir::lower(&body, &signatures, &std::sync::Arc::new(BTreeMap::new())).unwrap();
+        let (runtime, _) = cleanup.lower_runtime_values(ty, 0, None, Some(&signatures)).unwrap();
+        let mut runtime = crate::runtime_mir::tests::finalize_fixture(runtime);
+        cleanup.layouts[index].variants[0][0] = Type::Scalar(ScalarType::Bool);
+        assert!(cleanup.validate().unwrap_err().0.contains("binding pack layout"));
+        runtime.nominal_copy_descriptors[0].variants[0][0] = Type::Scalar(ScalarType::Bool);
+        assert!(runtime.validate().unwrap_err().contains("binding pack layout"));
+        body.layouts[index].variants[0][0] = Type::Scalar(ScalarType::Bool);
+        assert!(body.validate().unwrap_err().0.contains("binding pack layout"));
+    }
+
+    #[test]
     fn freezes_instantiated_nominal_layouts() {
         let body = fixture(
             "struct Boxed<T> { value: T } pub fn main<T>(value: T) -> Boxed<T> { Boxed { value: value } }",

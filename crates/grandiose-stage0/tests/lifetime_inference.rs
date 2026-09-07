@@ -11,11 +11,12 @@ fn request(source: &str) -> CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"constructor-lifetimes")),
         mode: CompilationMode::Build,
         root_package: package.clone(),
-        sources: vec![SourceInput::new(
-            package,
-            LogicalPath::parse("src/main.glorious").unwrap(),
-            source.as_bytes(),
-        )],
+        sources: vec![
+            SourceInput::new(package, LogicalPath::parse("src/main.glorious").unwrap(),
+                format!("use std::*;\n{source}").as_bytes()),
+            SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(),
+                include_bytes!("../../../stdlib/src/lib.glorious").as_slice()),
+        ],
         target: "stage0-vm".into(),
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
@@ -112,6 +113,95 @@ fn destructor_owned_loans_remain_live_until_the_owner_is_destroyed() {
     let outcome = StageZeroCompiler::new().compile(plain).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert!(outcome.artifact.is_none());
+}
+
+#[test]
+fn later_call_context_does_not_put_callee_regions_in_an_earlier_generic_instance() {
+    assert_eq!(run(r#"
+        struct Marker<'a, 'b> {}
+        fn carry<T>(value: T) -> T { value }
+        fn inspect<'a, 'b>(value: &Marker<'a, 'b>) -> i64 { 42 }
+        pub fn main() -> i64 {
+            let marker = carry(Marker {});
+            inspect(&marker)
+        }
+    "#), 42);
+}
+
+#[test]
+fn call_context_shares_an_open_region_across_unconstrained_operands() {
+    assert_eq!(run(r#"
+        struct Marker<'a> {}
+        fn carry<T>(value: T) -> T { value }
+        fn inspect<'a>(left: &Marker<'a>, right: &Marker<'a>) -> i64 { 42 }
+        pub fn main() -> i64 {
+            let left = carry(Marker {});
+            let right = carry(Marker {});
+            inspect(&left, &right)
+        }
+    "#), 42);
+}
+
+#[test]
+fn call_context_preserves_caller_regions_nested_in_generic_type_arguments() {
+    assert_eq!(run(r#"
+        struct Probe<'a> { target: &'a i64 }
+        fn carry<T>(value: T) -> T { value }
+        fn inspect<'a, 'b>(value: &Probe<'a>, other: &'b i64) -> i64 { *value.target }
+        fn forward<'a, 'b>(value: &'a i64, other: &'b i64) -> i64 {
+            let probe = carry(Probe { target: value });
+            inspect(&probe, other)
+        }
+        pub fn main() -> i64 { let value = 42; let other = 7; forward(&value, &other) }
+    "#), 42);
+}
+
+#[test]
+fn call_context_opens_a_higher_ranked_callback_region_into_a_caller_hole() {
+    assert_eq!(run(r#"
+        struct Marker<'a> {}
+        fn carry<T>(value: T) -> T { value }
+        fn inspect<'a>(value: Marker<'a>) -> i64 { 42 }
+        fn invoke(callback: for<'a> (Marker<'a>) -> i64) -> i64 {
+            let marker = carry(Marker {});
+            callback(marker)
+        }
+        pub fn main() -> i64 { invoke(inspect) }
+    "#), 42);
+}
+
+#[test]
+fn call_context_cannot_lengthen_or_merge_rigid_caller_regions() {
+    for source in [r#"
+        struct Probe<'a> { target: &'a i64 }
+        fn carry<T>(value: T) -> T { value }
+        fn need_static(value: Probe<'static>) -> i64 { 42 }
+        fn invalid(value: &i64) -> i64 {
+            let probe = carry(Probe { target: value });
+            need_static(probe)
+        }
+        pub fn main() -> i64 { 42 }
+    "#, r#"
+        struct Probe<'a> { target: &'a i64 }
+        fn need_same<'a>(left: Probe<'a>, right: Probe<'a>) -> i64 { 42 }
+        fn invalid<'a, 'b>(left: &'a i64, right: &'b i64) -> i64 {
+            need_same(Probe { target: left }, Probe { target: right })
+        }
+        pub fn main() -> i64 { 42 }
+    "#, r#"
+        struct Hold<'a, 'b> { slot: &'a mut &'b i64 }
+        fn carry<T>(value: T) -> T { value }
+        fn need_static<'a>(value: Hold<'a, 'static>) -> i64 { 42 }
+        fn invalid<'a, 'b>(slot: &'a mut &'b i64) -> i64 {
+            let holder = carry(Hold { slot: slot });
+            need_static(holder)
+        }
+        pub fn main() -> i64 { 42 }
+    "#, r#"
+        fn static_only(value: &'static i64) -> i64 { 42 }
+        fn invoke(callback: for<'a> (&'a i64) -> i64) -> i64 { 42 }
+        pub fn main() -> i64 { invoke(static_only) }
+    "#] { rejects_lifetime(source); }
 }
 
 #[test]

@@ -130,11 +130,32 @@ fn record_execution_values(
             )
         })
         .unwrap_or_default();
+    let native_headers = [
+        "native_peak_live_bytes", "native_raw_live_bytes", "native_raw_peak_bytes",
+        "native_raw_allocations", "native_raw_reallocations", "native_raw_deallocations",
+        "native_home_live_bytes", "native_home_peak_bytes", "native_home_allocations",
+        "native_home_deallocations", "native_raw_bulk_copy_bytes", "native_home_bulk_copy_bytes",
+        "native_counters_saturated", "native_architecture", "native_os", "native_pointer_bits", "native_little_endian",
+    ];
+    let native = profile.map(|profile| {
+        let value = profile.native_memory;
+        [
+            value.peak_live_bytes.to_string(), value.raw_live_bytes.to_string(), value.raw_peak_bytes.to_string(),
+            value.raw_allocations.to_string(), value.raw_reallocations.to_string(), value.raw_deallocations.to_string(),
+            value.home_live_bytes.to_string(), value.home_peak_bytes.to_string(), value.home_allocations.to_string(),
+            value.home_deallocations.to_string(), value.raw_bulk_copy_bytes.to_string(), value.home_bulk_copy_bytes.to_string(),
+            value.counters_saturated.to_string(),
+            std::env::consts::ARCH.to_string(), std::env::consts::OS.to_string(),
+            usize::BITS.to_string(), cfg!(target_endian = "little").to_string(),
+        ]
+    }).unwrap_or_else(|| std::array::from_fn(|_| String::new()));
     let record = format!(
-        "fixture\tartifact_digest\tartifact_bytes\tresult_i64\tresult_i64_tuple\tprofiled\twork_ticks\tcharged_allocation_elements\tpeak_call_depth\trecycled_tail_calls\tinspected_tail_argument_elements\treused_call_register_buffers\n{case}\t{}\t{}\t{result}\t{tuple}\t{}\t{ticks}\t{allocations}\t{depth}\t{tails}\t{inspected}\t{buffers}\n",
+        "fixture\tartifact_digest\tartifact_bytes\tresult_i64\tresult_i64_tuple\tprofiled\twork_ticks\tcharged_allocation_elements\tpeak_call_depth\trecycled_tail_calls\tinspected_tail_argument_elements\treused_call_register_buffers\t{}\n{case}\t{}\t{}\t{result}\t{tuple}\t{}\t{ticks}\t{allocations}\t{depth}\t{tails}\t{inspected}\t{buffers}\t{}\n",
+        native_headers.join("\t"),
         Digest::of_bytes(&bytes),
         bytes.len(),
-        profile.is_some()
+        profile.is_some(),
+        native.join("\t"),
     );
     fs::write(
         Path::new(&directory).join(case.replace('/', "__") + ".tsv"),
@@ -301,6 +322,87 @@ fn gsc2_authoring_snapshots_nested_shared_loans_in_the_owning_frame() {
 #[test]
 fn gsc2_controls_preserve_limits_overflow_and_cancellation_cleanup() {
     assert_eq!(source_case("runtime/operation.glorious"), 42);
+}
+
+#[test]
+fn gsc2_hierarchical_budgets_match_parent_first_reference_accounting() {
+    let root = grandiose_stage0::Budget::root("1", 10);
+    let child = root.child("2", 7);
+    let leaf = child.child("3", 5);
+    let sibling = root.child("4", 6);
+    let mut trace = 1_i64;
+    let mut append = |value: i64| { trace = trace.wrapping_mul(31).wrapping_add(value); };
+    let status = |value: Result<(), grandiose_stage0::BudgetError>| {
+        value.err().map(|error| error.name.parse::<i64>().unwrap() * 10000
+            + error.ceiling as i64 * 100 + error.requested as i64).unwrap_or(0)
+    };
+    append(status(leaf.charge(4)));
+    append(root.spent() as i64);
+    append(child.spent() as i64);
+    append(status(child.charge(4)));
+    append(root.spent() as i64);
+    append(status(sibling.charge(7)));
+    append(root.spent() as i64);
+    append(status(sibling.charge(6)));
+    append(root.spent() as i64);
+    append(status(child.charge(0)));
+    leaf.release(4);
+    append(0);
+    append(root.spent() as i64);
+    append(child.spent() as i64);
+    append(sibling.spent() as i64);
+    assert_eq!(source_case("runtime/budget.glorious"), trace);
+}
+
+#[test]
+fn gsc2_hierarchical_budget_retained_leases_survive_close_and_grow_atomically() {
+    static RESULTS: OnceLock<Result<Vec<i64>, String>> = OnceLock::new();
+    let results = source_batch(&RESULTS, "runtime/budget_retained.glorious", &[],
+        "runtime/budget-retained-batch", &[21, 20]);
+    assert_eq!(results, &[21, 20]);
+}
+
+#[test]
+fn gsc2_hierarchical_budget_leases_preserve_cancellation_and_retirement() {
+    assert_eq!(source_case("runtime/budget_leases.glorious"), 22);
+}
+
+#[test]
+fn gsc2_hierarchical_budget_close_reclaims_abandoned_leases_without_refunding_work() {
+    assert_eq!(source_case("runtime/budget_close.glorious"), 28);
+}
+
+#[test]
+fn gsc2_source_copy_yields_at_utf8_boundaries_and_cancels_owned_partial_buffers() {
+    let program = source_program("source/copy.glorious", &[]);
+    let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
+    record_execution_values("source/copy-batch", &program, "", &format!("{results:?}"), Some(&profile));
+    assert_eq!(results, [17, 8, 7, 7, 28]);
+    assert!(profile.peak_call_depth < 128, "source construction, validation, comparison and cancellation must not consume one frame per byte: {profile:#?}");
+    let native = profile.native_memory;
+    assert_eq!((native.raw_live_bytes, native.home_live_bytes), (0, 0), "cleanup must release actual native backing, not only logical reservations: {native:#?}");
+    assert_eq!(native.raw_allocations, native.raw_deallocations);
+    assert_eq!(native.home_allocations, native.home_deallocations);
+    assert!(native.raw_peak_bytes >= 2 * 8225, "the original source and independent copy coexist");
+    assert!(native.raw_bulk_copy_bytes >= 8225 + 4095, "complete and cancelled copies both move real bytes");
+    assert!(!native.counters_saturated);
+}
+
+#[test]
+fn gsc2_registry_products_retain_automatic_backing_storage_and_phase_charges() {
+    static RESULTS: OnceLock<Result<Vec<i64>, String>> = OnceLock::new();
+    let results = source_batch(&RESULTS, "registry/product_memory.glorious", &[],
+        "registry/product-memory-batch", &[77, 30, 30, 30, 30, 23, 27]);
+    assert_eq!(results, &[77, 30, 30, 30, 30, 23, 27]);
+}
+
+#[test]
+fn gsc2_registry_requests_own_hierarchical_reservations_until_close() {
+    let case = "registry/resources.glorious";
+    let program = source_program(case, &[]);
+    let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
+    record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
+    assert_eq!(results, [3, 41, 27, 28]);
 }
 
 #[test]
@@ -632,6 +734,14 @@ fn publication_case(mode: u32, evidence_name: &str, expected: i64) {
 }
 
 #[test]
+fn gsc2_product_memory_survives_request_close_until_final_disposal() {
+    static RESULTS: OnceLock<Result<Vec<i64>, String>> = OnceLock::new();
+    let results = source_batch(&RESULTS, "engine/product_memory.glorious", &[],
+        "engine/product-memory-batch", &[54, 22, 21, 25]);
+    assert_eq!(results, &[54, 22, 21, 25]);
+}
+
+#[test]
 fn gsc2_product_release_waits_for_the_last_owner_and_rejects_foreign_acknowledgments() {
     let case = "engine/product_release.glorious";
     let program = source_program(case, &[]);
@@ -720,6 +830,93 @@ fn gsc2_source_products_match_reference_bytes_lines_and_every_utf16_position() {
     assert_eq!(result, 42);
 }
 
+#[test]
+fn gsc2_lossless_lexer_matches_reference_tokens_recovery_and_spelling() {
+    use grandiose_stage0::{FileKey, LexedFile, TokenKind};
+    fn escaped(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("\\x{b:02x}")).collect() }
+    fn word(bytes: &mut Vec<u8>, value: u64) { bytes.extend_from_slice(&value.to_le_bytes()); }
+    let mut samples: Vec<String> = [
+        "", " \t\r\n", "alpha _name Z09 'a 'static 'x' 'ab' '' '\\n' '😀'",
+        "fn f<T>(x: Option<&'a T>) -> !/ IO { @done: i64 { @done(42) } }",
+        "Outer<Inner<T>> << >> <= >= <& <! <* !/ +!/ +-*/ =?@",
+        "// comment 😀\n/* outer /* inner */ tail */()[]{}",
+        "([)] } { ( [", "/* unterminated /* nested */", "// eof",
+        "0 1 0b101 0o77 0x_dead_beef 1_000 1.25 1e3 1.2e-3 1..2 1.field",
+        "0b 0b2 0o8 0x 0x_ 0x__dead 0xg 12a 1_ 1__2 1e 1e+ 1e_2 1.2e- 1.2_",
+        "\"text 😀\" b\"rawé\\xff\" \"\\x7f\" \"\\x80\" b\"\\x80\"",
+        "\"\\u{0}\\u{10ffff}\" \"\\u{d800}\" \"\\u{110000}\" \"\\u{}\" \"\\u{0000000}\"",
+        "\"\\q\" b\"\\q\" '\\q' \"line\nnext \"end", "\"\\x", "\"\\xA", "b\"\\xA", "'\\xA",
+        "\"\\u1\" \"\\u{xy}\" \"\\xq1\" \"\\x1q\" 'éx' '\n",
+        "é😀\u{10ffff}\0`$", "\"\\\ncontinued\" b\"\\\ncontinued\"",
+    ].into_iter().map(str::to_owned).collect();
+    for byte in 0_u8..=127 { samples.push(char::from(byte).to_string()); }
+    for left in ['(', '[', '{', ')', ']', '}'] {
+        for right in ['(', '[', '{', ')', ']', '}'] { samples.push(format!("{left}{right}")); }
+    }
+    for prefix in ["0b", "0o", "0x", "", "1.", "1e", "1.2e-"] {
+        for digits in ["", "_", "__1", "1_", "1__2", "_1", "01", "89", "af", "12z"] {
+            samples.push(format!("{prefix}{digits}"));
+        }
+    }
+    for prefix in ["\"", "b\"", "'"] {
+        let closing = if prefix == "'" { "'" } else { "\"" };
+        for payload in [r"\x00", r"\x7f", r"\x80", r"\xff", r"\xg0", r"\x0g", r"\u{d7ff}", r"\u{d800}",
+            r"\u{dfff}", r"\u{e000}", r"\u{10ffff}", r"\u{110000}", r"\u{0000000}", r"\u{", r"\u", r"\é", r"\😀"] {
+            samples.push(format!("{prefix}{payload}{closing}"));
+            samples.push(format!("{prefix}{payload}"));
+        }
+    }
+    let file = FileKey(Digest::of_bytes(b"lex-fixture"));
+    eprintln!("lossless lexer corpus: {} cases", samples.len());
+    let mut expected = Vec::new();
+    let mut cases = String::new();
+    for sample in samples {
+        cases.push_str(&format!("Vec::push(&mut inputs, owned(b\"{}\"));\n", escaped(sample.as_bytes())));
+        let lexed = LexedFile::lex(file, &sample);
+        expected.extend_from_slice(&file.0.as_bytes());
+        expected.extend_from_slice(&lexed.source_fingerprint.as_bytes());
+        word(&mut expected, lexed.tokens.len() as u64);
+        for (index, token) in lexed.tokens.iter().enumerate() {
+            let tag = match token.kind { TokenKind::Identifier => 0, TokenKind::Integer => 1, TokenKind::Float => 2,
+                TokenKind::String => 3, TokenKind::ByteString => 4, TokenKind::Character => 5, TokenKind::Operator => 6,
+                TokenKind::Punctuation(_) => 7, TokenKind::Whitespace => 8, TokenKind::LineComment => 9,
+                TokenKind::BlockComment => 10, TokenKind::Invalid => 11, TokenKind::End => 12 };
+            word(&mut expected, tag);
+            word(&mut expected, match token.kind { TokenKind::Punctuation(c) => c as u64, _ => 0 });
+            word(&mut expected, token.start.into()); word(&mut expected, token.end.into());
+            let diagnostics: Vec<_> = lexed.diagnostics.iter().filter(|d| d.span == token.span).collect();
+            assert!(diagnostics.len() <= 1);
+            word(&mut expected, diagnostics.first().map_or(0, |d| d.code[1..].parse().unwrap()));
+            let delimiters: Vec<_> = lexed.delimiters.diagnostics.iter().filter(|d| d.token == index).collect();
+            assert!(delimiters.len() <= 1);
+            word(&mut expected, delimiters.first().map_or(0, |d| d.code[1..].parse().unwrap()));
+            for message in [diagnostics.first().map(|d| d.message), delimiters.first().map(|d| d.message)] {
+                let bytes = message.unwrap_or("").as_bytes(); word(&mut expected, bytes.len() as u64); expected.extend_from_slice(bytes);
+            }
+            word(&mut expected, lexed.delimiters.matching(index).map_or(0, |p| p as u64 + 1));
+            let spelling = lexed.text(&sample, token).as_bytes();
+            word(&mut expected, spelling.len() as u64); expected.extend_from_slice(spelling);
+        }
+    }
+    assert!(expected.len() < 1048576);
+    let case = "source/lex.glorious";
+    let program = source_program(case, &[("@CASES@", cases), ("@ORACLE@", escaped(&Digest::of_bytes(&expected).as_bytes())),
+        ("@CAPACITY@", expected.len().to_string())]);
+    let (result, profile) = program.run_i64_for_authoring(Default::default()).unwrap();
+    record_execution(case, &program, result, Some(&profile));
+    assert_eq!(result, 42);
+    assert_eq!(profile.native_memory.raw_live_bytes, 0);
+    assert_eq!(profile.native_memory.home_live_bytes, 0);
+    eprintln!("lossless lexer: {} bytes; {profile:?}", expected.len());
+}
+
+#[test]
+fn gsc2_lexer_yields_preflights_backing_and_closes_every_cancelled_transition() {
+    static RESULTS: OnceLock<Result<Vec<i64>, String>> = OnceLock::new();
+    let results = source_batch(&RESULTS, "source/lex_controls.glorious", &[], "source/lex-controls-batch", &[5, 4, 8]);
+    assert_eq!(results, &[5, 4, 8]);
+}
+
 fn gsc2_registry_computes_tracked_source_children_and_collects_typed_products() {
     registry_history(0, 35, "registry/cold-hit-collection");
 }
@@ -757,6 +954,28 @@ fn registry_history(mode: i64, expected: i64, evidence_name: &str) {
 
 #[test]
 fn gsc2_registry_projects_committed_reads_into_atomic_public_dependency_facts() {
+    registry_projects_public_dependency_facts(false);
+}
+
+#[test]
+fn gsc2_lex_registry_projects_reused_and_recomputed_journals_into_public_facts() {
+    registry_projects_public_dependency_facts(true);
+}
+
+#[test]
+fn gsc2_lex_registry_owns_backing_across_reuse_failure_cancellation_and_retirement() {
+    let support = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compiler/tests/registry/source.glorious")).unwrap();
+    let support = support.split("fn retained(").next().unwrap().to_owned();
+    let case = "registry/lex.glorious";
+    let program = source_program(case, &[("@SUPPORT@", support)]);
+    let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
+    record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
+    assert_eq!(results, [1, 1, 1, 1, 1, 1, 1]);
+    assert_eq!(profile.native_memory.raw_live_bytes, 0);
+    assert_eq!(profile.native_memory.home_live_bytes, 0);
+}
+
+fn registry_projects_public_dependency_facts(lexical: bool) {
     use grandiose_stage0::{DependencyNode, DependencyStatus};
     fn literal(value: &[u8]) -> String {
         format!("b\"{}\"", value.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>())
@@ -766,6 +985,10 @@ fn gsc2_registry_projects_committed_reads_into_atomic_public_dependency_facts() 
     }
     let support = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compiler/tests/registry/source.glorious")).unwrap();
     let support = support.split("fn retained(").next().unwrap().to_owned();
+    let support = if lexical {
+        support.replace("source::LineIndex", "source::lex::LexedFile")
+            .replace("registry::line_index", "registry::lex")
+    } else { support };
     let original = b"pub fn main() -> i64 { 42 }\n";
     let changed = b"pub fn main() -> i64 { 43 }\n";
     let package = PackageKey("app".into());
@@ -797,7 +1020,7 @@ fn gsc2_registry_projects_committed_reads_into_atomic_public_dependency_facts() 
         parent = Some(revision);
     }
     let case = "registry/dependencies.glorious";
-    let program = source_program(case, &[
+    let mut replacements = vec![
         ("@SUPPORT@", support),
         ("@FILE@", source_digest(file.0)),
         ("@SECOND@", source_digest(Digest::of_bytes(b"dependency-unobserved-file"))),
@@ -805,11 +1028,23 @@ fn gsc2_registry_projects_committed_reads_into_atomic_public_dependency_facts() 
         ("@DIGEST1@", source_digest(Digest::of_bytes(changed))),
         ("@ORIGINAL@", literal(original)),
         ("@CHANGED@", literal(changed)),
-    ]);
+    ];
+    if lexical {
+        // Reuse the complete publication/cancellation history, changing only
+        // its typed provider and corresponding product inspection.
+        replacements.extend([
+            ("source::LineIndex", "source::lex::LexedFile".to_owned()),
+            ("registry::line_value", "registry::lex_value".to_owned()),
+            ("source::line_count(value)", "source::lex::token_count(value)".to_owned()),
+        ]);
+    }
+    let program = source_program(case, &replacements);
     let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
-    record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
+    record_execution_values(if lexical { "registry/lex-dependencies" } else { case }, &program, "", &format!("{results:?}"), Some(&profile));
     assert_eq!(&results[..6], &[1, 1, 1, 1, 1, 1]);
     assert!(results[6] > 10, "every projection/preparation boundary was cancelled: {results:?}");
+    assert_eq!(profile.native_memory.raw_live_bytes, 0);
+    assert_eq!(profile.native_memory.home_live_bytes, 0);
 }
 
 fn gsc2_registry_key_slots_are_reclaimed_across_pinned_retirement_and_generation_reuse() {

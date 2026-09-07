@@ -561,8 +561,24 @@ struct Sequence {
 
 impl Builder<'_> {
     fn region(&mut self, source: CoreId) -> Result<EvaluationRegionId, EvaluationError> {
+        self.region_with_observation(source, false)
+    }
+
+    fn region_with_observation(&mut self, source: CoreId, observational: bool) -> Result<EvaluationRegionId, EvaluationError> {
         let mut sequence = Sequence::default();
-        let value = if let CoreKind::Block(items) = &self.body.expression(source).kind {
+        let subject_ty = self.body.expression(source).ty.clone();
+        let observation = if observational
+            && crate::core::refinement_binding_type(subject_ty.clone()) != subject_ty {
+            self.expression_place(source, &mut sequence)?
+        } else { None };
+        let value = if let Some(place) = observation {
+            // An observational dispatch on an existing owner must not first
+            // materialize a consuming ReadLocal/Project temporary. Dispatch
+            // and binding projections operate through this ordinary borrow.
+            self.emit(source, crate::core::refinement_binding_type(subject_ty),
+                EvaluationOperation::Borrow { unique: false },
+                vec![EvaluationOperand::Place(place)], &mut sequence)?
+        } else if let CoreKind::Block(items) = &self.body.expression(source).kind {
             let items = items.clone();
             let mut value = None;
             let count = items.len();
@@ -980,8 +996,10 @@ impl Builder<'_> {
                 computation,
                 clauses,
                 handles_operations,
+                refinement_test,
+                ..
             } => {
-                let computation = self.region(computation)?;
+                let computation = self.region_with_observation(computation, refinement_test.is_some())?;
                 let mut arms = vec![];
                 for contract in clauses {
                     arms.push(EvaluationCompletionArm {

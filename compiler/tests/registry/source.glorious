@@ -23,7 +23,7 @@ struct Root { revision: identity::RevisionId, session: registry::Session, value:
 fn owned(bytes: Slice<u8>) -> Vec<u8> { let value = Vec<u8>::new(); Vec::extend_from_slice(&mut value, bytes); value }
 fn limits() -> registry::Limits {
     registry::Limits { revisions: 8, sessions: 8, attempts: 16, memos: 32, reads: 16, keys: 16,
-        source_products: 16, line_products: 16, drivers: 8, frames: 8, source_bytes: 1024, lines: 64 }
+        source_products: 16, line_products: 16, lex_products: 16, drivers: 8, frames: 8, source_bytes: 1024, lines: 64, tokens: 1025 }
 }
 fn world(first: identity::FileKey, second: identity::FileKey, a: Slice<u8>, b: Slice<u8>) -> Result<Inputs, source::Failure> {
     let controls = operation::create(10000, 10000);

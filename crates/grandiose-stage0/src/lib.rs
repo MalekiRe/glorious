@@ -11,6 +11,7 @@ pub mod artifact_cache;
 pub mod bootstrap;
 pub mod coherence;
 pub mod core;
+pub mod refinement;
 pub mod dependency;
 pub mod diagnostic;
 mod destruction;
@@ -65,7 +66,7 @@ pub use core::{
     CaptureEnvironment, CaptureMode, CapturePostState, ClosureCapture, CoreDiagnostic, CoreExpr,
     CoreHandlerClause, CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind,
     CorePattern, CorePatternField, CorePlace, EnvironmentBrand, LabelBrand, RefinementBrand,
-    RefinementEnvironment, RunsInEvidence, TypedBody,
+    RefinementBindingKey, RefinementEnvironment, RunsInEvidence, TypedBody,
 };
 pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};

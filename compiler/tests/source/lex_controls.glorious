@@ -1,0 +1,102 @@
+use std::*;
+use kernel::{identity, operation};
+use source::lex;
+pub mod kernel;
+pub mod source;
+
+fn owned(value: Slice<u8>) -> Vec<u8> { let bytes = Vec<u8>::new(); Vec::extend_from_slice(&mut bytes, value); bytes }
+fn check(value: Bool) -> i64 { handle value { true => 1, false => -10000 } }
+fn closed(builder: &lex::Builder) -> Bool { handle lex::progress(builder) { Result::Err(source::Failure::Closed) => true, _ => false } }
+fn prefix(builder: &mut lex::Builder, blob: &source::Blob, controls: &mut operation::Controls, count: usize) -> Bool {
+    handle count == 0 { true => true, false => handle lex::step(&mut *builder, blob, &mut *controls) {
+        Result::Err(_) => false, Result::Ok(_) => prefix(builder, blob, controls, count - 1) } }
+}
+fn cancelled(blob: &source::Blob, count: usize) -> i64 {
+    let controls = operation::create(100000, 100000);
+    handle lex::begin(blob, 1024, &mut controls) { Result::Err(_) => -1, Result::Ok(builder) => {
+        let score = check(prefix(&mut builder, blob, &mut controls, count));
+        let spent = operation::work_spent(&controls); operation::cancel(&mut controls);
+        let score = score + check(handle lex::step(&mut builder, blob, &mut controls) {
+            Result::Err(source::Failure::Control(operation::Failure::Cancelled)) => true, _ => false });
+        score + check(closed(&builder)) + check(operation::work_spent(&controls) == spent)
+            + check(handle lex::finish(&mut builder, &controls) {
+                Result::Err(source::Failure::Control(operation::Failure::Cancelled)) => true, _ => false })
+    } }
+}
+fn exhausted(blob: &source::Blob, count: usize) -> i64 {
+    let controls = operation::create(as<u64>(count) + 1, 100000);
+    handle lex::begin(blob, 1024, &mut controls) { Result::Err(_) => -1, Result::Ok(builder) => {
+        let score = check(prefix(&mut builder, blob, &mut controls, count));
+        let score = score + check(handle lex::step(&mut builder, blob, &mut controls) {
+            Result::Err(source::Failure::Control(operation::Failure::ResourceLimit { name, ceiling: _, requested: _ })) => name == 0,
+            _ => false });
+        score + check(closed(&builder)) + check(handle lex::finish(&mut builder, &controls) { Result::Err(source::Failure::Closed) => true, _ => false })
+    } }
+}
+fn transitions(blob: &source::Blob, last: usize, cursor: usize, score: i64) -> i64 {
+    handle cursor > last { true => score, false => {
+        let found = cancelled(blob, cursor) + exhausted(blob, cursor);
+        transitions(blob, last, cursor + 1, score + check(found == 9))
+    } }
+}
+fn measured_step(builder: &mut lex::Builder, blob: &source::Blob, controls: &mut operation::Controls) -> Result<source::Event, source::Failure> {
+    handle lex::next_memory(& *builder) { Result::Err(error) => Result::Err(error), Result::Ok(delta) =>
+        handle operation::reserve(&mut *controls, delta) { Result::Err(error) => Result::Err(source::Failure::Control(error)), Result::Ok(_) =>
+            handle lex::progress(& *builder) { Result::Err(error) => Result::Err(error), Result::Ok(before) =>
+                handle lex::step(&mut *builder, blob, &mut *controls) { Result::Err(error) => Result::Err(error), Result::Ok(event) =>
+                    handle lex::progress(& *builder) { Result::Err(error) => Result::Err(error), Result::Ok(after) =>
+                        handle after >= before and { after - before <= 4 } { false => Result::Err(source::Failure::Offset),
+                            true => handle lex::builder_memory(& *builder) { Result::Err(error) => Result::Err(error), Result::Ok(memory) =>
+                                handle memory == operation::memory_spent(& *controls) { false => Result::Err(source::Failure::Capacity), true => Result::Ok(event) } } } } } } } }
+}
+fn measure(builder: &mut lex::Builder, blob: &source::Blob, controls: &mut operation::Controls, count: usize, fuel: usize) -> Result<usize, source::Failure> {
+    handle fuel == 0 { true => Result::Err(source::Failure::Busy), false => handle measured_step(&mut *builder, blob, &mut *controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(event) => handle event {
+            source::Event::Ready => Result::Ok(count + 1), source::Event::Continue => measure(builder, blob, controls, count + 1, fuel - 1) } } }
+}
+fn finish_drop(builder: &mut lex::Builder, controls: &operation::Controls) -> Result<u64, source::Failure> {
+    handle lex::finish(builder, controls) { Result::Err(error) => Result::Err(error), Result::Ok(value) => Result::Ok(lex::product_memory(&value)) }
+}
+fn measured(blob: &source::Blob, all_prefixes: Bool) -> i64 {
+    let controls = operation::create(100000, 100000);
+    handle lex::begin(blob, 1024, &mut controls) { Result::Err(_) => -1, Result::Ok(builder) =>
+        handle measure(&mut builder, blob, &mut controls, 0, 100000) { Result::Err(_) => -2, Result::Ok(steps) =>
+            handle finish_drop(&mut builder, &controls) { Result::Err(_) => -3, Result::Ok(memory) => {
+                let score = check(memory == operation::memory_spent(&controls));
+                let score = score + check(handle operation::release(&mut controls, memory) { Result::Ok(_) => true, _ => false });
+                let score = score + check(operation::memory_spent(&controls) == 0) + check(closed(&builder));
+                handle all_prefixes { false => score, true => score + check(transitions(blob, steps, 0, 0) == as<i64>(steps) + 1) }
+            } } } }
+}
+fn failure_cases(blob: &source::Blob, other: &source::Blob) -> i64 {
+    let controls = operation::create(10000, 10000);
+    let score = check(handle lex::begin(blob, 0, &mut controls) { Result::Err(source::Failure::Capacity) => true, _ => false });
+    let score = score + handle lex::begin(blob, 1024, &mut controls) { Result::Err(_) => -1, Result::Ok(builder) => {
+        let score = check(handle lex::step(&mut builder, other, &mut controls) { Result::Err(source::Failure::SourceMismatch) => true, _ => false });
+        score + check(closed(&builder))
+    } };
+    let score = score + handle lex::begin(blob, 1, &mut controls) { Result::Err(_) => -1, Result::Ok(builder) => {
+        let result = measure(&mut builder, blob, &mut controls, 0, 10000);
+        // Preflight rejects before mutation. The owning driver abandons the
+        // still-live builder, then refunds its existing reservation.
+        let score = check(handle result { Result::Err(source::Failure::Capacity) => true, _ => false });
+        lex::abort(&mut builder); let held = operation::memory_spent(&controls); operation::release(&mut controls, held);
+        score + check(closed(&builder))
+    } };
+    let score = score + handle lex::begin(blob, 1024, &mut controls) { Result::Err(_) => -1, Result::Ok(builder) => {
+        let score = check(handle lex::finish(&mut builder, &controls) { Result::Err(source::Failure::Busy) => true, _ => false });
+        score + check(closed(&builder))
+    } };
+    operation::cancel(&mut controls);
+    score + check(handle lex::begin(blob, 1024, &mut controls) { Result::Err(source::Failure::Control(operation::Failure::Cancelled)) => true, _ => false })
+}
+fn run(file: identity::FileKey) -> (i64, i64, i64) {
+    let controls = operation::create(100000, 100000);
+    let long = owned(b"/*"); Vec::resize(&mut long, 8194, 97); Vec::extend_from_slice(&mut long, b"*/");
+    handle source::create(file, owned(b"([)]\n/*x*/ 'life 'a' 0x__1 1.2e-3 \"\\u{10ffff}\" b\"\\xff\" {"), 100000, &mut controls) {
+        Result::Err(_) => (-1, -1, -1), Result::Ok(blob) => handle source::create(file, long, 100000, &mut controls) {
+            Result::Err(_) => (-2, -2, -2), Result::Ok(long) => (measured(&blob, true), measured(&long, false), failure_cases(&blob, &long)) } }
+}
+pub fn main() -> (i64, i64, i64) {
+    handle identity::hash(b"lex-controls") { Result::Err(_) => (-3, -3, -3), Result::Ok(file) => run(identity::FileKey { digest: file }) }
+}

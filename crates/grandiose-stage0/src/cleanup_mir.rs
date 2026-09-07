@@ -151,6 +151,10 @@ pub struct CleanupMir {
     pub(crate) flags: Vec<DropFlag>,
     pub(crate) plans: Vec<CleanupPlan>,
     pub(crate) frame_cleanup: CleanupPlanId,
+    /// Lexical cleanup in the surviving destination frame of a label call.
+    pub(crate) label_cleanup: Vec<CleanupPlanId>,
+    /// Surviving-frame cleanup after a clause abandons its continuation.
+    pub(crate) clause_cleanup: BTreeMap<ControlBlockId, CleanupPlanId>,
     /// Fully selected, recursively closed hook and structural programs.
     pub(crate) destruction: std::sync::Arc<BTreeMap<DefKey, crate::destruction::Plan>>,
     pub(crate) native_operations: BTreeMap<ControlBlockId, Vec<(Type, Option<DefKey>)>>,

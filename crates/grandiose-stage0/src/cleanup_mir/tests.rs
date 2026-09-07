@@ -55,6 +55,52 @@ pub(crate) fn fixture(source: &str) -> CleanupMir {
 const OWNED: &str = "pub fn main(value: () -> i64) -> { let owned = move value; () }";
 
 #[test]
+fn replay_outer_consumption_is_classified_from_the_resumed_suffix() {
+    for (computation, captured) in [
+        ("let consumed = move value; Tick::tick(); 42", false),
+        ("Tick::tick(); let consumed = move value; 42", true),
+    ] {
+        let source = format!("effect Tick {{ [2, 2] tick() -> i64; }} pub fn main(value: i64) -> i64 {{ handle {{ {computation} }} {{ Tick::tick() with k => {{ let first = k(0); k(0) }} }} }}");
+        let body = fixture(&source);
+        assert_eq!(body.handlers.len(), 1);
+        assert_eq!(body.replay_owned_roots(ControlHandlerId(0)).contains(&body.parameters[0]), captured,
+            "only consuming the outer owner after suspension captures it: {computation}");
+    }
+}
+
+#[test]
+fn cancellation_cleanup_cannot_omit_surviving_frame_owners() {
+    let body = fixture("effect Ask { [0, 1] ask() -> i64; } pub fn main(value: () -> i64) -> i64 { handle { let owned = move value; Ask::ask() } { Ask::ask() with _ => 42 } }");
+    let id = *body.clause_cleanup.values().next().expect("clause abandonment plan");
+    assert!(body.plans[id.0 as usize].actions.iter().any(|action| matches!(action, CleanupAction::Destroy { .. })));
+    let mut missing = body.clone();
+    missing.clause_cleanup.clear();
+    assert!(missing.validate().unwrap_err().0.contains("clause abandonment cleanup is absent"));
+    let mut forged = body.clone();
+    forged.plans[id.0 as usize].actions.clear();
+    assert!(forged.validate().is_err(), "protected owners must not disappear from cancellation");
+}
+
+#[test]
+fn label_cleanup_seals_the_lexical_exit_and_protects_its_payload() {
+    let body = fixture("pub fn main(value: () -> i64) -> i64 { label done { let owned = move value; transfer done 42; 0 } }");
+    assert_eq!(body.label_cleanup.len(), 1);
+    let id = body.label_cleanup[0];
+    let plan = &body.plans[id.0 as usize];
+    assert!(plan.actions.iter().any(|action| matches!(action, CleanupAction::Destroy { .. })));
+    assert_eq!(plan.protected, [body.labels[0].result]);
+    let mut missing = body.clone();
+    missing.label_cleanup.clear();
+    assert!(missing.validate().unwrap_err().0.contains("label cleanup inventory"));
+    let mut forged = body.clone();
+    forged.plans[id.0 as usize].actions.retain(|action| !matches!(action, CleanupAction::StorageDead(_)));
+    assert!(forged.validate().is_err(), "a label exit must retain every lexical owner");
+    let mut unprotected = body.clone();
+    unprotected.plans[id.0 as usize].protected.clear();
+    assert!(unprotected.validate().is_err(), "the transferred result is not an abandoned owner");
+}
+
+#[test]
 fn cleanup_owns_concrete_destroy_and_complete_frame_plans() {
     let body = fixture(OWNED);
     assert!(body.plans.iter().any(|plan| {

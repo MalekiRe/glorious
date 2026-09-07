@@ -1,0 +1,324 @@
+use std::*;
+use kernel::storage;
+use kernel::operation;
+
+// A request/scheduler owns the pool. Handles never retain a database borrow
+// across suspension. Parents are immutable, and cannot retire before children.
+pub struct Budget { private key: storage::Handle }
+pub struct Lease { private key: Option<storage::Handle> }
+pub impl Use<[0, 1]> for Lease {}
+struct Node { name: u32, ceiling: u64, spent: u64, direct: u64,
+    parent: Option<storage::Handle>, children: usize, reservations: usize }
+struct Reservation { budget: storage::Handle, amount: u64, retained: Bool }
+pub struct Pool { private nodes: storage::Arena<Node>, private leases: storage::Arena<Reservation>,
+    private closed: Bool, private close_cursor: usize, private retained: usize }
+pub impl Use<[0, 1]> for Pool {}
+pub enum Failure { Storage(storage::StorageError), Control(operation::Failure), Busy, Released, Closed, Invariant }
+pub impl Clone for Failure {
+    clone(value: &Failure) -> Failure {
+        handle *value {
+            Failure::Storage(error) => Failure::Storage(error),
+            Failure::Control(error) => Failure::Control(error),
+            Failure::Busy => Failure::Busy, Failure::Released => Failure::Released,
+            Failure::Closed => Failure::Closed, Failure::Invariant => Failure::Invariant,
+        }
+    }
+}
+pub fn reservations(pool: &Pool) -> usize { storage::count(&pool.leases) }
+pub fn retained_reservations(pool: &Pool) -> usize { pool.retained }
+
+pub fn create(database: u64, owner: u64, budgets: usize, leases: usize) -> Pool {
+    Pool { nodes: storage::namespace(database, owner, budgets),
+        leases: storage::namespace(database, owner, leases), closed: false, close_cursor: 0, retained: 0 }
+}
+pub fn root(pool: &mut Pool, name: u32, ceiling: u64) -> Result<Budget, Failure> {
+    handle pool.closed { true => Result::Err(Failure::Closed), false => root_open(pool, name, ceiling) }
+}
+fn root_open(pool: &mut Pool, name: u32, ceiling: u64) -> Result<Budget, Failure> {
+    handle storage::insert(&mut pool.nodes, Node { name: name, ceiling: ceiling,
+        spent: 0, direct: 0, parent: None, children: 0, reservations: 0 }) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)),
+        Result::Ok(key) => Result::Ok(Budget { key: key }),
+    }
+}
+pub fn child(pool: &mut Pool, parent: Budget, name: u32, ceiling: u64) -> Result<Budget, Failure> {
+    handle pool.closed { true => Result::Err(Failure::Closed), false => child_open(pool, parent, name, ceiling) }
+}
+fn child_open(pool: &mut Pool, parent: Budget, name: u32, ceiling: u64) -> Result<Budget, Failure> {
+    handle storage::get(&pool.nodes, parent.key) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)),
+        Result::Ok(_) => handle storage::insert(&mut pool.nodes, Node { name: name, ceiling: ceiling,
+            spent: 0, direct: 0, parent: Result::Ok(parent.key), children: 0, reservations: 0 }) {
+            Result::Err(error) => Result::Err(Failure::Storage(error)),
+            Result::Ok(key) => handle storage::get_mut(&mut pool.nodes, parent.key) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(node) => { (*node).children = node.children + 1; Result::Ok(Budget { key: key }) },
+            },
+        },
+    }
+}
+pub fn spent(pool: &Pool, budget: Budget) -> Result<u64, Failure> {
+    handle storage::get(&pool.nodes, budget.key) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)), Result::Ok(node) => Result::Ok(node.spent),
+    }
+}
+pub fn ceiling(pool: &Pool, budget: Budget) -> Result<u64, Failure> {
+    handle storage::get(&pool.nodes, budget.key) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)), Result::Ok(node) => Result::Ok(node.ceiling),
+    }
+}
+
+// Build the path before any mutation. Each ancestor costs real request work;
+// rejected reservations do not refund the work used to inspect the hierarchy.
+fn path(pool: &Pool, key: storage::Handle, controls: &mut operation::Controls,
+    result: Vec<storage::Handle>) -> Result<Vec<storage::Handle>, Failure> {
+    handle operation::charge(&mut *controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle storage::get(&pool.nodes, key) {
+            Result::Err(error) => Result::Err(Failure::Storage(error)),
+            Result::Ok(node) => {
+                let parent = node.parent;
+                Vec::push(&mut result, key);
+                handle parent {
+                    Result::Err(_) => Result::Ok(result),
+                    Result::Ok(parent) => path(pool, parent, controls, result),
+                }
+            },
+        },
+    }
+}
+fn admitted(pool: &Pool, path: &Vec<storage::Handle>, remaining: usize, amount: u64) -> Result<(), Failure> {
+    handle remaining == 0 {
+        true => Result::Ok(()),
+        false => {
+            let index = remaining - 1;
+            handle storage::get(&pool.nodes, *Vec::get_unchecked(path, index)) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(node) => handle amount <= wrapping_sub(node.ceiling, node.spent) {
+                    false => Result::Err(Failure::Control(operation::Failure::ResourceLimit {
+                        name: node.name, ceiling: node.ceiling, requested: amount })),
+                    true => admitted(pool, path, index, amount),
+                },
+            }
+        },
+    }
+}
+// This pass follows only a sealed, prevalidated path. No provider callbacks or
+// suspension can observe a partial update. Capacity and control checks precede it.
+fn add(pool: &mut Pool, path: &Vec<storage::Handle>, index: usize, amount: u64) -> Result<(), Failure> {
+    handle index == Vec::len(path) {
+        true => Result::Ok(()),
+        false => {
+            handle storage::get_mut(&mut pool.nodes, *Vec::get_unchecked(path, index)) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(node) => {
+                    (*node).spent = wrapping_add(node.spent, amount);
+                    add(pool, path, index + 1, amount)
+                },
+            }
+        },
+    }
+}
+pub fn charge(pool: &mut Pool, budget: Budget, amount: u64, controls: &mut operation::Controls) -> Result<(), Failure> {
+    handle pool.closed { true => Result::Err(Failure::Closed), false => charge_open(pool, budget, amount, controls) }
+}
+fn charge_open(pool: &mut Pool, budget: Budget, amount: u64, controls: &mut operation::Controls) -> Result<(), Failure> {
+    handle path(& *pool, budget.key, controls, Vec::new()) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(path) => handle admitted(& *pool, &path, Vec::len(&path), amount) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle add(&mut *pool, &path, 0, amount) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => handle storage::get_mut(&mut pool.nodes, budget.key) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(node) => { (*node).direct = wrapping_add(node.direct, amount); Result::Ok(()) },
+                },
+            },
+        },
+    }
+}
+pub fn lease(pool: &mut Pool, budget: Budget, amount: u64, controls: &mut operation::Controls) -> Result<Lease, Failure> {
+    handle pool.closed { true => Result::Err(Failure::Closed), false => lease_open(pool, budget, amount, controls) }
+}
+fn lease_open(pool: &mut Pool, budget: Budget, amount: u64, controls: &mut operation::Controls) -> Result<Lease, Failure> {
+    handle path(& *pool, budget.key, controls, Vec::new()) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(path) => handle admitted(& *pool, &path, Vec::len(&path), amount) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle storage::insert(&mut pool.leases, Reservation { budget: budget.key, amount: amount, retained: false }) {
+                Result::Err(error) => Result::Err(Failure::Storage(error)),
+                Result::Ok(key) => handle add(&mut *pool, &path, 0, amount) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(_) => handle storage::get_mut(&mut pool.nodes, budget.key) {
+                        Result::Err(_) => Result::Err(Failure::Invariant),
+                        Result::Ok(node) => {
+                            (*node).reservations = node.reservations + 1;
+                            Result::Ok(Lease { key: Result::Ok(key) })
+                        },
+                    },
+                },
+            },
+        },
+    }
+}
+
+// A product owner keeps the pool alive after request close. Marking the lease
+// transfers cleanup responsibility; the close scan only reclaims temporaries.
+pub fn retain_lease(pool: &mut Pool, lease: &Lease) -> Result<(), Failure> {
+    handle pool.closed {
+        true => Result::Err(Failure::Closed),
+        false => handle lease.key {
+            Result::Err(_) => Result::Err(Failure::Released),
+            Result::Ok(key) => handle storage::get_mut(&mut pool.leases, key) {
+                Result::Err(error) => Result::Err(Failure::Storage(error)),
+                Result::Ok(reservation) => handle reservation.retained {
+                    true => Result::Ok(()),
+                    false => {
+                        (*reservation).retained = true;
+                        (*pool).retained = pool.retained + 1;
+                        Result::Ok(())
+                    },
+                },
+            },
+        },
+    }
+}
+
+pub fn grow_lease(pool: &mut Pool, lease: &Lease, amount: u64, controls: &mut operation::Controls) -> Result<(), Failure> {
+    handle pool.closed {
+        true => Result::Err(Failure::Closed),
+        false => handle lease.key {
+            Result::Err(_) => Result::Err(Failure::Released),
+            Result::Ok(key) => {
+                let budget = handle storage::get(&pool.leases, key) {
+                    Result::Err(error) => Result::Err(Failure::Storage(error)), Result::Ok(value) => Result::Ok(value.budget),
+                };
+                handle budget {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(budget) => grow_key(pool, key, budget, amount, controls),
+                }
+            },
+        },
+    }
+}
+fn grow_key(pool: &mut Pool, key: storage::Handle, budget: storage::Handle, amount: u64,
+    controls: &mut operation::Controls) -> Result<(), Failure> {
+    handle path(& *pool, budget, controls, Vec::new()) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(path) => handle admitted(& *pool, &path, Vec::len(&path), amount) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle add(&mut *pool, &path, 0, amount) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => handle storage::get_mut(&mut pool.leases, key) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(value) => { (*value).amount = wrapping_add(value.amount, amount); Result::Ok(()) },
+                },
+            },
+        },
+    }
+}
+// Cleanup is independent of cancellation/work exhaustion. Parent retention and
+// direct-charge accounting prevent release from stealing a child's reservation.
+fn subtract(pool: &mut Pool, key: storage::Handle, amount: u64) -> Result<(), Failure> {
+    handle storage::get_mut(&mut pool.nodes, key) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(node) => {
+            (*node).spent = wrapping_sub(node.spent, amount);
+            let parent = node.parent;
+            handle parent { Result::Err(_) => Result::Ok(()), Result::Ok(parent) => subtract(pool, parent, amount) }
+        },
+    }
+}
+pub fn release(pool: &mut Pool, budget: Budget, amount: u64) -> Result<(), Failure> {
+    handle storage::get_mut(&mut pool.nodes, budget.key) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)),
+        Result::Ok(node) => handle amount <= node.direct {
+            false => Result::Err(Failure::Invariant),
+            true => { (*node).direct = wrapping_sub(node.direct, amount); subtract(pool, budget.key, amount) },
+        },
+    }
+}
+pub fn release_lease(pool: &mut Pool, lease: &mut Lease) -> Result<(), Failure> {
+    handle lease.key {
+        Result::Err(_) => Result::Err(Failure::Released),
+        Result::Ok(key) => handle release_key(pool, key) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => { (*lease).key = None; Result::Ok(()) },
+        },
+    }
+}
+fn release_key(pool: &mut Pool, key: storage::Handle) -> Result<(), Failure> {
+    handle storage::remove(&mut pool.leases, key) {
+            Result::Err(error) => Result::Err(Failure::Storage(error)),
+            Result::Ok(reservation) => {
+                handle reservation.retained { false => (), true => { (*pool).retained = pool.retained - 1; } };
+                handle storage::get_mut(&mut pool.nodes, reservation.budget) {
+                    Result::Err(_) => Result::Err(Failure::Invariant),
+                    Result::Ok(node) => {
+                        (*node).reservations = node.reservations - 1;
+                        subtract(pool, reservation.budget, reservation.amount)
+                    },
+                }
+            },
+    }
+}
+// A dropped temporary token does not lose the pool-owned reservation record.
+// The request owner must drive close to completion on every session exit.
+// Retained leases remain charged: their product owner must keep the pool alive
+// and explicitly release them after disposal, even when close reports done.
+// Each step examines one lease slot and releases at most one ancestor chain;
+// it remains usable after cancellation or work exhaustion and never refunds
+// cumulative direct charges. Repeated close calls retain their scan position.
+pub fn close_step(pool: &mut Pool) -> Result<Bool, Failure> {
+    (*pool).closed = true;
+    handle pool.close_cursor == storage::slot_count(&pool.leases) {
+        true => Result::Ok(true),
+        false => {
+            let key = storage::key_at(&pool.leases, pool.close_cursor);
+            let result = handle key { Result::Err(_) => Result::Ok(()), Result::Ok(key) => close_key(&mut *pool, key) };
+            handle result {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => { (*pool).close_cursor = pool.close_cursor + 1; Result::Ok(false) },
+            }
+        },
+    }
+}
+fn close_key(pool: &mut Pool, key: storage::Handle) -> Result<(), Failure> {
+    let retained = handle storage::get(&pool.leases, key) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)), Result::Ok(value) => Result::Ok(value.retained),
+    };
+    handle retained {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(retained) => handle retained { true => Result::Ok(()), false => release_key(pool, key) },
+    }
+}
+fn idle(node: &Node) -> Bool {
+    handle node.children == 0 {
+        false => false,
+        true => handle node.spent == 0 { false => false, true => node.reservations == 0 },
+    }
+}
+fn can_retire(pool: &Pool, budget: Budget) -> Result<(), Failure> {
+    handle storage::get(&pool.nodes, budget.key) {
+        Result::Err(error) => Result::Err(Failure::Storage(error)),
+        Result::Ok(node) => handle idle(node) {
+            false => Result::Err(Failure::Busy),
+            true => Result::Ok(()),
+        },
+    }
+}
+pub fn retire(pool: &mut Pool, budget: Budget) -> Result<(), Failure> {
+    handle can_retire(& *pool, budget) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle storage::remove(&mut pool.nodes, budget.key) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(node) => handle node.parent {
+                    Result::Err(_) => Result::Ok(()),
+                    Result::Ok(parent) => handle storage::get_mut(&mut pool.nodes, parent) {
+                        Result::Err(_) => Result::Err(Failure::Invariant),
+                        Result::Ok(parent) => { (*parent).children = parent.children - 1; Result::Ok(()) },
+                    },
+                },
+        },
+    }
+}

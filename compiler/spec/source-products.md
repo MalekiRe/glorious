@@ -5,6 +5,8 @@ an immutable UTF-8 `Blob` and its immutable `LineIndex`. These are actual source
 data, not the arithmetic payloads used by the kernel histories. The closed
 registry now connects them to tracked queries and separate typed stores;
 see [query-registry.md](query-registry.md) for integration evidence and scope.
+The subsequent [lossless lexer](lossless-lex.md) consumes the same admitted blob
+and has its own typed query, recovery comparisons, and ownership histories.
 
 The blob accepts an already admitted `FileKey` and owns the input bytes through
 the standard `String` representation. It checks the configured byte ceiling,
@@ -66,5 +68,6 @@ production sources. Full expanded-closure verification is recorded separately.
 
 These tests compile Glorious source through C0, independently decode/verify
 its serialized G0 program, and execute that program. They do not establish
-G1 execution, a lexer, or self-compilation. Provider dependency tracking and
+G1 execution or self-compilation; the lexer has separate comparisons.
+Provider dependency tracking and
 retention have separate registry integration histories.

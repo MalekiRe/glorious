@@ -4,7 +4,168 @@ No milestone or compatibility contract is considered passed just because its
 types exist. The executable source tests currently exercise kernel components
 and initial source products, not a complete compilation pipeline.
 
+## Current source-authoring revalidation (September 7)
+
+The latest full source gate passes all 60 tests in 415.72 seconds after adding
+the lossless lexical provider and its typed registry family
+(`target/compiler-check/run-8wjo_51m/report.json`). All 62 execution records
+retain the existing 12 workers/limits and `release_ready: false`; all 36
+profiled runs finish with zero raw/home live bytes and unsaturated counters.
+The lexical corpus compares all token/recovery/spelling/pairing fields for
+357 reference inputs, while separate histories check stepped cancellation,
+backing preflight, reuse, failure, retirement, and atomic public input facts.
+The wider selected authoring run has 1,101 passes and the same 15 previously
+recorded failures. All 175 standard-library and 28 native-bridge tests pass.
+See [lossless lexical products](lossless-lex.md) for the exact scope, enabling
+region-invariance correction, and measurements. Declaration scanning, headers,
+semantic compilation, emission, and self-host bootstrap remain outstanding.
+
+The preceding full source gate passed all 56 tests in 399.31 seconds after fixing
+call-context lifetime inference and detached higher-ranked layout obligations
+(`target/compiler-check/run-mg43ga9e/report.json`). All 58 records retain the
+existing 12 workers/limits and `release_ready: false`; all 32 profiled runs
+finish with zero raw/home live bytes and unsaturated counters. The copy batch
+retains its 33-frame depth and prior artifact/backing/work measurements.
+All 28 native-bridge tests now pass. The wider selected authoring run has
+1,095 passes and 15 remaining failures, including two lifetime-suite ownership
+failures reproduced with identical diagnostics on the pre-fix compiler.
+See [call-context lifetime evidence](call-context-lifetimes.md) for the five
+new source regressions, two layout checks, and baseline comparisons.
+
+The preceding full source gate passed all 56 tests in 395.95 seconds after the
+native owner-move and fixture revalidation
+(`target/compiler-check/run-uin4h5j2/report.json`). All 58 records retain the
+existing 12 workers/limits and `release_ready: false`; the 32 profiled runs
+finish with zero raw/home live bytes and unsaturated counters. The copy batch
+retains its 33-frame depth and previous backing/work measurements. The broader
+selected authoring suites pass 712 tests with six failures, including one
+remaining native lifetime-specialization blocker now reduced to a source-only
+seven-line case. All 19 general-memory tests pass; the owned native Pair
+roundtrip passes its unchanged two-slot memory cap. See
+[native fixture evidence and the minimized blocker](unsafe-memory-progress.md#native-fixture-and-owner-move-revalidation-september-7).
+
+The preceding full source gate passed all 56 tests in 368.27 seconds after bounding
+the source library's comparison, UTF-8 validation, and vector-growth stack costs
+(`target/compiler-check/run-28gl455c/report.json`). The copy/cancellation batch
+now reaches 33 frames instead of 8,234, with a 4,720-byte native-home peak instead
+of 197,456 bytes. All 171 standard-library tests pass, including 16,417-element
+ordinary/authoring runs under a 128-frame cap and 51 UTF-8 oracle cases.
+The 58 source execution records retain 12 workers, existing resource limits,
+and `release_ready: false`; all 32 profiled runs finish with zero live raw/home
+bytes. These traversals have logarithmic stack growth, not general constant-stack
+compiler execution. The copy batch uses more logical work ticks; see the
+[measured tradeoff](native-costs.md#library-stack-depth-localization).
+
+The preceding full source gate passed all 56 tests in 362.25 seconds with native
+backing-storage measurements (`target/compiler-check/run-51ln7pdm/report.json`).
+All 58 execution records preserve the existing limits and 12 workers and retain
+`release_ready: false`. The 32 profiled executions finish with zero live raw
+and native-home backing bytes and no saturated counters; the 26 unprofiled
+records leave those fields empty. See [native cost evidence](native-costs.md)
+for scope, additional native-suite failures, and remaining stack-cost work.
+
+The preceding full source gate passed all 56 tests in 353.67 seconds after the
+nested-pattern coverage and nonreturning-call authority fixes
+(`target/compiler-check/run-6rjmwza6/report.json`). Its 58 execution records
+retain the existing limits and workers and `release_ready: false`. The source
+copy provider uses the directly nested patterns from the minimized blocker;
+its focused history also passes in 125.52 seconds. The closure-tracking
+regression passes unchanged.
+
+The preceding full source gate passed all 56 tests in 350.38 seconds, including
+resumable source copying, UTF-8 chunk boundaries, and cancellation of owned
+partial buffers (`target/compiler-check/run-93dk84z7/report.json`). Its 58
+execution records retain the existing limits and workers and
+`release_ready: false`. The new focused copy history also passes independently
+in 105.32 seconds; the closure-tracking regression passes unchanged.
+
+The preceding full source gate passed all 55 tests in 343.49 seconds, including
+automatic source/line-index backing reservations and independent phase/root
+ownership through request close, reuse, and final disposal
+(`target/compiler-check/run-9hgug8g_/report.json`). Its 57 execution records
+retain the existing limits and workers and `release_ready: false`.
+Seven focused standard-library vector/destruction tests also pass, including
+the new capacity-preflight comparator and unchanged native-allocation guards.
+
+The preceding full source gate passed all 54 tests in 318.64 seconds, including
+retained phase-lease growth/close and typed-store staged-publication cleanup
+(`target/compiler-check/run-all572xe/report.json`). Its 56 execution records
+retain the existing limits and workers and `release_ready: false`.
+
+The preceding full source gate passed all 53 tests in 317.23 seconds, including
+retained product-memory ownership, cancellation, and rejected publication
+(`target/compiler-check/run-z_95s4k3/report.json`). Its 55 execution records
+retain the existing limits and workers and `release_ready: false`.
+
+The preceding full source gate passed all 52 tests in 297.35 seconds, including
+request-owned hierarchical reservations and exact cold/memoized query histories
+(`target/compiler-check/run-5o47hyfl/report.json`). Its 54 execution records
+retain the existing limits and workers and `release_ready: false`.
+
+The preceding full source gate passed all 51 tests in 291.53 seconds, including
+the [hierarchical budget histories](operation-budgets.md)
+(`target/compiler-check/run-n4lywn96/report.json`). Its 53 execution records
+use the existing limits and workers and retain `release_ready: false`.
+
+The preceding full source gate passed all 48 tests in 279.09 seconds after the
+MIR pipeline and binding-pack changes (`target/compiler-check/run-d63yok2j/report.json`).
+The unfiltered report contains 50 execution records, uses the existing 12
+workers and resource limits, and records `release_ready: false`. This is source
+kernel/request/registry evidence, not a fresh workspace-wide pass or C2/C3
+convergence. Known Stage0 integration failures remain outside this source gate.
+
+The source audit previously failed before execution because its authoring
+allowlist retained a deleted legacy bridge. It now fingerprints the Stage0
+manifest and complete recursive Rust source tree, including the new lowering
+and validation modules. A regression checks additions, edits, removals, and
+manifest changes. The refreshed lock records these current inputs without
+marking any of the 11,455 open public contracts complete; `--release` still
+rejects missing full comparisons and verified bootstrap convergence.
+
 ## Current prerequisite
+
+The authoring runner now records [native backing-storage costs](native-costs.md)
+at allocation/release events, with separate raw-buffer/native-home counters,
+combined peaks, and explicit bulk-copy bytes. Source-copy cleanup also checks
+actual native backing returns to zero. This does not replace request-budget
+accounting or certify allocator internals, complete VM costs, or host polling.
+
+Stage0's authoring coverage proof now handles split finite constructors inside
+`Result` while leaving integer/generic error payloads open. Completion and effect
+handlers preserve correlated fields and reject collectively unreachable arms.
+Nonreturning calls also enforce their effect and generic-bound contracts unless
+operand evaluation prevents entering the call. The minimized failures and
+decoded-bytecode regressions pass; the broader authoring run retains the same
+13 previously recorded Core/destruction/VM failures
+(`target/nested-coverage-authoring-full.log`). No frozen parity contract is
+closed by these authoring fixes.
+
+The source kernel now has a [hierarchical budget pool](operation-budgets.md)
+with ancestor-first admission, checked leases, generational retirement, and an
+explicit abandoned-reservation close scan. Registry requests now own source/
+line-index family pools and charge the actual request-memory counter, reclaiming
+reservations before pin release. The generic database now transfers explicit
+product charges from computing attempts to final-owner disposal, retaining a
+separate counter after the producing request closes. Source-copy and line-index
+backing allocations now acquire both shared-root and phase reservations before
+allocation, transferring them to typed stores through final disposal. Full
+allocation accounting remains open; this does not complete M1/M2.
+
+Source materialization now yields between UTF-8-safe chunks of at most 4 KiB,
+using the actual request controls and retaining the prepaid destination buffer
+across scheduler steps. Cancellation destroys partial copies before reservation
+refunds. Initial capacity allocation is still synchronous; transport polling
+and physical latency certification remain open.
+
+Phase pools now support checked lease growth and explicitly retained leases
+that survive the close scan. Typed-store publication and suspended-builder
+cleanup destroy concrete values before attempt refunds. Registry pools now have
+independent owners that survive producer close only while products retain them;
+requests and revision pins do not survive with those owners. Admission rollback
+undoes only rejected growth, preserving existing builders and spent work.
+The accounting covers the copied source text and line-start backing capacities,
+not allocator peaks, arena storage, temporary fingerprints, VM frames, or a full
+physical allocation census.
 
 The September 5 direction selects [host-compatible bytecode and unsafe
 memory](unsafe-memory-progress.md) as prerequisite U0–U6 work. The compiler and

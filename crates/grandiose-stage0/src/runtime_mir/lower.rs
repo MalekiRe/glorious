@@ -152,6 +152,27 @@ impl CleanupMir {
         let mut pending = vec![];
         let mut blocks = vec![];
         let mut edge_blocks = vec![];
+        let mut label_landings = BTreeMap::new();
+        for id in self.blocks.iter().flat_map(|block| &block.instructions).filter_map(|instruction| {
+            match instruction.operation {
+                CleanupOperation::Compute(SpecializedComputation::Label(label)) => Some(label),
+                _ => None,
+            }
+        }).collect::<std::collections::BTreeSet<_>>() {
+            let label = &self.labels[id.0 as usize];
+            let landing = MirBlockId(u32::try_from(self.blocks.len() + edge_blocks.len()).ok()?);
+            self.record_runtime_plan(self.label_cleanup[id.0 as usize], landing.0 as usize, 0, &local, &mut pending);
+            edge_blocks.push(RuntimeBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![local(label.result)],
+                instructions: vec![],
+                terminator: RuntimeTerminator::Goto {
+                    target: MirBlockId(label.target.0),
+                    arguments: vec![local(label.result)],
+                },
+            });
+            label_landings.insert(id, landing);
+        }
         let mut lifted = BTreeMap::new();
         let mut leave_handler_depths = BTreeMap::new();
         for (block_index, block) in self.blocks.iter().enumerate() {
@@ -700,12 +721,13 @@ impl CleanupMir {
                             }
                         }
                         SpecializedComputation::Label(label) => {
+                            let landing = *label_landings.get(label)?;
                             let label = &self.labels[label.0 as usize];
                             RuntimeOperation::MakeLabel {
                                 label: crate::MirLabelId::UNASSIGNED,
                                 dst,
                                 brand: label.brand,
-                                target: MirBlockId(label.target.0),
+                                target: landing,
                                 destination: local(label.result),
                             }
                         }
@@ -822,10 +844,10 @@ impl CleanupMir {
                             if arguments.len() != 1 {
                                 return None;
                             }
-                            instructions.push(RuntimeOperation::ResumeReturn {
-                                site: crate::MirResumptionSiteId::UNASSIGNED,
+                            instructions.push(RuntimeOperation::CallIndirect {
                                 dst: local(*result),
-                                value: arguments[0],
+                                callee: local(*callee),
+                                arguments,
                             });
                         }
                         SpecializedCallTarget::Indirect => {
@@ -905,6 +927,7 @@ impl CleanupMir {
                 CleanupControl::Transfer(transfer) => {
                     let edge = match transfer {
                         ControlTransfer::Leave { label, .. } => {
+                            let target = label_landings.get(label).copied().unwrap_or(routes[0].0);
                             let label = &self.labels[label.0 as usize];
                             leave_handler_depths.insert(MirBlockId(block_index as u32), u32::try_from(label.handler_prefix.len()).ok()?);
                             blocks.push(RuntimeBlock {
@@ -914,7 +937,7 @@ impl CleanupMir {
                                 terminator: RuntimeTerminator::Leave {
                                     label: crate::MirLabelId::UNASSIGNED,
                                     brand: label.brand,
-                                    target: routes[0].0,
+                                    target,
                                     arguments: routes[0].1.clone(),
                                     cleanup: crate::MirCleanupPlan {
                                         source_storage_scope: crate::MirSourceStorageScopeId::ROOT,
@@ -1008,6 +1031,13 @@ impl CleanupMir {
                                 instructions.push(RuntimeOperation::Cancel {
                                     site: crate::MirResumptionSiteId::UNASSIGNED,
                                 });
+                                // Cancel first unwinds retained deeper frames.
+                                // Then dispose of protected locals in this
+                                // surviving frame before the clause rejoins.
+                                self.record_runtime_plan(
+                                    *self.clause_cleanup.get(&ControlBlockId(block_index as u32))?,
+                                    block_index, instructions.len(), &local, &mut pending,
+                                );
                             } else {
                                 // A deep performance can re-enter this same
                                 // clause while an older resumption call waits.

@@ -1,0 +1,167 @@
+use std::*;
+use kernel::identity;
+use kernel::operation;
+pub mod kernel;
+pub mod source;
+pub mod registry;
+
+fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+fn control(value: Result<(), operation::Failure>) -> i64 { handle value { Result::Ok(_) => 1, _ => -1000 } }
+fn progress(builder: &source::CopyBuilder, expected: u32) -> i64 {
+    handle source::copy_progress(builder) { Result::Ok(value) => check(value == expected), _ => -1000 }
+}
+fn step(builder: &mut source::CopyBuilder, blob: &source::Blob, controls: &operation::Controls, ready: Bool) -> i64 {
+    handle source::step_copy(builder, blob, controls) {
+        Result::Err(_) => -1000,
+        Result::Ok(source::Event::Continue) => handle ready { false => 1, true => -1000 },
+        Result::Ok(source::Event::Ready) => check(ready),
+    }
+}
+fn destroy(value: source::Blob) -> () { () }
+fn prepaid(controls: &mut operation::Controls, blob: &source::Blob) -> i64 {
+    let memory = control(operation::reserve(&mut *controls, source::copy_memory(blob)));
+    memory + control(operation::charge(controls, as<u64>(source::length(blob)) + 1))
+}
+fn finished(builder: &mut source::CopyBuilder, blob: &source::Blob, controls: &mut operation::Controls) -> i64 {
+    handle source::finish_copy(&mut *builder, & *controls) {
+        Result::Err(_) => -1000,
+        Result::Ok(copy) => {
+            let exact = check(source::length(&copy) == 8225) + check(identity::equal(source::fingerprint(&copy), source::fingerprint(blob)))
+                + handle Slice::lex_compare(source::bytes(&copy), source::bytes(blob)) { Ordering::Equal => 1, _ => -1000 };
+            let hidden = handle source::copy_progress(& *builder) { Result::Err(source::Failure::Closed) => 1, _ => -1000 };
+            let twice = handle source::finish_copy(builder, & *controls) { Result::Err(source::Failure::Closed) => 1, _ => -1000 };
+            destroy(copy);
+            exact + hidden + twice + control(operation::release(&mut *controls, source::copy_memory(blob))) + check(operation::memory_spent(& *controls) == 0)
+        },
+    }
+}
+fn successful(blob: &source::Blob) -> i64 {
+    let controls = operation::create(100000, 100000);
+    let admitted = prepaid(&mut controls, blob);
+    let work = operation::work_spent(&controls);
+    handle source::begin_copy(blob, &controls) {
+        Result::Err(_) => -1000,
+        Result::Ok(builder) => {
+            let initial = progress(&builder, 0);
+            let first = step(&mut builder, blob, &controls, false) + progress(&builder, 4095);
+            let second = step(&mut builder, blob, &controls, false) + progress(&builder, 8190);
+            let last = step(&mut builder, blob, &controls, true) + progress(&builder, 8225);
+            admitted + initial + first + second + last + check(operation::work_spent(&controls) == work) + finished(&mut builder, blob, &mut controls)
+        },
+    }
+}
+fn failed(blob: &source::Blob, other: &source::Blob, mode: u32) -> i64 {
+    let controls = operation::create(100000, 100000);
+    let admitted = prepaid(&mut controls, blob);
+    let work = operation::work_spent(&controls);
+    handle source::begin_copy(blob, &controls) {
+        Result::Err(_) => -1000,
+        Result::Ok(builder) => {
+            let result = handle mode {
+                0 => {
+                    let partial = step(&mut builder, blob, &controls, false);
+                    operation::cancel(&mut controls);
+                    partial + handle source::step_copy(&mut builder, blob, &controls) { Result::Err(source::Failure::Control(operation::Failure::Cancelled)) => 1, _ => -1000 }
+                },
+                1 => handle source::step_copy(&mut builder, other, &controls) { Result::Err(source::Failure::SourceMismatch) => 1, _ => -1000 },
+                _ => handle source::finish_copy(&mut builder, &controls) { Result::Err(source::Failure::Busy) => 1, _ => -1000 },
+            };
+            let closed = handle source::copy_progress(&builder) { Result::Err(source::Failure::Closed) => 1, _ => -1000 };
+            admitted + result + closed + check(operation::work_spent(&controls) == work)
+                + control(operation::release(&mut controls, source::copy_memory(blob))) + check(operation::memory_spent(&controls) == 0)
+        },
+    }
+}
+struct Inputs { blob: source::Blob }
+impl registry::World for Inputs {
+    source<'a>(value: &'a Inputs, file: identity::FileKey) -> Option<&'a source::Blob> {
+        handle identity::equal(source::file(&value.blob).digest, file.digest) { true => Result::Ok(&value.blob), false => None }
+    }
+}
+type Db = registry::Registry<Inputs>;
+fn ok<T>(value: Result<T, registry::Failure>) -> i64 where T: Use<[0, 1]> { handle value { Result::Ok(_) => 1, _ => -1000 } }
+fn allocated(db: &mut Db, session: registry::Session, query: registry::Query<source::Blob>, fuel: usize) -> i64 {
+    handle fuel == 0 { true => -1000, false => handle registry::memory_spent(& *db, session) {
+        Result::Ok(8225) => 1,
+        _ => handle registry::poll(&mut *db, query) { Result::Ok(registry::Event::Continue) => allocated(db, session, query, fuel - 1), _ => -1000 },
+    } }
+}
+fn close(db: &mut Db, session: registry::Session, fuel: usize) -> i64 {
+    handle fuel == 0 { true => -1000, false => handle registry::close_step(&mut *db, session) {
+        Result::Ok(registry::CloseStep::Done) => 1, Result::Ok(_) => close(db, session, fuel - 1), _ => -1000,
+    } }
+}
+fn empty_owners(db: &Db) -> i64 {
+    handle registry::ownership_stats(db) {
+        Result::Err(_) => -1000,
+        Result::Ok(value) => check(value.phase_owners == 0) + check(value.closed_phase_owners == 0)
+            + check(value.root_owners == 0) + check(value.root_leases == 0) + check(value.closed_roots == 0),
+    }
+}
+fn sweep(db: &mut Db, fuel: usize) -> i64 {
+    handle fuel == 0 { true => -1000, false => handle registry::collect_step(&mut *db) {
+        Result::Err(_) => -1000,
+        Result::Ok(registry::CollectionStep::Done(report)) => check(report.revisions == 1) + check(report.products == 0),
+        _ => sweep(db, fuel - 1),
+    } }
+}
+fn cancelled_query(db: &mut Db, session: registry::Session, revision: identity::RevisionId, query: registry::Query<source::Blob>) -> i64 {
+    let begun = allocated(&mut *db, session, query, 1000);
+    let pending = handle registry::stats(& *db) {
+        Result::Err(_) => -1000,
+        Result::Ok(value) => check(value.sources == 0) + check(value.core.products == 0) + check(value.core.queries.attempts == 1) + check(value.drivers == 1),
+    };
+    let memory = handle registry::resource_stats(& *db, session) {
+        Result::Err(_) => -1000,
+        Result::Ok(value) => check(value.total == 8225) + check(value.source == 8225) + check(value.lines == 0) + check(value.reservations == 1),
+    };
+    let root = handle registry::memory_spent(& *db, session) { Result::Ok(value) => check(value == 8225), _ => -1000 };
+    let work = registry::work_spent(& *db, session);
+    let cancelled = ok(registry::cancel(&mut *db, session));
+    let charged = handle work {
+        Result::Err(_) => -1000,
+        Result::Ok(before) => handle registry::work_spent(& *db, session) { Result::Err(_) => -1000, Result::Ok(after) => check(before == after) },
+    };
+    let closed = ok(registry::begin_close(&mut *db, session)) + close(&mut *db, session, 1000) + empty_owners(& *db);
+    let empty = handle registry::stats(& *db) {
+        Result::Err(_) => -1000,
+        Result::Ok(value) => check(value.sources == 0) + check(value.core.products == 0) + check(value.core.queries.attempts == 0)
+            + check(value.drivers == 0) + check(value.core.revisions.snapshot_pins == 0),
+    };
+    begun + pending + memory + root + cancelled + charged + closed + empty
+        + ok(registry::retire(&mut *db, revision)) + ok(registry::collect(&mut *db)) + sweep(db, 1000)
+}
+fn registry_copy(blob: source::Blob) -> i64 {
+    let file = source::file(&blob);
+    let fingerprint = source::fingerprint(&blob);
+    let limits = registry::Limits { revisions: 2, sessions: 1, attempts: 2, memos: 2, reads: 4, keys: 2,
+        source_products: 2, line_products: 2, lex_products: 2, drivers: 1, frames: 2, source_bytes: 10000, lines: 4, tokens: 10001 };
+    handle registry::create<Inputs>(440, limits) { Result::Err(_) => -1000, Result::Ok(db) =>
+        handle registry::import(&mut db, Inputs { blob: blob }, fingerprint, None) { Result::Err(_) => -1000, Result::Ok(revision) =>
+            handle registry::open(&mut db, revision, 100000, 10000) { Result::Err(_) => -1000, Result::Ok(session) =>
+                handle registry::source_bytes(&mut db, session, file) { Result::Err(_) => -1000, Result::Ok(query) => cancelled_query(&mut db, session, revision, query) }
+            }
+        }
+    }
+}
+fn run(blob: source::Blob, other: source::Blob) -> (i64, i64, i64, i64, i64) {
+    let copied = successful(&blob);
+    let cancelled = failed(&blob, &other, 0);
+    let mismatch = failed(&blob, &other, 1);
+    let premature = failed(&blob, &other, 2);
+    (copied, cancelled, mismatch, premature, registry_copy(blob))
+}
+pub fn main() -> (i64, i64, i64, i64, i64) {
+    let bytes = Vec<u8>::new();
+    Vec::resize(&mut bytes, 4095, as<u8>(97));
+    Vec::extend_from_slice(&mut bytes, b"\xf0\x9f\x98\x80");
+    Vec::resize(&mut bytes, 8190, as<u8>(98));
+    Vec::extend_from_slice(&mut bytes, b"\xf0\x9f\x98\x80");
+    Vec::resize(&mut bytes, 8225, as<u8>(99));
+    let controls = operation::create(100000, 100000);
+    handle identity::file(b"app", b"src/copy", 128) { Result::Err(_) => (-1, -1, -1, -1, -1), Result::Ok(file) =>
+        handle source::create(file, bytes, 10000, &mut controls) { Result::Err(_) => (-2, -2, -2, -2, -2), Result::Ok(blob) =>
+            handle source::create(file, Vec<u8>::new(), 10000, &mut controls) { Result::Err(_) => (-3, -3, -3, -3, -3), Result::Ok(other) => run(blob, other) }
+        }
+    }
+}

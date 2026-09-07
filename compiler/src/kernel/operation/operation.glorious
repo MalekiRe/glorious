@@ -1,5 +1,7 @@
 use std::*;
 
+pub mod budget;
+
 pub enum Failure {
     Cancelled,
     ResourceLimit { name: u32, ceiling: u64, requested: u64 },
@@ -14,11 +16,12 @@ pub struct Controls {
     private work_spent: u64,
     private memory_limit: u64,
     private memory_spent: u64,
+    private memory_retained: u64,
 }
 
 pub fn create(work: u64, memory: u64) -> Controls {
     Controls { cancelled: false, work_limit: work, work_spent: 0,
-        memory_limit: memory, memory_spent: 0 }
+        memory_limit: memory, memory_spent: 0, memory_retained: 0 }
 }
 
 pub fn cancel(controls: &mut Controls) -> () { (*controls).cancelled = Result<(), ()>::Ok(()); }
@@ -63,7 +66,7 @@ pub fn reserve(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
 }
 
 pub fn release(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
-    handle amount <= controls.memory_spent {
+    handle amount <= wrapping_sub(controls.memory_spent, controls.memory_retained) {
         false => Result::Err(Failure::Invariant(0)),
         true => {
             (*controls).memory_spent = wrapping_sub(controls.memory_spent, amount);
@@ -72,5 +75,26 @@ pub fn release(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
     }
 }
 
+// Published products retain their part of the same request counter. Ordinary
+// temporary cleanup cannot steal these credits; only the checked product-owner
+// protocol releases them after the final owner has disposed of the value.
+pub fn reserve_retained(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
+    handle reserve(&mut *controls, amount) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => { (*controls).memory_retained = wrapping_add(controls.memory_retained, amount); Result::Ok(()) },
+    }
+}
+pub fn release_retained(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
+    handle amount <= controls.memory_retained {
+        false => Result::Err(Failure::Invariant(1)),
+        true => {
+            (*controls).memory_retained = wrapping_sub(controls.memory_retained, amount);
+            (*controls).memory_spent = wrapping_sub(controls.memory_spent, amount);
+            Result::Ok(())
+        },
+    }
+}
+
 pub fn work_spent(controls: &Controls) -> u64 { controls.work_spent }
 pub fn memory_spent(controls: &Controls) -> u64 { controls.memory_spent }
+pub fn memory_retained(controls: &Controls) -> u64 { controls.memory_retained }

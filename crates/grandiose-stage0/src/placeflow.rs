@@ -349,6 +349,7 @@ pub struct RefinementFact {
     pub brand: RefinementBrand,
     pub subject: Option<String>,
     pub bindings: Vec<String>,
+    pub binding_keys: Vec<crate::RefinementBindingKey>,
     pub span: Span,
 }
 
@@ -1476,8 +1477,13 @@ impl Analyzer<'_> {
             CoreKind::Completion {
                 computation,
                 clauses,
+                refinement_test,
                 ..
             } => {
+                if let Some(environment) = &refinement_test {
+                    self.refinements.push(RefinementFact { brand: environment.brand, subject: environment.subject.clone(),
+                        bindings: environment.bindings.clone(), binding_keys: environment.binding_keys.clone(), span: e.span });
+                }
                 let mut inside_completion = live_after.clone();
                 for clause in &clauses {
                     self.collect_local_uses(clause.body, &mut inside_completion);
@@ -1529,6 +1535,15 @@ impl Analyzer<'_> {
                         None,
                     );
                     self.install_pattern_transfers(transfers);
+                    if clause_index == 0 && let Some(environment) = &refinement_test {
+                        // Producer binders are observational projections, not
+                        // reference fields already resident in the subject.
+                        self.install_refinement_bindings(&crate::core::CoreRefinementBranch {
+                            subject: computation,
+                            pattern: clause.pattern.clone(),
+                            environment: environment.clone(),
+                        });
+                    }
                     if let Some(refinement) = &clause.refinement {
                         self.install_refinement_bindings(refinement);
                     }
@@ -1619,6 +1634,7 @@ impl Analyzer<'_> {
                     brand: refinement.brand,
                     subject: refinement.subject,
                     bindings: refinement.bindings,
+                    binding_keys: refinement.binding_keys,
                     span: e.span,
                 });
             }
@@ -1861,10 +1877,11 @@ impl Analyzer<'_> {
                         let root = Self::result_owner(*id);
                         **owner == root || owner.starts_with(&(root + "."))
                     })
-                    && !live_after.contains(*owner)
-                    && !live_after
-                        .iter()
-                        .any(|name| self.resolve_name(name) == **owner)
+                    && !live_after.iter().any(|name| {
+                        let resolved = self.resolve_name(name);
+                        **owner == *name || owner.starts_with(&(name.clone() + "."))
+                            || **owner == resolved || owner.starts_with(&(resolved + "."))
+                    })
             })
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -2027,15 +2044,9 @@ impl Analyzer<'_> {
                     self.read_place_by_name(&capture.name, span);
                 }
                 CaptureMode::Move => {
-                    self.move_(&capture.name, span);
-                    self.place_event(
-                        FlowEventKind::Move(capture.name.clone()),
-                        Projection {
-                            root: capture.name.clone(),
-                            fields: vec![],
-                        },
-                        span,
-                    );
+                    self.move_projection(Projection {
+                        root: self.resolve_name(&capture.name), fields: vec![],
+                    }, span);
                 }
             }
         }
@@ -2171,43 +2182,17 @@ impl Analyzer<'_> {
         }
         self.event(FlowEventKind::EndBorrow(owner.into()), span);
     }
-    fn move_(&mut self, n: &str, s: Span) {
-        let n = self.resolve_name(n);
-        let place = Projection {
-            root: n.clone(),
-            fields: vec![],
-        };
-        if let Some(moved) = self.moved_place_overlapping(&place) {
-            self.error(
-                s,
-                "G5003",
-                format!(
-                    "cannot move `{n}` because `{}` is already moved",
-                    moved.display()
-                ),
-            );
-            return;
-        }
-        match self.states.get(&n) {
-            Some(LocalState::Initialized) => {
-                self.states.insert(n.clone(), LocalState::Moved);
-                self.record_move(place);
-                self.event(FlowEventKind::Move(n.clone()), s)
-            }
-            Some(LocalState::Moved) => {
-                self.error(s, "G5003", format!("local `{n}` is moved more than once"))
-            }
-            Some(_) => self.error(s, "G5004", format!("cannot move borrowed local `{n}`")),
-            None => self.error(s, "G5002", format!("unknown local `{n}` in PlaceFlow")),
-        }
-    }
-
     fn read_place_by_name(&mut self, name: &str, span: Span) {
         let name = self.resolve_name(name);
         let place = Projection {
             root: name.clone(),
             fields: vec![],
         };
+        if self.projection_loans.iter().any(|loan|
+            !loan.indirect && loan.unique && loan.place.overlaps(&place)) {
+            self.error(span, "G5008", format!("cannot copy a capture of uniquely borrowed place `{name}`"));
+            return;
+        }
         if let Some(moved) = self.moved_place_overlapping(&place) {
             self.error(span, "G5001", format!("use of moved place `{}`", moved.display()));
             return;
@@ -3455,6 +3440,17 @@ impl Analyzer<'_> {
     fn use_projected_deref_reference(&mut self, id: CoreId, fields: &[u32], span: Span, mutation: bool) {
         let key = self.reference_origin_key(id);
         let name = key.clone().unwrap_or_else(|| format!("<reference-value-{}>", id.0));
+        // A shared view of an affine reference borrows the carrier itself,
+        // not its referent. Its loan therefore cannot overlap the referent
+        // loans checked below. Using the unique capability while that view
+        // is live would bypass the suspension established by `&reference`.
+        if matches!(self.body.expression(id).ty, Type::Reference { mutability: crate::Mutability::Unique, .. })
+            && self.projection(id).is_some_and(|carrier|
+                self.projection_loans.iter().any(|loan| !loan.indirect && loan.place.overlaps(&carrier)
+                    && (mutation || loan.unique))) {
+            self.error(span, "G5004", format!("cannot access unique reference `{name}` while its carrier is borrowed"));
+            return;
+        }
         if self.open_referent_holes.contains_key(&name) {
             self.error(
                 span,

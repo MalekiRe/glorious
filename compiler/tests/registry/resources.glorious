@@ -1,0 +1,263 @@
+use std::*;
+use kernel::identity;
+use kernel::operation;
+use kernel::operation::budget;
+pub mod kernel;
+pub mod source;
+pub mod registry;
+
+struct Inputs { blob: source::Blob }
+impl registry::World for Inputs {
+    source<'a>(world: &'a Inputs, file: identity::FileKey) -> Option<&'a source::Blob> {
+        handle identity::equal(source::file(&world.blob).digest, file.digest) {
+            true => Result::Ok(&world.blob), false => None,
+        }
+    }
+}
+type Db = registry::Registry<Inputs>;
+type Scores = (i64, i64, i64, i64);
+fn failure(code: i64) -> Scores { (code, code, code, code) }
+fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+fn ok<T>(value: Result<T, registry::Failure>) -> i64 where T: Use<[0, 1]> {
+    handle value { Result::Ok(_) => 1, _ => -1000 }
+}
+fn limits() -> registry::Limits {
+    registry::Limits { revisions: 4, sessions: 4, attempts: 8, memos: 16, reads: 8, keys: 8,
+        source_products: 8, line_products: 8, lex_products: 8, drivers: 4, frames: 4, source_bytes: 128, lines: 16, tokens: 129 }
+}
+fn memory(db: &Db, session: registry::Session, total: u64, source: u64, lines: u64, leases: usize) -> i64 {
+    let charged = handle registry::memory_spent(db, session) { Result::Ok(value) => check(value == total), _ => -1000 };
+    handle registry::resource_stats(db, session) {
+        Result::Err(_) => -1000,
+        Result::Ok(stats) => check(stats.total == total) + check(stats.source == source)
+            + check(stats.lines == lines) + check(stats.reservations == leases) + charged,
+    }
+}
+fn limit(value: Result<registry::Reservation, registry::Failure>, name: u32, ceiling: u64, requested: u64) -> i64 {
+    handle value {
+        Result::Err(registry::Failure::Budget(budget::Failure::Control(operation::Failure::ResourceLimit {
+            name: actual_name, ceiling: actual_ceiling, requested: actual_requested }))) =>
+                check(actual_name == name) + check(actual_ceiling == ceiling) + check(actual_requested == requested),
+        _ => -1000,
+    }
+}
+fn drive(db: &mut Db, query: registry::Query<source::LineIndex>, fuel: usize) -> Result<registry::Value<source::LineIndex>, registry::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(registry::Failure::Invariant),
+        false => handle registry::poll(&mut *db, query) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                registry::Event::Ready(value) => Result::Ok(value), _ => drive(db, query, fuel - 1),
+            },
+        },
+    }
+}
+fn query(db: &mut Db, session: registry::Session, file: identity::FileKey, cached: Bool) -> i64 {
+    handle registry::line_index(&mut *db, session, file) {
+        Result::Err(_) => -1000,
+        Result::Ok(query) => handle drive(&mut *db, query, 1000) {
+            Result::Err(_) => -1000,
+            Result::Ok(value) => {
+                let provenance = handle registry::execution(value) {
+                    kernel::engine::Execution::Memoized { revision: _ } => check(cached),
+                    kernel::engine::Execution::Recomputed(kernel::engine::Reason::Cold) => handle cached { false => 1, true => -1000 },
+                    _ => -1000,
+                };
+                handle registry::line_value(& *db, session, value) {
+                    Result::Err(_) => -1000, Result::Ok(value) => provenance + check(source::line_count(value) == 2),
+                }
+            },
+        },
+    }
+}
+fn full_request_query(db: &mut Db, session: registry::Session, file: identity::FileKey) -> i64 {
+    handle registry::line_index(&mut *db, session, file) {
+        Result::Err(_) => -1000,
+        Result::Ok(query) => handle drive(db, query, 1000) {
+            Result::Err(registry::Failure::Database(kernel::database::Failure::Engine(kernel::engine::Failure::Control(
+                operation::Failure::ResourceLimit { name, ceiling, requested })))) =>
+                check(name == 1) + check(ceiling == 10) + check(requested == 4),
+            _ => -1000,
+        },
+    }
+}
+fn pins(db: &Db, expected: usize) -> Bool {
+    handle registry::stats(db) { Result::Err(_) => false, Result::Ok(stats) => stats.core.revisions.snapshot_pins == expected }
+}
+fn balanced(db: &Db, session: registry::Session, total: u64) -> Bool {
+    handle registry::memory_spent(db, session) { Result::Ok(value) => value == total, _ => false }
+}
+fn closing(db: &mut Db, session: registry::Session, fuel: usize, observed_empty: Bool) -> i64 {
+    handle fuel == 0 {
+        true => -1000,
+        false => handle registry::close_step(&mut *db, session) {
+            Result::Err(_) => -1000,
+            Result::Ok(event) => handle event {
+                registry::CloseStep::Done => check(observed_empty) + check(pins(& *db, 1)),
+                registry::CloseStep::Continue => handle pins(& *db, 2) {
+                    false => -1000,
+                    true => handle registry::resource_stats(& *db, session) {
+                        Result::Err(_) => -1000,
+                        Result::Ok(stats) => handle balanced(& *db, session, stats.total) {
+                            false => -1000,
+                            true => handle stats.reservations == 0 {
+                                true => closing(db, session, fuel - 1, true),
+                                false => closing(db, session, fuel - 1, observed_empty),
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+}
+fn close(db: &mut Db, session: registry::Session, fuel: usize) -> i64 {
+    handle fuel == 0 {
+        true => -1000,
+        false => handle registry::close_step(&mut *db, session) {
+            Result::Err(_) => -1000,
+            Result::Ok(event) => handle event { registry::CloseStep::Done => 1, _ => close(db, session, fuel - 1) },
+        },
+    }
+}
+fn sweep(db: &mut Db, fuel: usize) -> i64 {
+    handle fuel == 0 {
+        true => -1000,
+        false => handle registry::collect_step(&mut *db) {
+            Result::Err(_) => -1000,
+            Result::Ok(event) => handle event { registry::CollectionStep::Done(_) => 1, _ => sweep(db, fuel - 1) },
+        },
+    }
+}
+fn exhausted(db: &mut Db, revision: identity::RevisionId) -> i64 {
+    handle registry::open(&mut *db, revision, 1, 10) {
+        Result::Err(_) => -1000,
+        Result::Ok(session) => {
+            let score = limit(registry::reserve(&mut *db, session, registry::Family::SourceBytes, 3), 0, 1, 1);
+            let score = score + memory(& *db, session, 0, 0, 0, 0);
+            let score = score + handle registry::work_spent(& *db, session) { Result::Ok(value) => check(value == 1), _ => -1000 };
+            let score = score + ok(registry::begin_close(&mut *db, session)) + close(&mut *db, session, 100);
+            score + check(pins(& *db, 0))
+        },
+    }
+}
+fn replaced(db: &mut Db, revision: identity::RevisionId, second: registry::Session, old: registry::Reservation) -> i64 {
+    handle registry::open(&mut *db, revision, 10000, 10) {
+        Result::Err(_) => -1000,
+        Result::Ok(fresh) => {
+            let score = memory(& *db, fresh, 0, 0, 0, 0);
+            let score = score + handle registry::release_reservation(&mut *db, &mut old) {
+                Result::Err(registry::Failure::Closed) => 1, _ => -1000,
+            };
+            let score = score + memory(& *db, fresh, 0, 0, 0, 0);
+            let score = score + ok(registry::begin_close(&mut *db, second)) + close(&mut *db, second, 100);
+            let score = score + ok(registry::begin_close(&mut *db, fresh)) + close(&mut *db, fresh, 100);
+            score + check(pins(& *db, 0)) + exhausted(db, revision)
+        },
+    }
+}
+fn finish(db: &mut Db, revision: identity::RevisionId, first: registry::Session, second: registry::Session,
+    file: identity::FileKey, held: registry::Reservation) -> (i64, i64) {
+    let cleanup = registry::reserve(&mut *db, first, registry::Family::SourceBytes, 1);
+    let score = handle registry::reserve(&mut *db, first, registry::Family::SourceBytes, 1) {
+        Result::Err(registry::Failure::Budget(budget::Failure::Storage(kernel::storage::StorageError::Capacity))) => 1,
+        _ => -1000,
+    };
+    let score = score + memory(& *db, first, 4, 1, 3, 3);
+    let score = score + ok(registry::cancel(&mut *db, first));
+    let score = score + handle cleanup {
+        Result::Err(_) => -1000, Result::Ok(reservation) => ok(registry::release_reservation(&mut *db, &mut reservation)),
+    };
+    let score = score + memory(& *db, first, 3, 0, 3, 2);
+    let score = score + handle registry::reserve(&mut *db, first, registry::Family::SourceBytes, 0) {
+        Result::Err(registry::Failure::Database(kernel::database::Failure::Engine(kernel::engine::Failure::Control(operation::Failure::Cancelled)))) => 1,
+        _ => -1000,
+    };
+    let score = score + ok(registry::begin_close(&mut *db, first)) + ok(registry::begin_close(&mut *db, first));
+    let score = score + handle registry::reserve(&mut *db, first, registry::Family::SourceBytes, 0) {
+        Result::Err(registry::Failure::Closing) => 1, _ => -1000,
+    };
+    let score = score + closing(&mut *db, first, 100, false);
+    let score = score + handle registry::release_reservation(&mut *db, &mut held) {
+        Result::Err(registry::Failure::Closed) => 1, _ => -1000,
+    };
+    let score = score + query(&mut *db, second, file, true) + memory(& *db, second, 20, 4, 16, 2);
+    (score, replaced(db, revision, second, held))
+}
+fn held(db: &mut Db, revision: identity::RevisionId, first: registry::Session, second: registry::Session,
+    file: identity::FileKey, reservation: registry::Reservation) -> (i64, i64, i64) {
+    let score = memory(& *db, first, 7, 7, 0, 1) + memory(& *db, second, 0, 0, 0, 0);
+    let score = score + limit(registry::reserve(&mut *db, first, registry::Family::LineIndex, 4), 1, 10, 4);
+    // Discarding a successful token leaves its record owned by the request.
+    let score = score + ok(registry::reserve(&mut *db, first, registry::Family::LineIndex, 3));
+    // The first request is full: automatic source allocation must fail without
+    // disturbing its manual reservations. A separate request owns the products.
+    let score = score + memory(& *db, first, 10, 7, 3, 2) + full_request_query(&mut *db, first, file)
+        + query(&mut *db, second, file, false);
+    let score = score + ok(registry::collect(&mut *db));
+    let score = score + handle registry::reserve(&mut *db, first, registry::Family::SourceBytes, 0) {
+        Result::Err(registry::Failure::Database(kernel::database::Failure::Collecting)) => 1, _ => -1000,
+    };
+    let score = score + handle registry::release_reservation(&mut *db, &mut reservation) {
+        Result::Err(registry::Failure::Database(kernel::database::Failure::Collecting)) => 1, _ => -1000,
+    };
+    let score = score + sweep(&mut *db, 1000) + memory(& *db, first, 10, 7, 3, 2);
+    let foreign = handle registry::create<Inputs>(202, limits()) {
+        Result::Err(_) => -1000,
+        Result::Ok(other) => handle registry::release_reservation(&mut other, &mut reservation) {
+            Result::Err(registry::Failure::Closed) => 1, _ => -1000,
+        },
+    };
+    let score = score + foreign + ok(registry::release_reservation(&mut *db, &mut reservation));
+    let score = score + handle registry::release_reservation(&mut *db, &mut reservation) {
+        Result::Err(registry::Failure::Budget(budget::Failure::Released)) => 1, _ => -1000,
+    };
+    let score = score + memory(& *db, first, 3, 0, 3, 1);
+    handle registry::reserve(&mut *db, first, registry::Family::LineIndex, 0) {
+        Result::Err(_) => (-1000, -1000, -1000),
+        Result::Ok(zero) => handle finish(db, revision, first, second, file, zero) {
+            (closed, replaced) => (score, closed, replaced),
+        },
+    }
+}
+fn sessions(db: &mut Db, revision: identity::RevisionId, file: identity::FileKey) -> Scores {
+    handle registry::open_with_resources(&mut *db, revision, 10000, 10,
+        registry::ResourceLimits { source: 7, lines: 6, lex: 0, reservations: 3 }) {
+        Result::Err(_) => failure(-1000),
+        Result::Ok(first) => handle registry::open(&mut *db, revision, 10000, 32) {
+            Result::Err(_) => failure(-1000),
+            Result::Ok(second) => {
+                let score = limit(registry::reserve(&mut *db, first, registry::Family::SourceBytes, 8), 2, 7, 8);
+                handle registry::reserve(&mut *db, first, registry::Family::SourceBytes, 7) {
+                    Result::Err(_) => failure(-1000),
+                    Result::Ok(reservation) => handle held(db, revision, first, second, file, reservation) {
+                        (held, closed, replaced) => (score, held, closed, replaced),
+                    },
+                }
+            },
+        },
+    }
+}
+pub fn main() -> Scores {
+    handle identity::file(b"app", b"src/input.glorious", 128) {
+        Result::Err(_) => failure(-1),
+        Result::Ok(file) => {
+            let bytes = Vec<u8>::new();
+            Vec::extend_from_slice(&mut bytes, b"a\nb");
+            let controls = operation::create(1000, 1000);
+            handle source::create(file, bytes, 128, &mut controls) {
+                Result::Err(_) => failure(-2),
+                Result::Ok(blob) => {
+                    let fingerprint = source::fingerprint(&blob);
+                    handle registry::create<Inputs>(201, limits()) {
+                        Result::Err(_) => failure(-3),
+                        Result::Ok(db) => handle registry::import(&mut db, Inputs { blob: blob }, fingerprint, None) {
+                            Result::Err(_) => failure(-4),
+                            Result::Ok(revision) => sessions(&mut db, revision, file),
+                        },
+                    }
+                },
+            }
+        },
+    }
+}

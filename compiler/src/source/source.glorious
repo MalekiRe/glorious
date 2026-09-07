@@ -4,6 +4,8 @@ use super::kernel::identity::Digest;
 use super::kernel::identity::FileKey;
 use super::kernel::operation;
 
+pub mod lex;
+
 // FileKey is admitted by the request normalizer. This constructor checks the
 // actual bytes; it neither opens a path nor invents a normalized-world identity.
 pub struct Blob { private stamp: Stamp, private text: String }
@@ -17,6 +19,9 @@ pub struct LineIndex { private stamp: Stamp, private starts: Vec<u32>, private f
 pub struct SourcePosition { line: u32, utf16_column: u32 }
 pub struct LineBuilder { private work: Option<LineWork> }
 pub impl Use<[0, 1]> for LineBuilder {}
+pub struct CopyBuilder { private work: Option<CopyWork> }
+pub impl Use<[0, 1]> for CopyBuilder {}
+struct CopyWork { stamp: Stamp, text: String, cursor: u32 }
 struct LineWork { stamp: Stamp, starts: Vec<u32>, cursor: u32, limit: usize }
 pub struct PositionBuilder { private work: Option<PositionWork> }
 pub impl Use<[0, 1]> for PositionBuilder {}
@@ -58,6 +63,8 @@ fn create_sized(file: FileKey, bytes: Vec<u8>, controls: &mut operation::Control
 pub fn file(blob: &Blob) -> FileKey { blob.stamp.file }
 pub fn fingerprint(blob: &Blob) -> Digest { blob.stamp.fingerprint }
 pub fn length(blob: &Blob) -> u32 { blob.stamp.length }
+pub fn copy_memory(blob: &Blob) -> u64 { as<u64>(Vec<u8>::initial_capacity(as<usize>(blob.stamp.length))) }
+pub fn initial_line_memory() -> u64 { as<u64>(Vec<u32>::initial_capacity(1)) * 4 }
 pub fn text<'a>(blob: &'a Blob) -> Str<'a> { String::as_str(&blob.text) }
 pub fn bytes<'a>(blob: &'a Blob) -> Slice<'a, u8> { Str::as_bytes(text(blob)) }
 fn matches(left: Stamp, right: Stamp) -> Bool {
@@ -65,6 +72,68 @@ fn matches(left: Stamp, right: Stamp) -> Bool {
         false => false,
         true => handle identity::equal(left.fingerprint, right.fingerprint) {
             false => false, true => left.length == right.length,
+        },
+    }
+}
+
+// The trusted driver reserves copy_memory and prepays length + 1 work before
+// constructing this buffer. Each step checks cancellation and copies <= 4 KiB.
+pub fn begin_copy(blob: &Blob, controls: &operation::Controls) -> Result<CopyBuilder, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => Result::Ok(CopyBuilder { work: Result::Ok(CopyWork { stamp: blob.stamp,
+            text: String::with_capacity(as<usize>(blob.stamp.length)), cursor: 0 }) }),
+    }
+}
+pub fn abort_copy(builder: &mut CopyBuilder) -> () { (*builder).work = None; }
+pub fn copy_progress(builder: &CopyBuilder) -> Result<u32, Failure> {
+    handle Result::as_ref(&builder.work) { Result::Err(_) => Result::Err(Failure::Closed), Result::Ok(work) => Result::Ok(work.cursor) }
+}
+pub fn step_copy(builder: &mut CopyBuilder, blob: &Blob, controls: &operation::Controls) -> Result<Event, Failure> {
+    let result = copy_checked(&mut *builder, blob, controls);
+    handle result { Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort_copy(builder); Result::Err(error) } }
+}
+fn copy_checked(builder: &mut CopyBuilder, blob: &Blob, controls: &operation::Controls) -> Result<Event, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle matches(work.stamp, blob.stamp) {
+                false => Result::Err(Failure::SourceMismatch), true => copy_chunk(work, text(blob)),
+            },
+        },
+    }
+}
+fn copy_end(value: Str, end: usize, fuel: u32) -> Result<usize, Failure> {
+    handle Str::is_char_boundary(value, end) {
+        true => Result::Ok(end),
+        false => handle fuel == 0 { true => Result::Err(Failure::Offset), false => copy_end(value, end - 1, fuel - 1) },
+    }
+}
+fn copy_chunk(work: &mut CopyWork, value: Str) -> Result<Event, Failure> {
+    let remaining = work.stamp.length - work.cursor;
+    let amount = handle remaining < 4096 { true => remaining, false => as<u32>(4096) };
+    handle copy_end(value, as<usize>(work.cursor + amount), 3) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(end) => handle Str::subslice(value, as<usize>(work.cursor), end - as<usize>(work.cursor)) {
+            Result::Err(_) => Result::Err(Failure::Offset),
+            Result::Ok(chunk) => {
+                String::push_str(&mut work.text, chunk);
+                (*work).cursor = as<u32>(end);
+                handle work.cursor == work.stamp.length { true => Result::Ok(Event::Ready), false => Result::Ok(Event::Continue) }
+            },
+        },
+    }
+}
+pub fn finish_copy(builder: &mut CopyBuilder, controls: &operation::Controls) -> Result<Blob, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { abort_copy(builder); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle Option::take(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.cursor == work.stamp.length {
+                false => Result::Err(Failure::Busy),
+                true => Result::Ok(Blob { stamp: work.stamp, text: work.text }),
+            },
         },
     }
 }
@@ -83,6 +152,29 @@ pub fn begin_lines(blob: &Blob, limit: usize, controls: &mut operation::Controls
     }
 }
 pub fn abort_lines(builder: &mut LineBuilder) -> () { (*builder).work = None; }
+// Inspect only the next backing-storage growth. The registry reserves this
+// delta before step_lines mutates the builder; work/cancellation stay there.
+pub fn next_line_memory(builder: &LineBuilder, blob: &Blob) -> Result<u64, Failure> {
+    handle Result::as_ref(&builder.work) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(work) => handle matches(work.stamp, blob.stamp) {
+            false => Result::Err(Failure::SourceMismatch),
+            true => handle work.cursor == work.stamp.length {
+                true => Result::Ok(0),
+                false => handle *Slice::get_unchecked(bytes(blob), as<usize>(work.cursor)) == 10 {
+                    false => Result::Ok(0),
+                    true => handle Vec::len(&work.starts) < work.limit {
+                        false => Result::Err(Failure::Capacity),
+                        true => handle Vec::len(&work.starts) < 4294967295 {
+                            false => Result::Err(Failure::Capacity),
+                            true => Result::Ok(as<u64>(Vec::reserved_capacity(&work.starts, 1) - Vec::capacity(&work.starts)) * 4),
+                        },
+                    },
+                },
+            },
+        },
+    }
+}
 pub fn step_lines(builder: &mut LineBuilder, blob: &Blob, controls: &mut operation::Controls) -> Result<Event, Failure> {
     let result = lines_checked(&mut *builder, blob, controls);
     handle result { Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort_lines(builder); Result::Err(error) } }

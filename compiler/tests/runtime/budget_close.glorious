@@ -1,0 +1,68 @@
+use std::*;
+use kernel::operation;
+use kernel::operation::budget;
+pub mod kernel;
+
+fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+fn ok(value: Result<(), budget::Failure>) -> i64 { handle value { Result::Ok(_) => 1, _ => -1000 } }
+fn spent(pool: &budget::Pool, value: budget::Budget, expected: u64) -> i64 {
+    handle budget::spent(pool, value) { Result::Ok(value) => check(value == expected), _ => -1000 }
+}
+fn abandon(value: Result<budget::Lease, budget::Failure>) -> i64 {
+    handle value { Result::Ok(_) => 1, _ => -1000 }
+}
+fn closed(value: Result<Bool, budget::Failure>, expected: Bool) -> i64 {
+    handle value {
+        Result::Ok(value) => handle value {
+            true => check(expected), false => handle expected { true => -1000, false => 1 },
+        },
+        _ => -1000,
+    }
+}
+fn run(pool: &mut budget::Pool, root: budget::Budget, child: budget::Budget) -> i64 {
+    let controls = operation::create(1000, 1000);
+    let score = ok(budget::charge(&mut *pool, child, 18446744073709551615, &mut controls));
+    let score = score + handle budget::charge(&mut *pool, child, 1, &mut controls) {
+        Result::Err(budget::Failure::Control(operation::Failure::ResourceLimit { name: name, ceiling: ceiling, requested: requested })) =>
+            check(name == 1) + check(ceiling == 18446744073709551615) + check(requested == 1),
+        _ => -1000,
+    };
+    let score = score + spent(& *pool, root, 18446744073709551615);
+    let score = score + ok(budget::release(&mut *pool, child, 18446744073709551615));
+    let exhausted = operation::create(1, 0);
+    let score = score + handle budget::charge(&mut *pool, child, 1, &mut exhausted) {
+        Result::Err(budget::Failure::Control(operation::Failure::ResourceLimit { name: name, ceiling: ceiling, requested: requested })) =>
+            check(name == 0) + check(ceiling == 1) + check(requested == 1),
+        _ => -1000,
+    };
+    let score = score + check(operation::work_spent(&exhausted) == 1);
+    let score = score + spent(& *pool, root, 0) + spent(& *pool, child, 0);
+    let score = score + ok(budget::charge(&mut *pool, child, 2, &mut controls));
+    let score = score + abandon(budget::lease(&mut *pool, child, 3, &mut controls));
+    let score = score + abandon(budget::lease(&mut *pool, child, 0, &mut controls));
+    let score = score + spent(& *pool, root, 5);
+    operation::cancel(&mut controls);
+    let score = score + closed(budget::close_step(&mut *pool), false);
+    let score = score + spent(& *pool, root, 2);
+    let score = score + handle budget::charge(&mut *pool, child, 0, &mut controls) {
+        Result::Err(budget::Failure::Closed) => 1, _ => -1000,
+    };
+    let score = score + closed(budget::close_step(&mut *pool), false);
+    let score = score + closed(budget::close_step(&mut *pool), true);
+    let score = score + closed(budget::close_step(&mut *pool), true);
+    let score = score + spent(& *pool, root, 2) + spent(& *pool, child, 2);
+    let score = score + handle budget::retire(&mut *pool, child) {
+        Result::Err(budget::Failure::Busy) => 1, _ => -1000,
+    };
+    score + ok(budget::release(&mut *pool, child, 2)) + ok(budget::retire(&mut *pool, child)) + ok(budget::retire(&mut *pool, root))
+}
+pub fn main() -> i64 {
+    let pool = budget::create(100, 1, 2, 2);
+    handle budget::root(&mut pool, 1, 18446744073709551615) {
+        Result::Err(_) => -1,
+        Result::Ok(root) => handle budget::child(&mut pool, root, 2, 18446744073709551615) {
+            Result::Err(_) => -2,
+            Result::Ok(child) => run(&mut pool, root, child),
+        },
+    }
+}

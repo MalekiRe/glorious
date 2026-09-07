@@ -105,6 +105,11 @@ impl<'a> Planner<'a> {
         };
         let shape = match ty {
             Type::Tuple(fields) => Shape::Tuple(self.fields(fields)?),
+            Type::Nominal { definition, .. } if *definition == crate::refinement::bindings_definition() => {
+                let fields = crate::refinement::binding_pack_fields(ty)
+                    .ok_or_else(|| "destruction binding pack has no canonical sealed layout".to_string())?;
+                Shape::Nominal { definition: *definition, is_enum: false, variants: vec![self.fields(fields)?] }
+            }
             Type::Nominal {
                 definition,
                 arguments,

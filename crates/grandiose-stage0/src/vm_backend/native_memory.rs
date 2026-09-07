@@ -8,13 +8,15 @@ use super::{
     expect_usize, value_matches_vm_type,
 };
 use grandiose_runtime::memory::{MemoryError, MemoryLayout, RawAllocation};
+use super::native_profile::{AllocationKind, NativeAllocation, NativeMemoryMeasurements};
 use std::{cell::{Cell, RefCell}, collections::{BTreeMap, BTreeSet}, ptr, rc::Rc, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct NativeMemory {
-    allocations: BTreeMap<usize, RawAllocation>,
+    allocations: BTreeMap<usize, NativeAllocation>,
     live_bytes: usize,
     pub(super) home_bytes: Rc<Cell<usize>>,
+    pub(super) measurements: Option<Rc<NativeMemoryMeasurements>>,
     pub(super) homes: super::native_storage::HomeRegistry,
     program_descriptors: Option<Arc<[VmNominalCopyDescriptor]>>,
     storage_plans: BTreeMap<super::DefKey, Arc<super::native_storage::NativeFramePlan>>,
@@ -46,6 +48,10 @@ fn error(message: &'static str) -> VmArtifactError {
 }
 
 impl NativeMemory {
+    pub(super) fn profiled() -> Self {
+        Self { measurements: Some(Rc::default()), ..Self::default() }
+    }
+
     pub(super) fn live_native_bytes(&self) -> usize { self.live_bytes + self.home_bytes.get() }
 
     pub(super) fn install_program_layouts(&mut self, program: &super::CandidateVmProgram) {
@@ -96,6 +102,7 @@ impl NativeMemory {
             Err(MemoryError::AllocationFailed { .. }) => return Ok(ptr::null_mut()),
             Err(failure) => return Err(memory_error(failure)),
         };
+        let allocation = NativeAllocation::new(allocation, self.measurements.clone(), AllocationKind::Raw);
         let pointer = allocation.as_ptr().as_ptr();
         // Zero-sized allocations own no bytes and can share an aligned
         // dangling address. Source code still owns every logical resident.
@@ -144,7 +151,8 @@ impl NativeMemory {
             if pointer.is_null() || pointer.addr() % old.alignment() != 0 {
                 return Err(error("invalid zero-sized reallocation pointer"));
             }
-            RawAllocation::new(old, 0).map_err(memory_error)?
+            NativeAllocation::new(RawAllocation::new(old, 0).map_err(memory_error)?,
+                self.measurements.clone(), AllocationKind::Raw)
         } else {
             let allocation = self.allocations.get(&pointer.addr()).ok_or_else(|| {
                 error("raw resize does not name a live allocation in this domain")
@@ -159,7 +167,7 @@ impl NativeMemory {
             .min(block_limit);
         // SAFETY: forwarded source/embedding obligation; this owner retains
         // the exact allocator identity and allocation provenance.
-        let result = unsafe { allocation.resize(size, available) };
+        let result = unsafe { allocation.resize_raw(size, available) };
         let output = allocation.as_ptr().as_ptr();
         if allocation.layout().size() != 0 {
             self.allocations.insert(output.addr(), allocation);
@@ -937,6 +945,9 @@ pub(super) fn execute_memory_intrinsic(
                         ptr::copy_nonoverlapping(source, destination, bytes);
                     }
                 }
+                if let Some(measurements) = &budget.native_memory.measurements {
+                    measurements.copied(AllocationKind::Raw, bytes);
+                }
             }
             VmValue::Unit
         }
@@ -950,6 +961,74 @@ mod tests {
     fn budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
             limits: Default::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn native_profile_tracks_raw_resize_failures_zero_sizes_and_release() {
+        let mut memory = NativeMemory::profiled();
+        let measurements = memory.measurements.clone().unwrap();
+        let empty = MemoryLayout::new(0, 8).unwrap();
+        let zero = memory.allocate(empty, 64, 64).unwrap();
+        memory.deallocate(zero, empty).unwrap();
+        assert_eq!(measurements.snapshot(), Default::default());
+
+        let first = MemoryLayout::new(8, 8).unwrap();
+        let pointer = memory.allocate(first, 64, 64).unwrap();
+        unsafe { pointer.write_bytes(7, 8); }
+        let admitted = measurements.snapshot();
+        assert_eq!((admitted.raw_live_bytes, admitted.raw_allocations), (8, 1));
+        assert!(memory.allocate(MemoryLayout::new(80, 8).unwrap(), 64, 64).is_err());
+        assert_eq!(measurements.snapshot(), admitted);
+
+        let pointer = unsafe { memory.reallocate(pointer, first, 24, 64, 64) }.unwrap();
+        let grown = measurements.snapshot();
+        assert_eq!((grown.raw_live_bytes, grown.raw_peak_bytes, grown.raw_reallocations), (24, 24, 1));
+        let layout = MemoryLayout::new(24, 8).unwrap();
+        assert!(unsafe { memory.reallocate(pointer, layout, 128, 64, 64) }.is_err());
+        assert_eq!(measurements.snapshot(), grown);
+        assert_eq!(unsafe { std::slice::from_raw_parts(pointer, 8) }, &[7; 8]);
+        let pointer = unsafe { memory.reallocate(pointer, layout, 24, 64, 64) }.unwrap();
+        assert_eq!(measurements.snapshot(), grown, "same-size resize does not invoke the allocator");
+        let pointer = unsafe { memory.reallocate(pointer, layout, 4, 64, 64) }.unwrap();
+        assert_eq!(unsafe { std::slice::from_raw_parts(pointer, 4) }, &[7; 4]);
+        let pointer = unsafe { memory.reallocate(pointer, MemoryLayout::new(4, 8).unwrap(), 0, 64, 64) }.unwrap();
+        assert_eq!(measurements.snapshot().raw_live_bytes, 0);
+        let pointer = unsafe { memory.reallocate(pointer, empty, 16, 64, 64) }.unwrap();
+        let final_layout = MemoryLayout::new(16, 8).unwrap();
+        let live = measurements.snapshot();
+        assert!(memory.deallocate(pointer, first).is_err());
+        assert_eq!(measurements.snapshot(), live, "rejected release cannot alter measurements");
+        memory.deallocate(pointer, final_layout).unwrap();
+        let result = measurements.snapshot();
+        assert_eq!((result.raw_live_bytes, result.raw_peak_bytes, result.peak_live_bytes), (0, 24, 24));
+        assert_eq!((result.raw_allocations, result.raw_reallocations, result.raw_deallocations), (2, 2, 2));
+        assert!(!result.counters_saturated);
+    }
+
+    #[test]
+    fn native_profile_observes_combined_peaks_between_instruction_ticks() {
+        use super::super::native_storage::NativeHome;
+        let mut budget = budget();
+        budget.native_memory = NativeMemory::profiled();
+        let measurements = budget.native_memory.measurements.clone().unwrap();
+        let raw_layout = MemoryLayout::new(32, 8).unwrap();
+        let raw = budget.native_memory.allocate(raw_layout, 256, 256).unwrap();
+        let scalar = Arc::new(native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let small = NativeHome::new(scalar, &mut budget).unwrap();
+        assert_eq!(measurements.snapshot().peak_live_bytes, 40);
+        budget.native_memory.deallocate(raw, raw_layout).unwrap();
+        let tuple = Arc::new(native_layout(&VmType::Tuple(vec![VmType::I64; 16]), &Arc::from([]), &mut vec![]).unwrap());
+        let large = NativeHome::new(tuple, &mut budget).unwrap();
+        drop(large);
+        drop(small);
+        let result = measurements.snapshot();
+        assert_eq!(budget.instructions, 0, "this peak occurs without an instruction tick");
+        assert_eq!(result.peak_live_bytes, 136);
+        assert_eq!((result.raw_peak_bytes, result.home_peak_bytes), (32, 136));
+        assert!(result.peak_live_bytes < result.raw_peak_bytes + result.home_peak_bytes);
+        assert_eq!((result.raw_live_bytes, result.home_live_bytes), (0, 0));
+        assert_eq!((result.home_allocations, result.home_deallocations), (2, 2));
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
     }
 
     #[test]

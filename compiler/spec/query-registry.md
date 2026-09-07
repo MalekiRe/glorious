@@ -1,18 +1,19 @@
 # Closed source-query registry
 
 `src/registry/registry.glorious` replaces runtime family registration at the
-compiler boundary with the first two source-defined typed families. The
+compiler boundary with three source-defined typed families. The
 generic database stays a small storage adapter over the shared non-generic
 engine, not a second engine per family. The specification's complete section 9
 inventory remains in scope.
 
-The first concrete providers are `SourceBytes` and `LineIndex`. Their
-immutable products now exist in `src/source/source.glorious`, with initial
-reference-comparison tests; see [source-products.md](source-products.md).
+The concrete providers are `SourceBytes`, `LineIndex`, and `Lex`. Their
+immutable products exist in `src/source/source.glorious` and its `lex` module,
+with reference-comparison tests; see [source-products.md](source-products.md)
+and [lossless-lex.md](lossless-lex.md).
 Their products live in separate typed stores; the memo
 directory retains a checked sealed product-reference sum. Subsequent source,
 interface, solver, body, MIR, and artifact families extend this closed sum and
-its typed dispatch as their actual products are implemented. Two families alone
+its typed dispatch as their actual products are implemented. Three families alone
 do not establish M2/M3 completion or the complete registry.
 
 Provider frames own stable IDs, positions, and attempt-local builders. They do
@@ -23,9 +24,14 @@ observations, propagates child completeness, validates products, and computes
 their fingerprints. Arbitrary caller-supplied `Read` fingerprints remain confined
 to the low-level test/storage adapter, not the compiler provider API. Raw source
 input has a separate observation projection from query output. Replay resolves
-checked typed keys and demands actual children. The line algorithm receives
-only its immutable blob, builder, and actual request controls. The world driver
+checked typed keys and demands actual children. The line and lexical algorithms
+receive only their immutable blob, builder, and actual request controls. The world driver
 validates file identity and charges source copying before materialization.
+Materialization now retains a source-copy builder across steps, copying at most
+4 KiB at UTF-8 boundaries and checking the actual request controls on each
+continuation. Its destination reservation and byte-work charge are acquired
+once; no partial blob is published. Close drops the builder before refunds.
+Backing allocation itself remains synchronous.
 
 Separate product stores require explicit final-owner release. The database now
 offers `collect_step_with_products`: on the last memo owner it yields an opaque
@@ -52,6 +58,19 @@ cancels the actual request, rejects new query admission, then scans one driver
 slot or drops one provider frame per step. Only after all attempts are gone
 does it release the revision pin. Repeated close admission does not reset its
 scan. Checked session generations prevent touching another request's driver.
+
+Requests reference independently owned [hierarchical reservation pools](operation-budgets.md).
+The reservation facade authenticates the session, applies source/line-index
+and lexical ceilings under the actual shared request-memory counter, and rolls back a
+rejected phase/capacity/work admission. Closing reclaims temporary records after
+drivers and before the revision pin, including records whose affine tokens
+were dropped. Source-copy, line-index, and lexical backing allocations now automatically
+reserve the actual request root and family phase before allocation. Typed stores
+own the phase leases; the generic database owns the corresponding root charges.
+Both survive producer close and parent reuse without keeping the request or
+revision pin alive. Final disposal destroys the concrete value before releasing
+either charge. See [provider backing-storage accounting](operation-budgets.md#initial-provider-backing-storage-integration)
+for the exact scope and remaining physical-allocation gaps.
 
 The blob constructor accepts an admitted
 `FileKey`, like the reference lexical API; it is not a substitute for full
@@ -105,8 +124,8 @@ physical-cost certification, and the remaining families remain open. Logical
 work charges do not establish physical VM copying or host-polling bounds.
 The isolated partial-catalog adapter is not the normalized-world contract; the
 new end-to-end history uses the complete fingerprint and admission facade.
-No lexer, semantic frontend, G1 emission, or
-self-compilation is implied by these histories.
+The lexical provider has separate executable evidence below; no semantic frontend,
+G1 emission, or self-compilation is implied by these histories.
 
 ### Provider-derived input facts and typed result publication
 
@@ -119,7 +138,7 @@ pinned revision, with exact observed fingerprint and completeness checks.
 A checked-identity set bounds repeated child traversal by the memo limit.
 No provider is rerun, and reading the graph does not change execution provenance.
 
-The public ledger intentionally has no `LineIndex` node. Both current query
+The public ledger intentionally has no `LineIndex` or `Lex` node. All three current query
 families project their transitive raw-source observations into the established
 `Input(FileKey)` fact with the observed source digest and no semantic edges.
 Unknown family/projection shapes fail closed. The first-observation journal

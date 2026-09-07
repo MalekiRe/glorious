@@ -1,5 +1,11 @@
 use super::*;
 
+pub(crate) fn finalize_fixture(mut body: RuntimeMir) -> RuntimeMir {
+    body.frame = body.derive_frame().unwrap();
+    body.validate().unwrap();
+    body
+}
+
 pub(crate) fn fixture(source: &str) -> RuntimeMir {
     let cleanup = crate::cleanup_mir::tests::fixture(source);
     let (mut body, _) = cleanup
@@ -16,6 +22,35 @@ pub(crate) fn fixture(source: &str) -> RuntimeMir {
 }
 const CALL: &str = "pub fn main(action: () -> i64) -> i64 { action() }";
 const PERFORM: &str = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(42) { Ask::ask(value) with _ => value } }";
+
+#[test]
+fn handler_candidate_order_follows_scopes_not_arena_numbers() {
+    let mut body = fixture("effect Ask { [1, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle { handle Ask::ask(1) { Ask::ask(0) => 0 } } { Ask::ask(value) => value } }");
+    assert_eq!(body.control.handlers.len(), 2);
+    assert!(body.control.performs.iter().any(|site| site.handler_candidates.len() == 2));
+    let rename = |id: &mut MirHandlerSiteId| { id.0 = 1 - id.0; };
+    body.control.handlers.swap(0, 1);
+    for scope in &mut body.control.scopes {
+        if let Some(id) = &mut scope.entered_handler { rename(id); }
+    }
+    for perform in &mut body.control.performs {
+        for id in &mut perform.handler_candidates { rename(id); }
+    }
+    for resumption in &mut body.control.resumptions {
+        if let Some(id) = &mut resumption.originating_handler { rename(id); }
+    }
+    for block in &mut body.blocks {
+        for operation in &mut block.instructions {
+            if let RuntimeOperation::InstallHandler { site, .. } = operation { rename(site); }
+        }
+    }
+    body.frame = body.derive_frame().unwrap();
+    body.validate().unwrap();
+    let site = body.control.performs.iter_mut().find(|site| site.handler_candidates.len() == 2).unwrap();
+    site.handler_candidates.reverse();
+    assert!(body.validate().unwrap_err().contains("lexical handler candidates"),
+        "renumbering is harmless, but reversing lexical precedence must be rejected");
+}
 
 #[test]
 fn runtime_rejects_reading_a_consumed_effect_argument() {
@@ -70,8 +105,8 @@ fn runtime_rejects_reading_a_consumed_resumption_argument() {
                 .iter()
                 .enumerate()
                 .find_map(|(offset, op)| {
-                    if let RuntimeOperation::ResumeReturn { value, .. } = op {
-                        Some((offset, *value))
+                    if let RuntimeOperation::CallIndirect { arguments, .. } = op {
+                        Some((offset, arguments[0]))
                     } else {
                         None
                     }

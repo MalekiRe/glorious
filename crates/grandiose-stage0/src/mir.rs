@@ -5630,14 +5630,16 @@ impl MirFunction {
             }
         }
         for (index, perform) in self.control.performs.iter().enumerate() {
-            let mut previous = None;
+            let mut seen = BTreeSet::new();
             for candidate in &perform.handler_candidates {
-                if previous.is_some_and(|previous| previous <= candidate.0) {
+                if !seen.insert(*candidate) {
                     return Err(format!(
                         "MIR perform site {index} has non-canonical handler candidates"
                     ));
                 }
-                previous = Some(candidate.0);
+                // IDs follow block allocation, not lexical nesting. The
+                // instruction check below verifies exact innermost-first
+                // scope order independently of those incidental numbers.
                 let handler = self
                     .control
                     .handlers
@@ -7329,6 +7331,14 @@ pub(crate) fn validate_nominal_copy_descriptors(
     descriptors: &[MirNominalCopyDescriptor],
 ) -> Result<(), String> {
     for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.definition == crate::refinement::bindings_definition() {
+            let ty = Type::Nominal { definition: descriptor.definition, arguments: descriptor.arguments.clone() };
+            let fields = crate::refinement::binding_pack_fields(&ty).ok_or("MIR binding pack has no canonical environment layout")?;
+            if descriptor.is_enum || descriptor.variants.as_slice() != [fields.to_vec()]
+                || Some(descriptor.source_contract) != crate::refinement::binding_pack_contract(&ty) {
+                return Err("MIR binding pack layout disagrees with its sealed environment".into());
+            }
+        }
         if descriptor.variants.is_empty() {
             return Err("MIR nominal copy descriptor has no variants".into());
         }
@@ -8769,6 +8779,9 @@ pub(crate) fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
 }
 
 pub(crate) fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(), String> {
+    if !matches!(pattern, MirPattern::Any) && let Type::Reference { referent, .. } = subject {
+        return validate_pattern(pattern, referent);
+    }
     match pattern {
         MirPattern::Any => Ok(()),
         MirPattern::Literal(value)

@@ -59,6 +59,164 @@ fn request(application: &str) -> CompilationRequest {
 }
 
 #[test]
+fn borrowed_subviews_keep_the_named_input_region_across_helper_returns() {
+    for application in [
+        r#"use std::*;
+        fn text<'a>(value: Str<'a>) -> Result<Str<'a>, StringRangeError> { Str::subslice(value, 1, 2) }
+        fn view<'a>(value: Slice<'a, u8>) -> Result<Slice<'a, u8>, SliceRangeError> {
+            Slice::slice(value, Range { start: 0, end: 1 })
+        }
+        fn split<'a>(value: Slice<'a, u8>) -> Result<(Slice<'a, u8>, Slice<'a, u8>), SliceRangeError> { Slice::split_at(value, 1) }
+        fn chars<'a>(value: Str<'a>) -> Chars<'a> { Str::chars(value) }
+        fn iter<'a>(value: Slice<'a, u8>) -> SliceIter<'a, u8> { Slice::iter(value) }
+        pub fn main() -> i64 {
+            let owner = String::new(); String::push_str(&mut owner, "a*Z");
+            handle text(String::as_str(&owner)) {
+                Result::Err(_) => -1, Result::Ok(text) => handle split(Str::as_bytes(text)) {
+                    Result::Err(_) => -2, Result::Ok((left, right)) => handle view(left) {
+                        Result::Err(_) => -3, Result::Ok(view) => {
+                            let iterator = iter(view); let characters = chars(text);
+                            handle Chars::next(&mut characters) {
+                                Result::Err(_) => -4, Result::Ok(_) => handle SliceIter::next(&mut iterator) {
+                                    Result::Err(_) => -5, Result::Ok(value) => as<i64>(*value) + as<i64>(Slice::len(&right)) - 1,
+                                },
+                            }
+                        },
+                    },
+                },
+            }
+        }"#,
+        r#"use std::*;
+        fn element<'a>(value: SliceMut<'a, i64>) -> &'a mut i64 { SliceMut::get_unchecked(value, 0) }
+        fn checked<'a>(value: SliceMut<'a, i64>) -> Option<&'a mut i64> { SliceMut::get(value, 0) }
+        fn window<'a>(value: SliceMut<'a, i64>) -> Result<SliceMut<'a, i64>, SliceRangeError> {
+            SliceMut::slice(value, Range { start: 0, end: 1 })
+        }
+        fn split<'a>(value: SliceMut<'a, i64>) -> Result<(SliceMut<'a, i64>, SliceMut<'a, i64>), SliceRangeError> {
+            SliceMut::split_at(value, 1)
+        }
+        fn iter<'a>(value: SliceMut<'a, i64>) -> SliceIter<'a, i64> { SliceMut::iter(value) }
+        pub fn main() -> i64 {
+            let owner = Vec<i64>::new(); Vec::push(&mut owner, 20); Vec::push(&mut owner, 22);
+            handle split(Vec::as_mut_slice(&mut owner)) {
+                Result::Err(_) => -1, Result::Ok((left, right)) => handle window(left) {
+                    Result::Err(_) => -2, Result::Ok(left) => {
+                        let first = element(left);
+                        handle checked(right) { Result::Err(_) => -3, Result::Ok(second) => { *first = *first + *second; *first } }
+                    },
+                },
+            }
+        }"#,
+    ] {
+        let outcome = StageZeroCompiler::new().compile(request(application)).unwrap();
+        let artifact = outcome.artifact.expect(&format!("{:?}", outcome.diagnostics));
+        let program = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(program.run_std_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn borrowed_subviews_cannot_lengthen_a_named_input_to_static() {
+    for signature in [
+        "fn wrong<'a>(value: Str<'a>) -> Result<Str<'static>, StringRangeError> { Str::subslice(value, 0, 0) }",
+        "fn wrong<'a>(value: Slice<'a, u8>) -> Result<Slice<'static, u8>, SliceRangeError> { Slice::slice(value, Range { start: 0, end: 0 }) }",
+        "fn wrong<'a>(value: SliceMut<'a, u8>) -> &'static mut u8 { SliceMut::get_unchecked(value, 0) }",
+        "fn wrong<'a>(value: SliceMut<'a, u8>) -> Option<&'static mut u8> { SliceMut::get(value, 0) }",
+        "fn wrong<'a>(value: Str<'a>) -> Chars<'static> { Str::chars(value) }",
+        "fn wrong<'a>(value: Slice<'a, u8>) -> SliceIter<'static, u8> { Slice::iter(value) }",
+    ] {
+        let source = format!("use std::*; {signature} pub fn main() -> i64 {{ 42 }}");
+        let error = StageZeroCompiler::new().compile(request(&source)).unwrap_err();
+        assert!(error.diagnostics().iter().any(|d| d.code == "G5017"), "{signature}: {error:?}");
+    }
+}
+
+#[test]
+fn source_linear_collection_stack_costs() {
+    // The large case exceeds even the default VM call-depth ceiling. Neither
+    // ordinary execution nor optional authoring recycling may need one frame
+    // per element. Keep all other resource limits unchanged.
+    for length in [256, 16_417] {
+        let literal = "a".repeat(length);
+        for (name, body) in [
+            ("compare", format!(r#"handle Slice::lex_compare(Str::as_bytes("{literal}"), Str::as_bytes("{literal}")) {{ Ordering::Equal => {length}, _ => 0 }}"#)),
+            ("utf8", format!(r#"let bytes = Vec<u8>::new(); Vec::extend_from_slice(&mut bytes, b"{literal}"); handle String::from_utf8(bytes) {{ Result::Ok(value) => as<i64>(String::len(&value)), Result::Err(_) => 0 }}"#)),
+            ("resize", format!("let bytes = Vec<u8>::new(); Vec::resize(&mut bytes, {length}, 97); as<i64>(Vec::len(&bytes))")),
+        ] {
+            let source = format!("use std::*; pub fn main() -> i64 {{ {body} }}");
+            let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+            let program = grandiose_stage0::decode_and_verify_program(
+                &outcome.artifact.expect(&format!("{name}: {:?}", outcome.diagnostics)).canonical_bytes(),
+            ).unwrap();
+            // SAFETY: freshly compiled source uses the trusted bundled library.
+            let limits = grandiose_stage0::VmExecutionLimits { max_call_depth: 128, ..Default::default() };
+            let (value, profile) = unsafe { program.run_i64_for_authoring_with_unsafe(limits) }.unwrap();
+            assert_eq!(value, length as i64, "{name}");
+            assert!(profile.peak_call_depth < 64, "{name}: {profile:?}");
+            assert_eq!(profile.native_memory.raw_live_bytes, 0, "{name}");
+            assert_eq!(profile.native_memory.home_live_bytes, 0, "{name}");
+            eprintln!("{name} length={length} depth={}", profile.peak_call_depth);
+            // SAFETY: the same trusted source, without authoring optimizations.
+            let ordinary = unsafe { program.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits {
+                max_call_depth: 128, ..Default::default()
+            }) };
+            assert_eq!(ordinary.unwrap(), length as i64, "ordinary {name}");
+        }
+    }
+}
+
+#[test]
+fn utf8_balanced_validation_preserves_boundaries_first_error_and_owned_bytes() {
+    let mut samples = vec![vec![], b"a".to_vec(), "é€😀".as_bytes().to_vec()];
+    for padding in 0..8 {
+        let mut valid = vec![b'a'; padding];
+        valid.extend_from_slice("é€😀z".as_bytes());
+        samples.push(valid.clone());
+        for suffix in [&[0xff][..], &[0xc0, 0x80], &[0xed, 0xa0, 0x80], &[0xf4, 0x90, 0x80, 0x80], &[0xe2, 0x82]] {
+            let mut invalid = valid.clone();
+            invalid.extend_from_slice(suffix);
+            samples.push(invalid);
+        }
+    }
+    let expected: Vec<i64> = samples.iter().map(|bytes| match std::str::from_utf8(bytes) {
+        Ok(_) => bytes.len() as i64 + 1,
+        Err(error) => -(error.valid_up_to() as i64 + 1),
+    }).collect();
+    let calls = samples.iter().map(|bytes| {
+        let escaped = bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>();
+        format!("check(b\"{escaped}\")")
+    }).collect::<Vec<_>>().join(",");
+    let source = format!(r#"
+        use std::*;
+        fn check(input: Slice<u8>) -> i64 {{
+            let bytes = Vec<u8>::new();
+            Vec::extend_from_slice(&mut bytes, input);
+            handle String::from_utf8(bytes) {{
+                Result::Ok(value) => as<i64>(String::len(&value)) + 1,
+                Result::Err(error) => {{
+                    let position = Utf8Error::valid_up_to(&error);
+                    let restored = Utf8Error::into_bytes(error);
+                    handle Slice::lex_compare(Vec::as_slice(&restored), input) {{
+                        Ordering::Equal => 0 - (as<i64>(position) + 1),
+                        _ => 0,
+                    }}
+                }},
+            }}
+        }}
+        pub fn main() -> ({types}) {{ ({calls}) }}
+    "#, types = vec!["i64"; samples.len()].join(","));
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    // SAFETY: trusted source constructs owned buffers with in-range copies.
+    let (actual, profile) = unsafe { program.run_tuple_i64_for_authoring_with_unsafe(
+        grandiose_stage0::VmExecutionLimits { max_call_depth: 128, ..Default::default() },
+    ) }.unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(profile.native_memory.raw_live_bytes, 0);
+    assert_eq!(profile.native_memory.home_live_bytes, 0);
+}
+
+#[test]
 fn native_static_addresses_keep_exact_literal_bytes_after_the_leaf_returns() {
     let mut input = request("use std::*; pub fn main() -> i64 { native_static_address_fixture() }");
     let compiler = StageZeroCompiler::new();
@@ -1192,6 +1350,134 @@ fn option_get_or_insert_default_constructs_only_a_vacant_resident() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
+}
+
+#[test]
+fn source_vec_capacity_preflight_matches_allocation_and_zero_sized_storage() {
+    let source = r#"
+        use std::*;
+        fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+        pub fn main() -> i64 {
+            let bytes = Vec<u8>::new();
+            let score = check(Vec<u8>::initial_capacity(0) == 0);
+            let first = Vec::reserved_capacity(&bytes, 1);
+            let score = score + check(first == 4) + check(Vec::capacity(&bytes) == 0);
+            Vec::reserve(&mut bytes, 1);
+            let score = score + check(Vec::capacity(&bytes) == first) + check(Vec::len(&bytes) == 0);
+            Vec::push(&mut bytes, as<u8>(1)); Vec::push(&mut bytes, as<u8>(2));
+            Vec::push(&mut bytes, as<u8>(3)); Vec::push(&mut bytes, as<u8>(4));
+            let doubled = Vec::reserved_capacity(&bytes, 1);
+            let score = score + check(doubled == 8);
+            Vec::reserve(&mut bytes, 1);
+            let score = score + check(Vec::capacity(&bytes) == doubled) + check(Vec::len(&bytes) == 4);
+            let exact = Vec::reserved_capacity(&bytes, 20);
+            let score = score + check(exact == 24);
+            Vec::reserve(&mut bytes, 20);
+            let score = score + check(Vec::capacity(&bytes) == exact) + check(Vec::len(&bytes) == 4);
+            let units = Vec<()>::new();
+            let score = score + check(Vec<()>::initial_capacity(0) == Vec::capacity(&units))
+                + check(Vec<()>::initial_capacity(3) == Vec::capacity(&units))
+                + check(Vec::reserved_capacity(&units, 3) == Vec::capacity(&units));
+            Vec::reserve(&mut units, 3);
+            let score = score + check(Vec::capacity(&units) == 18446744073709551615);
+            let words = Vec<u32>::with_capacity(1);
+            let larger = Vec<u32>::with_capacity(9);
+            score + check(Vec<u32>::initial_capacity(1) == 4)
+                + check(Vec::capacity(&words) == Vec<u32>::initial_capacity(1))
+                + check(Vec::capacity(&larger) == Vec<u32>::initial_capacity(9))
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 18);
+}
+
+#[test]
+fn source_vec_backing_byte_preflight_uses_the_actual_padded_layout() {
+    let source = r#"use std::*;
+        struct Padded { byte: u8, word: u64 }
+        fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+        pub fn main() -> i64 {
+            let bytes = Vec<u8>::new(); let words = Vec<u32>::new(); let padded = Vec<Padded>::new(); let units = Vec<()>::new();
+            let score = check(Vec::backing_bytes(&bytes) == 0) + check(Vec::reserved_backing_bytes(&bytes, 1) == 4)
+                + check(Vec::reserved_backing_bytes(&words, 1) == 16) + check(Vec::reserved_backing_bytes(&padded, 1) == 64)
+                + check(Vec::backing_bytes(&units) == 0) + check(Vec::reserved_backing_bytes(&units, 1000) == 0);
+            Vec::reserve(&mut bytes, 1); Vec::reserve(&mut words, 1); Vec::reserve(&mut padded, 1); Vec::reserve(&mut units, 1000);
+            score + check(Vec::backing_bytes(&bytes) == 4) + check(Vec::backing_bytes(&words) == 16)
+                + check(Vec::backing_bytes(&padded) == 64) + check(Vec::backing_bytes(&units) == 0)
+                + check(Vec::reserved_backing_bytes(&padded, 9) == 144)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let artifact = outcome.artifact.expect(&format!("{:?}", outcome.diagnostics));
+    let program = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_std_i64().unwrap(), 11);
+}
+
+#[test]
+fn byte_buffer_word_store_preserves_unaligned_offsets_limits_and_endianness() {
+    let source = r#"use std::*;
+        fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
+        pub fn main() -> i64 {
+            let buffer = ByteBuf::new(17); ByteBuf::push(&mut buffer, 99);
+            let score = check(handle ByteBuf::put_u64(&mut buffer, 578437695752307201) { Result::Ok(_) => true, _ => false });
+            let score = score + check(handle ByteBuf::put_u64(&mut buffer, 18446744073709551615) { Result::Ok(_) => true, _ => false });
+            let score = score + check(handle ByteBuf::put_u64(&mut buffer, 0) { Result::Err(ByteError::Limit) => true, _ => false });
+            let bytes = ByteBuf::view(&buffer);
+            score + check(ByteBuf::len(&buffer) == 17) + check(*Slice::get_unchecked(bytes, 0) == 99)
+                + check(*Slice::get_unchecked(bytes, 1) == 1) + check(*Slice::get_unchecked(bytes, 2) == 2)
+                + check(*Slice::get_unchecked(bytes, 3) == 3) + check(*Slice::get_unchecked(bytes, 4) == 4)
+                + check(*Slice::get_unchecked(bytes, 5) == 5) + check(*Slice::get_unchecked(bytes, 6) == 6)
+                + check(*Slice::get_unchecked(bytes, 7) == 7) + check(*Slice::get_unchecked(bytes, 8) == 8)
+                + check(*Slice::get_unchecked(bytes, 9) == 255) + check(*Slice::get_unchecked(bytes, 16) == 255)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let artifact = outcome.artifact.expect(&format!("{:?}", outcome.diagnostics));
+    let program = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_std_i64().unwrap(), 15);
+}
+
+#[test]
+fn source_vec_native_profile_matches_backing_growth_copy_and_disposal() {
+    let source = r#"
+        use std::*;
+        pub fn main() -> i64 {
+            let bytes = Vec<u8>::with_capacity(4);
+            Vec::extend_from_slice(&mut bytes, b"abcd");
+            Vec::push(&mut bytes, as<u8>(101));
+            let copy = Vec<u8>::new();
+            Vec::extend_from_slice(&mut copy, Vec::as_slice(&bytes));
+            as<i64>(Vec::len(&bytes) + Vec::len(&copy))
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    // SAFETY: freshly compiled source and the trusted stdlib own these two
+    // buffers and their in-bounds slice copies; no supplied artifact is run.
+    let (value, profile) = unsafe { program.run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+    assert_eq!(value, 10);
+    let native = profile.native_memory;
+    assert_eq!((native.raw_allocations, native.raw_reallocations, native.raw_deallocations), (2, 1, 2));
+    assert_eq!((native.raw_peak_bytes, native.raw_live_bytes), (13, 0), "8-byte grown source plus exact 5-byte destination");
+    assert_eq!(native.raw_bulk_copy_bytes, 9, "4 literal bytes plus 5 independently copied bytes");
+    assert_eq!(native.home_live_bytes, 0);
+    assert!(native.home_allocations > 0);
+    assert_eq!(native.home_allocations, native.home_deallocations);
+    assert!(!native.counters_saturated);
+
+    let zero = StageZeroCompiler::new().compile(request(
+        "use std::*; pub fn main() -> i64 { let values = Vec<()>::new(); Vec::resize(&mut values, 5, ()); as<i64>(Vec::len(&values)) }"
+    )).unwrap();
+    assert!(zero.diagnostics.is_empty(), "{:#?}", zero.diagnostics);
+    // SAFETY: the source stdlib owns the logical zero-sized residents.
+    let (value, profile) = unsafe { zero.artifact.unwrap().run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+    assert_eq!(value, 5);
+    assert_eq!(profile.native_memory.raw_allocations, 0);
+    assert_eq!(profile.native_memory.raw_peak_bytes, 0);
+    assert!(profile.charged_allocation_elements > 0, "logical VM charges are not physical buffer bytes");
 }
 
 #[test]
@@ -3726,7 +4012,9 @@ fn vec_extend_from_slice_and_string_push_str_copy_borrowed_bytes() {
         pub fn main() -> usize {
             let bytes = Vec::new();
             Vec::push(&mut bytes, 65);
-            let bytes_view = Vec::as_slice(&bytes);
+            let source_bytes = Vec::new();
+            Vec::push(&mut source_bytes, 65);
+            let bytes_view = Vec::as_slice(&source_bytes);
             Vec::extend_from_slice(&mut bytes, bytes_view);
 
             let value = String::new();
@@ -3737,6 +4025,25 @@ fn vec_extend_from_slice_and_string_push_str_copy_borrowed_bytes() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 5);
+}
+
+#[test]
+fn vec_extend_from_slice_rejects_a_live_view_of_its_destination() {
+    let source = r#"
+        use std::*;
+        pub fn main() -> usize {
+            let bytes = Vec::new();
+            Vec::push(&mut bytes, 65);
+            let bytes_view = Vec::as_slice(&bytes);
+            Vec::extend_from_slice(&mut bytes, bytes_view);
+            Vec::len(&bytes)
+        }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source)) else {
+            panic!("extending a vector while its input aliases that vector was accepted");
+        };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5006"), "{diagnostics:#?}");
 }
 
 #[test]

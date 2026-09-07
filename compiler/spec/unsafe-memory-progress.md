@@ -50,6 +50,80 @@ gates on the bytecode path. Only then implement the Glorious LLVM backend and
 compare native output against the shared ABI and bytecode execution. Recording
 this order does not close any outstanding M0–M10 compiler contract.
 
+## Native fixture and owner-move revalidation (September 7)
+
+Native bridge fixtures now import the canonical source operators/Boolean
+bindings explicitly. The owned-result corruption test initializes the complete
+`u32` tag of the source-defined `Bool = Result<(), ()>` layout, checks that
+layout, and rejects an invalid enum discriminant; it does not read a partially
+initialized slot or assume the old one-byte Boolean ABI. Resident metadata
+mutations cover the current owned host-call instruction, and expanding nominal
+layouts are checked against the current finite-specialization rejection.
+
+The owned-pair test exposed a real transient backing-allocation problem, not
+just a stale fixture. A checked native-to-native whole-owner move may now
+transfer the backing block when its address has never been exposed, its only
+strong owners are the source slot/value, the destination has no existing home,
+and its exact native type matches. Otherwise the existing copy/retirement path
+remains. A four-case unit history covers the transfer, exposed addresses,
+additional owners, and a preexisting destination. It checks pointer identity,
+bulk-copy/allocation counts, and final release. No ABI transport buffer or
+source destructor is introduced or skipped.
+
+The two-Pair host roundtrip passes under its unchanged 32-byte total/16-byte
+per-block cap. Its source returns one result field so this cap isolates the
+two ABI slots rather than adding borrowed scalar homes for library arithmetic;
+the native transform still checks/uses both input fields and initializes both
+result fields.
+
+General-memory fixtures retain their custom bodyless declarations and explicit
+role bindings. They now use the canonical source library for operators/Bool:
+only the general memory declarations are replaced by the fixture module, with
+ordinary library references redirected to those bindings. Static-data leaves
+and all non-memory primitive roles remain unchanged. There are no fixture
+forwarding bodies or fabricated arithmetic primitives. All 19 tests pass,
+including missing-binding/unsafe-call rejection, raw extents/copies, owner-loan
+facades, and every variant of the expanded enum roundtrip fixture.
+
+The broader authoring run (`target/native-owner-authoring-full.log`) passes
+216 unit, 109 destruction, 27 native-bridge, 19 runtime-memory, four
+runtime-storage, 171 standard-library, and 166 VM tests: 712 passes, six
+failures. The failures are the two previously recorded destruction cases,
+three previously recorded VM cases, and the native nominal-field-lifetime
+fixture below. This is not a full workspace pass or U1–U6 certification.
+
+### Lifetime-specialization blocker and subsequent fix
+
+At this native-fixture checkpoint, the nominal-field contract fixture failed before execution with
+`G7032` / `NonConcreteType`. A smaller source-only reproduction needs no native
+calls, memory operations, or standard library:
+
+```glorious
+struct Marker<'a, 'b> {}
+fn carry<T>(value: T) -> T { value }
+fn inspect<'a, 'b>(value: &Marker<'a, 'b>) -> i64 { 42 }
+pub fn main() -> i64 {
+    let marker = carry(Marker {});
+    inspect(&marker)
+}
+```
+
+The ordinary CLI reproduced the specialization failure
+(`target/native-lifetime-minimized.glorious` and `.log`). Diagnostic probing of
+the native fixture showed its nominal type argument retaining
+`Lifetime(Generic(0))` / `Lifetime(Generic(1))`. The contextual call-argument
+unification/opening boundary needed correction; these declaration regions must
+not be erased or accepted as concrete merely to admit a native binding.
+Two source-only controls return `(42, 42)`: omitting the later `inspect` call,
+or explicitly constructing `Marker<'static, 'static> {}` before that call
+(`target/native-lifetime-control.glorious` and `.log`). This localizes the
+failure to delayed lifetime inference rather than the marker's runtime layout.
+The subsequent [call-context lifetime fix](call-context-lifetimes.md) makes
+this reproduction and all 28 native-bridge tests pass, preserving the original
+same-layout/different-field-lifetime contract checks. It also fixes detached
+higher-ranked layout obligations. Two separate ownership/loan-ending failures
+in the lifetime suite remain baseline-confirmed and enabled.
+
 ## U1: shared raw-storage substrate
 
 `crates/grandiose-runtime` supplies `MemoryLayout` and `RawAllocation`, reused

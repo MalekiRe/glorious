@@ -181,8 +181,8 @@ pub(super) fn validate(program: &CleanupProgram) -> Result<(), CleanupError> {
                                 && owner.quantity != Some(crate::Quantity::UNRESTRICTED)
                             {
                                 return Err(CleanupError(format!(
-                                    "Cleanup {:?} block {}: replay cannot duplicate live owner {} without Copy permission across a suspended call",
-                                    definition, target.0, value.0
+                                    "Cleanup {:?} block {}: replay cannot duplicate live owner {} ({:?}, scope {:?}) without Copy permission across a suspended call",
+                                    definition, target.0, value.0, body.values[value.0 as usize].ty, owner.scope
                                 )));
                             }
                         }

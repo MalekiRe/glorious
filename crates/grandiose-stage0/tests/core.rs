@@ -123,6 +123,59 @@ fn handler_payload_test_count(mir: &grandiose_stage0::MirFunction) -> usize {
     }).count()
 }
 
+fn binding_drop_intent_count(mir: &grandiose_stage0::MirFunction, name: &str) -> usize {
+    let bindings = mir.control.move_paths.bindings.iter().enumerate()
+        .filter(|(_, binding)| binding.spelling == name)
+        .map(|(index, _)| grandiose_stage0::MirPlaceBindingId(index as u32)).collect::<BTreeSet<_>>();
+    assert_eq!(bindings.len(), 1, "fixture must select one lexical owner");
+    let locals = mir.blocks.iter().flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            MirInstruction::StorageLive { binding, local } if bindings.contains(binding) => Some(*local),
+            _ => None,
+        }).collect::<BTreeSet<_>>();
+    assert_eq!(locals.len(), 1, "owner must retain its exact storage slot");
+    mir.blocks.iter().flat_map(|block| &block.instructions).filter(|instruction| {
+        matches!(instruction, MirInstruction::Drop { local } if locals.contains(local))
+    }).count()
+}
+
+fn follow_trivial_edges(mir: &grandiose_stage0::MirFunction, mut id: grandiose_stage0::MirBlockId) -> grandiose_stage0::MirBlockId {
+    let mut visited = BTreeSet::new();
+    loop {
+        assert!(visited.insert(id), "unexpected cycle in fixture continuation");
+        let block = &mir.blocks[id.0 as usize];
+        id = match block.terminator {
+            grandiose_stage0::MirTerminator::Goto { target, .. } => target,
+            grandiose_stage0::MirTerminator::SwitchBool { condition, then_target, .. }
+                if block.instructions.iter().any(|instruction| matches!(instruction,
+                    MirInstruction::PatternTest { dst, pattern: MirPattern::Any, .. } if *dst == condition)) => then_target,
+            _ => return id,
+        };
+    }
+}
+
+fn literal_pattern_block(mir: &grandiose_stage0::MirFunction, literal: &str) -> grandiose_stage0::MirBlockId {
+    let matches = mir.blocks.iter().enumerate().filter(|(_, block)| block.instructions.iter().any(|instruction| {
+        matches!(instruction, MirInstruction::PatternTest { pattern: MirPattern::Literal(value), .. } if value == literal)
+    })).map(|(index, _)| grandiose_stage0::MirBlockId(index as u32)).collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "fixture must have one test of {literal}");
+    matches[0]
+}
+
+fn assert_binding_moved_before_leave(mir: &grandiose_stage0::MirFunction, spelling: &str) {
+    let binding = mir.control.move_paths.bindings.iter().position(|binding| binding.spelling == spelling)
+        .expect("source binding identity");
+    let local = mir.blocks.iter().flat_map(|block| &block.instructions).find_map(|instruction| {
+        match instruction {
+            MirInstruction::StorageLive { binding: id, local } if id.0 as usize == binding => Some(*local),
+            _ => None,
+        }
+    }).expect("source storage slot");
+    assert!(mir.blocks.iter().any(|block| matches!(block.terminator, grandiose_stage0::MirTerminator::Leave { .. })
+        && block.instructions.iter().any(|instruction| matches!(instruction, MirInstruction::Move { src, .. } if *src == local))),
+        "the owning move must execute before the leave, not survive as a legacy cleanup fact");
+}
+
 #[test]
 fn ordinary_fn_bounds_reject_noncallable_arguments_during_elaboration() {
     for argument in ["42", "()", "Token { value: 42 }"] {
@@ -384,7 +437,7 @@ fn declared_result_expectations_flow_through_blocks_and_structured_values() {
 fn typed_core_retains_explicit_nominal_arguments_on_record_and_enum_construction() {
     let core = core_for(
         "core-explicit-nominal-construction@0.1.0",
-        "pub struct Packet<T> { value: T } pub enum Result<T> { Ok(T) } pub fn main() -> i64 { let packet = Packet<i64> { value: 7 }; let result = Result<i64>::Ok(9); let matches = result is Result<i64>::Ok(_); packet.value }",
+        "use std::Test; pub struct Packet<T> { value: T } pub enum Result<T> { Ok(T) } pub fn main() -> i64 { let packet = Packet<i64> { value: 7 }; let result = Result<i64>::Ok(9); let matches = result is Result<i64>::Ok(_); packet.value }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let expected = vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))];
@@ -744,15 +797,28 @@ fn projected_trait_effect_handler_statements_rejoin_their_lexical_suffix_in_mir(
     mir.validate().unwrap_or_else(|error| {
         panic!("projected statement handler MIR validates: {error}\n{mir:#?}")
     });
-    let entry = &mir.blocks[mir.entry.0 as usize].instructions;
+    let mut entry = Vec::new();
+    let mut current = mir.entry;
+    let mut visited = BTreeSet::new();
+    loop {
+        assert!(visited.insert(current), "statement fixture has an unexpected normal-path cycle");
+        let block = &mir.blocks[current.0 as usize];
+        entry.extend(block.instructions.iter());
+        match block.terminator {
+            grandiose_stage0::MirTerminator::Goto { target, .. } => current = target,
+            _ => break,
+        }
+    }
     let install = entry
         .iter()
         .position(|instruction| matches!(instruction, MirInstruction::InstallHandler { .. }))
         .expect("statement handler frame");
+    let apply = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some("apply"))
+        .expect("ordinary higher-order helper").key;
     let call = entry
         .iter()
-        .position(|instruction| matches!(instruction, MirInstruction::CallIndirect { .. }))
-        .expect("opaque projected callable call");
+        .position(|instruction| matches!(instruction, MirInstruction::Call { callee, .. } if *callee == apply))
+        .expect("resolved helper call carrying the projected callable");
     let uninstall = entry
         .iter()
         .position(|instruction| matches!(instruction, MirInstruction::UninstallHandler))
@@ -1256,13 +1322,13 @@ fn typed_core_validation_rejects_impossible_structural_projection() {
 fn typed_core_validation_rejects_out_of_range_nominal_pattern_fields() {
     let mut body = core_for(
         "core-pattern-arity-validation@0.1.0",
-        "pub struct Pair { left: i64 } pub fn main(value: Pair) -> bool { value is Pair { left: _ } }",
+        "use std::Test; pub struct Pair { left: i64 } pub fn main(value: Pair) -> () { value is Pair { left: _ }; () }",
     );
     let pattern = body
         .expressions
         .iter_mut()
         .find_map(|expression| match &mut expression.kind {
-            CoreKind::PatternTest { pattern, .. } => Some(pattern),
+            CoreKind::Completion { clauses, refinement_test: Some(_), .. } => Some(&mut clauses[0].pattern),
             _ => None,
         })
         .expect("source is-pattern must elaborate to Core");
@@ -1289,13 +1355,13 @@ fn typed_core_validation_rejects_out_of_range_nominal_pattern_fields() {
 fn typed_core_validation_rejects_nominal_pattern_field_type_forgery() {
     let mut body = core_for(
         "core-pattern-layout-validation@0.1.0",
-        "pub struct Pair { left: i64, right: bool } pub fn main(value: Pair) -> bool { value is Pair { left: _, right: _ } }",
+        "use std::Test; pub struct Pair { left: i64, right: bool } pub fn main(value: Pair) -> () { value is Pair { left: _, right: _ }; () }",
     );
     let pattern = body
         .expressions
         .iter_mut()
         .find_map(|expression| match &mut expression.kind {
-            CoreKind::PatternTest { pattern, .. } => Some(pattern),
+            CoreKind::Completion { clauses, refinement_test: Some(_), .. } => Some(&mut clauses[0].pattern),
             _ => None,
         })
         .expect("source is-pattern must elaborate to Core");
@@ -4156,6 +4222,10 @@ fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_cover
     }));
     let verified = compile_source(source);
     assert_eq!(verified.run_i64().expect("VM executes pattern dispatch"), 1);
+    let second = compile_source(&source.replace("handle Stop::die(true)", "handle Stop::die(false)"));
+    assert_eq!(second.run_i64().expect("VM executes the final exhaustive row"), 2);
+    let called = "use std::*; effect Stop { die(value: Bool) -> !; } fn raise(value: Bool) -> ! / Stop { Stop::die(value) } pub fn main() -> i64 { handle raise(false) { Stop::die(true) => 1, Stop::die(false) => 2 } }";
+    assert_eq!(compile_source(called).run_i64().expect("callee dispatch enters the first matching clause"), 2);
 
     let unreachable = core_for(
         "core-handler-pattern-matrix-unreachable@0.1.0",
@@ -4169,6 +4239,23 @@ fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_cover
         "unreachable terminal handler pattern was not diagnosed: {:#?}",
         unreachable.diagnostics
     );
+}
+
+#[test]
+fn handler_pattern_coverage_preserves_payload_correlations_at_runtime() {
+    for (left, right, expected) in [("true", "true", 1), ("true", "false", 2), ("false", "true", 3), ("false", "false", 4)] {
+        let source = format!("use std::*; effect Stop {{ die(left: Bool, right: Bool) -> !; }} pub fn main() -> i64 {{ handle Stop::die({left}, {right}) {{ Stop::die(std::true, std::true) => 1, Stop::die(std::true, std::false) => 2, Stop::die(std::false, std::true) => 3, Stop::die(std::false, std::false) => 4 }} }}");
+        assert_eq!(compile_source(&source).run_i64().unwrap(), expected);
+    }
+    let partial = "use std::*; effect Stop { die(left: Bool, right: Bool) -> !; } pub fn main() -> i64 { handle { handle Stop::die(true, false) { Stop::die(std::true, std::true) => 1, Stop::die(std::false, std::false) => 2 } } { Stop::die(_, _) => 9 } }";
+    assert_eq!(compile_source(partial).run_i64().unwrap(), 9);
+    // A fresh packet raised inside an earlier clause has not rejected that
+    // clause's pattern. Later rows cannot inherit lexical prefix coverage.
+    let reentrant = "use std::*; effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle { handle Stop::die(true) { Stop::die(true) => Stop::die(true), Stop::die(false) => 2 } } { Stop::die(_) => 9 } }";
+    assert_eq!(compile_source(reentrant).run_i64().unwrap(), 9);
+    let called_reentrant = reentrant.replace("pub fn main", "fn raise(value: Bool) -> ! / Stop { Stop::die(value) } pub fn main")
+        .replace("=> Stop::die(true)", "=> raise(true)");
+    assert_eq!(compile_source(&called_reentrant).run_i64().unwrap(), 9);
 }
 
 #[test]
@@ -4334,6 +4421,131 @@ fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
         "duplicate i64 handler literal was not diagnosed: {:#?}",
         core.diagnostics
     );
+}
+
+#[test]
+fn completion_coverage_partitions_nested_constructors_with_open_payloads() {
+    let declarations = "enum Result<T, E> { Ok(T), Err(E) } enum Event { Continue, Ready } enum Failure { Code(i64), Closed } struct Packet { event: Event, code: i64 }";
+    for (subject, arms) in [
+        ("Result<Event, Failure>", "Result::Err(_) => 0, Result::Ok(Event::Continue) => 1, Result::Ok(Event::Ready) => 2"),
+        ("Result<(Event, i64), Failure>", "Result::Err(_) => 0, Result::Ok((Event::Continue, _)) => 1, Result::Ok((Event::Ready, _)) => 2"),
+        ("Result<Packet, Failure>", "Result::Err(_) => 0, Result::Ok(Packet { event: Event::Continue }) => 1, Result::Ok(Packet { event: Event::Ready }) => 2"),
+        ("Result<Event, Failure>", "Result::Ok(Event::Continue) => 1, Result::Ok(Event::Ready) => 2, Result::Err(Failure::Code(0)) => 3, Result::Err(Failure::Code(_)) => 4, Result::Err(Failure::Closed) => 5"),
+    ] {
+        let source = format!("{declarations} pub fn main(value: {subject}) -> i64 {{ handle value {{ {arms} }} }}");
+        let core = core_for("core-completion-nested-open-payload@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{source}\n{:#?}", core.diagnostics);
+    }
+    let generic = core_for(
+        "core-completion-nested-generic-payload@0.1.0",
+        &format!("{declarations} pub fn main<T>(value: Result<Event, T>) -> i64 {{ handle value {{ Result::Err(_) => 0, Result::Ok(Event::Continue) => 1, Result::Ok(Event::Ready) => 2 }} }}"),
+    );
+    assert!(generic.diagnostics.is_empty(), "{:#?}", generic.diagnostics);
+}
+
+#[test]
+fn completion_coverage_keeps_missing_open_and_correlated_payloads_uncovered() {
+    let declarations = "enum Result<T, E> { Ok(T), Err(E) } enum Event { Continue, Ready } enum Failure { Code(i64), Closed }";
+    for (subject, arms) in [
+        ("Result<Event, Failure>", "Result::Err(_) => 0, Result::Ok(Event::Continue) => 1"),
+        ("Result<Event, Failure>", "Result::Ok(Event::Continue) => 1, Result::Ok(Event::Ready) => 2, Result::Err(Failure::Code(0)) => 3, Result::Err(Failure::Closed) => 4"),
+        ("Result<(Event, Event), i64>", "Result::Err(_) => 0, Result::Ok((Event::Continue, _)) => 1, Result::Ok((_, Event::Continue)) => 2"),
+    ] {
+        let source = format!("{declarations} pub fn main(value: {subject}) -> i64 {{ handle value {{ {arms} }} }}");
+        let core = core_for("core-completion-nested-missing-payload@0.1.0", &source);
+        assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4166"), "{source}\n{:#?}", core.diagnostics);
+        assert!(!core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4168"), "a possible open-leaf match is not unreachable: {:#?}", core.diagnostics);
+    }
+}
+
+#[test]
+fn completion_coverage_rejects_collectively_shadowed_constructor_rows() {
+    let declarations = "enum Result<T, E> { Ok(T), Err(E) } enum Event { Continue, Ready }";
+    for redundant in ["Result::Ok(_)", "_"] {
+        let source = format!("{declarations} pub fn main(value: Result<Event, i64>) -> i64 {{ handle value {{ Result::Err(_) => 0, Result::Ok(Event::Continue) => 1, Result::Ok(Event::Ready) => 2, {redundant} => 3 }} }}");
+        let core = core_for("core-completion-nested-unreachable@0.1.0", &source);
+        assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4168"), "{source}\n{:#?}", core.diagnostics);
+        assert!(!core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4166"), "the total matrix must stay exhaustive: {:#?}", core.diagnostics);
+    }
+}
+
+#[test]
+fn handler_coverage_partitions_nested_constructors_with_open_payloads() {
+    let declarations = "enum Result<T, E> { Ok(T), Err(E) } enum Event { Continue, Ready } effect Stop { die(value: Result<Event, i64>, code: i64) -> !; } fn raise(value: Result<Event, i64>) -> ! / Stop { Stop::die(value, 19) }";
+    let arms = "Stop::die(Result::Err(_), _) => 0, Stop::die(Result::Ok(Event::Continue), _) => 1, Stop::die(Result::Ok(Event::Ready), _) => 2";
+    let source = format!("{declarations} pub fn main(value: Result<Event, i64>) -> i64 {{ handle raise(value) {{ {arms} }} }}");
+    let core = core_for("core-handler-nested-open-payload@0.1.0", &source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+
+    let missing = source.replace(", Stop::die(Result::Ok(Event::Ready), _) => 2", "");
+    let partial = core_for("core-handler-nested-missing-payload@0.1.0", &missing);
+    assert!(partial.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "a missing nested constructor cannot discharge Stop: {:#?}", partial.diagnostics);
+
+    let literal = source.replace("Stop::die(Result::Err(_), _)", "Stop::die(Result::Err(0), _)");
+    let partial = core_for("core-handler-nested-literal-payload@0.1.0", &literal);
+    assert!(partial.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "one integer cannot discharge the open payload: {:#?}", partial.diagnostics);
+    assert!(!partial.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4175"), "an open payload can match a literal: {:#?}", partial.diagnostics);
+
+    let redundant = source.replace(arms, &format!("{arms}, Stop::die(Result::Ok(_), _) => 3"));
+    let core = core_for("core-handler-nested-unreachable-payload@0.1.0", &redundant);
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4175"), "collective constructor coverage must reject the redundant handler: {:#?}", core.diagnostics);
+}
+
+#[test]
+fn nonreturning_calls_still_require_effect_and_generic_bound_authority() {
+    let effect = core_for(
+        "core-nonreturning-call-effect-authority@0.1.0",
+        "effect Stop { die() -> !; } fn stop() -> ! / Stop { Stop::die() } pub fn main() -> ! { stop() }",
+    );
+    assert!(effect.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "a nonreturning call still performs its effects: {:#?}", effect.diagnostics);
+    let bound = core_for(
+        "core-nonreturning-call-bound-authority@0.1.0",
+        "trait Mark {} effect Stop { die() -> !; } fn stop<T>(value: T) -> ! / Stop where T: Mark { Stop::die() } pub fn main<T>(value: T) -> ! / Stop { stop(value) }",
+    );
+    assert!(bound.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4143"), "a nonreturning call still needs its declared evidence: {:#?}", bound.diagnostics);
+    let valid = core_for(
+        "core-nonreturning-call-admitted@0.1.0",
+        "trait Mark {} effect Stop { die() -> !; } fn stop<T>(value: T) -> ! / Stop where T: Mark { Stop::die() } pub fn main<T>(value: T) -> ! / Stop where T: Mark { stop(value) }",
+    );
+    assert!(valid.diagnostics.is_empty(), "{:#?}", valid.diagnostics);
+}
+
+#[test]
+fn nonreturning_operands_do_not_require_authority_for_a_call_never_entered() {
+    let core = core_for(
+        "core-nonreturning-operand-call-not-entered@0.1.0",
+        "effect Stop { die() -> !; } effect Other { read() -> i64; } fn stop() -> ! / Stop { Stop::die() } fn consume(value: i64) -> i64 / Other { Other::read() } pub fn main() -> ! / Stop { consume(stop()) }",
+    );
+    assert!(core.diagnostics.is_empty(), "the never-entered consume call must not perform Other: {:#?}", core.diagnostics);
+    assert_eq!(core.expression(core.root).ty, Type::Never);
+}
+
+#[test]
+fn completion_coverage_executes_nested_open_payloads_after_independent_verification() {
+    let declarations = "enum Result<T, E> { Ok(T), Err(E) } enum Event { Continue, Ready } enum Failure { Code(i64), Closed } fn classify(value: Result<Event, Failure>) -> i64 { handle value { Result::Ok(Event::Continue) => 1, Result::Ok(Event::Ready) => 2, Result::Err(Failure::Code(0)) => 3, Result::Err(Failure::Code(value)) => value, Result::Err(Failure::Closed) => 5 } }";
+    for (value, expected) in [
+        ("Result::Ok(Event::Continue)", 1),
+        ("Result::Ok(Event::Ready)", 2),
+        ("Result::Err(Failure::Code(0))", 3),
+        ("Result::Err(Failure::Code(41))", 41),
+        ("Result::Err(Failure::Closed)", 5),
+    ] {
+        let source = format!("{declarations} pub fn main() -> i64 {{ classify({value}) }}");
+        assert_eq!(compile_source(&source).run_i64().unwrap(), expected, "{source}");
+    }
+}
+
+#[test]
+fn handler_coverage_executes_nested_open_payloads_after_independent_verification() {
+    let declarations = "enum Result<T, E> { Ok(T), Err(E) } enum Event { Continue, Ready } effect Stop { die(value: Result<Event, i64>, code: i64) -> !; } fn raise(value: Result<Event, i64>) -> ! / Stop { Stop::die(value, 19) } fn classify(value: Result<Event, i64>) -> i64 { handle raise(value) { Stop::die(Result::Err(code), _) => code, Stop::die(Result::Ok(Event::Continue), _) => 1, Stop::die(Result::Ok(Event::Ready), _) => 2 } }";
+    for (value, expected) in [
+        ("Result::Ok(Event::Continue)", 1),
+        ("Result::Ok(Event::Ready)", 2),
+        ("Result::Err(41)", 41),
+    ] {
+        let source = format!("{declarations} pub fn main() -> i64 {{ classify({value}) }}");
+        assert_eq!(compile_source(&source).run_i64().unwrap(), expected, "{source}");
+    }
 }
 
 #[test]
@@ -4583,12 +4795,21 @@ fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
         "the snapshot lost its residual outward effects: {:#?}",
         function.locals[snapshot.0 as usize]
     );
-    assert!(
-        instructions
-            .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::ResumeSnapshot { .. })),
-        "MIR resumed through an implicit frame instead of the snapshot: {instructions:#?}"
-    );
+    let capture = instructions.iter().find_map(|instruction| match instruction {
+        MirInstruction::CaptureResumption { site, .. } => Some(*site), _ => None,
+    }).unwrap();
+    let resume = instructions.iter().find_map(|instruction| match instruction {
+        MirInstruction::ResumeReturn { site, .. } => Some(*site), _ => None,
+    }).expect("the legacy adapter resolves this same-scope alias");
+    let resume_scope = function.control.resumptions[resume.0 as usize].scope;
+    let scope = function.control.resumptions[capture.0 as usize].scope;
+    assert_eq!(resume_scope, scope, "the alias call stays in its exact active handler scope");
+    let handler = function.control.scopes[scope.0 as usize].entered_handler.expect("selected handler activation");
+    let ask = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some("Ask")).unwrap().key;
+    assert_eq!(function.control.handlers[handler.0 as usize].effect, ask);
+    let executable = format!("{} pub fn main() -> i64 {{ handle aliased() {{ Log::log(value) => value }} }}",
+        source.replace("pub fn main()", "fn aliased()"));
+    assert_eq!(compile_source(&executable).run_i64().unwrap(), 41);
 }
 
 #[test]
@@ -4621,6 +4842,18 @@ fn nested_local_shadowing_does_not_turn_an_ordinary_value_into_a_resumption() {
         "a shadowing local was mistaken for the outer resumption: {:#?}",
         core.diagnostics
     );
+}
+
+#[test]
+fn a_resumption_alias_keeps_its_owner_under_a_newly_installed_handler() {
+    let source = "effect Ask { [1, 1] ask() -> i64; } effect Log { [1, 1] log(value: i64) -> i64; } pub fn main() -> i64 { handle { let answer = Ask::ask(); handle Log::log(answer) { Log::log(value) => value } } { Ask::ask() with k => { let saved = k; handle saved(41) { Log::log(value) => value } } } }";
+    assert_eq!(compile_source(source).run_i64().unwrap(), 41);
+}
+
+#[test]
+fn a_returning_resumption_runs_under_its_callers_effect_handlers() {
+    let source = "effect Ask { [1, 1] ask() -> i64; } effect Log { [1, 1] log(value: i64) -> i64; } fn leaf() -> i64 / Log { handle { let answer = Ask::ask(); Log::log(answer) } { Ask::ask() with k => { let saved = k; handle saved(41) { Log::log(value) => 42 } } } } pub fn main() -> i64 { handle leaf() { Log::log(value) => 99 } }";
+    assert_eq!(compile_source(source).run_i64().unwrap(), 42);
 }
 
 #[test]
@@ -5068,8 +5301,8 @@ fn mir_lowering_rejects_cancellation_that_violates_a_frozen_required_resume_cont
     assert!(
         lowered.function.is_none()
             && lowered.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "G6002"
-                    && diagnostic.message.contains("resumption quantity disagrees")
+                diagnostic.code == "G6001"
+                    && diagnostic.message.contains("handler resumption disagrees with its frozen ownership contract")
             }),
         "lowering accepted cancellation that contradicted its frozen contract: {lowered:#?}"
     );
@@ -5359,7 +5592,7 @@ fn inferred_generic_aggregate_reference_paths_refine_after_instantiation() {
 fn opaque_generic_result_shapes_distinguish_concrete_scalars_from_enum_reference_payloads() {
     let concrete = core_for(
         "core-opaque-reference-shape-concrete-generic@0.1.0",
-        "pub enum Maybe<T> { Some(T), None } pub fn relay<T>(value: Maybe<T>) -> Maybe<T> { value } pub fn main() -> bool { let value = relay<i64>(Maybe<i64>::Some(41)); value is Maybe<i64>::Some(_) }",
+        "use std::Test; pub enum Maybe<T> { Some(T), None } pub fn relay<T>(value: Maybe<T>) -> Maybe<T> { value } pub fn main() -> () { let value = relay<i64>(Maybe<i64>::Some(41)); value is Maybe<i64>::Some(_); () }",
     );
     assert!(
         concrete.diagnostics.is_empty(),
@@ -7163,14 +7396,14 @@ fn handler_clauses_and_resumptions_receive_distinct_callable_brands() {
 fn is_pattern_tests_publish_sealed_scoped_refinement_facts() {
     let core = core_for(
         "core-refinement-environment@0.1.0",
-        "pub fn main(value: i64) -> bool { value is bound }",
+        "use std::*; pub fn main(value: i64) -> () { value is bound; () }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let refinement = core
         .expressions
         .iter()
         .find_map(|expression| match &expression.kind {
-            CoreKind::PatternTest { refinement, .. } => Some(refinement),
+            CoreKind::Completion { refinement_test: Some(refinement), .. } => Some(refinement),
             _ => None,
         })
         .expect("pattern test Core node");
@@ -7181,6 +7414,199 @@ fn is_pattern_tests_publish_sealed_scoped_refinement_facts() {
     assert_eq!(flow.refinements.len(), 1);
     assert_eq!(flow.refinements[0].brand, refinement.brand);
     assert_eq!(flow.refinements[0].bindings, ["bound"]);
+    assert_eq!(flow.refinements[0].binding_keys, refinement.binding_keys);
+}
+
+#[test]
+fn source_is_constructs_ordinary_test_values_with_sealed_binding_packs() {
+    for (subject, pattern, expected) in [(42, "found", 1), (42, "42", 1), (41, "42", 0)] {
+        let source = format!("use std::*; fn identity<T>(value: T) -> T {{ value }} pub fn main() -> i64 {{ handle identity({subject} is {pattern}) {{ Test::Yes(_) => 1, Test::No(_) => 0 }} }}");
+        let core = core_for("core-first-class-is-packs@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+        assert!(!core.expressions.iter().any(|expression| matches!(expression.kind, CoreKind::PatternTest { .. })));
+        assert!(core.expressions.iter().any(|expression| matches!(&expression.kind, CoreKind::Completion { refinement_test: Some(_), .. })));
+        assert_eq!(compile_source(&source).run_i64().unwrap(), expected);
+    }
+    let once = "use std::*; fn next(count: &mut i64) -> i64 { *count = *count + 1; 42 } pub fn main() -> i64 { let count = 0; let test = next(&mut count) is 42; handle test { Test::Yes(_) => count, Test::No(_) => 0 } }";
+    assert_eq!(compile_source(once).run_i64().unwrap(), 1);
+    let observed = "use std::*; struct Owner { value: i64 } pub fn main() -> i64 { let owner = Owner { value: 42 }; let test = owner is found; handle test { Test::Yes(_) => owner.value, Test::No(_) => 0 } }";
+    assert_eq!(compile_source(observed).run_i64().unwrap(), 42);
+    let transported = "use std::*; struct Owner { value: i64 } fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { let owner = Owner { value: 42 }; let test = identity(owner is found); handle test { Test::Yes(_) => owner.value, Test::No(_) => 0 } }";
+    assert_eq!(compile_source(transported).run_i64().unwrap(), 42);
+}
+
+#[test]
+fn contextual_binding_pack_arguments_activate_source_binders() {
+    for main in [
+        "visit(42 is found) { found }",
+        "visit((40, 2) is (left, right)) { left + right }",
+        "let owner = Owner { value: 21 }; let observed = visit(owner is found) { found.value }; let moved = owner; observed + moved.value",
+        "let test = identity(42 is found); visit(test) { found }",
+    ] {
+        let source = format!("use std::*; struct Owner {{ value: i64 }} impl Use<[0, 1]> for Owner {{}} fn identity<T>(value: T) -> T {{ value }} fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} pub fn main() -> i64 {{ {main} }}");
+        let core = core_for("core-hidden-binding-context@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+        assert!(core.expressions.iter().any(|expression| matches!(&expression.kind,
+            CoreKind::Closure { parameters, environment, .. } if parameters.len() == 1 && environment.captures.is_empty())));
+        assert_eq!(compile_source(&source).run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn contextual_binding_pack_arguments_do_not_activate_foreign_or_negative_binders() {
+    for (main, code) in [
+        ("reject(42 is found) { found }", "G4104"),
+        ("let first = 42 is found; visit(1 is other) { found }", "G4104"),
+        ("let found = 7; visit(42 is found) { found }", "G4170"),
+        ("let test = 42 is found; found", "G4104"),
+    ] {
+        let source = format!("use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N), Output = i64> {{ handle test {{ Test::Yes(_) => 0, Test::No(value) => no(value) }} }} pub fn main() -> i64 {{ {main} }}");
+        let core = core_for("core-hidden-binding-scope@0.1.0", &source);
+        assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == code), "{main}: {:#?}", core.diagnostics);
+    }
+}
+
+#[test]
+fn contextual_binding_packs_support_shared_arguments_and_explicit_user_parameters() {
+    for source in [
+        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(&Y), Output = i64> { handle test { Test::Yes(value) => yes(&value), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }",
+        "use std::*; fn invoke<P, F>(pack: P, extra: i64, body: F) -> i64 where F: Fn<(P, i64), Output = i64> { body(pack, extra) } pub fn main() -> i64 { handle (40 is found) { Test::Yes(pack) => invoke(pack, 2, (extra: i64) -> i64 { found + extra }), Test::No(_) => 0 } }",
+        "use std::*; fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N), Output = i64> { handle test { Test::Yes(_) => 0, Test::No(value) => no(value) } } pub fn main() -> i64 { reject(41 is 42) { 42 } }",
+    ] {
+        assert_eq!(compile_source(source).run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn frozen_binding_pack_projections_reject_forged_field_contracts() {
+    let source = "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }";
+    let core = core_for("core-frozen-pack-projections@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let projection = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Field { .. })).unwrap();
+    for mutation in 0..7 {
+        let mut forged = core.clone();
+        match mutation {
+            0 => forged.expressions[projection].ty = Type::Scalar(ScalarType::Bool),
+            1 => {
+                let CoreKind::Field { index, .. } = &mut forged.expressions[projection].kind else { unreachable!() };
+                *index = 1;
+            }
+            2 => {
+                let CoreKind::Field { field_count, .. } = &mut forged.expressions[projection].kind else { unreachable!() };
+                *field_count = 2;
+            }
+            3 | 4 => {
+                let CoreKind::Field { base, .. } = forged.expressions[projection].kind else { unreachable!() };
+                let mut forged_type = forged.expressions[base.0 as usize].ty.clone();
+                let Type::Nominal { arguments, .. } = &mut forged_type else { unreachable!() };
+                let GenericArgument::Type(Type::Nominal { arguments, .. }) = &mut arguments[1] else { unreachable!() };
+                let GenericArgument::Type(Type::Tuple(fields)) = &mut arguments[3] else { unreachable!() };
+                fields[0] = Type::Scalar(ScalarType::Bool);
+                forged.expressions[base.0 as usize].ty = forged_type.clone();
+                forged.expressions[projection].ty = Type::Scalar(ScalarType::Bool);
+                if mutation == 4 {
+                    let closure = forged.expressions.iter_mut().find(|expression| matches!(expression.kind, CoreKind::Closure { .. })).unwrap();
+                    let CoreKind::Closure { parameters, .. } = &mut closure.kind else { unreachable!() };
+                    parameters[0].1 = forged_type;
+                }
+            }
+            5 => {
+                let mut orphan = forged.expressions[projection].clone();
+                orphan.ty = Type::Scalar(ScalarType::Bool);
+                forged.expressions.push(orphan);
+            }
+            6 => {
+                let CoreKind::Field { base, .. } = &mut forged.expressions[projection].kind else { unreachable!() };
+                *base = grandiose_stage0::CoreId(projection as u32);
+            }
+            _ => unreachable!(),
+        }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"), "mutation {mutation} escaped Core validation");
+        assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(DefKey(Digest::of_bytes(b"forged-pack-field")), &forged).is_err());
+    }
+    let mut borrowed = core_for("core-pack-projection-authority@0.1.0",
+        "use std::*; struct Owner { value: i64 } fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { let owner = Owner { value: 42 }; visit(owner is found) { found.value } }");
+    assert!(borrowed.diagnostics.is_empty(), "{:#?}", borrowed.diagnostics);
+    let projection = borrowed.expressions.iter().position(|expression| match expression.kind {
+        CoreKind::Field { base, .. } => matches!(&borrowed.expressions[base.0 as usize].ty,
+            Type::Nominal { definition, .. } if *definition == grandiose_stage0::refinement::bindings_definition()),
+        _ => false,
+    }).unwrap();
+    let Type::Reference { mutability, .. } = &mut borrowed.expressions[projection].ty else { unreachable!() };
+    *mutability = grandiose_stage0::Mutability::Unique;
+    assert!(borrowed.validate().iter().any(|diagnostic| diagnostic.code == "G4183"));
+    assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(DefKey(Digest::of_bytes(b"forged-pack-field-authority")), &borrowed).is_err());
+}
+
+#[test]
+fn higher_ranked_binding_pack_callbacks_open_the_hidden_argument_lifetime() {
+    for callback in ["invoke(pack) { found }", "invoke(pack, () -> i64 { found })"] {
+        let source = format!("use std::*; fn invoke<P>(pack: P, body: for<'a> (&'a P) -> i64) -> i64 {{ body(&pack) }} pub fn main() -> i64 {{ handle (42 is found) {{ Test::Yes(pack) => {callback}, Test::No(_) => 0 }} }}");
+        let core = core_for("core-higher-ranked-hidden-pack@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+        let closure = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Closure { .. })).unwrap();
+        let Type::Callable { lifetime_binders, parameters: contract_parameters, .. } = &core.expressions[closure].ty else { unreachable!() };
+        assert_eq!(*lifetime_binders, 1);
+        let CoreKind::Closure { parameters, .. } = &core.expressions[closure].kind else { unreachable!() };
+        assert_ne!(parameters[0].1, contract_parameters[0]);
+        let mut forged = core.clone();
+        let CoreKind::Closure { parameters, .. } = &mut forged.expressions[closure].kind else { unreachable!() };
+        parameters[0].1 = contract_parameters[0].clone();
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4184"));
+        assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(DefKey(Digest::of_bytes(b"forged-hidden-pack-binder")), &forged).is_err());
+        assert_eq!(compile_source(&source).run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn source_is_pack_producers_reject_forged_construction_and_reused_carriers() {
+    let core = core_for("core-is-pack-producer-proof@0.1.0", "use std::*; pub fn main() -> i64 { handle (42 is found) { Test::Yes(_) => 1, Test::No(_) => 0 } }");
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let producer = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Completion { refinement_test: Some(_), .. })).unwrap();
+    for mutation in 0..3 {
+        let mut forged = core.clone();
+        let CoreKind::Completion { clauses, refinement_test, .. } = &mut forged.expressions[producer].kind else { unreachable!() };
+        match mutation {
+            0 => refinement_test.as_mut().unwrap().binding_types[0].1 = Type::Scalar(ScalarType::Bool),
+            1 => clauses[0].body = clauses[1].body,
+            2 => *refinement_test = None,
+            _ => unreachable!(),
+        }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"));
+        assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(DefKey(Digest::of_bytes(b"forged-is-pack-producer")), &forged).is_err());
+    }
+}
+
+#[test]
+fn refinement_binder_keys_are_generative_and_standalone_evidence_is_checked() {
+    let core = core_for(
+        "core-generative-refinement-binding-keys@0.1.0",
+        "use std::*; pub fn main(value: i64) -> () { value is bound; value is bound; () }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    let tests = core.expressions.iter().enumerate().filter_map(|(index, expression)| {
+        if let CoreKind::Completion { refinement_test: Some(refinement), .. } = &expression.kind { Some((index, refinement.clone())) } else { None }
+    }).collect::<Vec<_>>();
+    assert_eq!(tests.len(), 2);
+    assert_ne!(tests[0].1.binding_keys[0], tests[1].1.binding_keys[0]);
+    assert_eq!(tests[0].1.bindings, tests[1].1.bindings);
+    for mutation in 0..5 {
+        let mut forged = core.clone();
+        let CoreKind::Completion { refinement_test: Some(refinement), .. } = &mut forged.expressions[tests[1].0].kind else { unreachable!() };
+        match mutation {
+            0 => refinement.binding_keys[0] = tests[0].1.binding_keys[0],
+            1 => refinement.binding_keys[0].binder = 1,
+            2 => refinement.binding_types[0].1 = Type::Scalar(ScalarType::Bool),
+            3 => refinement.subject = Some("different_subject".into()),
+            4 => *refinement = tests[0].1.clone(),
+            _ => unreachable!(),
+        }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"), "mutation {mutation} was accepted");
+        assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(DefKey(Digest::of_bytes(b"forged-refinement-keys")), &forged).is_err());
+        let flow = PlaceFlow::analyze(&forged);
+        assert!(MirLowering::lower(DefKey(Digest::of_bytes(b"forged-refinement-keys")), &forged, &flow).function.is_none());
+    }
 }
 
 #[test]
@@ -7240,6 +7666,24 @@ fn is_refinement_binders_cannot_shadow_incoming_post_state_names() {
         "ambiguous refinement post-state shadowing was accepted: {:#?}",
         core.diagnostics
     );
+}
+
+#[test]
+fn copied_refinement_bindings_can_be_captured_by_returned_closures() {
+    let source = "use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B> { handle test { Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) } } pub fn main() -> i64 { let delayed = map(42 is found) { (ignored: i64) -> i64 { found } }; handle delayed { Result::Ok(callable) => callable(0), Result::Err(_) => 0 } }";
+    assert_eq!(compile_source(source).run_i64().unwrap(), 42);
+}
+
+#[test]
+fn binding_pack_callbacks_infer_outputs_independently_of_known_inputs() {
+    for main in [
+        "let mapped = map(40 is found) { found + 2 }; handle mapped { Result::Ok(value) => value, Result::Err(_) => 0 }",
+        "let mapped = map(40 is found) { (found, 2) }; handle mapped { Result::Ok((left, right)) => left + right, Result::Err(_) => 0 }",
+        "let mapped = map(41 is 42) { 7 }; handle mapped { Result::Ok(value) => value, Result::Err(_) => 42 }",
+    ] {
+        let source = format!("use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B> {{ handle test {{ Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) }} }} pub fn main() -> i64 {{ {main} }}");
+        assert_eq!(compile_source(&source).run_i64().unwrap(), 42, "{main}");
+    }
 }
 
 #[test]
@@ -7609,9 +8053,10 @@ fn inner_label_transfer_rejoins_its_enclosing_label_expression() {
 
 #[test]
 fn nested_label_transfer_preserves_cleanup_and_the_outer_continuation() {
+    let source = "use std::*; pub fn main() -> i64 { let value = 1; let answer = label outer { label inner { move value; transfer outer 40; 0 }; 1 }; answer + 2 }";
     let core = core_for(
         "core-nested-bound-label-cleanup@0.1.0",
-        "use std::*; pub fn main() -> i64 { let value = 1; let answer = label outer { label inner { move value; transfer outer 40; 0 }; 1 }; answer + 2 }",
+        source,
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -7631,7 +8076,8 @@ fn nested_label_transfer_preserves_cleanup_and_the_outer_continuation() {
         panic!("nested transfer must lower to Leave")
     };
     assert_eq!(*brand, outer);
-    assert_eq!(cleanup.moved_places, flow.moved_places);
+    assert!(cleanup.moved_places.is_empty());
+    assert_binding_moved_before_leave(&mir, "value");
     assert_eq!(cleanup.active_loans, flow.active_loans);
     let artifact = grandiose_stage0::emit_vm(&mir).expect("emit nested cleanup leave");
     assert!(
@@ -7645,8 +8091,7 @@ fn nested_label_transfer_preserves_cleanup_and_the_outer_continuation() {
             ))
     );
     assert_eq!(
-        grandiose_stage0::verify_vm(artifact)
-            .unwrap()
+        compile_source(source)
             .run_i64()
             .unwrap(),
         42
@@ -7681,7 +8126,8 @@ fn leave_edges_carry_canonical_placeflow_cleanup_evidence() {
         panic!("label transfer must use a Leave terminator")
     };
     assert_eq!(*leave_brand, brand);
-    assert_eq!(cleanup.moved_places, flow.moved_places);
+    assert!(cleanup.moved_places.is_empty());
+    assert_binding_moved_before_leave(&mir, "value");
     assert_eq!(cleanup.active_loans, flow.active_loans);
     grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("emit leave"))
         .expect("verify proof-erased cleanup leave");
@@ -7710,10 +8156,9 @@ fn handler_clause_label_transfer_preserves_brand_cleanup_and_vm_frame_exit() {
             lowered.diagnostics
         )
     });
-    assert!(matches!(
-        mir.blocks[2].terminator,
-        grandiose_stage0::MirTerminator::Leave { .. }
-    ));
+    let clause = follow_trivial_edges(&mir, mir.control.handlers[0].target);
+    assert!(matches!(mir.blocks[clause.0 as usize].terminator,
+        grandiose_stage0::MirTerminator::Leave { brand, .. } if brand.owner == owner));
     let artifact = grandiose_stage0::emit_vm(&mir).expect("emit handler leave");
     assert!(
         artifact
@@ -7790,7 +8235,12 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
         panic!("label transfer must retain cleanup")
     };
     assert_eq!(cleanup.moved_paths.len(), cleanup.moved_places.len());
-    let cleanup_path = cleanup.moved_paths[0];
+    let source_path = &flow.move_paths[flow.final_move_paths[0].0 as usize];
+    let cleanup_path = mir.control.move_paths.paths.iter().enumerate().find_map(|(index, path)| {
+        (path.field == source_path.field && path.parent.is_some()
+            && mir.control.move_paths.bindings[path.binding.0 as usize].source == source_path.binding)
+            .then_some(grandiose_stage0::MirMovePathId(index as u32))
+    }).expect("the executed field move retains its frozen ownership identity");
     let node = &mir.control.move_paths.paths[cleanup_path.0 as usize];
     let binding = &mir.control.move_paths.bindings[node.binding.0 as usize];
     assert_eq!(
@@ -7802,6 +8252,7 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
         node.parent.is_some(),
         "a field move must retain its root parent"
     );
+    let parent_path = node.parent.unwrap();
     assert!(mir.validate().is_ok());
     assert_eq!(
         compile_with_destruction(source, &mir)
@@ -7809,6 +8260,13 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
             .expect("shadowed cleanup result"),
         42
     );
+
+    // Production cleanup is executable now. Seed the backward-compatible
+    // evidence form explicitly to keep its independent hostile-MIR checks.
+    let grandiose_stage0::MirTerminator::Leave { cleanup, .. } = &mut mir.blocks[0].terminator else { unreachable!(); };
+    cleanup.moved_paths = vec![cleanup_path];
+    cleanup.moved_places = vec![flow.moved_places[0].clone()];
+    mir.validate().expect("well-formed legacy evidence remains verifiable");
 
     let root_path = mir
         .control
@@ -7861,7 +8319,7 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
     else {
         unreachable!()
     };
-    cleanup.moved_paths[0] = node.parent.expect("field path parent");
+    cleanup.moved_paths[0] = parent_path;
     assert!(
         mismatched_cleanup
             .validate()
@@ -7977,7 +8435,6 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
                         pair = Pair { left: 6, right: 7 };
                         transfer done first.left + moved + pair.left + last.right
                     },
-                    Ask::ask(_) => transfer done first.left + pair.left + last.right,
                 }
             }
         }
@@ -8015,7 +8472,7 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(leaves.len(), 3, "one leave per handler arm: {mir:#?}");
+    assert_eq!(leaves.len(), 2, "one leave per exhaustive Boolean arm: {mir:#?}");
     assert!(leaves.iter().all(|cleanup| cleanup.drop_flags.len() >= 3));
     assert!(
         mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
@@ -8029,6 +8486,11 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
             .run_i64()
             .unwrap_or_else(|error| panic!("combined cleanup VM must execute: {error:#?}\n{verified:#?}")),
         42
+    );
+    assert_eq!(
+        compile_source(&source.replace("handle Ask::ask(true)", "handle Ask::ask(false)"))
+            .run_i64().expect("the other Boolean arm preserves its distinct moved field"),
+        48,
     );
 }
 
@@ -8097,21 +8559,9 @@ fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancell
         }),
         "the refutable inner arm must retain its real forwarding edge: {mir:#?}"
     );
-    let outer_cancellation = mir
-        .control
-        .handlers
-        .first()
-        .expect("outer handler control entry")
-        .target;
-    let outer_drop_intents = mir.blocks[outer_cancellation.0 as usize]
-        .instructions
-        .iter()
-        .filter(|instruction| matches!(instruction, MirInstruction::Drop { local }
-            if matches!(mir.locals[local.0 as usize].ty, Type::Nominal { .. })))
-        .count();
     assert_eq!(
-        outer_drop_intents, 1,
-        "the forwarded outer-cancellation path must retain exactly one Probe destruction boundary: {mir:#?}"
+        binding_drop_intent_count(&mir, "probe"), 1,
+        "the Probe owner must retain its destruction intent; linked execution checks cancellation: {mir:#?}"
     );
     assert_eq!(compile_with_destruction(source, &mir).run_i64().unwrap(), 42);
 }
@@ -8136,10 +8586,9 @@ fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
     let mir = lowered
         .function
         .unwrap_or_else(|| panic!("nested handler transfer lowers: {:#?}", lowered.diagnostics));
-    assert!(matches!(
-        mir.blocks[2].terminator,
-        grandiose_stage0::MirTerminator::Leave { brand, .. } if brand == outer
-    ));
+    let clause = follow_trivial_edges(&mir, mir.control.handlers[0].target);
+    assert!(matches!(mir.blocks[clause.0 as usize].terminator,
+        grandiose_stage0::MirTerminator::Leave { brand, .. } if brand == outer));
     assert_eq!(
         grandiose_stage0::verify_vm(
             grandiose_stage0::emit_vm(&mir).expect("emit nested handler leave")
@@ -8221,6 +8670,13 @@ fn nested_generic_label_forward_rejoins_completion_after_refutable_handler() {
         verified.run_i64(),
         Err(grandiose_stage0::VmArtifactError::CallRequiresProgram)
     ));
+}
+
+#[test]
+fn direct_and_first_class_label_exits_share_one_cleanup_destination() {
+    let source = "fn jump<L>(destination: L) -> ! where L: Label<i64> { destination(42) } pub fn main() -> i64 { label done { handle 1 { 0 => transfer done 0; value => jump(@done) } } }";
+    assert_eq!(compile_source(source).run_i64().unwrap(), 42);
+    assert_eq!(compile_source(&source.replace("handle 1", "handle 0")).run_i64().unwrap(), 0);
 }
 
 #[test]
@@ -8354,12 +8810,7 @@ fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
     mir.validate()
         .unwrap_or_else(|error| panic!("cleanup forwarding MIR validates: {error}\n{mir:#?}"));
     assert_eq!(
-        mir.blocks[1]
-            .instructions
-            .iter()
-            .filter(|instruction| matches!(instruction, MirInstruction::Drop { local }
-                if matches!(mir.locals[local.0 as usize].ty, Type::Nominal { .. })))
-            .count(),
+        binding_drop_intent_count(&mir, "probe"),
         1,
         "the dynamic rejoin must retain one Probe destruction boundary before completion: {mir:#?}"
     );
@@ -8461,12 +8912,7 @@ fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() 
         .iter()
         .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))));
     assert_eq!(
-        mir.blocks[1]
-            .instructions
-            .iter()
-            .filter(|instruction| matches!(instruction, MirInstruction::Drop { local }
-                if matches!(mir.locals[local.0 as usize].ty, Type::Nominal { .. })))
-            .count(),
+        binding_drop_intent_count(&mir, "probe"),
         1,
         "the generic-label rejoin retains one Probe destruction boundary before completion: {mir:#?}"
     );
@@ -8642,9 +9088,13 @@ fn deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows() {
             .flat_map(|block| &block.instructions)
             .filter(|instruction| matches!(instruction, MirInstruction::Forward { .. }))
             .count(),
-        2,
-        "both partial rows must preserve independent forwarding edges: {mir:#?}"
+        6,
+        "every failed payload test in both partial rows must preserve its forwarding edge: {mir:#?}"
     );
+    let forwarding_scopes = mir.control.resumptions.iter()
+        .filter(|site| site.kind == grandiose_stage0::MirResumptionSiteKind::Forward)
+        .map(|site| site.scope).collect::<BTreeSet<_>>();
+    assert_eq!(forwarding_scopes.len(), 2, "the two rows must forward from distinct handler scopes");
     assert!(mir.blocks.iter().any(|block| block
         .instructions
         .iter()
@@ -8784,17 +9234,12 @@ fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
             lowered.diagnostics
         )
     });
-    assert!(
-        mir.blocks[0]
-            .instructions
-            .iter()
-            .any(|instruction| matches!(
-                instruction,
-                grandiose_stage0::MirInstruction::UninstallHandler
-            ))
-    );
+    let uninstall = mir.blocks.iter().position(|block| block.instructions.iter()
+        .any(|instruction| matches!(instruction, MirInstruction::UninstallHandler)))
+        .expect("normal completion uninstalls its handler");
+    let leave = follow_trivial_edges(&mir, grandiose_stage0::MirBlockId(uninstall as u32));
     assert!(matches!(
-        mir.blocks[1].terminator,
+        mir.blocks[leave.0 as usize].terminator,
         grandiose_stage0::MirTerminator::Leave { .. }
     ));
     let artifact = grandiose_stage0::emit_vm(&mir).expect("emit completion leave");
@@ -8910,16 +9355,18 @@ fn refutable_completion_label_transfer_has_explicit_match_and_fallback_cfg() {
             lowered.diagnostics
         )
     });
+    let test = literal_pattern_block(&mir, "41");
+    let grandiose_stage0::MirTerminator::SwitchBool { then_target, else_target, .. } = mir.blocks[test.0 as usize].terminator else {
+        panic!("the refutable completion pattern needs both CFG edges");
+    };
+    let matched = follow_trivial_edges(&mir, then_target);
+    let fallback = follow_trivial_edges(&mir, else_target);
     assert!(matches!(
-        mir.blocks[1].terminator,
-        grandiose_stage0::MirTerminator::SwitchBool { .. }
-    ));
-    assert!(matches!(
-        mir.blocks[2].terminator,
+        mir.blocks[matched.0 as usize].terminator,
         grandiose_stage0::MirTerminator::Leave { .. }
     ));
     assert!(matches!(
-        mir.blocks[3].terminator,
+        mir.blocks[fallback.0 as usize].terminator,
         grandiose_stage0::MirTerminator::Return { .. }
     ));
     assert_eq!(
@@ -8978,18 +9425,15 @@ fn ordered_refutable_completion_transfers_chain_through_each_test() {
     let mir = MirLowering::lower(owner, &core, &flow)
         .function
         .expect("ordered completion chain lowers");
-    assert!(matches!(
-        mir.blocks[1].terminator,
-        grandiose_stage0::MirTerminator::SwitchBool {
-            else_target: grandiose_stage0::MirBlockId(2),
-            ..
-        }
-    ));
-    assert!(matches!(
-        mir.blocks[2].terminator,
-        grandiose_stage0::MirTerminator::SwitchBool { .. }
-    ));
-    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[3].terminator
+    let first = literal_pattern_block(&mir, "1");
+    let second = literal_pattern_block(&mir, "41");
+    let grandiose_stage0::MirTerminator::SwitchBool { then_target: first_match, else_target, .. } = mir.blocks[first.0 as usize].terminator else { panic!("first pattern gate"); };
+    assert_eq!(follow_trivial_edges(&mir, else_target), second, "refutation must continue to the next ordered test");
+    let grandiose_stage0::MirTerminator::SwitchBool { then_target: second_match, else_target: fallback, .. } = mir.blocks[second.0 as usize].terminator else { panic!("second pattern gate"); };
+    let first_match = follow_trivial_edges(&mir, first_match);
+    let second_match = follow_trivial_edges(&mir, second_match);
+    let fallback = follow_trivial_edges(&mir, fallback);
+    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[first_match.0 as usize].terminator
     else {
         panic!("first matched completion arm must leave the enclosing label")
     };
@@ -8997,11 +9441,11 @@ fn ordered_refutable_completion_transfers_chain_through_each_test() {
     assert_eq!(cleanup.moved_places, flow.moved_places);
     assert_eq!(cleanup.active_loans, flow.active_loans);
     assert!(matches!(
-        mir.blocks[4].terminator,
+        mir.blocks[second_match.0 as usize].terminator,
         grandiose_stage0::MirTerminator::Leave { .. }
     ));
     assert!(matches!(
-        mir.blocks[5].terminator,
+        mir.blocks[fallback.0 as usize].terminator,
         grandiose_stage0::MirTerminator::Return { .. }
     ));
     assert_eq!(
@@ -9070,24 +9514,19 @@ fn ordered_completion_fallback_transfer_leaves_after_all_tests_fail() {
     let mir = MirLowering::lower(owner, &core, &flow)
         .function
         .expect("fallback transfer chain lowers");
-    assert!(
-        mir.blocks[0]
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::UninstallHandler))
-    );
+    let uninstall = mir.blocks.iter().position(|block| block.instructions.iter()
+        .any(|instruction| matches!(instruction, MirInstruction::UninstallHandler)))
+        .expect("completion follows handler uninstall");
+    let test = literal_pattern_block(&mir, "1");
+    assert_eq!(follow_trivial_edges(&mir, grandiose_stage0::MirBlockId(uninstall as u32)), test);
+    let grandiose_stage0::MirTerminator::SwitchBool { then_target, else_target, .. } = mir.blocks[test.0 as usize].terminator else { panic!("ordered pattern gate"); };
+    let matched = follow_trivial_edges(&mir, then_target);
+    let fallback = follow_trivial_edges(&mir, else_target);
     assert!(matches!(
-        mir.blocks[1].terminator,
-        grandiose_stage0::MirTerminator::SwitchBool {
-            else_target: grandiose_stage0::MirBlockId(3),
-            ..
-        }
-    ));
-    assert!(matches!(
-        mir.blocks[2].terminator,
+        mir.blocks[matched.0 as usize].terminator,
         grandiose_stage0::MirTerminator::Return { .. }
     ));
-    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[3].terminator
+    let grandiose_stage0::MirTerminator::Leave { brand, cleanup, .. } = &mir.blocks[fallback.0 as usize].terminator
     else {
         panic!("final fallback must leave the enclosing label")
     };
