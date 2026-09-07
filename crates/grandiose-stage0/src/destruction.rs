@@ -3,12 +3,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::{
-    CoreId, DefKey, Digest, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
-    ElaboratedTraitReference, GenericArgument, GenericKind, InstanceKey, MirBlock, MirBlockId,
-    MirControlTables, MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirPattern, MirScopeId,
-    MirTerminator, Mutability, Safety, ScalarType, TraitAnswer, TraitGoal, TraitSolver, Type,
-};
+use crate::{DefKey, Digest, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
+    ElaboratedTraitReference, GenericArgument, GenericKind, InstanceKey, TraitAnswer, TraitGoal, TraitSolver, Type};
+#[cfg(test)]
+use crate::{CoreId, MirBlock, MirBlockId, MirControlTables, MirFunction, MirInstruction,
+    MirLocal, MirLocalDecl, MirPattern, MirScopeId, MirTerminator, Mutability, Safety, ScalarType};
 
 fn glue_definition() -> DefKey {
     DefKey(Digest::of_bytes(b"grandiose-owned-destruction-glue-v1"))
@@ -18,34 +17,7 @@ pub(crate) fn is_glue(key: &InstanceKey) -> bool {
     key.callable == glue_definition()
 }
 
-#[derive(Clone)]
-struct Field {
-    ty: Type,
-    glue: Option<InstanceKey>,
-}
-
-#[derive(Clone)]
-enum Shape {
-    Leaf,
-    Callable,
-    Tuple(Vec<Field>),
-    Nominal {
-        definition: DefKey,
-        is_enum: bool,
-        variants: Vec<Vec<Field>>,
-    },
-    Array {
-        element: Type,
-        glue: InstanceKey,
-    },
-}
-
-#[derive(Clone)]
-struct Plan {
-    ty: Type,
-    hook: Option<InstanceKey>,
-    shape: Shape,
-}
+pub(crate) use crate::cleanup_mir::{DestructionField as Field, DestructionShape as Shape, DestructionProgram as Plan};
 
 pub(crate) struct Planner<'a> {
     signatures: &'a ElaboratedInterface,
@@ -56,6 +28,11 @@ pub(crate) struct Planner<'a> {
 }
 
 impl<'a> Planner<'a> {
+    /// Snapshot the already-demanded concrete destruction language. Cleanup
+    /// cannot resolve new trait evidence or extend executable demand.
+    pub(crate) fn frozen_plans(&self) -> BTreeMap<InstanceKey, Plan> {
+        self.plans.clone()
+    }
     pub(crate) fn new(signatures: &'a ElaboratedInterface) -> Self {
         Self {
             signatures,
@@ -188,9 +165,15 @@ impl<'a> Planner<'a> {
         types
             .iter()
             .map(|ty| {
+                // A concrete nominal may still spell its fields using
+                // associated projections. Seal those before deciding that a
+                // field is trivial; an unresolved projection is not no-Drop.
+                let ty = self.solver.normalize_type(ty.clone())
+                    .map_err(|error| format!("destruction field projection: {error:?}"))?;
+                let ty = crate::service::normalize_materialized_type(&ty, &mut self.solver)?;
                 Ok(Field {
                     ty: ty.clone(),
-                    glue: self.discover(ty)?,
+                    glue: self.discover(&ty)?,
                 })
             })
             .collect()
@@ -198,6 +181,7 @@ impl<'a> Planner<'a> {
 
     /// Preserve the compiler's concrete selection on each native boundary,
     /// including referent/pointee residents that are not owned by this frame.
+    #[cfg(test)]
     pub(crate) fn seal_native_operations(&mut self, function: &mut MirFunction) -> Result<(), String> {
         for instruction in function.blocks.iter_mut().flat_map(|block| &mut block.instructions) {
             let MirInstruction::HostCall { parameters, result, resident_operations, .. } = instruction else { continue; };
@@ -215,6 +199,7 @@ impl<'a> Planner<'a> {
     /// Give each concrete, branded environment ordinary executable cleanup
     /// glue. Borrowed captures are not owners, and invocation arguments/results
     /// never participate in the environment's structural layout.
+    #[cfg(test)]
     pub(crate) fn seal_callable_environments(
         &mut self,
         functions: &mut BTreeMap<DefKey, MirFunction>,
@@ -289,6 +274,7 @@ impl<'a> Planner<'a> {
         Ok(callees)
     }
 
+    #[cfg(test)]
     pub(crate) fn materialize(&self, key: &InstanceKey) -> Result<MirFunction, String> {
         let plan = self
             .plans
@@ -329,10 +315,12 @@ impl<'a> Planner<'a> {
     /// Expand lexical, replacement, parameter, and nonlocal boundaries only
     /// after concrete instance discovery. Every cleanup call must already be
     /// in the demand graph; this phase cannot smuggle in an undiscovered hook.
+    #[cfg(test)]
     pub(crate) fn elaborate(&mut self, function: &mut MirFunction) -> Result<(), String> {
         self.elaborate_with_frame_cleanup(function, true)
     }
 
+    #[cfg(test)]
     fn elaborate_with_frame_cleanup(&mut self, function: &mut MirFunction, frame_cleanup: bool) -> Result<(), String> {
         let original_blocks = function.blocks.len();
         let ownership = crate::ownership::FrameOwnership::for_function(function);
@@ -512,11 +500,13 @@ impl<'a> Planner<'a> {
     }
 }
 
+#[cfg(test)]
 struct Builder<'a> {
     function: &'a mut MirFunction,
     current: MirBlockId,
 }
 
+#[cfg(test)]
 impl Builder<'_> {
     fn function(definition: DefKey, ty: Type) -> MirFunction {
         MirFunction {

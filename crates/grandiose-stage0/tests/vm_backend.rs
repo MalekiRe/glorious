@@ -15,6 +15,297 @@ use grandiose_stage0::{
 };
 use std::collections::BTreeMap;
 
+fn array_storage_candidate() -> CandidateVmArtifact {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        fingerprint: Digest::of_bytes(b"array-storage-unsealed"),
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"array-storage")),
+            safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers: vec![VmType::I64, VmType::Array(Box::new(VmType::I64)),
+                VmType::Usize, VmType::Usize, VmType::I64, VmType::Bool],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeArray { dst: 1, fields: vec![0], element_type: VmType::I64 },
+                VmInstruction::ConstUsize { dst: 2, value: 0 },
+                VmInstruction::ArrayLen { dst: 3, value: 1 },
+                VmInstruction::TakeArrayElement { dst: 4, value: 1, index: 2 },
+                VmInstruction::ArrayElementIsInitialized { dst: 5, value: 1, index: 2 },
+                VmInstruction::BranchBool { condition: 5, then_target: 7, else_target: 8 },
+                VmInstruction::Trap,
+                VmInstruction::Return { value: 4 },
+            ],
+        },
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    candidate
+}
+
+fn owned_call_program(indirect: bool) -> CandidateVmProgram {
+    let entry = DefKey(Digest::of_bytes(b"owned-call-entry"));
+    let callee = DefKey(Digest::of_bytes(b"owned-call-callee"));
+    let callable = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64), effects: Box::<VmEffectRow>::default(),
+    };
+    let function = |definition, parameters, registers, instructions| VmFunction {
+        definition, parameters, registers, instructions,
+        safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+        nominal_copy_descriptors: vec![], captures: 0,
+    };
+    let main = function(entry, 0, vec![VmType::I64, VmType::I64, callable, VmType::Bool], vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 },
+        VmInstruction::MakeCallable { dst: 2, callee, captures: vec![], environment: None },
+        if indirect { VmInstruction::CallIndirectOwned { dst: 1, callee: 2, arguments: vec![0] } }
+        else { VmInstruction::CallOwned { dst: 1, callee, arguments: vec![0] } },
+        VmInstruction::IsInitialized { dst: 3, base: 0, fields: vec![] },
+        VmInstruction::BranchBool { condition: 3, then_target: 5, else_target: 6 },
+        VmInstruction::Trap,
+        VmInstruction::Return { value: 1 },
+    ]);
+    let child = function(callee, 1, vec![VmType::I64], vec![
+        VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+        VmInstruction::Return { value: 0 },
+    ]);
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        entry, functions: BTreeMap::from([(entry, main), (callee, child)]),
+        host_capabilities: vec![], callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"owned-call-unsealed"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    program
+}
+
+fn owned_effect_candidate(forward: bool) -> CandidateVmArtifact {
+    let definition = DefKey(Digest::of_bytes(b"owned-effect-packet"));
+    let effect = DefKey(Digest::of_bytes(b"owned-effect-protocol"));
+    let install = |payload, target| VmInstruction::InstallHandlerOwned {
+        effect, effect_arguments: vec![], operation: 0, payload_destinations: vec![payload],
+        resume_type: VmType::I64, continuation: VmContinuationPolicy::Consume, target,
+    };
+    let instructions = if forward {
+        vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            install(1, 15), install(2, 10),
+            VmInstruction::PerformOwned { dst: 3, effect, effect_arguments: vec![], operation: 0, arguments: vec![0] },
+            VmInstruction::IsInitialized { dst: 4, base: 0, fields: vec![] },
+            VmInstruction::BranchBool { condition: 4, then_target: 6, else_target: 7 },
+            VmInstruction::Trap,
+            VmInstruction::UninstallHandler, VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 3 },
+            VmInstruction::PatternTest { dst: 5, subject: 2, pattern: VmPattern::Literal("41".into()) },
+            VmInstruction::BranchBool { condition: 5, then_target: 12, else_target: 14 },
+            VmInstruction::ClaimEffectPayloads { payloads: vec![2] },
+            VmInstruction::Resume { value: 2 },
+            VmInstruction::Forward,
+            VmInstruction::ClaimEffectPayloads { payloads: vec![1] },
+            VmInstruction::Resume { value: 1 },
+        ]
+    } else {
+        vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 }, install(1, 8),
+            VmInstruction::PerformOwned { dst: 3, effect, effect_arguments: vec![], operation: 0, arguments: vec![0] },
+            VmInstruction::IsInitialized { dst: 4, base: 0, fields: vec![] },
+            VmInstruction::BranchBool { condition: 4, then_target: 5, else_target: 6 },
+            VmInstruction::Trap, VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 3 },
+            VmInstruction::ClaimEffectPayloads { payloads: vec![1] },
+            VmInstruction::Resume { value: 1 },
+        ]
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        fingerprint: Digest::of_bytes(b"owned-effect-unsealed"),
+        function: VmFunction { definition, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers: vec![VmType::I64, VmType::I64, VmType::I64, VmType::I64, VmType::Bool, VmType::Bool], instructions },
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    candidate
+}
+
+#[test]
+fn owned_effect_packets_round_trip_forward_and_resume_without_outgoing_ghosts() {
+    for forward in [false, true] {
+        let candidate = owned_effect_candidate(forward);
+        let bytes = encode_artifact(&candidate);
+        assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+        assert_eq!(decode_and_verify_artifact(&bytes).unwrap().run_i64().unwrap(), 42);
+        let mut program = CandidateVmProgram {
+            schema: candidate.schema, runtime_manifest: None, entry: candidate.function.definition,
+            functions: BTreeMap::from([(candidate.function.definition, candidate.function)]),
+            host_capabilities: vec![], callable_environments: BTreeMap::new(), fingerprint: candidate.fingerprint,
+        };
+        program.fingerprint = program.computed_fingerprint();
+        assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn owned_effect_packets_cross_ordinary_calls_without_reviving_either_outgoing_carrier() {
+    let candidate = owned_effect_candidate(false);
+    let mut entry = candidate.function;
+    let child = DefKey(Digest::of_bytes(b"owned-effect-callee"));
+    let VmInstruction::PerformOwned { effect, .. } = entry.instructions[2] else { panic!() };
+    entry.instructions[2] = VmInstruction::CallOwned { dst: 3, callee: child, arguments: vec![0] };
+    let callee = VmFunction { definition: child, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+        nominal_copy_descriptors: vec![], captures: 0, parameters: 1,
+        registers: vec![VmType::I64, VmType::I64, VmType::Bool],
+        instructions: vec![
+            VmInstruction::PerformOwned { dst: 1, effect, effect_arguments: vec![], operation: 0, arguments: vec![0] },
+            VmInstruction::IsInitialized { dst: 2, base: 0, fields: vec![] },
+            VmInstruction::BranchBool { condition: 2, then_target: 3, else_target: 4 },
+            VmInstruction::Trap, VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut program = CandidateVmProgram { schema: candidate.schema, runtime_manifest: None, entry: entry.definition,
+        functions: BTreeMap::from([(entry.definition, entry), (child, callee)]), host_capabilities: vec![],
+        callable_environments: BTreeMap::new(), fingerprint: candidate.fingerprint };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), 42);
+    program.functions.get_mut(&child).unwrap().instructions[0] = VmInstruction::Perform {
+        dst: 1, effect, effect_arguments: vec![], operation: 0, arguments: vec![0],
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(matches!(decode_and_verify_program(&encode_program(&program)), Err(VmArtifactError::MalformedEncoding {
+        message: "program effect operation ABI declarations disagree",
+    })));
+}
+
+#[test]
+fn owned_effect_packets_reject_missing_duplicate_wrong_and_forwarded_claims() {
+    for replacement in [
+        VmInstruction::Copy { dst: 2, src: 1 },
+        VmInstruction::ClaimEffectPayloads { payloads: vec![0] },
+        VmInstruction::ConstBool { dst: 5, value: true },
+    ] {
+        let mut candidate = owned_effect_candidate(false);
+        candidate.function.instructions[8] = replacement;
+        candidate.fingerprint = candidate.computed_fingerprint();
+        assert!(decode_and_verify_artifact(&encode_artifact(&candidate)).is_err());
+    }
+    for replacement in [VmInstruction::Forward, VmInstruction::ClaimEffectPayloads { payloads: vec![1] }] {
+        let mut candidate = owned_effect_candidate(false);
+        candidate.function.instructions[9] = replacement;
+        candidate.fingerprint = candidate.computed_fingerprint();
+        assert!(decode_and_verify_artifact(&encode_artifact(&candidate)).is_err());
+    }
+    let mut candidate = owned_effect_candidate(false);
+    candidate.function.instructions[3] = VmInstruction::Copy { dst: 2, src: 0 };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&candidate)), Err(VmArtifactError::UseAfterMove { register: 0 })));
+}
+
+#[test]
+fn runtime_owned_calls_round_trip_and_empty_outgoing_slots() {
+    for indirect in [false, true] {
+        let candidate = owned_call_program(indirect);
+        let encoded = encode_program(&candidate);
+        assert_eq!(decode_program(&encoded).unwrap(), candidate);
+        assert_eq!(decode_and_verify_program(&encoded).unwrap().run_i64().unwrap(), 42);
+        let mut forged = candidate;
+        forged.functions.get_mut(&forged.entry).unwrap().instructions[3] =
+            VmInstruction::Copy { dst: 1, src: 0 };
+        forged.fingerprint = forged.computed_fingerprint();
+        assert!(matches!(decode_and_verify_program(&encode_program(&forged)),
+            Err(VmArtifactError::UseAfterMove { register: 0 })));
+    }
+}
+
+#[test]
+fn runtime_owned_calls_reject_aliased_argument_carriers() {
+    for indirect in [false, true] {
+        let mut candidate = owned_call_program(indirect);
+        for function in candidate.functions.values_mut() {
+            if function.parameters != 0 {
+                function.parameters = 2;
+                function.registers.push(VmType::I64);
+            } else {
+                if let VmType::Callable { parameters, .. } = &mut function.registers[2] { parameters.push(VmType::I64); }
+                match &mut function.instructions[2] {
+                    VmInstruction::CallOwned { arguments, .. } | VmInstruction::CallIndirectOwned { arguments, .. } => arguments.push(0),
+                    _ => unreachable!(),
+                }
+            }
+        }
+        candidate.fingerprint = candidate.computed_fingerprint();
+        assert!(matches!(decode_and_verify_program(&encode_program(&candidate)),
+            Err(VmArtifactError::MalformedEncoding { message: "consuming call repeats an argument carrier" })));
+    }
+}
+
+#[test]
+fn runtime_owned_host_call_empties_its_argument_and_preserves_authority_checks() {
+    let mut candidate = owned_call_program(false);
+    let entry = candidate.entry;
+    let main = candidate.functions.get_mut(&entry).unwrap();
+    main.registers = vec![VmType::Text, VmType::Unit, VmType::Bool];
+    main.instructions = vec![
+        VmInstruction::ConstText { dst: 0, value: "owned host argument".into() },
+        VmInstruction::HostCallOwned {
+            dst: 1, capability: "diagnostic".into(), symbol: "__g1_diagnostic_write".into(),
+            source_contract: Digest::of_bytes(b"owned-diagnostic"), resident_operations: vec![],
+            parameters: vec![VmType::Text], result: VmType::Unit, arguments: vec![0],
+        },
+        VmInstruction::IsInitialized { dst: 2, base: 0, fields: vec![] },
+        VmInstruction::BranchBool { condition: 2, then_target: 4, else_target: 5 },
+        VmInstruction::Trap,
+        VmInstruction::Return { value: 1 },
+    ];
+    candidate.functions.retain(|key, _| *key == entry);
+    candidate.host_capabilities = vec!["diagnostic".into()];
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let program = decode_and_verify_program(&encode_program(&candidate)).unwrap();
+    assert!(matches!(program.run_unit(), Err(VmArtifactError::HostCallRequiresAuthority { .. })));
+    let mut host = RecordingVmHost::default();
+    program.run_unit_with_host(&mut host).unwrap();
+    assert_eq!(host.diagnostics, ["owned host argument"]);
+}
+
+#[test]
+fn runtime_array_storage_round_trips_and_preserves_move_holes() {
+    let candidate = array_storage_candidate();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(decode_and_verify_artifact(&encoded).unwrap().run_i64().unwrap(), 42);
+    let mut length = candidate;
+    length.function.instructions[8] = VmInstruction::Return { value: 3 };
+    length.fingerprint = length.computed_fingerprint();
+    assert_eq!(decode_and_verify_artifact(&encode_artifact(&length)).unwrap().run_usize().unwrap(), 1);
+}
+
+#[test]
+fn runtime_array_storage_rejects_wrong_types_and_repeated_moves() {
+    let mut candidate = array_storage_candidate();
+    candidate.function.instructions[5] = VmInstruction::TakeArrayElement { dst: 0, value: 1, index: 2 };
+    candidate.function.instructions.truncate(6);
+    candidate.function.instructions.push(VmInstruction::Return { value: 0 });
+    // Use a fresh destination so a repeated element move reaches the storage check.
+    candidate.function.registers.push(VmType::I64);
+    candidate.function.instructions[5] = VmInstruction::TakeArrayElement { dst: 6, value: 1, index: 2 };
+    candidate.function.instructions[6] = VmInstruction::Return { value: 6 };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64(),
+        Err(VmArtifactError::UseAfterMove { register: 1 })));
+    let mut wrong_index = array_storage_candidate();
+    wrong_index.function.instructions[4] = VmInstruction::TakeArrayElement { dst: 4, value: 1, index: 0 };
+    wrong_index.fingerprint = wrong_index.computed_fingerprint();
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&wrong_index)), Err(VmArtifactError::TypeMismatch { .. })));
+}
+
+#[test]
+fn runtime_array_storage_rejects_out_of_bounds_probes() {
+    let mut candidate = array_storage_candidate();
+    candidate.function.instructions[2] = VmInstruction::ConstUsize { dst: 2, value: 1 };
+    candidate.function.instructions[4] = VmInstruction::ConstI64 { dst: 4, value: 42 };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64(),
+        Err(VmArtifactError::InvalidRegister { register: 1 })));
+}
+
 #[test]
 fn frame_cleanup_declarations_round_trip_and_validate_owner_and_target_abis() {
     use grandiose_stage0::VmFrameDrop;
@@ -6058,6 +6349,14 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
         },
         fingerprint: Digest::of_bytes(b"projected-label-capture-candidate"),
     };
+    let mut dynamic = candidate.clone();
+    dynamic.function.registers.push(VmType::Usize);
+    dynamic.function.instructions.insert(6, VmInstruction::ConstUsize { dst: 9, value: 0 });
+    dynamic.function.instructions[7] = VmInstruction::TakeArrayElement { dst: 6, value: 5, index: 9 };
+    if let VmInstruction::MakeLabel { target, .. } = &mut dynamic.function.instructions[1] { *target += 1; }
+    dynamic.fingerprint = dynamic.computed_fingerprint();
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&dynamic)),
+        Err(VmArtifactError::InvalidLabelContract { .. })));
     candidate.fingerprint = candidate.computed_fingerprint();
     let bytes = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&bytes).unwrap(), candidate);

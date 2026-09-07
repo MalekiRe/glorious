@@ -6,6 +6,7 @@ use grandiose_stage0::{
 };
 
 const PROBE: &str = r#"
+    use std::*;
     struct Probe<'a> { target: &'a mut i64 }
     impl<'a> Use<[0, 1]> for Probe<'a> {}
     impl<'a> Drop for Probe<'a> {
@@ -40,6 +41,89 @@ fn run(body: &str) -> i64 {
     let artifact = outcome.artifact.unwrap();
     let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
     program.run_i64().unwrap()
+}
+
+#[test]
+fn array_elements_are_destroyed_by_runtime_loop() {
+    assert_eq!(run(r#"
+        fn finish(first: &mut i64, second: &mut i64) -> {
+            let owners = [Probe { target: first }, Probe { target: second }];
+            ()
+        }
+        pub fn main() -> i64 {
+            let first = 0;
+            let second = 0;
+            finish(&mut first, &mut second);
+            first * 10 + second
+        }
+    "#), 11);
+}
+
+#[test]
+fn nested_array_elements_are_destroyed_by_runtime_loops() {
+    assert_eq!(run(r#"
+        fn finish(first: &mut i64, second: &mut i64) -> {
+            let owners = [[Probe { target: first }], [Probe { target: second }]];
+            ()
+        }
+        pub fn main() -> i64 {
+            let first = 0;
+            let second = 0;
+            finish(&mut first, &mut second);
+            first * 10 + second
+        }
+    "#), 11);
+}
+
+#[test]
+fn empty_array_destruction_does_not_enter_element_cleanup() {
+    assert_eq!(run(r#"
+        struct Item { value: i64 }
+        impl Use<[0, 1]> for Item {}
+        impl Drop for Item { drop(&mut self) -> { () } }
+        fn empty() -> Array<Item> { [] }
+        pub fn main() -> i64 { let owners = empty(); 42 }
+    "#), 42);
+}
+
+#[test]
+fn uninvoked_closure_destroys_its_captured_array() {
+    assert_eq!(run(r#"
+        fn finish(target: &mut i64) -> {
+            let owners = [Probe { target: target }];
+            let pending = () -> i64 { let taken = move owners; 42 };
+            ()
+        }
+        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+    "#), 1);
+}
+
+#[test]
+fn cancelled_array_cleanup_preserves_surviving_caller_storage() {
+    assert_eq!(run(r#"
+        effect Stop { [0, 1] stop() -> i64; }
+        fn finish(target: &mut i64) -> i64 {
+            let owners = [Probe { target: target }];
+            handle Stop::stop() { Stop::stop() with _ => 0 }
+        }
+        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+    "#), 1);
+}
+
+#[test]
+fn owning_array_patterns_leave_only_residual_elements_for_cleanup() {
+    assert_eq!(run(r#"
+        pub fn main() -> i64 {
+            let first = 0;
+            let second = 0;
+            {
+                let owners = [Probe { target: &mut first }, Probe { target: &mut second }];
+                handle owners { [left, _] => (), _ => () };
+                ()
+            };
+            first * 10 + second
+        }
+    "#), 11);
 }
 
 #[test]
@@ -375,7 +459,7 @@ fn terminal_calls_only_end_the_selected_lazy_boolean_path() {
                 fn jump<L>(destination: L, target: &mut i64, flag: Bool) -> i64 where L: Label<i64> {{
                     let owner = Probe {{ target: target }};
                     let pending = (exit: L) -> i64 {{
-                        flag {operator} {{ exit(0); false }};
+                        flag {operator} (() -> Bool {{ exit(0); false }});
                         *owner.target = *owner.target + 10;
                         let taken = move owner;
                         42
@@ -578,8 +662,9 @@ fn root_lowering_probes_preserve_lexical_owner_cleanup() {
             }}
         "#)), 42, "{result}");
     }
-    for result in ["false and true", "true or false", "flag and true", "flag or false"] {
+    for result in ["boolean(false) and { true }", "boolean(true) or { false }", "flag and { true }", "flag or { false }"] {
         assert_eq!(run(&format!(r#"
+            fn boolean(value: Bool) -> Bool {{ value }}
             fn finish(target: &mut i64, flag: Bool) -> Bool {{
                 let owner = Probe {{ target: target }};
                 {result}
@@ -601,9 +686,9 @@ fn lazy_boolean_value_joins_preserve_branch_and_enclosing_owner_cleanup() {
                 let enclosing = Probe {{ target: outer }};
                 let selected = flag and {{
                     let branch = Probe {{ target: inner }};
-                    true and true
+                    true and {{ true }}
                 }};
-                selected or false
+                selected or {{ false }}
             }}
             pub fn main() -> i64 {{
                 let outer = 0;
@@ -952,6 +1037,37 @@ fn discarded_computed_owners_release_their_destructor_loans() {
             pub fn main() -> i64 {{ let count = 41; {expression}; count }}
         "#)), 42, "{expression}");
     }
+}
+
+#[test]
+fn discarded_named_owners_are_destroyed_before_the_next_statement() {
+    assert_eq!(run(r#"
+        pub fn main() -> i64 {
+            let count = 41;
+            let owner = Probe { target: &mut count };
+            owner;
+            count
+        }
+    "#), 42);
+}
+
+#[test]
+fn testing_a_borrowed_noncopy_enum_field_does_not_move_its_owner() {
+    assert_eq!(run(r#"
+        enum State<'a> { Full(Probe<'a>), Empty }
+        struct Slot<'a> { state: State<'a> }
+        fn inspect<'a, 'b>(slot: &'a Slot<'b>) -> i64 {
+            handle slot.state { State::Full(_) => 41, State::Empty => 0 }
+        }
+        pub fn main() -> i64 {
+            let count = 0;
+            let observed = {
+                let slot = Slot { state: State::Full(Probe { target: &mut count }) };
+                inspect(&slot)
+            };
+            observed + count
+        }
+    "#), 42);
 }
 
 #[test]

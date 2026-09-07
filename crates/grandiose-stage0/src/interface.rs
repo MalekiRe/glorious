@@ -316,7 +316,15 @@ impl InterfaceSet {
                     message: "constant declaration has no initializer".into(),
                 });
             }
-            let key = definition_key(&module, shell.kind, name.as_deref(), header_digest, ordinal);
+            let key = if let ParsedHeader::Fixity(fixity) = &syntax.header {
+                // One spelling may have both a prefix and an infix contract.
+                // Keep those identities distinct while retaining identity
+                // across edits to precedence or associativity.
+                let slot = format!("{}:{}", if fixity.form.is_prefix() { "prefix" } else { "infix" }, fixity.operator);
+                definition_key(&module, shell.kind, Some(&slot), header_digest, ordinal)
+            } else {
+                definition_key(&module, shell.kind, name.as_deref(), header_digest, ordinal)
+            };
             definitions.push(Definition {
                 key,
                 kind: shell.kind,

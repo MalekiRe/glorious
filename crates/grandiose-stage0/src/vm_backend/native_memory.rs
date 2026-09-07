@@ -8,7 +8,7 @@ use super::{
     expect_usize, value_matches_vm_type,
 };
 use grandiose_runtime::memory::{MemoryError, MemoryLayout, RawAllocation};
-use std::{cell::Cell, collections::BTreeMap, ptr, rc::Rc, sync::Arc};
+use std::{cell::{Cell, RefCell}, collections::{BTreeMap, BTreeSet}, ptr, rc::Rc, sync::Arc};
 
 #[derive(Default)]
 pub(super) struct NativeMemory {
@@ -233,9 +233,19 @@ impl NativeLayout {
 pub(super) struct NativeReference {
     pointer: *mut u8,
     layout: Arc<NativeLayout>,
+    // Logical paths, not byte ranges: distinct zero-sized fields can have
+    // the same address. Reborrows and projections share this initialization
+    // state; constructing a fresh reference from raw storage remains an
+    // unsafe promise of initialized source storage.
+    path: Vec<u32>,
+    holes: Rc<RefCell<BTreeSet<Vec<u32>>>>,
 }
 
 impl NativeReference {
+    fn new(pointer: *mut u8, layout: Arc<NativeLayout>) -> Self {
+        Self { pointer, layout, path: vec![], holes: Rc::default() }
+    }
+
     pub(super) fn ty(&self) -> &VmType {
         &self.layout.ty
     }
@@ -243,6 +253,7 @@ impl NativeReference {
     pub(super) fn project(&self, path: &[u32]) -> Result<Self, VmArtifactError> {
         let mut pointer = self.pointer;
         let mut layout = self.layout.clone();
+        let mut logical_path = self.path.clone();
         for &index in path {
             let (offset, fields) = match &layout.shape {
                 NativeShape::Product(fields) => (0, fields),
@@ -250,6 +261,9 @@ impl NativeReference {
                     payload_offset,
                     variants,
                 } => {
+                    if self.holes.borrow().iter().any(|hole| logical_path.starts_with(hole)) {
+                        return Err(error("native enum projection names a moved-out resident"));
+                    }
                     // SAFETY: construction promises a live, initialized resident;
                     // ordinary source loan checks preserve it during projection.
                     let tag = unsafe { pointer.cast::<u32>().read() };
@@ -272,11 +286,24 @@ impl NativeReference {
             // SAFETY: concrete field layout stays within the referenced resident.
             pointer = unsafe { pointer.add(offset + field.offset) };
             layout = field.layout.clone();
+            logical_path.push(index);
         }
         Ok(Self {
             pointer,
             layout,
+            path: logical_path,
+            holes: self.holes.clone(),
         })
+    }
+
+    pub(super) fn is_initialized(&self, path: &[u32]) -> bool {
+        let path = self.path.iter().chain(path).copied().collect::<Vec<_>>();
+        !self.holes.borrow().iter().any(|hole| path.starts_with(hole))
+    }
+
+    fn is_fully_initialized(&self) -> bool {
+        !self.holes.borrow().iter().any(|hole|
+            self.path.starts_with(hole) || hole.starts_with(&self.path))
     }
 
     pub(super) fn read(
@@ -285,16 +312,93 @@ impl NativeReference {
         budget: &mut ExecutionBudget,
     ) -> Result<VmValue, VmArtifactError> {
         let field = self.project(path)?;
+        if !field.is_initialized(&[]) {
+            return Ok(VmValue::Uninitialized(field.layout.ty.clone()));
+        }
+        // Preserve logical holes in a partial aggregate without reading its
+        // moved-out bytes. Cleanup can still inspect the remaining fields.
+        if !field.is_fully_initialized() {
+            let (fields, variant) = match &field.layout.shape {
+                NativeShape::Product(fields) => (fields, None),
+                NativeShape::Enum { variants, .. } => {
+                    let tag = unsafe { field.pointer.cast::<u32>().read() };
+                    (variants.get(tag as usize).ok_or_else(|| error("invalid native enum discriminant"))?, Some(tag))
+                }
+                _ => return Err(error("native scalar has an invalid projected hole")),
+            };
+            budget.reserve_value("partial native resident fields", fields.len())?;
+            let values = (0..fields.len()).map(|index| field.read(&[index as u32], budget))
+                .collect::<Result<Vec<_>, _>>()?.into();
+            return Ok(match (&field.layout.ty, variant) {
+                (VmType::Tuple(_), None) => VmValue::Tuple(values),
+                (VmType::Nominal { definition, .. }, None) => VmValue::Record {
+                    definition: *definition, fields: values, signature: field.layout.ty.clone(),
+                },
+                (VmType::Nominal { definition, .. }, Some(variant)) => VmValue::Enum {
+                    definition: *definition, variant, fields: values, signature: field.layout.ty.clone(),
+                },
+                _ => return Err(error("invalid partial native aggregate type")),
+            });
+        }
         // SAFETY: native reference creation and the source borrow/use contract
         // establish validity. DerefCopy/Move separately retain resident uses.
         unsafe { field.layout.read(field.pointer, budget) }
     }
 
-    pub(super) fn write(&self, path: &[u32], value: VmValue) -> Result<(), VmArtifactError> {
+    pub(super) fn take(&self, path: &[u32], budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
         let field = self.project(path)?;
+        if !field.is_initialized(&[]) {
+            return Err(error("native reference resident was moved out"));
+        }
+        let value = field.read(&[], budget)?;
+        let mut holes = self.holes.borrow_mut();
+        holes.retain(|hole| !hole.starts_with(&field.path));
+        holes.insert(field.path);
+        Ok(value)
+    }
+
+    pub(super) fn write(&self, path: &[u32], value: VmValue, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        let field = self.project(path)?;
+        if self.holes.borrow().iter().any(|hole| hole != &field.path && field.path.starts_with(hole)) {
+            return Err(error("native field cannot initialize an absent parent"));
+        }
+        // Native byte storage can carry a partially moved aggregate, but the
+        // uninitialized children must remain holes rather than fresh owners.
+        fn write_partial(layout: &NativeLayout, pointer: *mut u8, value: VmValue,
+            path: &mut Vec<u32>, holes: &mut BTreeSet<Vec<u32>>, budget: &mut ExecutionBudget,
+        ) -> Result<(), VmArtifactError> {
+            let value = match value {
+                VmValue::Resident(home) => home.load(&[], budget)?,
+                value => value,
+            };
+            if let VmValue::Uninitialized(ty) = &value {
+                if &layout.ty != ty { return Err(error("native hole has a different concrete type")); }
+                holes.insert(path.clone());
+                return Ok(());
+            }
+            let (offset, fields, values, tag) = match (&layout.shape, &value) {
+                (NativeShape::Product(fields), VmValue::Tuple(values) | VmValue::Record { fields: values, .. }) => (0, fields, values, None),
+                (NativeShape::Enum { payload_offset, variants }, VmValue::Enum { variant, fields: values, .. }) =>
+                    (*payload_offset, variants.get(*variant as usize).ok_or_else(|| error("invalid native enum discriminant"))?, values, Some(*variant)),
+                _ => return unsafe { layout.write(pointer, value) },
+            };
+            if fields.len() != values.len() { return Err(error("native product field count mismatch")); }
+            for (index, (field, value)) in fields.iter().zip(values.iter()).enumerate() {
+                path.push(index as u32);
+                write_partial(&field.layout, unsafe { pointer.add(offset + field.offset) }, value.clone(), path, holes, budget)?;
+                path.pop();
+            }
+            if let Some(tag) = tag { unsafe { pointer.cast::<u32>().write(tag); } }
+            Ok(())
+        }
+        let mut replacement_holes = BTreeSet::new();
         // SAFETY: only checked unique references reach this operation; source
         // drops/moves the old resident before replacing it.
-        unsafe { field.layout.write(field.pointer, value) }
+        write_partial(&field.layout, field.pointer, value, &mut field.path.clone(), &mut replacement_holes, budget)?;
+        let mut holes = self.holes.borrow_mut();
+        holes.retain(|hole| !hole.starts_with(&field.path));
+        holes.extend(replacement_holes);
+        Ok(())
     }
 }
 
@@ -440,9 +544,7 @@ impl NativeLayout {
                 }
                 if let Some(reference) = budget.native_memory.home_reference(pointer, referent, *unique)? { return Ok(reference); }
                 Ok(VmValue::Reference {
-                    target: super::ReferenceTarget::Native(NativeReference {
-                        pointer, layout: Arc::new(layout),
-                    }),
+                    target: super::ReferenceTarget::Native(NativeReference::new(pointer, Arc::new(layout))),
                     fields: Arc::from([]),
                     unique: *unique,
                     referent: referent.clone(),
@@ -551,7 +653,7 @@ impl NativeLayout {
                 VmValue::Reference { target: super::ReferenceTarget::Native(native), fields, .. },
             ) => {
                 let native = native.project(&fields)?;
-                if native.ty() != referent {
+                if native.ty() != referent || !native.is_fully_initialized() {
                     return Err(error("native reference resident has a different referent layout"));
                 }
                 // SAFETY: destination is an aligned reference slot and the
@@ -791,10 +893,7 @@ pub(super) fn execute_memory_intrinsic(
                 return Ok(reference);
             }
             VmValue::Reference {
-                target: super::ReferenceTarget::Native(NativeReference {
-                    pointer,
-                    layout: Arc::new(layout.clone()),
-                }),
+                target: super::ReferenceTarget::Native(NativeReference::new(pointer, Arc::new(layout.clone()))),
                 fields: Arc::from([]),
                 unique: primitive == BorrowUnique,
                 referent: layout.ty,
@@ -848,6 +947,74 @@ pub(super) fn execute_memory_intrinsic(
 mod tests {
     use super::*;
 
+    fn budget() -> ExecutionBudget {
+        ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
+            limits: Default::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn native_projected_holes_are_shared_and_distinguish_zero_sized_fields() {
+        let layout = Arc::new(native_layout(&VmType::Tuple(vec![VmType::Unit, VmType::Unit]),
+            &Arc::from([]), &mut vec![]).unwrap());
+        let allocation = RawAllocation::new(layout.memory, 0).unwrap();
+        let native = NativeReference::new(allocation.as_ptr().as_ptr(), layout);
+        let alias = native.clone();
+        let left = native.project(&[0]).unwrap();
+        let right = native.project(&[1]).unwrap();
+        assert_eq!(left.pointer, right.pointer);
+        let mut budget = budget();
+        assert!(matches!(left.take(&[], &mut budget).unwrap(), VmValue::Unit));
+        assert!(!alias.is_initialized(&[0]));
+        assert!(right.is_initialized(&[]));
+        assert!(native.is_initialized(&[]));
+        assert!(!native.is_fully_initialized());
+        assert!(left.take(&[], &mut budget).is_err());
+        let VmValue::Tuple(fields) = native.read(&[], &mut budget).unwrap() else { panic!() };
+        assert!(matches!(fields[0], VmValue::Uninitialized(VmType::Unit)));
+        assert!(matches!(fields[1], VmValue::Unit));
+        left.write(&[], VmValue::Unit, &mut budget).unwrap();
+        assert!(alias.is_fully_initialized());
+    }
+
+    #[test]
+    fn native_partial_moves_preserve_holes_when_stored_and_restored() {
+        let layout = Arc::new(native_layout(&VmType::Tuple(vec![
+            VmType::Tuple(vec![VmType::I64, VmType::I64]), VmType::I64,
+        ]), &Arc::from([]), &mut vec![]).unwrap());
+        let first = RawAllocation::new(layout.memory, 24).unwrap();
+        let second = RawAllocation::new(layout.memory, 24).unwrap();
+        let native = NativeReference::new(first.as_ptr().as_ptr(), layout.clone());
+        let destination = NativeReference::new(second.as_ptr().as_ptr(), layout.clone());
+        let mut budget = budget();
+        native.write(&[], VmValue::Tuple(vec![
+            VmValue::Tuple(vec![VmValue::I64(19), VmValue::I64(42)].into()), VmValue::I64(23),
+        ].into()), &mut budget).unwrap();
+        let field = native.project(&[0, 1]).unwrap();
+        assert!(matches!(field.take(&[], &mut budget).unwrap(), VmValue::I64(42)));
+        let alias = VmValue::Reference { target: super::super::ReferenceTarget::Native(native.clone()),
+            fields: vec![0, 1].into(), unique: true, referent: VmType::I64 };
+        assert!(!super::super::referent_is_initialized(&[], &[], &alias).unwrap());
+        let snapshot = native.take(&[], &mut budget).unwrap();
+        assert!(!native.is_initialized(&[]));
+        assert!(field.write(&[], VmValue::I64(0), &mut budget).is_err());
+        destination.write(&[], snapshot, &mut budget).unwrap();
+        assert!(!destination.is_initialized(&[0, 1]));
+        assert!(matches!(destination.read(&[0, 0], &mut budget).unwrap(), VmValue::I64(19)));
+        assert!(matches!(destination.read(&[1], &mut budget).unwrap(), VmValue::I64(23)));
+        let reference_layout = native_layout(&VmType::Reference { unique: true, referent: Box::new(layout.ty.clone()) },
+            &Arc::from([]), &mut vec![]).unwrap();
+        let mut pointer_slot = std::mem::MaybeUninit::<*mut u8>::uninit();
+        let reference = VmValue::Reference { target: super::super::ReferenceTarget::Native(destination.clone()),
+            fields: Arc::from([]), unique: true, referent: layout.ty.clone() };
+        // A partially moved resident cannot be exported as a complete native reference.
+        assert!(unsafe { reference_layout.write(pointer_slot.as_mut_ptr().cast(), reference) }.is_err());
+        destination.write(&[0, 1], VmValue::I64(42), &mut budget).unwrap();
+        assert!(destination.is_fully_initialized());
+        native.write(&[], destination.take(&[], &mut budget).unwrap(), &mut budget).unwrap();
+        assert!(super::super::referent_is_initialized(&[], &[], &alias).unwrap());
+        assert!(matches!(field.read(&[], &mut budget).unwrap(), VmValue::I64(42)));
+    }
+
     #[test]
     fn checked_reference_resident_is_one_actual_native_pointer() {
         let descriptors = Arc::from([]);
@@ -858,10 +1025,9 @@ mod tests {
         let mut value = 40i64;
         let pointer = &raw mut value;
         let reference = VmValue::Reference {
-            target: super::super::ReferenceTarget::Native(NativeReference {
-                pointer: pointer.cast(),
-                layout: Arc::new(native_layout(&VmType::I64, &descriptors, &mut vec![]).unwrap()),
-            }),
+            target: super::super::ReferenceTarget::Native(NativeReference::new(
+                pointer.cast(), Arc::new(native_layout(&VmType::I64, &descriptors, &mut vec![]).unwrap()),
+            )),
             fields: Arc::from([]), unique: true, referent: VmType::I64,
         };
         let mut resident = std::mem::MaybeUninit::<*mut i64>::uninit();

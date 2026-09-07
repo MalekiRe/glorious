@@ -19,6 +19,9 @@ pub(crate) struct FrameOwnership {
 
 impl FrameOwnership {
     pub(crate) fn for_function(function: &MirFunction) -> Self {
+        if let Some(owners) = &function.control.cleanup_owners {
+            return Self { reverse_owners: owners.clone() };
+        }
         Self::from_bindings(
             &function.parameters,
             function.captures as usize,

@@ -80,6 +80,11 @@ __g1_int_convert_wrapping_to_isize<T>(value: T) -> isize;
 __g1_int_convert_wrapping_to_u128<T>(value: T) -> u128;
 __g1_int_convert_wrapping_to_i128<T>(value: T) -> i128;
 __g1_int_wrapping_add<T>(left: T, right: T) -> T;
+__g1_int_checked_add<T>(left: T, right: T) -> T;
+__g1_int_checked_div<T>(left: T, right: T) -> T;
+__g1_int_equal<T>(left: T, right: T) -> u32;
+__g1_int_less<T>(left: T, right: T) -> u32;
+__g1_int_greater<T>(left: T, right: T) -> u32;
 __g1_int_wrapping_sub<T>(left: T, right: T) -> T;
 __g1_int_wrapping_mul<T>(left: T, right: T) -> T;
 __g1_int_bit_and<T>(left: T, right: T) -> T;
@@ -89,6 +94,7 @@ __g1_int_bit_not<T>(value: T) -> T;
 __g1_int_shl<T>(value: T, count: u32) -> T;
 __g1_int_shr<T>(value: T, count: u32) -> T;
 __g1_f32_add(left: f32, right: f32) -> f32;
+__g1_f32_neg(value: f32) -> f32;
 __g1_f32_sub(left: f32, right: f32) -> f32;
 __g1_f32_mul(left: f32, right: f32) -> f32;
 __g1_f32_div(left: f32, right: f32) -> f32;
@@ -103,6 +109,7 @@ __g1_f32_from_bits(value: u32) -> f32;
 __g1_i64_to_f32(value: i64) -> f32;
 __g1_f32_to_i64_checked(value: f32) -> i64;
 __g1_f64_add(left: f64, right: f64) -> f64;
+__g1_f64_neg(value: f64) -> f64;
 __g1_f64_sub(left: f64, right: f64) -> f64;
 __g1_f64_mul(left: f64, right: f64) -> f64;
 __g1_f64_div(left: f64, right: f64) -> f64;
@@ -162,8 +169,338 @@ pub let Some = Result::Ok;
 pub let None = Result::Err(());
 
 pub type Bool = Option<()>;
+// The absent variant stays polymorphic: true also inhabits Result<(), E>,
+// and false also inhabits Option<T>. Bool closes both slots only when needed.
 pub let true = Result::Ok(());
 pub let false = Result::Err(());
+
+// Arithmetic syntax and policy are source declarations. The machine leaves
+// return integer predicates; their conversion to this library's Bool is local.
+pub infix 20 ==;
+pub infix 20 !=;
+pub infix 20 <;
+pub infix 20 <=;
+pub infix 20 >;
+pub infix 20 >=;
+pub infixl 30 +;
+pub infixl 30 -;
+pub infixl 40 *;
+pub infixl 40 /;
+pub infixl 40 %;
+pub prefix 50 +;
+pub prefix 50 -;
+pub prefix 50 !;
+
+pub trait Arithmetic {
+    +(left: Self, right: Self) -> Self;
+    -(left: Self, right: Self) -> Self;
+    *(left: Self, right: Self) -> Self;
+    /(left: Self, right: Self) -> Self;
+    %(left: Self, right: Self) -> Self;
+}
+pub trait NumericPrefix { +(value: Self) -> Self; -(value: Self) -> Self; }
+pub trait Comparison {
+    ==(left: Self, right: Self) -> Bool;
+    !=(left: Self, right: Self) -> Bool;
+    <(left: Self, right: Self) -> Bool;
+    <=(left: Self, right: Self) -> Bool;
+    >(left: Self, right: Self) -> Bool;
+    >=(left: Self, right: Self) -> Bool;
+}
+pub trait LogicalNot { !(value: Self) -> Self; }
+pub impl LogicalNot for Bool { !(value: Bool) -> Bool { handle value { true => false; false => true } } }
+
+fn predicate(value: u32) -> Bool { handle value { 0 => false; _ => true } }
+fn inverse_predicate(value: u32) -> Bool { handle value { 0 => true; _ => false } }
+
+pub impl Arithmetic for u8 {
+    +(left: u8, right: u8) -> u8 { __g1_int_checked_add(left, right) }
+    -(left: u8, right: u8) -> u8 { handle __g1_int_less(left, right) { 0 => __g1_int_wrapping_sub(left, right); _ => __g1_abort() } }
+    *(left: u8, right: u8) -> u8 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: u8, right: u8) -> u8 { __g1_int_checked_div(left, right) }
+    %(left: u8, right: u8) -> u8 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for u8 {
+    +(value: u8) -> u8 { value }
+    -(value: u8) -> u8 { 0 - value }
+}
+pub impl Comparison for u8 {
+    ==(left: u8, right: u8) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: u8, right: u8) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: u8, right: u8) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: u8, right: u8) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: u8, right: u8) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: u8, right: u8) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for u16 {
+    +(left: u16, right: u16) -> u16 { __g1_int_checked_add(left, right) }
+    -(left: u16, right: u16) -> u16 { handle __g1_int_less(left, right) { 0 => __g1_int_wrapping_sub(left, right); _ => __g1_abort() } }
+    *(left: u16, right: u16) -> u16 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: u16, right: u16) -> u16 { __g1_int_checked_div(left, right) }
+    %(left: u16, right: u16) -> u16 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for u16 {
+    +(value: u16) -> u16 { value }
+    -(value: u16) -> u16 { 0 - value }
+}
+pub impl Comparison for u16 {
+    ==(left: u16, right: u16) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: u16, right: u16) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: u16, right: u16) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: u16, right: u16) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: u16, right: u16) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: u16, right: u16) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for u32 {
+    +(left: u32, right: u32) -> u32 { __g1_int_checked_add(left, right) }
+    -(left: u32, right: u32) -> u32 { handle __g1_int_less(left, right) { 0 => __g1_int_wrapping_sub(left, right); _ => __g1_abort() } }
+    *(left: u32, right: u32) -> u32 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: u32, right: u32) -> u32 { __g1_int_checked_div(left, right) }
+    %(left: u32, right: u32) -> u32 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for u32 {
+    +(value: u32) -> u32 { value }
+    -(value: u32) -> u32 { 0 - value }
+}
+pub impl Comparison for u32 {
+    ==(left: u32, right: u32) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: u32, right: u32) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: u32, right: u32) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: u32, right: u32) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: u32, right: u32) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: u32, right: u32) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for u64 {
+    +(left: u64, right: u64) -> u64 { __g1_int_checked_add(left, right) }
+    -(left: u64, right: u64) -> u64 { handle __g1_int_less(left, right) { 0 => __g1_int_wrapping_sub(left, right); _ => __g1_abort() } }
+    *(left: u64, right: u64) -> u64 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: u64, right: u64) -> u64 { __g1_int_checked_div(left, right) }
+    %(left: u64, right: u64) -> u64 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for u64 {
+    +(value: u64) -> u64 { value }
+    -(value: u64) -> u64 { 0 - value }
+}
+pub impl Comparison for u64 {
+    ==(left: u64, right: u64) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: u64, right: u64) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: u64, right: u64) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: u64, right: u64) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: u64, right: u64) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: u64, right: u64) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for u128 {
+    +(left: u128, right: u128) -> u128 { __g1_int_checked_add(left, right) }
+    -(left: u128, right: u128) -> u128 { handle __g1_int_less(left, right) { 0 => __g1_int_wrapping_sub(left, right); _ => __g1_abort() } }
+    *(left: u128, right: u128) -> u128 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: u128, right: u128) -> u128 { __g1_int_checked_div(left, right) }
+    %(left: u128, right: u128) -> u128 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for u128 {
+    +(value: u128) -> u128 { value }
+    -(value: u128) -> u128 { 0 - value }
+}
+pub impl Comparison for u128 {
+    ==(left: u128, right: u128) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: u128, right: u128) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: u128, right: u128) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: u128, right: u128) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: u128, right: u128) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: u128, right: u128) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for usize {
+    +(left: usize, right: usize) -> usize { __g1_int_checked_add(left, right) }
+    -(left: usize, right: usize) -> usize { handle __g1_int_less(left, right) { 0 => __g1_int_wrapping_sub(left, right); _ => __g1_abort() } }
+    *(left: usize, right: usize) -> usize { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: usize, right: usize) -> usize { __g1_int_checked_div(left, right) }
+    %(left: usize, right: usize) -> usize { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for usize {
+    +(value: usize) -> usize { value }
+    -(value: usize) -> usize { 0 - value }
+}
+pub impl Comparison for usize {
+    ==(left: usize, right: usize) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: usize, right: usize) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: usize, right: usize) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: usize, right: usize) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: usize, right: usize) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: usize, right: usize) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for i8 {
+    +(left: i8, right: i8) -> i8 { __g1_int_checked_add(left, right) }
+    -(left: i8, right: i8) -> i8 { let result = __g1_int_wrapping_sub(left, right); handle __g1_int_less(right, 0) { 0 => handle __g1_int_greater(result, left) { 0 => result; _ => __g1_abort() }; _ => handle __g1_int_less(result, left) { 0 => result; _ => __g1_abort() } } }
+    *(left: i8, right: i8) -> i8 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: i8, right: i8) -> i8 { __g1_int_checked_div(left, right) }
+    %(left: i8, right: i8) -> i8 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for i8 {
+    +(value: i8) -> i8 { value }
+    -(value: i8) -> i8 { 0 - value }
+}
+pub impl Comparison for i8 {
+    ==(left: i8, right: i8) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: i8, right: i8) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: i8, right: i8) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: i8, right: i8) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: i8, right: i8) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: i8, right: i8) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for i16 {
+    +(left: i16, right: i16) -> i16 { __g1_int_checked_add(left, right) }
+    -(left: i16, right: i16) -> i16 { let result = __g1_int_wrapping_sub(left, right); handle __g1_int_less(right, 0) { 0 => handle __g1_int_greater(result, left) { 0 => result; _ => __g1_abort() }; _ => handle __g1_int_less(result, left) { 0 => result; _ => __g1_abort() } } }
+    *(left: i16, right: i16) -> i16 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: i16, right: i16) -> i16 { __g1_int_checked_div(left, right) }
+    %(left: i16, right: i16) -> i16 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for i16 {
+    +(value: i16) -> i16 { value }
+    -(value: i16) -> i16 { 0 - value }
+}
+pub impl Comparison for i16 {
+    ==(left: i16, right: i16) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: i16, right: i16) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: i16, right: i16) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: i16, right: i16) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: i16, right: i16) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: i16, right: i16) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for i32 {
+    +(left: i32, right: i32) -> i32 { __g1_int_checked_add(left, right) }
+    -(left: i32, right: i32) -> i32 { let result = __g1_int_wrapping_sub(left, right); handle __g1_int_less(right, 0) { 0 => handle __g1_int_greater(result, left) { 0 => result; _ => __g1_abort() }; _ => handle __g1_int_less(result, left) { 0 => result; _ => __g1_abort() } } }
+    *(left: i32, right: i32) -> i32 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: i32, right: i32) -> i32 { __g1_int_checked_div(left, right) }
+    %(left: i32, right: i32) -> i32 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for i32 {
+    +(value: i32) -> i32 { value }
+    -(value: i32) -> i32 { 0 - value }
+}
+pub impl Comparison for i32 {
+    ==(left: i32, right: i32) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: i32, right: i32) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: i32, right: i32) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: i32, right: i32) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: i32, right: i32) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: i32, right: i32) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for i64 {
+    +(left: i64, right: i64) -> i64 { __g1_int_checked_add(left, right) }
+    -(left: i64, right: i64) -> i64 { let result = __g1_int_wrapping_sub(left, right); handle __g1_int_less(right, 0) { 0 => handle __g1_int_greater(result, left) { 0 => result; _ => __g1_abort() }; _ => handle __g1_int_less(result, left) { 0 => result; _ => __g1_abort() } } }
+    *(left: i64, right: i64) -> i64 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: i64, right: i64) -> i64 { __g1_int_checked_div(left, right) }
+    %(left: i64, right: i64) -> i64 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for i64 {
+    +(value: i64) -> i64 { value }
+    -(value: i64) -> i64 { 0 - value }
+}
+pub impl Comparison for i64 {
+    ==(left: i64, right: i64) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: i64, right: i64) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: i64, right: i64) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: i64, right: i64) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: i64, right: i64) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: i64, right: i64) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for i128 {
+    +(left: i128, right: i128) -> i128 { __g1_int_checked_add(left, right) }
+    -(left: i128, right: i128) -> i128 { let result = __g1_int_wrapping_sub(left, right); handle __g1_int_less(right, 0) { 0 => handle __g1_int_greater(result, left) { 0 => result; _ => __g1_abort() }; _ => handle __g1_int_less(result, left) { 0 => result; _ => __g1_abort() } } }
+    *(left: i128, right: i128) -> i128 { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: i128, right: i128) -> i128 { __g1_int_checked_div(left, right) }
+    %(left: i128, right: i128) -> i128 { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for i128 {
+    +(value: i128) -> i128 { value }
+    -(value: i128) -> i128 { 0 - value }
+}
+pub impl Comparison for i128 {
+    ==(left: i128, right: i128) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: i128, right: i128) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: i128, right: i128) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: i128, right: i128) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: i128, right: i128) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: i128, right: i128) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for isize {
+    +(left: isize, right: isize) -> isize { __g1_int_checked_add(left, right) }
+    -(left: isize, right: isize) -> isize { let result = __g1_int_wrapping_sub(left, right); handle __g1_int_less(right, 0) { 0 => handle __g1_int_greater(result, left) { 0 => result; _ => __g1_abort() }; _ => handle __g1_int_less(result, left) { 0 => result; _ => __g1_abort() } } }
+    *(left: isize, right: isize) -> isize { handle left { 0 => 0; _ => { let result = __g1_int_wrapping_mul(left, right); handle __g1_int_equal(__g1_int_checked_div(result, left), right) { 0 => __g1_abort(); _ => result } } } }
+    /(left: isize, right: isize) -> isize { __g1_int_checked_div(left, right) }
+    %(left: isize, right: isize) -> isize { __g1_int_wrapping_sub(left, __g1_int_wrapping_mul(__g1_int_checked_div(left, right), right)) }
+}
+pub impl NumericPrefix for isize {
+    +(value: isize) -> isize { value }
+    -(value: isize) -> isize { 0 - value }
+}
+pub impl Comparison for isize {
+    ==(left: isize, right: isize) -> Bool { predicate(__g1_int_equal(left, right)) }
+    !=(left: isize, right: isize) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
+    <(left: isize, right: isize) -> Bool { predicate(__g1_int_less(left, right)) }
+    <=(left: isize, right: isize) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
+    >(left: isize, right: isize) -> Bool { predicate(__g1_int_greater(left, right)) }
+    >=(left: isize, right: isize) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
+}
+
+pub impl Arithmetic for f32 {
+    +(left: f32, right: f32) -> f32 { __g1_f32_add(left, right) }
+    -(left: f32, right: f32) -> f32 { __g1_f32_sub(left, right) }
+    *(left: f32, right: f32) -> f32 { __g1_f32_mul(left, right) }
+    /(left: f32, right: f32) -> f32 { __g1_f32_div(left, right) }
+    %(left: f32, right: f32) -> f32 { __g1_f32_rem(left, right) }
+}
+pub impl NumericPrefix for f32 {
+    +(value: f32) -> f32 { value }
+    -(value: f32) -> f32 { __g1_f32_neg(value) }
+}
+pub impl Comparison for f32 {
+    ==(left: f32, right: f32) -> Bool { predicate(__g1_f32_eq(left, right)) }
+    !=(left: f32, right: f32) -> Bool { predicate(__g1_f32_ne(left, right)) }
+    <(left: f32, right: f32) -> Bool { predicate(__g1_f32_lt(left, right)) }
+    <=(left: f32, right: f32) -> Bool { predicate(__g1_f32_le(left, right)) }
+    >(left: f32, right: f32) -> Bool { predicate(__g1_f32_gt(left, right)) }
+    >=(left: f32, right: f32) -> Bool { predicate(__g1_f32_ge(left, right)) }
+}
+
+pub impl Arithmetic for f64 {
+    +(left: f64, right: f64) -> f64 { __g1_f64_add(left, right) }
+    -(left: f64, right: f64) -> f64 { __g1_f64_sub(left, right) }
+    *(left: f64, right: f64) -> f64 { __g1_f64_mul(left, right) }
+    /(left: f64, right: f64) -> f64 { __g1_f64_div(left, right) }
+    %(left: f64, right: f64) -> f64 { __g1_f64_rem(left, right) }
+}
+pub impl NumericPrefix for f64 {
+    +(value: f64) -> f64 { value }
+    -(value: f64) -> f64 { __g1_f64_neg(value) }
+}
+pub impl Comparison for f64 {
+    ==(left: f64, right: f64) -> Bool { predicate(__g1_f64_eq(left, right)) }
+    !=(left: f64, right: f64) -> Bool { predicate(__g1_f64_ne(left, right)) }
+    <(left: f64, right: f64) -> Bool { predicate(__g1_f64_lt(left, right)) }
+    <=(left: f64, right: f64) -> Bool { predicate(__g1_f64_le(left, right)) }
+    >(left: f64, right: f64) -> Bool { predicate(__g1_f64_gt(left, right)) }
+    >=(left: f64, right: f64) -> Bool { predicate(__g1_f64_ge(left, right)) }
+}
+
+pub impl Comparison for char {
+    ==(left: char, right: char) -> Bool { predicate(__g1_int_equal(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
+    !=(left: char, right: char) -> Bool { inverse_predicate(__g1_int_equal(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
+    <(left: char, right: char) -> Bool { predicate(__g1_int_less(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
+    <=(left: char, right: char) -> Bool { inverse_predicate(__g1_int_greater(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
+    >(left: char, right: char) -> Bool { predicate(__g1_int_greater(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
+    >=(left: char, right: char) -> Bool { inverse_predicate(__g1_int_less(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
+}
 
 pub enum Ordering { Less, Equal, Greater }
 pub struct Range<T> { start: T, end: T }
@@ -2053,9 +2390,9 @@ pub impl Clone for String {
 }
 pub impl<A, E> Clone for Result<A, E> where A: Clone, E: Clone {
     clone(value: &Result<A, E>) -> Result<A, E> {
-        handle *value is Result::Ok(_) {
-            true => Result::Ok(Clone::clone(&value.0)),
-            false => Result::Err(Clone::clone(&value.0)),
+        handle *value {
+            Result::Ok(_) => Result::Ok(Clone::clone(&value.0)),
+            Result::Err(_) => Result::Err(Clone::clone(&value.0)),
         }
     }
 }
@@ -2452,7 +2789,7 @@ impl Hasher {
         // Hash accumulation is deliberately wrapping.  A deterministic hasher
         // must remain total for every sequence of caller-provided words rather
         // than exposing arithmetic overflow as a collection operation failure.
-        (*value).state = __g1_int_wrapping_add((*value).state * 33, input);
+        (*value).state = __g1_int_wrapping_add(__g1_int_wrapping_mul((*value).state, 33), input);
     }
 
     pub fn finish(value: Self) -> usize { value.state }
@@ -2910,16 +3247,16 @@ impl<A, E> Result<A, E> {
     }
 
     pub fn as_ref<'a>(value: &'a Self) -> Result<&'a A, &'a E> {
-        handle *value is Result::Ok(_) {
-            true => Result::Ok(&value.0),
-            false => Result::Err(&value.0),
+        handle *value {
+            Result::Ok(_) => Result::Ok(&value.0),
+            Result::Err(_) => Result::Err(&value.0),
         }
     }
 
     pub fn as_mut<'a>(value: &'a mut Self) -> Result<&'a mut A, &'a mut E> {
-        handle *value is Result::Ok(_) {
-            true => Result::Ok(&mut value.0),
-            false => Result::Err(&mut value.0),
+        handle *value {
+            Result::Ok(_) => Result::Ok(&mut value.0),
+            Result::Err(_) => Result::Err(&mut value.0),
         }
     }
 }
@@ -2953,9 +3290,9 @@ impl<T> Option<T> {
     // the public affine contract. The returned reference borrows the resident.
     pub fn get_or_insert<'a>(target: &'a mut Self, value: T) -> &'a mut T
         where T: Use<[0, 1]> {
-        handle *target is Result::Ok(_) {
-            true => &mut target.0,
-            false => {
+        handle *target {
+            Result::Ok(_) => &mut target.0,
+            Result::Err(_) => {
                 *target = Some(value);
                 &mut target.0
             },
@@ -2968,8 +3305,8 @@ impl<T> Option<T> {
     // not invoke it.
     pub fn get_or_insert_with<'a, F>(target: &'a mut Self, make: F) -> &'a mut T
         where F: Fn<(), Output = T>, F: Use<[0, 1]> {
-        handle *target is Result::Ok(_) {
-            true => &mut target.0,
+        handle *target {
+            Result::Ok(_) => &mut target.0,
             false => {
                 *target = Some(make());
                 &mut target.0
@@ -2982,8 +3319,8 @@ impl<T> Option<T> {
     // to erase on the occupied path, so `T` needs only its normal Default bound.
     pub fn get_or_insert_default<'a>(target: &'a mut Self) -> &'a mut T
         where T: Default {
-        handle *target is Result::Ok(_) {
-            true => &mut target.0,
+        handle *target {
+            Result::Ok(_) => &mut target.0,
             false => {
                 *target = Some(default_value<T>());
                 &mut target.0

@@ -75,22 +75,173 @@ full workspace/source integration gates for major migration milestones.
 Migration checkpoint: `evaluation_mir.rs` normalizes Typed Core into a separate
 immutable product with explicit operands, places, deferred regions, statement
 disposition, terminal exits and a structural scheduling validator.
-`control_mir.rs` composes migrated operations into a CFG with lexical scopes,
-typed joins and explicit invocation return continuations. Its validator checks
-edge types and must-definition availability across branches. A production
-adapter consumes Control MIR without inspecting Core for the currently
-migrated scalar/tuple/direct-call domain; abstract destruction still goes
-through existing ownership import and concrete destruction elaboration.
+`control_mir.rs` composes operations into a CFG with lexical scopes, typed
+joins, places, labels, handlers, closure bodies and invocation return
+continuations. Its validator checks edge types and must-definition availability
+across branches. `ownership_mir.rs` consumes that CFG into a distinct generic
+owner-operation vocabulary, including moves, copies, loans, temporary cleanup,
+capture environments and active/suspended owner dispositions. Copying a call
+argument preserves the original suspended owner; moving it transfers that
+owner. Its validator checks SSA availability and operation types, generic copy
+authority, loan identity/mutability, sealed capture metadata, must-initialized
+owner uses, and independently recomputed cleanup and suspension inventories.
+Mutually exclusive successor arguments consume owners only on their selected
+edge. It still imports source PlaceFlow proof; independent partial-move-path,
+overlapping-loan and invocation-budget validation is not complete.
 
-Focused validation passes 967 source normalization, control execution, service
-and destruction tests, plus five Control MIR validator tests. No full suite is
-claimed for this checkpoint. Handlers, labels, closure environments, places and
-resumption capabilities remain on legacy lowering. The next integration
-milestone must move these hard control paths through the new stages, establish
-explicit owner dispositions/unwind contracts, and remove the corresponding
-source-shape lowerers. Full phase type/ownership/dynamic-control certification,
-source-language implementations, and Ownership/Specialized/Cleanup/Runtime MIR
-remain outstanding.
+`specialized_mir.rs` materializes a distinct concrete language directly from
+Ownership MIR. Its demand walk follows that graph, including nested closures,
+implicit destruction and native-resident dependencies, without inspecting Core
+expressions. Static calls retain canonical executable instance identities;
+trait method selection and associated type/effect normalization finish before
+the product is published. Concrete nominal layouts, handler contracts and
+closure capture ABIs are independently checked. Applying a higher-ranked
+callable binder creates body-local regions while nested callable binders remain
+intact. The program validator checks cross-instance call signatures.
+
+`cleanup_mir.rs` now consumes the specialized graph into its own language.
+Discard and lexical disposition intents become concrete, interned cleanup
+plans. Those plans protect outgoing values, end loans, guard destruction with
+logical initialization flags, and end owner storage. Whole and projected moves,
+replacement, construction and selected CFG edges carry checked flag
+transitions. Returns carry complete guarded residual cleanup; suspended calls
+and performances retain their exact residual inventories. Every frame also
+has a complete guarded abandonment plan, including unnamed temporary owners.
+Captures have separate, sealed reverse-order environment destruction, and host
+boundaries retain selected native-resident operations. Destruction programs
+contain closed types, concrete hook instances and active structural layouts;
+associated field types normalize before trivial-destruction decisions. Their
+execution order is custom hook followed by initialized fields in reverse order.
+
+Evaluation, Control, Ownership, Specialized and Cleanup lowering and validation
+are mandatory in production; the source-shape fallback and the temporary
+Specialized-to-backend bypass have been removed. The Cleanup validator checks
+its own CFG, flag transitions, protected return chains, environment plans and
+independently recomputed suspension/nonlocal inventories. It still imports the
+frontend's source ownership proof rather than completing the Ownership gaps
+listed above. `runtime_mir.rs` now consumes Cleanup directly into a distinct
+closed storage language, with its own CFG, storage/control validator, capture
+and invocation ABI, and independently recomputed per-transfer retained-owner
+and cancellation inventories. Its frame contracts supply backend ABI operands
+and guarded frame cleanup. The Cleanup-to-backend bypass has been removed;
+Runtime lowering and validation are mandatory. This Runtime stage is still
+being completed and debugged: dynamic transfer/initialization semantics need
+further work. Array destruction now lowers to an ordinary reverse CFG loop:
+read the extent, decrement a private activation-local counter, probe the
+element's initialization state, move a live element out, and call its selected
+destructor. The VM's array leaves perform only checked storage operations;
+they do not select or execute destruction algorithms. Counter slots are
+distinct from source bindings and cannot overwrite parameters or source
+storage. Copied outgoing operands now have explicit independent temporaries.
+Direct, indirect and host calls now lower to consuming call opcodes. Runtime
+and bytecode verification reject repeated carriers and reads after handoff.
+The callee's native homes are installed before outgoing homes are disarmed;
+an indirect callable receiver remains borrowed, separate from its consumed
+parameters. Host calls retain their exact capability and native-resident ABI.
+Effect payload handoff, saved-frame ownership and native projected-hole
+initialization still need work. These are explicit protocol gaps, not a
+reason to defer construction of the final compiler language.
+
+`vm_lir.rs` now consumes Runtime MIR directly into concrete VM registers,
+machine leaves and symbolic basic blocks. Parallel branch arguments become
+explicit edge blocks; cyclic assignments use the shared machine move scheduler.
+Capture/parameter and abandonment declarations come from the checked Runtime
+frame, and callable instances retain canonical link-time environment identities.
+The product owns no earlier MIR body. The Runtime-to-legacy-MIR body adapter is
+removed from production and from Runtime itself. A bounded machine-leaf
+converter is shared with the legacy fixture emitter; it performs no source
+lowering, specialization or destruction planning.
+
+VM LIR checks symbolic targets, handler-layout constraints, dedicated control
+slots and consuming call vocabulary. A VM-owned metadata walk independently
+rejects generic types/consts, open effect rows and delayed projections throughout
+registers, layouts, capture environments and all typed machine operands,
+including unreachable instructions. Legacy generic artifact compatibility does
+not weaken this production boundary. Its full ABI/storage validation reuses
+the independent machine verifier after mechanical relocation. Bytecode emission
+only lays out blocks, resolves symbols, and constructs the artifact envelope;
+publication still verifies the final image and its explicit host authority.
+The initial VM LIR tests exposed a missing entrypoint result-ABI check, now
+enforced on every normal bytecode return (separately from resumption returns).
+Return summaries include handler cancellation and externally enterable lexical
+label continuations; lowering freezes them before mechanical emission. Lexical
+leaves carry the retained handler-clause prefix composed by Control MIR, and
+Runtime validation rejects an absent leave-depth contract. The compilation
+request charges reachable backend work before LIR lowering and verification.
+The connected-pipeline source run passes all 48 `gsc2` tests, including the
+normalized-world registry. That run predates the subsequent ownership and
+closed-LIR metadata hardening; its coverage is not a full-workspace green claim.
+Legacy generic-MIR/destruction materialization helpers are test-only, not an
+alternative production route.
+
+Callable value ownership now derives from the sealed capture environment,
+separately from the invocation quantity of each copy. Reassigned bindings
+intersect the permissions of their possible resident environments, preventing
+an initially copyable closure from authorizing a copy of a later affine capture.
+A dereference used only to name a projected place is an ownership view even
+when its referent is copyable; it must not introduce a whole-referent destructor.
+Source drop counters distinguish this from an explicit `let copy = *reference`.
+The copied-closure regression and the new projection-versus-copy regression
+pass with exact destruction counts and unchanged execution limits. The broad
+standard-library rerun passes 155/156; its remaining BLAKE3 high-counter fixture
+fails earlier Typed Core inference. The completed ownership-hardening rerun
+after the reassignment regression fix passes all 187 unit tests, three Cleanup
+execution tests, six Ownership tests, eight specialization tests and 21
+library-boundary tests. Destruction remains 95/102 and the standard library
+155/156; this checkpoint does not claim a green workspace gate.
+
+The Cleanup checkpoint passes fifteen phase-specific validator/contract tests,
+three Cleanup execution regressions and eight specialization execution tests (including effects and higher-ranked
+callbacks), 21 library-boundary tests, six ownership transition tests and ten
+static-data boundary tests. The first complete Cleanup library gate preserves
+the 150/153 standard-library baseline and 89/96 destruction baseline: the latter
+has six legacy scalar-Boolean `is` refinement cases and one nested label-capture
+case. The compiler's byte-buffer source integration passes; the full compiler
+source suite is being checked, and a full workspace gate is not claimed. That
+expanded gate exposed a specialization layout-cache bug: nested concrete
+instances of one enum declaration were conflated by a declaration-only
+recursion guard. Layout closure is now keyed and checked by full concrete type;
+the focused 154-unit-test gate and the minimized execution regression pass.
+The database integration now compiles, independently verifies and executes
+successfully. Its next failure exposed a separate library bug: the hasher used
+checked multiplication despite its wrapping-arithmetic contract. Both hash
+operations now wrap explicitly; a maximal-word regression and the previously
+failing string/hash-collision integration pass. The full 48-case source suite
+and updated library gates are being rerun; their complete results are not yet
+claimed. The completed Cleanup source rerun passes 42/48; all six remaining
+failures report native allocation release errors. The updated library gates
+pass 152/154 standard-library tests, 89/96 destruction tests and 10/10 static
+data tests. The initial Runtime gate passes 164 unit tests (including ten new
+Runtime contract mutations), three Cleanup execution regressions, eight
+specialization executions and 21 library-boundary tests. A native release trace
+then exposed duplicate replacement cleanup in the storage adapter. Removing
+the redundant insertion passes the focused native-resident replacement test,
+the database changed-branch case, package-session integration, all three
+registry integrations and the request-publication batch. These six source
+regressions pass before the consuming-call refinement; its database rerun also
+passes. Six new source executions
+cover flat, nested and empty arrays, captured-array destruction, cancellation,
+and residual cleanup after owning array patterns. Fourteen Runtime contract
+tests pass, including counter-slot and index-type mutations and independent
+copied arguments and rejecting consumed-argument reuse. Three VM array-storage
+tests pass round-trip encoding, move holes, repeated-move rejection and
+out-of-bounds checks; three consuming-call tests check slot retirement,
+duplicate-carrier rejection and host authority. The earlier consuming-call gates pass
+168 unit tests, 153/155 standard-library tests, 95/102 destruction tests, and
+160/163 VM tests. The remaining VM failures are two direct legacy-lowering
+fixtures and one legacy partial-leave proof mismatch; the destruction gate has
+the same seven failures. The Runtime ABI checker now accepts a diverging
+destructor target without demanding an impossible normal result. No fully
+green backend/workspace gate is claimed.
+The experimental direct-local partial
+path checker is test-only after exposing false positives on compiler sources;
+PlaceFlow remains the production proof for that obligation. The
+standard-library truth values remain polymorphic `Ok(())` / `Err(())`; closing
+the `Bool` alias does not close the absent variant of either value. The current
+sequence is to finish the end-to-end pipeline first, then close explicit gaps
+using whole-pipeline failures and independent mutation tests. Remaining
+Ownership proof gaps and refinement-pack work remain tracked; the completed
+phase sequence is not a claim that those semantics have already been repaired.
 
 ## 2. Identity and storage model
 

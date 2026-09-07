@@ -476,6 +476,14 @@ pub enum VmInstruction {
         dst: u32,
         value: u32,
     },
+    /// Read the extent without copying or consuming the array.
+    ArrayLen { dst: u32, value: u32 },
+    /// Assign a compiler-owned, activation-local loop counter.
+    StoreUsize { dst: u32, value: u32 },
+    /// Probe a dynamically indexed move hole.
+    ArrayElementIsInitialized { dst: u32, value: u32, index: u32 },
+    /// Move one element out, leaving a hole in the owning array.
+    TakeArrayElement { dst: u32, value: u32, index: u32 },
     ArrayGetBorrowShared {
         dst: u32,
         value: u32,
@@ -747,6 +755,25 @@ pub enum VmInstruction {
         operation: u32,
         arguments: Vec<u32>,
     },
+    /// Consumes every outgoing carrier before capturing the continuation.
+    PerformOwned {
+        dst: u32,
+        effect: DefKey,
+        effect_arguments: Vec<VmGenericArgument>,
+        operation: u32,
+        arguments: Vec<u32>,
+    },
+    /// Payload destinations are observation-only until explicitly claimed.
+    InstallHandlerOwned {
+        effect: DefKey,
+        effect_arguments: Vec<VmGenericArgument>,
+        operation: u32,
+        payload_destinations: Vec<u32>,
+        resume_type: VmType,
+        continuation: VmContinuationPolicy,
+        target: u32,
+    },
+    ClaimEffectPayloads { payloads: Vec<u32> },
     /// Install one lexical handler frame. The frame is active while its
     /// protected continuation executes; `continuation` specifies whether a
     /// suspended snapshot is consumed or retained for replay.
@@ -1062,6 +1089,19 @@ pub enum VmInstruction {
         right: u32,
         op: VmCompare,
     },
+    /// Consuming Runtime ABI. Legacy Call remains a test-compatibility opcode.
+    CallOwned { dst: u32, callee: DefKey, arguments: Vec<u32> },
+    CallIndirectOwned { dst: u32, callee: u32, arguments: Vec<u32> },
+    HostCallOwned {
+        dst: u32,
+        capability: String,
+        symbol: String,
+        source_contract: Digest,
+        parameters: Vec<VmType>,
+        result: VmType,
+        resident_operations: Vec<VmNativeResident>,
+        arguments: Vec<u32>,
+    },
     Call {
         dst: u32,
         callee: DefKey,
@@ -1131,6 +1171,33 @@ pub enum VmInstruction {
     /// A checked terminal for MIR's impossible control-flow edge. It has no
     /// operands and cannot fall through into an unrelated instruction.
     Trap,
+}
+impl VmInstruction {
+    pub(crate) fn with_owned_effect_payloads(self) -> Self {
+        match self {
+            Self::Perform { dst, effect, effect_arguments, operation, arguments } =>
+                Self::PerformOwned { dst, effect, effect_arguments, operation, arguments },
+            Self::InstallHandler { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target } =>
+                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target },
+            value => value,
+        }
+    }
+    fn with_consumed_arguments(self) -> Self {
+        match self {
+            Self::Call { dst, callee, arguments } => Self::CallOwned { dst, callee, arguments },
+            Self::CallIndirect { dst, callee, arguments } => Self::CallIndirectOwned { dst, callee, arguments },
+            Self::HostCall { dst, capability, symbol, source_contract, parameters, result, resident_operations, arguments } =>
+                Self::HostCallOwned { dst, capability, symbol, source_contract, parameters, result, resident_operations, arguments },
+            _ => unreachable!("only a call ABI can consume prepared arguments"),
+        }
+    }
+    fn consumed_arguments(&self) -> Option<&[u32]> {
+        match self {
+            Self::CallOwned { arguments, .. } | Self::CallIndirectOwned { arguments, .. }
+            | Self::HostCallOwned { arguments, .. } => Some(arguments),
+            _ => None,
+        }
+    }
 }
 /// Canonical, artifact-safe ownership evidence attached to a nonlocal leave.
 /// Move paths and lexical bindings are numeric identities frozen by MIR. Text
@@ -2079,7 +2146,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 105 retains environment destruction targets and executes callable
 /// cleanup through ordinary bytecode over residual captured storage.
 /// Schema 106 seals whole-frame destruction plans for abandoned execution.
-pub const STAGE0_VM_SCHEMA: u32 = 106;
+/// Schema 107 makes call/effect carrier consumption and handler payload
+/// claims explicit; legacy fixture opcodes keep their original meanings.
+pub const STAGE0_VM_SCHEMA: u32 = 107;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3190,7 +3259,7 @@ fn retained_handler_depth(instructions: &[MirInstruction]) -> u32 {
 /// it never makes a terminal Trap fall through to a syntactically following
 /// Return. Keeping this small reachability proof in the emitter prevents a
 /// coerced bottom tail from being advertised as a normal Unit return.
-fn vm_instructions_may_return(instructions: &[VmInstruction]) -> bool {
+pub(crate) fn vm_instructions_may_return(instructions: &[VmInstruction]) -> bool {
     !reachable_return_values(instructions).is_empty()
 }
 
@@ -3234,7 +3303,7 @@ fn reachable_return_values(instructions: &[VmInstruction]) -> Vec<u32> {
 }
 
 fn edge_length(arguments: &[MirLocal], target: &crate::mir::MirBlock) -> u32 {
-    parallel_edge_transfers(arguments, target)
+    parallel_edge_transfers(arguments, &target.parameters)
         .iter()
         .map(|transfer| match transfer {
             EdgeTransfer::Direct { .. } => 1,
@@ -3264,7 +3333,19 @@ fn emit_edge(
     registers: &mut Vec<VmType>,
     instructions: &mut Vec<VmInstruction>,
 ) {
-    for transfer in parallel_edge_transfers(arguments, target) {
+    emit_parallel_moves(arguments, &target.parameters, registers, instructions);
+    instructions.push(VmInstruction::Jump { target: destination });
+}
+
+/// Shared machine-level parallel assignment scheduler; it knows no source
+/// semantics and is also used when VM LIR splits branch edges.
+pub(crate) fn emit_parallel_moves(
+    arguments: &[MirLocal],
+    destinations: &[MirLocal],
+    registers: &mut Vec<VmType>,
+    instructions: &mut Vec<VmInstruction>,
+) {
+    for transfer in parallel_edge_transfers(arguments, destinations) {
         match transfer {
             // An edge argument transfers ownership from its predecessor into
             // the target block parameter. The predecessor terminates here, so
@@ -3295,9 +3376,6 @@ fn emit_edge(
             }
         }
     }
-    instructions.push(VmInstruction::Jump {
-        target: destination,
-    });
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3317,11 +3395,11 @@ enum EdgeTransfer {
 /// stable across host iteration order.
 fn parallel_edge_transfers(
     arguments: &[MirLocal],
-    target: &crate::mir::MirBlock,
+    destinations: &[MirLocal],
 ) -> Vec<EdgeTransfer> {
     let mut pending = arguments
         .iter()
-        .zip(&target.parameters)
+        .zip(destinations)
         .filter_map(|(&source, &destination)| (source != destination).then_some((destination, source)))
         .collect::<BTreeMap<_, _>>();
     let mut transfers = Vec::new();
@@ -3467,7 +3545,7 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         callable_environments,
     })
 }
-fn vm_nominal_copy_descriptor(
+pub(crate) fn vm_nominal_copy_descriptor(
     descriptor: &crate::mir::MirNominalCopyDescriptor,
 ) -> Result<VmNominalCopyDescriptor, VmArtifactError> {
     Ok(VmNominalCopyDescriptor {
@@ -3494,7 +3572,7 @@ fn vm_nominal_copy_descriptor(
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
-fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
+pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
     match value {
         // Bottom has no inhabitant at runtime. It still needs a structural
         // register type so a terminal `Perform` can cross a caller-installed
@@ -4230,7 +4308,7 @@ fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
     }
 }
 
-fn vm_nominal_copy_descriptor_key(descriptor: &VmNominalCopyDescriptor) -> Vec<u8> {
+pub(crate) fn vm_nominal_copy_descriptor_key(descriptor: &VmNominalCopyDescriptor) -> Vec<u8> {
     let mut output = descriptor.definition.0.as_bytes().to_vec();
     output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
     for argument in &descriptor.arguments {
@@ -5110,7 +5188,7 @@ impl<'a> Decoder<'a> {
                 subject: self.u32()?,
                 pattern: self.pattern()?,
             }),
-            41 => {
+            opcode @ (41 | 208) => {
                 let dst = self.u32()?;
                 let effect = self.def_key()?;
                 let effect_arguments = self.vm_generic_arguments()?;
@@ -5120,13 +5198,14 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     arguments.push(self.u32()?);
                 }
-                Ok(VmInstruction::Perform {
+                let instruction = VmInstruction::Perform {
                     dst,
                     effect,
                     effect_arguments,
                     operation,
                     arguments,
-                })
+                };
+                Ok(if opcode == 208 { instruction.with_owned_effect_payloads() } else { instruction })
             }
             42 => Ok(VmInstruction::ProjectTuple {
                 dst: self.u32()?,
@@ -5143,7 +5222,7 @@ impl<'a> Decoder<'a> {
                 element_type: self.vm_type()?,
             }),
             43 => Ok(VmInstruction::Trap),
-            44 => {
+            opcode @ (44 | 209) => {
                 let effect = self.def_key()?;
                 let effect_arguments = self.vm_generic_arguments()?;
                 let operation = self.u32()?;
@@ -5153,7 +5232,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..payload_count {
                     payload_destinations.push(self.u32()?);
                 }
-                Ok(VmInstruction::InstallHandler {
+                let instruction = VmInstruction::InstallHandler {
                     effect,
                     effect_arguments,
                     operation,
@@ -5170,7 +5249,14 @@ impl<'a> Decoder<'a> {
                         }
                     },
                     target: self.u32()?,
-                })
+                };
+                Ok(if opcode == 209 { instruction.with_owned_effect_payloads() } else { instruction })
+            }
+            210 => {
+                let count = self.count("claimed effect payloads", MAX_DECODE_REGISTERS)?;
+                let mut payloads = Vec::with_capacity(count);
+                for _ in 0..count { payloads.push(self.u32()?); }
+                Ok(VmInstruction::ClaimEffectPayloads { payloads })
             }
             45 => Ok(VmInstruction::UninstallHandler),
             198 => Ok(VmInstruction::CompleteHandler { value: self.u32()? }),
@@ -5225,7 +5311,7 @@ impl<'a> Decoder<'a> {
                     cleanup: self.cleanup_proof()?,
                 })
             }
-            56 => {
+            opcode @ (56 | 207) => {
                 let dst = self.u32()?;
                 let capability = self.text()?;
                 let symbol = self.text()?;
@@ -5254,7 +5340,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     arguments.push(self.u32()?);
                 }
-                Ok(VmInstruction::HostCall {
+                let instruction = VmInstruction::HostCall {
                     dst,
                     capability,
                     symbol,
@@ -5263,7 +5349,8 @@ impl<'a> Decoder<'a> {
                     result,
                     resident_operations,
                     arguments,
-                })
+                };
+                Ok(if opcode == 207 { instruction.with_consumed_arguments() } else { instruction })
             }
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             104 => self.i64_arithmetic(|dst, left, right| VmInstruction::WrappingAddI64 {
@@ -5353,7 +5440,7 @@ impl<'a> Decoder<'a> {
             }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
-            6 => {
+            opcode @ (6 | 205) => {
                 let dst = self.u32()?;
                 let callee = self.def_key()?;
                 let count = self.count("call arguments", MAX_DECODE_REGISTERS)?;
@@ -5361,11 +5448,12 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     arguments.push(self.u32()?);
                 }
-                Ok(VmInstruction::Call {
+                let instruction = VmInstruction::Call {
                     dst,
                     callee,
                     arguments,
-                })
+                };
+                Ok(if opcode == 205 { instruction.with_consumed_arguments() } else { instruction })
             }
             7 => {
                 let dst = self.u32()?;
@@ -5555,6 +5643,10 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
+            204 => Ok(VmInstruction::StoreUsize { dst: self.u32()?, value: self.u32()? }),
+            201 => Ok(VmInstruction::ArrayLen { dst: self.u32()?, value: self.u32()? }),
+            202 => Ok(VmInstruction::ArrayElementIsInitialized { dst: self.u32()?, value: self.u32()?, index: self.u32()? }),
+            203 => Ok(VmInstruction::TakeArrayElement { dst: self.u32()?, value: self.u32()?, index: self.u32()? }),
             80 => Ok(VmInstruction::BytesLen {
                 dst: self.u32()?,
                 value: self.u32()?,
@@ -5807,7 +5899,7 @@ impl<'a> Decoder<'a> {
                 target: self.u32()?,
                 destination: self.u32()?,
             }),
-            30 => {
+            opcode @ (30 | 206) => {
                 let dst = self.u32()?;
                 let callee = self.u32()?;
                 let count = self.count("indirect-call arguments", MAX_DECODE_REGISTERS)?;
@@ -5815,11 +5907,12 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     arguments.push(self.u32()?);
                 }
-                Ok(VmInstruction::CallIndirect {
+                let instruction = VmInstruction::CallIndirect {
                     dst,
                     callee,
                     arguments,
-                })
+                };
+                Ok(if opcode == 206 { instruction.with_consumed_arguments() } else { instruction })
             }
             31 => Ok(VmInstruction::Jump {
                 target: self.u32()?,
@@ -6114,7 +6207,8 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
     verify_program_effect_operation_abis(&program.functions)?;
     for function in program.functions.values() {
         for instruction in &function.instructions {
-            if let VmInstruction::Call {
+            if let VmInstruction::CallOwned { dst, callee, arguments }
+            | VmInstruction::Call {
                 dst,
                 callee,
                 arguments,
@@ -6332,7 +6426,13 @@ fn verify_effect_operation_specialization(
 ) -> Result<(), VmArtifactError> {
     for instruction in &function.instructions {
         match instruction {
-            VmInstruction::Perform {
+            VmInstruction::PerformOwned {
+                dst,
+                effect_arguments,
+                arguments,
+                ..
+            }
+            | VmInstruction::Perform {
                 dst,
                 effect_arguments,
                 arguments,
@@ -6361,7 +6461,13 @@ fn verify_effect_operation_specialization(
                     });
                 }
             }
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
+                effect_arguments,
+                payload_destinations,
+                resume_type,
+                ..
+            }
+            | VmInstruction::InstallHandler {
                 effect_arguments,
                 payload_destinations,
                 resume_type,
@@ -6404,11 +6510,18 @@ fn verify_effect_operation_specialization(
 fn verify_program_effect_operation_abis(
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Result<(), VmArtifactError> {
-    let mut operations = Vec::<(DefKey, Vec<VmGenericArgument>, u32, Vec<VmType>, VmType)>::new();
+    let mut operations = Vec::<(DefKey, Vec<VmGenericArgument>, u32, Vec<VmType>, VmType, bool)>::new();
     for function in functions.values() {
         for instruction in &function.instructions {
             let (effect, effect_arguments, operation, payloads, resume_type) = match instruction {
-                VmInstruction::Perform {
+                VmInstruction::PerformOwned {
+                    dst,
+                    effect,
+                    effect_arguments,
+                    operation,
+                    arguments,
+                }
+                | VmInstruction::Perform {
                     dst,
                     effect,
                     effect_arguments,
@@ -6424,7 +6537,15 @@ fn verify_program_effect_operation_abis(
                         .collect::<Result<Vec<_>, _>>()?,
                     register_type(function, *dst)?,
                 ),
-                VmInstruction::InstallHandler {
+                VmInstruction::InstallHandlerOwned {
+                    effect,
+                    effect_arguments,
+                    operation,
+                    payload_destinations,
+                    resume_type,
+                    ..
+                }
+                | VmInstruction::InstallHandler {
                     effect,
                     effect_arguments,
                     operation,
@@ -6443,21 +6564,22 @@ fn verify_program_effect_operation_abis(
                 ),
                 _ => continue,
             };
-            if let Some((_, _, _, expected_payloads, expected_resume_type)) = operations
+            let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
+            if let Some((_, _, _, expected_payloads, expected_resume_type, expected_owned_payloads)) = operations
                 .iter()
-                .find(|(known_effect, known_arguments, known_operation, _, _)| {
+                .find(|(known_effect, known_arguments, known_operation, _, _, _)| {
                     *known_effect == effect
                         && *known_arguments == effect_arguments
                         && *known_operation == operation
                 })
             {
-                if *expected_payloads != payloads || *expected_resume_type != resume_type {
+                if *expected_payloads != payloads || *expected_resume_type != resume_type || *expected_owned_payloads != owned_payloads {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "program effect operation ABI declarations disagree",
                     });
                 }
             } else {
-                operations.push((effect, effect_arguments, operation, payloads, resume_type));
+                operations.push((effect, effect_arguments, operation, payloads, resume_type, owned_payloads));
             }
         }
     }
@@ -6491,7 +6613,7 @@ fn callable_environment_target(environment: &VmCaptureEnvironment) -> DefKey {
 /// call is an edge; materializing a callable is also an edge because a later
 /// `CallIndirect` may invoke it. This never omits a host capability while
 /// avoiding declarations from wholly unreachable emitted instances.
-fn reachable_host_capabilities(
+pub(crate) fn reachable_host_capabilities(
     entry: DefKey,
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Vec<String> {
@@ -6507,7 +6629,8 @@ fn reachable_host_capabilities(
         };
         for instruction in &function.instructions {
             match instruction {
-                VmInstruction::HostCall { capability, resident_operations, .. } => {
+                VmInstruction::HostCallOwned { capability, resident_operations, .. }
+                | VmInstruction::HostCall { capability, resident_operations, .. } => {
                     capabilities.insert(capability.clone());
                     pending.extend(resident_operations.iter().filter_map(|resident| resident.destructor));
                 }
@@ -6515,7 +6638,7 @@ fn reachable_host_capabilities(
                     pending.push(*callee);
                     pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
                 }
-                VmInstruction::Call { callee, .. } => {
+                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. } => {
                     pending.push(*callee)
                 }
                 VmInstruction::DeclareFrameCleanup { actions } => {
@@ -6904,11 +7027,11 @@ fn declared_frame_cleanup(function: &VmFunction) -> Result<&[VmFrameDrop], VmArt
     Ok(found)
 }
 
-fn lower_instruction(
+pub(crate) fn lower_instruction(
     value: &MirInstruction,
     starts: &[u32],
 ) -> Result<VmInstruction, VmArtifactError> {
-    Ok(match value {
+    let instruction = match value {
         MirInstruction::ConstUnit { dst } => VmInstruction::ConstUnit { dst: dst.0 },
         MirInstruction::ConstI64 { dst, value } => VmInstruction::ConstI64 {
             dst: dst.0,
@@ -7060,6 +7183,10 @@ fn lower_instruction(
             dst: dst.0,
             value: value.0,
         },
+        MirInstruction::StoreUsize { dst, value } => VmInstruction::StoreUsize { dst: dst.0, value: value.0 },
+        MirInstruction::ArrayLen { dst, value } => VmInstruction::ArrayLen { dst: dst.0, value: value.0 },
+        MirInstruction::ArrayElementIsInitialized { dst, value, index } => VmInstruction::ArrayElementIsInitialized { dst: dst.0, value: value.0, index: index.0 },
+        MirInstruction::TakeArrayElement { dst, value, index } => VmInstruction::TakeArrayElement { dst: dst.0, value: value.0, index: index.0 },
         MirInstruction::BytesLen { dst, value } => VmInstruction::BytesLen {
             dst: dst.0,
             value: value.0,
@@ -7473,6 +7600,9 @@ fn lower_instruction(
                 .get(target.0 as usize)
                 .expect("validated MIR handler target exists"),
         },
+        MirInstruction::ClaimEffectPayloads { payloads } => VmInstruction::ClaimEffectPayloads {
+            payloads: payloads.iter().map(|value| value.0).collect(),
+        },
         MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
         MirInstruction::CompleteHandler { value } => VmInstruction::CompleteHandler { value: value.0 },
         MirInstruction::CaptureResumption { dst, .. } => {
@@ -7760,7 +7890,8 @@ fn lower_instruction(
         MirInstruction::GeChar { dst, left, right } => {
             compare_char(dst.0, left.0, right.0, VmCompare::GreaterEqual)
         }
-        MirInstruction::Call {
+        MirInstruction::CallOwned { dst, callee, arguments }
+        | MirInstruction::Call {
             dst,
             callee,
             arguments,
@@ -7770,7 +7901,8 @@ fn lower_instruction(
             callee: *callee,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
-        MirInstruction::HostCall {
+        MirInstruction::HostCallOwned { dst, capability, symbol, source_contract, parameters, result, resident_operations, arguments }
+        | MirInstruction::HostCall {
             dst,
             capability,
             symbol,
@@ -7867,7 +7999,8 @@ fn lower_instruction(
                 .expect("validated MIR label target exists"),
             destination: destination.0,
         },
-        MirInstruction::CallIndirect {
+        MirInstruction::CallIndirectOwned { dst, callee, arguments }
+        | MirInstruction::CallIndirect {
             dst,
             callee,
             arguments,
@@ -7876,7 +8009,10 @@ fn lower_instruction(
             callee: callee.0,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
-    })
+    };
+    Ok(if matches!(value, MirInstruction::CallOwned { .. } | MirInstruction::CallIndirectOwned { .. } | MirInstruction::HostCallOwned { .. }) {
+        instruction.with_consumed_arguments()
+    } else { instruction })
 }
 fn lower_pattern(value: &MirPattern) -> VmPattern {
     match value {
@@ -8124,6 +8260,9 @@ struct VerifierHandlerFrame {
     resume_type: VmType,
     continuation: VmContinuationPolicy,
     target: u32,
+    owned_payloads: bool,
+    /// None while active, false while testing a packet, true after its claim.
+    payload_claim: Option<bool>,
     /// A verifier join can represent several concrete one-shot suspensions
     /// reaching one shared handler body. Runtime execution has exactly one.
     continuations: Vec<VerifierContinuation>,
@@ -8319,6 +8458,21 @@ fn verify_source_storage_identity_contracts(function: &VmFunction) -> Result<(),
 }
 
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
+    verify_function_control(function, true).map(|_| ())
+}
+
+/// Infer the normal-return half of the ABI using the machine verifier's full
+/// handler/resumption state machine, not a static-PC approximation. During
+/// lowering only the provisional `returns` bit is ignored; all type, storage,
+/// control and authority checks are unchanged.
+pub(crate) fn infer_function_returns(function: &VmFunction) -> Result<bool, VmArtifactError> {
+    // A lexical label can be invoked by a descendant ordinary call. Its
+    // destination is therefore an externally enterable continuation, even
+    // when the local verifier worklist has no ordinary predecessor for it.
+    Ok(verify_function_control(function, false)? || vm_instructions_may_return(&function.instructions))
+}
+
+fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Result<bool, VmArtifactError> {
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -8327,14 +8481,26 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         validate_vm_type(register)?;
     }
     let declared_result = declared_result(function)?;
+    if check_return_flag && declared_result.is_some() {
+        // Label continuations may be entered by a descendant call rather
+        // than by this local worklist. Check that half of the result ABI too,
+        // including an entry function with no ordinary caller.
+        return_type(function)?;
+    }
     declared_frame_cleanup(function)?;
     validate_vm_nominal_copy_descriptors(&function.nominal_copy_descriptors)?;
     for instruction in &function.instructions {
         match instruction {
-            VmInstruction::Perform {
+            VmInstruction::PerformOwned {
+                effect_arguments, ..
+            }
+            | VmInstruction::Perform {
                 effect_arguments, ..
             }
             | VmInstruction::InstallHandler {
+                effect_arguments, ..
+            }
+            | VmInstruction::InstallHandlerOwned {
                 effect_arguments, ..
             } => validate_vm_generic_arguments(effect_arguments)?,
             _ => {}
@@ -8343,6 +8509,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     verify_label_brand_contracts(function)?;
     verify_source_storage_identity_contracts(function)?;
     verify_handler_entry_boundaries(function)?;
+    verify_handler_payload_claims(function)?;
     let mut initial = vec![None; function.registers.len()];
     if function.captures > function.parameters {
         return Err(VmArtifactError::CallArity {
@@ -8420,6 +8587,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         let mut states = incoming[pc].clone().expect("scheduled verifier state");
         let mut advances = true;
         let instruction = &function.instructions[pc];
+        if states.handlers.last().is_some_and(|frame| frame.payload_claim == Some(false))
+            && !allowed_before_payload_claim(instruction) {
+            return Err(VmArtifactError::HandlerStateMismatch);
+        }
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {
                 // `declared_result` above has already proven this is the
@@ -8653,6 +8824,42 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *value, VmType::Char)?;
                 read(&states, *value)?;
                 write(&mut states, *dst)?
+            }
+            VmInstruction::StoreUsize { dst, value } => {
+                expect_type(function, *dst, VmType::Usize)?;
+                expect_type(function, *value, VmType::Usize)?;
+                read(&states, *value)?;
+                if *dst < function.parameters || states.source_storage[*dst as usize] {
+                    return Err(VmArtifactError::MalformedEncoding { message: "runtime counter cannot overwrite source storage or parameters" });
+                }
+                states.registers[*dst as usize] = Some(true);
+            }
+            VmInstruction::ArrayLen { dst, value } => {
+                if !matches!(register_type(function, *value)?, VmType::Array(_)) {
+                    return Err(VmArtifactError::MalformedEncoding { message: "array length requires an array" });
+                }
+                expect_type(function, *dst, VmType::Usize)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayElementIsInitialized { dst, value, index }
+            | VmInstruction::TakeArrayElement { dst, value, index } => {
+                let VmType::Array(element) = register_type(function, *value)? else {
+                    return Err(VmArtifactError::MalformedEncoding { message: "dynamic array storage requires an array" });
+                };
+                expect_type(function, *index, VmType::Usize)?;
+                expect_type(function, *dst, if matches!(instruction, VmInstruction::TakeArrayElement { .. }) { *element } else { VmType::Bool })?;
+                if dst == value {
+                    return Err(VmArtifactError::MalformedEncoding { message: "array storage requires a distinct destination" });
+                }
+                read(&states, *value)?;
+                read(&states, *index)?;
+                write(&mut states, *dst)?;
+                if matches!(instruction, VmInstruction::TakeArrayElement { .. }) {
+                    states.labels[*dst as usize] = states.labels[*value as usize];
+                    states.resumptions[*dst as usize] = states.resumptions[*value as usize];
+                    states.reference_origins[*dst as usize] = states.reference_origins[*value as usize].clone();
+                }
             }
             VmInstruction::BytesLen { dst, value }
             | VmInstruction::BytesUtf8ValidUpTo { dst, value } => {
@@ -9310,21 +9517,42 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 subject,
                 pattern,
             } => {
-                read(&states, *subject)?;
+                if !states.handlers.last().is_some_and(|frame|
+                    frame.payload_claim == Some(false) && frame.payload_destinations.contains(subject)
+                    && states.registers[*subject as usize] == Some(false)) {
+                    read(&states, *subject)?;
+                }
                 expect_type(function, *dst, VmType::Bool)?;
                 verify_pattern(pattern, &register_type(function, *subject)?)?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::Perform {
+            VmInstruction::PerformOwned {
+                dst,
+                effect,
+                effect_arguments,
+                operation,
+                arguments,
+            }
+            | VmInstruction::Perform {
                 dst,
                 effect,
                 effect_arguments,
                 operation,
                 arguments,
             } => {
+                let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. });
+                let mut seen = BTreeSet::new();
                 for argument in arguments {
                     read(&states, *argument)?;
+                    if owned_payloads && !seen.insert(*argument) { return Err(VmArtifactError::UseAfterMove { register: *argument }); }
                 }
+                if owned_payloads {
+                    for argument in arguments { states.registers[*argument as usize] = Some(false); }
+                }
+                let payload_metadata = arguments.iter().map(|argument| {
+                    let index = *argument as usize;
+                    (states.reference_origins[index].clone(), states.snapshots[index], states.labels[index], states.resumptions[index])
+                }).collect::<Vec<_>>();
                 if let Some(index) = states.handlers.iter().rposition(|frame| {
                     frame.continuations.is_empty()
                         && frame.effect == *effect
@@ -9333,6 +9561,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }) {
                     let above = states.handlers.split_off(index + 1);
                     let frame = states.handlers[index].clone();
+                    if frame.owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                     if frame.payload_destinations.len() != arguments.len() {
                         return Err(VmArtifactError::CallArity {
                             expected: frame.payload_destinations.len() as u32,
@@ -9347,11 +9576,20 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                     let saved = states.registers.clone();
-                    for (destination, argument) in frame.payload_destinations.iter().zip(arguments)
+                    for ((destination, argument), metadata) in frame.payload_destinations.iter().zip(arguments).zip(&payload_metadata)
                     {
                         same_type(function, *destination, *argument)?;
                         write(&mut states, *destination)?;
+                        if owned_payloads {
+                            let index = *destination as usize;
+                            states.registers[index] = Some(false);
+                            states.reference_origins[index] = metadata.0.clone();
+                            states.snapshots[index] = metadata.1;
+                            states.labels[index] = metadata.2;
+                            states.resumptions[index] = metadata.3;
+                        }
                     }
+                    states.handlers[index].payload_claim = owned_payloads.then_some(false);
                     states.handlers[index].continuations = vec![VerifierContinuation {
                         target: (pc + 1) as u32,
                         dst: *dst,
@@ -9380,7 +9618,30 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     write(&mut states, *dst)?;
                 }
             }
-            VmInstruction::InstallHandler {
+            VmInstruction::ClaimEffectPayloads { payloads } => {
+                let frame = states.handlers.last_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if !frame.owned_payloads || frame.payload_claim != Some(false) || frame.payload_destinations != *payloads {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                frame.payload_claim = Some(true);
+                for payload in payloads {
+                    if states.registers[*payload as usize] != Some(false) { return Err(VmArtifactError::HandlerStateMismatch); }
+                    let origins = states.reference_origins[*payload as usize].clone();
+                    states.registers[*payload as usize] = None;
+                    write(&mut states, *payload)?;
+                    states.reference_origins[*payload as usize] = origins;
+                }
+            }
+            VmInstruction::InstallHandlerOwned {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                resume_type,
+                continuation,
+                target,
+            }
+            | VmInstruction::InstallHandler {
                 effect,
                 effect_arguments,
                 operation,
@@ -9426,6 +9687,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     resume_type: resume_type.clone(),
                     continuation: *continuation,
                     target: *target,
+                    owned_payloads: matches!(instruction, VmInstruction::InstallHandlerOwned { .. }),
+                    payload_claim: None,
                     continuations: Vec::new(),
                 });
                 if *continuation == VmContinuationPolicy::Terminal {
@@ -9438,7 +9701,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     let mut terminal = states.clone();
                     for destination in payload_destinations {
                         write(&mut terminal, *destination)?;
+                        if matches!(instruction, VmInstruction::InstallHandlerOwned { .. }) {
+                            terminal.registers[*destination as usize] = Some(false);
+                        }
                     }
+                    terminal.handlers.last_mut().unwrap().payload_claim =
+                        matches!(instruction, VmInstruction::InstallHandlerOwned { .. }).then_some(false);
                     propagate_state(&mut incoming, &mut worklist, *target, &terminal)?;
                 }
             }
@@ -9501,6 +9769,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let replaying = frame.continuation.is_replay();
                 for continuation in continuations {
                     let mut resumed_handlers = states.handlers.clone();
+                    resumed_handlers.last_mut().unwrap().payload_claim = None;
                     if replaying {
                         resumed_handlers
                             .last_mut()
@@ -9556,6 +9825,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let result = register_type(function, *dst)?;
                 let resumption_return_result = vec![(frame.id, result)];
                 let mut resumed_handlers = states.handlers.clone();
+                resumed_handlers.last_mut().unwrap().payload_claim = None;
                 resumed_handlers
                     .last_mut()
                     .expect("active resumable handler exists")
@@ -9674,6 +9944,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let prefix = states.handlers[..=index].to_vec();
                 for continuation in continuations {
                     let mut resumed_handlers = prefix.clone();
+                    resumed_handlers.last_mut().unwrap().payload_claim = None;
                     if replaying {
                         resumed_handlers
                             .last_mut()
@@ -9708,6 +9979,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if declined.continuations.is_empty() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
+                if declined.owned_payloads && declined.payload_claim != Some(false) {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                declined.payload_claim = None;
                 let continuations = std::mem::take(&mut declined.continuations);
                 for continuation in continuations {
                     let Some(index) = states.handlers.iter().rposition(|frame| {
@@ -9725,6 +10000,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     let mut forwarded = states.clone();
                     let mut crossed = forwarded.handlers.split_off(index + 1);
                     let outer = forwarded.handlers[index].clone();
+                    if outer.owned_payloads != declined.owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                     if outer.payload_destinations.len() != continuation.performed.arguments.len() {
                         return Err(VmArtifactError::CallArity {
                             expected: outer.payload_destinations.len() as u32,
@@ -9744,7 +10020,17 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     {
                         same_type(function, *destination, *argument)?;
                         write(&mut forwarded, *destination)?;
+                        if outer.owned_payloads {
+                            let index = *destination as usize;
+                            let source = *argument as usize;
+                            forwarded.registers[index] = Some(false);
+                            forwarded.reference_origins[index] = continuation.reference_origins[source].clone();
+                            forwarded.snapshots[index] = continuation.snapshots[source];
+                            forwarded.labels[index] = continuation.labels[source];
+                            forwarded.resumptions[index] = continuation.resumptions[source];
+                        }
                     }
+                    forwarded.handlers[index].payload_claim = outer.owned_payloads.then_some(false);
                     let declined_active = declined.clone();
                     crossed.push(declined_active);
                     crossed.extend(continuation.above.clone());
@@ -10257,14 +10543,16 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *right, VmType::Char)?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::Call { dst, arguments, .. } => {
+            VmInstruction::CallOwned { dst, arguments, .. }
+            | VmInstruction::Call { dst, arguments, .. } => {
                 for &argument in arguments {
                     read(&states, argument)?;
                     verify_call_frame_resumption_transfer(&states, argument)?;
                 }
                 write(&mut states, *dst)?
             }
-            VmInstruction::HostCall {
+            VmInstruction::HostCallOwned { dst, capability, symbol, parameters, result, arguments, .. }
+            | VmInstruction::HostCall {
                 dst,
                 capability,
                 symbol,
@@ -10362,7 +10650,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.labels[*dst as usize] = true;
                 states.resumptions[*dst as usize] = false;
             }
-            VmInstruction::CallIndirect {
+            VmInstruction::CallIndirectOwned { dst, callee, arguments }
+            | VmInstruction::CallIndirect {
                 dst,
                 callee,
                 arguments,
@@ -10516,6 +10805,22 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
                 let found = register_type(function, *value)?;
+                // Every normal return must honor the declaration, including
+                // entrypoints which have no call site to check their ABI.
+                // Clause returns above belong to ResumeReturn's separate ABI.
+                if let Some((expected, returns)) = declared_result {
+                    if check_return_flag && !returns {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "non-returning function has a reachable normal return",
+                        });
+                    }
+                    if *expected != found {
+                        return Err(VmArtifactError::ResultType {
+                            expected: expected.clone(),
+                            found,
+                        });
+                    }
+                }
                 if let Some(expected) = &returned {
                     if *expected != found {
                         return Err(VmArtifactError::ResultType {
@@ -10533,12 +10838,25 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 advances = false;
             }
         }
+        if let Some(arguments) = instruction.consumed_arguments() {
+            let mut seen = BTreeSet::new();
+            for &argument in arguments {
+                if !seen.insert(argument) {
+                    return Err(VmArtifactError::MalformedEncoding { message: "consuming call repeats an argument carrier" });
+                }
+                states.registers[argument as usize] = Some(false);
+                states.reference_origins[argument as usize].clear();
+                states.snapshots[argument as usize] = None;
+                states.labels[argument as usize] = false;
+                states.resumptions[argument as usize] = false;
+            }
+        }
         if advances {
             propagate_state(&mut incoming, &mut worklist, (pc + 1) as u32, &states)?;
         }
     }
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
-        Ok(())
+        Ok(returned.is_some())
     } else {
         Err(VmArtifactError::NoReturn)
     }
@@ -10724,10 +11042,52 @@ fn validate_vm_effect_row(row: &VmEffectRow) -> Result<(), VmArtifactError> {
 /// `InstallHandler` instruction is the authoritative declaration of the entry.
 /// A target must follow its install site, and only a dynamic perform transfer
 /// may enter it.
+fn verify_handler_payload_claims(function: &VmFunction) -> Result<(), VmArtifactError> {
+    for instruction in &function.instructions {
+        let VmInstruction::InstallHandlerOwned { target, payload_destinations, .. } = instruction else { continue; };
+        let mut pending = vec![*target];
+        let mut seen = BTreeSet::new();
+        while let Some(pc) = pending.pop() {
+            if !seen.insert(pc) { continue; }
+            let instruction = function.instructions.get(pc as usize)
+                .ok_or(VmArtifactError::InvalidInstructionTarget { target: pc })?;
+            match instruction {
+                VmInstruction::ClaimEffectPayloads { payloads } if payloads == payload_destinations => {}
+                VmInstruction::Forward => {}
+                VmInstruction::Jump { target } => pending.push(*target),
+                VmInstruction::BranchBool { condition, then_target, else_target }
+                    if !payload_destinations.contains(condition) => {
+                    expect_type(function, *condition, VmType::Bool)?;
+                    pending.extend([*then_target, *else_target]);
+                }
+                VmInstruction::PatternTest { dst, subject, pattern }
+                    if payload_destinations.contains(subject) && !payload_destinations.contains(dst) => {
+                    expect_type(function, *dst, VmType::Bool)?;
+                    verify_pattern(pattern, &register_type(function, *subject)?)?;
+                    pending.push(pc + 1);
+                }
+                VmInstruction::SetDropFlag { flag: dst, .. } | VmInstruction::ConstBool { dst, .. }
+                    if !payload_destinations.contains(dst) => {
+                    expect_type(function, *dst, VmType::Bool)?;
+                    pending.push(pc + 1);
+                }
+                VmInstruction::StorageLive { local, .. } if !payload_destinations.contains(local) => {
+                    register_type(function, *local)?;
+                    pending.push(pc + 1);
+                }
+                _ => return Err(VmArtifactError::MalformedEncoding {
+                    message: "handler must claim its untouched payload packet before use",
+                }),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifactError> {
     let mut targets = BTreeSet::new();
     for (pc, instruction) in function.instructions.iter().enumerate() {
-        let VmInstruction::InstallHandler { target, .. } = instruction else {
+        let (VmInstruction::InstallHandler { target, .. } | VmInstruction::InstallHandlerOwned { target, .. }) = instruction else {
             continue;
         };
         if *target as usize <= pc || function.instructions.get(*target as usize).is_none() {
@@ -10910,6 +11270,8 @@ fn merge_handler_states(
             || left.payload_destinations != right.payload_destinations
             || left.resume_type != right.resume_type
             || left.target != right.target
+            || left.owned_payloads != right.owned_payloads
+            || left.payload_claim != right.payload_claim
         {
             return None;
         }
@@ -11468,6 +11830,7 @@ struct RuntimeHandlerFrame {
     payload_destinations: Vec<u32>,
     continuation: VmContinuationPolicy,
     target: u32,
+    owned_payloads: bool,
     suspended: Option<RuntimeContinuation>,
 }
 
@@ -11636,6 +11999,20 @@ impl RuntimeRegisters {
         if let Some(VmValue::Resident(home)) = self.values[local as usize].take() { home.clear(&[]); }
     }
 
+    /// The callee's carriers must be installed before retiring these homes.
+    /// This disarms ownership without running source destruction a second time.
+    fn retire_call_arguments(&mut self, arguments: &[u32]) {
+        for &argument in arguments {
+            self.clear_value(argument);
+            if let Some(home) = self.native_homes.get(&argument)
+                && !home.address_was_exposed()
+            {
+                home.retire();
+                self.native_homes.remove(&argument);
+            }
+        }
+    }
+
     fn synchronize_source_storage(&mut self, current: &Self) {
         for (local, brand) in &self.source_storage {
             if current.source_storage.get(local) == Some(brand) {
@@ -11738,7 +12115,14 @@ struct RuntimePerformed {
     effect: DefKey,
     effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
-    payloads: Vec<VmValue>,
+    payloads: Option<Vec<VmValue>>,
+}
+
+fn allowed_before_payload_claim(instruction: &VmInstruction) -> bool {
+    matches!(instruction, VmInstruction::PatternTest { .. } | VmInstruction::BranchBool { .. }
+        | VmInstruction::Jump { .. } | VmInstruction::ClaimEffectPayloads { .. }
+        | VmInstruction::Forward | VmInstruction::SetDropFlag { .. }
+        | VmInstruction::StorageLive { .. } | VmInstruction::ConstBool { .. })
 }
 
 impl VmValue {
@@ -12028,14 +12412,31 @@ fn load_reference_target(
     }
 }
 
+fn take_reference_target(
+    registers: &mut [Option<VmValue>], callers: &mut [RuntimeProgramCaller], target: &ReferenceTarget,
+    fields: &[u32], budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
+    match target {
+        ReferenceTarget::Home(home) => home.take(fields, budget),
+        ReferenceTarget::Native(native) => native.take(fields, budget),
+        _ => {
+            let owner = reference_target_mut(registers, callers, target)?;
+            let resident = project_reference_mut(owner, fields, budget)?;
+            if matches!(resident, VmValue::Uninitialized(_)) {
+                return Err(VmArtifactError::NativeMemory { message: "reference resident was moved out" });
+            }
+            let ty = resident.ty();
+            Ok(std::mem::replace(resident, VmValue::Uninitialized(ty)))
+        }
+    }
+}
+
 fn referent_is_initialized(registers: &[Option<VmValue>], callers: &[RuntimeProgramCaller],
     reference: &VmValue) -> Result<bool, VmArtifactError> {
     match reference {
         VmValue::SuspendedReference(_) => Ok(false),
         VmValue::Reference { target: ReferenceTarget::Home(home), fields, .. } => Ok(home.is_initialized(fields)),
-        // Native references promise an initialized resident when constructed.
-        // A later move retains its restoration capability in the variant above.
-        VmValue::Reference { target: ReferenceTarget::Native(_), .. } => Ok(true),
+        VmValue::Reference { target: ReferenceTarget::Native(native), fields, .. } => Ok(native.is_initialized(fields)),
         VmValue::Reference { target, fields, .. } =>
             Ok(storage_is_initialized(Some(reference_target(registers, callers, target)?), fields)),
         _ => Err(VmArtifactError::InvalidRegister { register: 0 }),
@@ -12054,7 +12455,7 @@ fn store_reference_target(
         return home.store(fields, &replacement, budget);
     }
     if let ReferenceTarget::Native(native) = target {
-        return native.write(fields, replacement);
+        return native.write(fields, replacement, budget);
     }
     let value = reference_target_mut(registers, callers, target)?;
     *project_reference_mut(value, fields, budget)? = replacement;
@@ -12172,6 +12573,47 @@ fn array_element_borrow(
         unique: false,
         referent: element_type.clone(),
     })
+}
+
+/// Storage-only array operations: no destructor lookup or semantic callback.
+fn execute_array_storage(
+    registers: &mut [Option<VmValue>],
+    function: &VmFunction,
+    instruction: &VmInstruction,
+    budget: &mut ExecutionBudget,
+) -> Result<(), VmArtifactError> {
+    match instruction {
+        VmInstruction::StoreUsize { dst, value } => {
+            registers[*dst as usize] = Some(VmValue::Usize(expect_usize(registers[*value as usize].as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?)?));
+        }
+        VmInstruction::ArrayLen { dst, value } => {
+            let Some(VmValue::Array { values }) = registers[*value as usize].as_ref() else {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            };
+            registers[*dst as usize] = Some(VmValue::Usize(values.len() as u64));
+        }
+        VmInstruction::ArrayElementIsInitialized { dst, value, index }
+        | VmInstruction::TakeArrayElement { dst, value, index } => {
+            let index = expect_usize(registers[*index as usize].as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *index })?)?;
+            let index = u32::try_from(index).map_err(|_| VmArtifactError::InvalidRegister { register: *value })?;
+            let Some(VmValue::Array { values }) = registers[*value as usize].as_ref() else {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            };
+            if index as usize >= values.len() {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            let result = if matches!(instruction, VmInstruction::TakeArrayElement { .. }) {
+                take_storage_projection(registers, *value, &[index], &register_type(function, *dst)?, budget)?
+            } else {
+                VmValue::Bool(storage_is_initialized(registers[*value as usize].as_ref(), &[index]))
+            };
+            registers[*dst as usize] = Some(result);
+        }
+        _ => unreachable!("non-storage operation passed to array storage executor"),
+    }
+    Ok(())
 }
 
 fn execute_array_primitive(
@@ -14068,6 +14510,12 @@ fn execute(
         registers.finish_native_writes(budget)?;
         budget.tick()?;
         registers.instruction_result(pc);
+        let consumes_arguments = instruction.consumed_arguments().is_some();
+        let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
+        if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
+            && !allowed_before_payload_claim(&instruction) {
+            return Err(VmArtifactError::HandlerStateMismatch);
+        }
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
@@ -14365,6 +14813,9 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::Bytes(Arc::from(
                     blake3::hash(&bytes).as_bytes().as_slice(),
                 )));
+            }
+            instruction @ (VmInstruction::StoreUsize { .. } | VmInstruction::ArrayLen { .. } | VmInstruction::ArrayElementIsInitialized { .. } | VmInstruction::TakeArrayElement { .. }) => {
+                execute_array_storage(&mut registers, function, &instruction, budget)?
             }
             instruction @ (VmInstruction::ArrayGetBorrowShared { .. } | VmInstruction::ArrayEmpty { .. } | VmInstruction::ArrayPushMove { .. }) => {
                 execute_array_primitive(&mut registers, &mut [], &instruction, budget)?
@@ -14825,7 +15276,14 @@ fn execute(
                     &pattern, budget,
                 )?));
             }
-            VmInstruction::Perform {
+            VmInstruction::PerformOwned {
+                dst,
+                effect,
+                effect_arguments,
+                operation,
+                arguments,
+            }
+            | VmInstruction::Perform {
                 dst,
                 effect,
                 effect_arguments,
@@ -14864,6 +15322,7 @@ fn execute(
                     });
                 }
                 let frame = &mut handlers[index];
+                if frame.owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                 if frame.payload_destinations.len() != values.len() {
                     return Err(VmArtifactError::CallArity {
                         expected: frame.payload_destinations.len() as u32,
@@ -14871,6 +15330,7 @@ fn execute(
                     });
                 }
                 budget.reserve_allocation(registers.len())?;
+                if owned_payloads { registers.retire_call_arguments(&arguments); }
                 let saved = registers.clone();
                 for (destination, value) in frame
                     .payload_destinations
@@ -14888,7 +15348,7 @@ fn execute(
                         effect,
                         effect_arguments,
                         operation,
-                        payloads: values,
+                        payloads: Some(values),
                     },
                     above,
                     pending_leave: None,
@@ -14898,7 +15358,24 @@ fn execute(
                 pc = frame.target as usize;
                 continue;
             }
-            VmInstruction::InstallHandler {
+            VmInstruction::ClaimEffectPayloads { payloads } => {
+                let frame = handlers.last_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if !frame.owned_payloads || frame.payload_destinations != payloads {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                frame.suspended.as_mut().and_then(|continuation| continuation.performed.payloads.take())
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+            }
+            VmInstruction::InstallHandlerOwned {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                continuation,
+                target,
+                ..
+            }
+            | VmInstruction::InstallHandler {
                 effect,
                 effect_arguments,
                 operation,
@@ -14925,6 +15402,7 @@ fn execute(
                     payload_destinations,
                     continuation,
                     target,
+                    owned_payloads,
                     suspended: None,
                 })
             }
@@ -15137,6 +15615,7 @@ fn execute(
                 let Some(continuation) = declined.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                let payloads = continuation.performed.payloads.as_ref().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let Some(index) = handlers.iter().rposition(|frame| {
                     frame.suspended.is_none()
                         && frame.effect == continuation.performed.effect
@@ -15149,14 +15628,15 @@ fn execute(
                         operation: continuation.performed.operation,
                     });
                 };
+                if handlers[index].owned_payloads != declined.owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                 let mut crossed = handlers.split_off(index + 1);
                 crossed.push(declined);
                 crossed.extend(continuation.above.clone());
                 let frame = &mut handlers[index];
-                if frame.payload_destinations.len() != continuation.performed.payloads.len() {
+                if frame.payload_destinations.len() != payloads.len() {
                     return Err(VmArtifactError::CallArity {
                         expected: frame.payload_destinations.len() as u32,
-                        found: continuation.performed.payloads.len() as u32,
+                        found: payloads.len() as u32,
                     });
                 }
                 budget.reserve_allocation(continuation.registers.len())?;
@@ -15164,7 +15644,7 @@ fn execute(
                 for (destination, payload) in frame
                     .payload_destinations
                     .iter()
-                    .zip(continuation.performed.payloads.iter().cloned())
+                    .zip(payloads.iter().cloned())
                 {
                     registers[*destination as usize] = Some(payload);
                     registers.native_write(*destination);
@@ -15280,10 +15760,7 @@ fn execute(
                 // The loan retains its address but becomes unreadable until
                 // restoration. This state also prevents replacement cleanup
                 // from destroying the resident transferred out by this move.
-                registers[dst as usize] = Some(match target {
-                    ReferenceTarget::Home(home) => home.take(fields, budget)?,
-                    _ => load_reference_target(&registers, &[], target, fields, budget)?,
-                });
+                registers[dst as usize] = Some(take_reference_target(&mut registers, &mut [], target, fields, budget)?);
                 registers[reference as usize] = Some(VmValue::SuspendedReference(Box::new(carrier)));
             }
             VmInstruction::DerefStore { reference, src } => {
@@ -15841,7 +16318,8 @@ fn execute(
                     signature,
                 });
             }
-            VmInstruction::CallIndirect {
+            VmInstruction::CallIndirectOwned { callee, arguments, .. }
+            | VmInstruction::CallIndirect {
                 callee, arguments, ..
             } => {
                 let VmValue::Label {
@@ -15862,7 +16340,9 @@ fn execute(
                         found: arguments.len() as u32,
                     });
                 };
-                registers[destination as usize] = Some(registers.copy_value(*argument, budget)?);
+                let payload = registers.copy_value(*argument, budget)?;
+                if consumes_arguments { registers.retire_call_arguments(&arguments); }
+                registers[destination as usize] = Some(payload);
                 registers.native_write(destination);
                 handlers.truncate(handler_depth);
                 // A dynamic label invocation is the same nonlocal control
@@ -15872,11 +16352,12 @@ fn execute(
                 pc = target as usize;
                 continue;
             }
-            VmInstruction::Call { .. } | VmInstruction::MakeCallable { .. }
+            VmInstruction::CallOwned { .. } | VmInstruction::Call { .. } | VmInstruction::MakeCallable { .. }
             | VmInstruction::DestroyCallable { .. } => {
                 return Err(VmArtifactError::CallRequiresProgram);
             }
-            VmInstruction::HostCall {
+            VmInstruction::HostCallOwned { capability, symbol, .. }
+            | VmInstruction::HostCall {
                 capability, symbol, ..
             } => {
                 return Err(VmArtifactError::HostCallRequiresAuthority { capability, symbol });
@@ -16288,14 +16769,21 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&subject.to_le_bytes());
             encode_pattern(pattern, output);
         }
-        VmInstruction::Perform {
+        VmInstruction::PerformOwned {
+            dst,
+            effect,
+            effect_arguments,
+            operation,
+            arguments,
+        }
+        | VmInstruction::Perform {
             dst,
             effect,
             effect_arguments,
             operation,
             arguments,
         } => {
-            output.push(41);
+            output.push(if matches!(value, VmInstruction::PerformOwned { .. }) { 208 } else { 41 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&effect.0.as_bytes());
             encode_vm_generic_arguments(effect_arguments, output);
@@ -16305,7 +16793,16 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&argument.to_le_bytes());
             }
         }
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
+            effect,
+            effect_arguments,
+            operation,
+            payload_destinations,
+            resume_type,
+            continuation,
+            target,
+        }
+        | VmInstruction::InstallHandler {
             effect,
             effect_arguments,
             operation,
@@ -16314,7 +16811,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             continuation,
             target,
         } => {
-            output.push(44);
+            output.push(if matches!(value, VmInstruction::InstallHandlerOwned { .. }) { 209 } else { 44 });
             output.extend_from_slice(&effect.0.as_bytes());
             encode_vm_generic_arguments(effect_arguments, output);
             output.extend_from_slice(&operation.to_le_bytes());
@@ -16332,6 +16829,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 VmContinuationPolicy::Terminal => output.push(2),
             }
             output.extend_from_slice(&target.to_le_bytes());
+        }
+        VmInstruction::ClaimEffectPayloads { payloads } => {
+            output.push(210);
+            output.extend_from_slice(&(payloads.len() as u64).to_le_bytes());
+            for value in payloads { output.extend_from_slice(&value.to_le_bytes()); }
         }
         VmInstruction::UninstallHandler => output.push(45),
         VmInstruction::CompleteHandler { value } => {
@@ -16628,12 +17130,13 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 VmCompare::GreaterEqual => 5,
             });
         }
-        VmInstruction::Call {
+        VmInstruction::CallOwned { dst, callee, arguments }
+        | VmInstruction::Call {
             dst,
             callee,
             arguments,
         } => {
-            output.push(6);
+            output.push(if matches!(value, VmInstruction::CallOwned { .. }) { 205 } else { 6 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&callee.0.as_bytes());
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
@@ -16641,7 +17144,8 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&argument.to_le_bytes());
             }
         }
-        VmInstruction::HostCall {
+        VmInstruction::HostCallOwned { dst, capability, symbol, source_contract, parameters, result, resident_operations, arguments }
+        | VmInstruction::HostCall {
             dst,
             capability,
             symbol,
@@ -16651,7 +17155,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             resident_operations,
             arguments,
         } => {
-            output.push(56);
+            output.push(if matches!(value, VmInstruction::HostCallOwned { .. }) { 207 } else { 56 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&(capability.len() as u64).to_le_bytes());
             output.extend_from_slice(capability.as_bytes());
@@ -16711,6 +17215,21 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(49);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::StoreUsize { dst, value } => {
+            output.push(204);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::ArrayLen { dst, value } => {
+            output.push(201);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::ArrayElementIsInitialized { dst, value: array, index }
+        | VmInstruction::TakeArrayElement { dst, value: array, index } => {
+            output.push(if matches!(value, VmInstruction::TakeArrayElement { .. }) { 203 } else { 202 });
+            for register in [dst, array, index] { output.extend_from_slice(&register.to_le_bytes()); }
         }
         VmInstruction::BytesLen { dst, value } => {
             output.push(80);
@@ -16973,12 +17492,13 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&target.to_le_bytes());
             output.extend_from_slice(&destination.to_le_bytes());
         }
-        VmInstruction::CallIndirect {
+        VmInstruction::CallIndirectOwned { dst, callee, arguments }
+        | VmInstruction::CallIndirect {
             dst,
             callee,
             arguments,
         } => {
-            output.push(30);
+            output.push(if matches!(value, VmInstruction::CallIndirectOwned { .. }) { 206 } else { 30 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&callee.to_le_bytes());
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
@@ -17306,9 +17826,9 @@ fn tail_cleanup_suffix(
     environments: &BTreeMap<DefKey, VmCaptureEnvironment>,
     budget: &mut ExecutionBudget,
 ) -> Result<bool, VmArtifactError> {
-    if !matches!(function.instructions.get(pc), Some(VmInstruction::IsInitialized { .. })) {
-        return Ok(false);
-    }
+    // Explicit invocation continuations may start with result forwarding or
+    // a CFG jump before reaching cleanup. The bounded proof below checks
+    // every instruction; its first opcode is not an admission criterion.
     #[derive(Clone)]
     enum Value { Known(VmValue), Result }
     // Read untouched slots from the existing frame. Only proof writes need
@@ -17362,12 +17882,10 @@ fn tail_cleanup_suffix(
                 write(&mut values, *dst, Some(Value::Known(VmValue::Bool(initialized))), budget)?;
             }
             VmInstruction::PatternTest {
-                dst, subject, pattern: VmPattern::Enum { definition, variant, fields, .. },
+                dst, subject, pattern: pattern @ VmPattern::Enum { fields, .. },
             } if fields.is_empty() => {
-                let Some(Value::Known(VmValue::Enum {
-                    definition: actual_definition, variant: actual_variant, ..
-                })) = read(&values, registers, *subject) else { return Ok(false); };
-                let matched = *definition == actual_definition && *variant == actual_variant;
+                let Some(Value::Known(value)) = read(&values, registers, *subject) else { return Ok(false); };
+                let matched = matches_runtime_pattern(&value, pattern, budget)?;
                 write(&mut values, *dst, Some(Value::Known(VmValue::Bool(matched))), budget)?;
             }
             VmInstruction::BranchBool { condition, then_target, else_target } => {
@@ -17617,6 +18135,12 @@ fn execute_program_profiled(
         };
         budget.tick()?;
         registers.instruction_result(pc);
+        let consumes_arguments = instruction.consumed_arguments().is_some();
+        let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
+        if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
+            && !allowed_before_payload_claim(instruction) {
+            return Err(VmArtifactError::HandlerStateMismatch);
+        }
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
@@ -17920,6 +18444,9 @@ fn execute_program_profiled(
                 registers[*dst as usize] = Some(VmValue::Bytes(Arc::from(
                     blake3::hash(&bytes).as_bytes().as_slice(),
                 )));
+            }
+            instruction @ (VmInstruction::StoreUsize { .. } | VmInstruction::ArrayLen { .. } | VmInstruction::ArrayElementIsInitialized { .. } | VmInstruction::TakeArrayElement { .. }) => {
+                execute_array_storage(&mut registers, function, instruction, budget)?
             }
             instruction @ (VmInstruction::ArrayGetBorrowShared { .. } | VmInstruction::ArrayEmpty { .. } | VmInstruction::ArrayPushMove { .. }) => {
                 execute_array_primitive(&mut registers, &mut callers, instruction, budget)?
@@ -18382,7 +18909,14 @@ fn execute_program_profiled(
                     pattern, budget,
                 )?));
             }
-            VmInstruction::Perform {
+            VmInstruction::PerformOwned {
+                dst,
+                effect,
+                effect_arguments,
+                operation,
+                arguments,
+            }
+            | VmInstruction::Perform {
                 dst,
                 effect,
                 effect_arguments,
@@ -18420,6 +18954,7 @@ fn execute_program_profiled(
                     });
                 }
                 let owner_depth = handlers[index].call_depth;
+                if handlers[index].owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                 if owner_depth > callers.len() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
@@ -18432,6 +18967,7 @@ fn execute_program_profiled(
                     });
                 }
                 budget.reserve_allocation(registers.len())?;
+                if owned_payloads { registers.retire_call_arguments(arguments); }
                 let saved = registers.clone();
                 let continuation_program = RuntimeProgramContinuation {
                     definition,
@@ -18466,7 +19002,7 @@ fn execute_program_profiled(
                         effect: *effect,
                         effect_arguments: effect_arguments.clone(),
                         operation: *operation,
-                        payloads: values,
+                        payloads: Some(values),
                     },
                     above,
                     pending_leave: None,
@@ -18476,7 +19012,24 @@ fn execute_program_profiled(
                 pc = handler_target as usize;
                 continue;
             }
-            VmInstruction::InstallHandler {
+            VmInstruction::ClaimEffectPayloads { payloads } => {
+                let frame = handlers.last_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if !frame.owned_payloads || frame.payload_destinations != *payloads {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                frame.suspended.as_mut().and_then(|continuation| continuation.performed.payloads.take())
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+            }
+            VmInstruction::InstallHandlerOwned {
+                effect,
+                effect_arguments,
+                operation,
+                payload_destinations,
+                continuation,
+                target,
+                ..
+            }
+            | VmInstruction::InstallHandler {
                 effect,
                 effect_arguments,
                 operation,
@@ -18503,6 +19056,7 @@ fn execute_program_profiled(
                     payload_destinations: payload_destinations.clone(),
                     continuation: *continuation,
                     target: *target,
+                    owned_payloads,
                     suspended: None,
                 });
             }
@@ -18755,6 +19309,7 @@ fn execute_program_profiled(
                 let Some(continuation) = declined.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                let payloads = continuation.performed.payloads.as_ref().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let Some(index) = handlers.iter().rposition(|frame| {
                     frame.suspended.is_none()
                         && frame.effect == continuation.performed.effect
@@ -18767,24 +19322,25 @@ fn execute_program_profiled(
                         operation: continuation.performed.operation,
                     });
                 };
+                if handlers[index].owned_payloads != declined.owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                 let mut crossed = handlers.split_off(index + 1);
                 crossed.push(declined);
                 crossed.extend(continuation.above.clone());
                 let owner_depth = handlers[index].call_depth;
                 let payload_destinations = handlers[index].payload_destinations.clone();
                 let handler_target = handlers[index].target;
-                if payload_destinations.len() != continuation.performed.payloads.len() {
+                if payload_destinations.len() != payloads.len() {
                     return Err(VmArtifactError::CallArity {
                         expected: payload_destinations.len() as u32,
-                        found: continuation.performed.payloads.len() as u32,
+                        found: payloads.len() as u32,
                     });
                 }
                 budget.reserve_allocation(continuation.registers.len())?;
                 let continuation_program = continuation.program.clone();
                 let original_callers = continuation_program.as_ref()
                     .map(|program| program.callers.as_slice()).unwrap_or(&[]);
-                budget.reserve_value("forwarded clause payload", continuation.performed.payloads.len())?;
-                let clause_values = continuation.performed.payloads.iter().cloned().map(|value| {
+                budget.reserve_value("forwarded clause payload", payloads.len())?;
+                let clause_values = payloads.iter().cloned().map(|value| {
                     transfer_to_ancestor_frame(value, &continuation.registers, original_callers, owner_depth, budget)
                 }).collect::<Result<Vec<_>, _>>()?;
                 if let Some(program) = &continuation_program {
@@ -18931,10 +19487,7 @@ fn execute_program_profiled(
                 else {
                     return Err(VmArtifactError::InvalidRegister { register: *reference });
                 };
-                let value = match target {
-                    ReferenceTarget::Home(home) => home.take(fields, budget)?,
-                    _ => load_reference_target(&registers, &callers, target, fields, budget)?,
-                };
+                let value = take_reference_target(&mut registers, &mut callers, target, fields, budget)?;
                 let value = match target {
                     ReferenceTarget::Caller { caller_depth, .. } => {
                         rebase_caller_references(value, *caller_depth)?
@@ -19504,7 +20057,8 @@ fn execute_program_profiled(
                     *op,
                 )))
             }
-            VmInstruction::HostCall {
+            VmInstruction::HostCallOwned { dst, capability, symbol, arguments, .. }
+            | VmInstruction::HostCall {
                 dst,
                 capability,
                 symbol,
@@ -19516,6 +20070,7 @@ fn execute_program_profiled(
                     registers[*dst as usize] = Some(native_bridge::execute(
                         program, imports, capability, symbol, &mut registers, arguments, *dst, budget, current_depth,
                     )?);
+                    if consumes_arguments { registers.retire_call_arguments(arguments); }
                     pc += 1;
                     continue;
                 }
@@ -19542,8 +20097,10 @@ fn execute_program_profiled(
                     symbol,
                     &values,
                 )?);
+                if consumes_arguments { registers.retire_call_arguments(arguments); }
             }
-            VmInstruction::Call {
+            VmInstruction::CallOwned { dst, callee, arguments }
+            | VmInstruction::Call {
                 dst,
                 callee,
                 arguments,
@@ -19621,6 +20178,14 @@ fn execute_program_profiled(
                     budget.reserve_allocation(callee_function.registers.len())?;
                     vec![None; callee_function.registers.len()]
                 };
+                let mut incoming = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    incoming[index] = Some(value);
+                }
+                if consumes_arguments {
+                    incoming.finish_native_writes(budget)?;
+                    registers.retire_call_arguments(arguments);
+                }
                 callers.push(RuntimeProgramCaller {
                     definition,
                     registers: std::mem::take(&mut registers),
@@ -19628,10 +20193,7 @@ fn execute_program_profiled(
                     return_destination: *dst,
                 });
                 definition = *callee;
-                registers = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
-                for (index, value) in values.into_iter().enumerate() {
-                    registers[index] = Some(value);
-                }
+                registers = incoming;
                 pc = 0;
                 continue;
             }
@@ -19733,7 +20295,8 @@ fn execute_program_profiled(
                     signature,
                 });
             }
-            VmInstruction::CallIndirect {
+            VmInstruction::CallIndirectOwned { dst, callee, arguments }
+            | VmInstruction::CallIndirect {
                 dst,
                 callee,
                 arguments,
@@ -19764,6 +20327,7 @@ fn execute_program_profiled(
                     }
                     let payload = transfer_to_ancestor_frame(registers.copy_value(*argument, budget)?,
                         &registers, &callers, call_depth, budget)?;
+                    if consumes_arguments { registers.retire_call_arguments(arguments); }
                     abandon_program_handlers(program, &mut handlers, handler_depth,
                         &mut registers, &mut callers, depth, budget, host)?;
                     let mut transferred = Some(*argument);
@@ -19844,6 +20408,15 @@ fn execute_program_profiled(
                     budget.reserve_allocation(callee_function.registers.len())?;
                     vec![None; callee_function.registers.len()]
                 };
+                let mut incoming = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
+                for (index, value) in values.into_iter().enumerate() {
+                    incoming[index] = Some(value);
+                }
+                incoming.install_captures(captures);
+                if consumes_arguments {
+                    incoming.finish_native_writes(budget)?;
+                    registers.retire_call_arguments(arguments);
+                }
                 callers.push(RuntimeProgramCaller {
                     definition,
                     registers: std::mem::take(&mut registers),
@@ -19851,11 +20424,7 @@ fn execute_program_profiled(
                     return_destination: *dst,
                 });
                 definition = callee;
-                registers = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
-                for (index, value) in values.into_iter().enumerate() {
-                    registers[index] = Some(value);
-                }
-                registers.install_captures(captures);
+                registers = incoming;
                 pc = 0;
                 continue;
             }
@@ -20142,6 +20711,22 @@ mod tests {
 
     fn cow_budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false, limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn moving_through_a_register_reference_clears_the_shared_source_path() {
+        let mut registers = vec![Some(VmValue::Tuple(vec![VmValue::I64(42), VmValue::Unit].into()))];
+        let mut budget = cow_budget();
+        let target = ReferenceTarget::Register(0);
+        let alias = VmValue::Reference { target: target.clone(), fields: vec![0].into(),
+            unique: true, referent: VmType::I64 };
+        assert!(matches!(take_reference_target(&mut registers, &mut [], &target, &[0], &mut budget).unwrap(), VmValue::I64(42)));
+        assert!(!referent_is_initialized(&registers, &[], &alias).unwrap());
+        assert!(take_reference_target(&mut registers, &mut [], &target, &[0], &mut budget).is_err());
+        assert!(storage_is_initialized(registers[0].as_ref(), &[1]));
+        store_reference_target(&mut registers, &mut [], &target, &[0], VmValue::I64(19), &mut budget).unwrap();
+        assert!(referent_is_initialized(&registers, &[], &alias).unwrap());
+        assert!(matches!(load_reference_target(&registers, &[], &target, &[0], &mut budget).unwrap(), VmValue::I64(19)));
     }
 
     #[test]
@@ -20655,7 +21240,7 @@ mod tests {
     #[test]
     fn parallel_edge_transfer_schedule_orders_chains_without_temporaries() {
         let target = edge_target(vec![MirLocal(1), MirLocal(2)]);
-        let schedule = parallel_edge_transfers(&[MirLocal(0), MirLocal(1)], &target);
+        let schedule = parallel_edge_transfers(&[MirLocal(0), MirLocal(1)], &target.parameters);
 
         assert_eq!(
             schedule,
@@ -20677,7 +21262,7 @@ mod tests {
     #[test]
     fn parallel_edge_transfer_schedule_breaks_each_cycle_once() {
         let target = edge_target(vec![MirLocal(0), MirLocal(1), MirLocal(2)]);
-        let schedule = parallel_edge_transfers(&[MirLocal(1), MirLocal(2), MirLocal(0)], &target);
+        let schedule = parallel_edge_transfers(&[MirLocal(1), MirLocal(2), MirLocal(0)], &target.parameters);
 
         assert_eq!(
             schedule,

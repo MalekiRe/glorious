@@ -6,6 +6,7 @@
 //! belong to later semantic queries, not parser heuristics.
 
 use crate::{
+    fixity::FixityTable,
     header::{
         EffectRowHeader, HeaderGenericArgument, HeaderStructuralConst, HeaderStructuralU32Expr,
         HeaderType,
@@ -236,20 +237,29 @@ pub struct BodySyntax {
 
 impl BodySyntax {
     pub fn parse(lexed: &LexedFile, source: &str, range: TokenRange) -> Self {
-        Self::parse_with(lexed, source, range, |parser| parser.parse_block(false))
+        Self::parse_with_fixities(lexed, source, range, &FixityTable::with_prelude())
+    }
+
+    pub fn parse_with_fixities(lexed: &LexedFile, source: &str, range: TokenRange, fixities: &FixityTable) -> Self {
+        Self::parse_with(lexed, source, range, fixities, |parser| parser.parse_block(false))
     }
 
     /// Parse a body-shaped expression that is not enclosed in declaration
     /// braces. Constant initializers use this path while retaining the same
     /// demand-driven AST, diagnostics, and fixity-later operator chains.
     pub fn parse_expression(lexed: &LexedFile, source: &str, range: TokenRange) -> Self {
-        Self::parse_with(lexed, source, range, |parser| parser.parse_expression())
+        Self::parse_expression_with_fixities(lexed, source, range, &FixityTable::with_prelude())
+    }
+
+    pub fn parse_expression_with_fixities(lexed: &LexedFile, source: &str, range: TokenRange, fixities: &FixityTable) -> Self {
+        Self::parse_with(lexed, source, range, fixities, |parser| parser.parse_expression())
     }
 
     fn parse_with(
         lexed: &LexedFile,
         source: &str,
         range: TokenRange,
+        fixities: &FixityTable,
         parse: impl FnOnce(&mut Parser<'_>) -> Option<ExprId>,
     ) -> Self {
         let tokens = lexed.tokens[range.start..range.end]
@@ -258,6 +268,7 @@ impl BodySyntax {
             .filter_map(|(offset, token)| (!is_trivia(&token.kind)).then_some(range.start + offset))
             .collect::<Vec<_>>();
         let mut parser = Parser {
+            fixities,
             lexed,
             source,
             tokens,
@@ -293,6 +304,7 @@ impl BodySyntax {
 }
 
 struct Parser<'a> {
+    fixities: &'a FixityTable,
     lexed: &'a LexedFile,
     source: &'a str,
     tokens: Vec<usize>,
@@ -376,31 +388,11 @@ impl Parser<'_> {
         self.finish_expression(expression)
     }
 
-    fn finish_expression(&mut self, mut expression: ExprId) -> Option<ExprId> {
-        while self.word() == Some("else") {
-            let else_token = self.advance()?;
-            let negative = if self.at_punctuation('{') {
-                self.parse_block(true)?
-            } else {
-                self.parse_prefix()
-                    .unwrap_or_else(|| self.recover_expression())
-            };
-            let callee = self.alloc(
-                ExprKind::Path(vec!["else".into()]),
-                self.lexed.tokens[else_token].span,
-            );
-            let span = join(
-                self.expression(expression).span,
-                self.expression(negative).span,
-            );
-            expression = self.alloc(
-                ExprKind::Call {
-                    callee,
-                    arguments: vec![expression, negative],
-                },
-                span,
-            );
-        }
+    fn finish_expression(&mut self, expression: ExprId) -> Option<ExprId> {
+        self.finish_expression_at(expression, 0)
+    }
+
+    fn finish_expression_at(&mut self, mut expression: ExprId, minimum: u8) -> Option<ExprId> {
         if self.word() == Some("is") {
             let is_token = self.advance()?;
             let mut binders = std::collections::BTreeSet::new();
@@ -418,7 +410,9 @@ impl Parser<'_> {
         }
         let mut operands = vec![expression];
         let mut operators = vec![];
-        while let Some(operator) = self.infix_operator().map(str::to_owned) {
+        while let Some(operator) = self.infix_operator().filter(|operator|
+            self.fixities.infix(operator).is_none_or(|fixity| fixity.precedence >= minimum)
+        ).map(str::to_owned) {
             self.position += 1;
             let rhs = self
                 .parse_prefix()
@@ -587,11 +581,16 @@ impl Parser<'_> {
         // `+`, `-`, and `!` forms made a header-declared `prefix ~` parse as
         // a recovery error before trait-based operator dispatch could ever
         // select its implementation.
-        if let Some(operator) = self.operator().map(str::to_owned) {
+        if let Some(operator) = self.operator().or_else(|| self.word().filter(|word| {
+            (self.fixities.prefix(word).is_some() || self.fixities.prefix_is_ambiguous(word))
+                && !self.peek_punctuation(1, '(')
+        })).map(str::to_owned) {
             let start = self.advance()?;
+            let precedence = self.fixities.prefix(&operator).map_or(u8::MAX, |fixity| fixity.precedence);
             let value = self
                 .parse_prefix()
                 .unwrap_or_else(|| self.recover_expression());
+            let value = self.finish_expression_at(value, precedence)?;
             return Some(self.alloc(
                 ExprKind::Prefix { operator, value },
                 join(self.lexed.tokens[start].span, self.expression(value).span),
@@ -1254,11 +1253,6 @@ impl Parser<'_> {
             }
             TokenKind::Identifier => {
                 self.position += 1;
-                if matches!(self.text(index), "true" | "false") {
-                    return Some(
-                        self.alloc(ExprKind::Literal(self.text(index).to_owned()), token.span),
-                    );
-                }
                 let mut path = vec![self.text(index).to_owned()];
                 let mut effect_arguments = vec![];
                 if self.generic_path_ahead() {
@@ -1305,7 +1299,7 @@ impl Parser<'_> {
             TokenKind::Punctuation('{') if self.compact_closure_ahead() => {
                 self.parse_compact_closure()
             }
-            TokenKind::Punctuation('{') => self.parse_block(false),
+            TokenKind::Punctuation('{') => self.parse_block(true),
             TokenKind::Punctuation('(') if self.typed_closure_ahead() => self.parse_typed_closure(),
             TokenKind::Punctuation('(') => self.parse_group_or_tuple(),
             TokenKind::Punctuation('[') => self.parse_array(),
@@ -2015,9 +2009,6 @@ impl Parser<'_> {
                 if first == "_" {
                     return Some(self.alloc_pattern(PatternKind::Wildcard, token.span));
                 }
-                if matches!(first.as_str(), "true" | "false") {
-                    return Some(self.alloc_pattern(PatternKind::Literal(first), token.span));
-                }
                 let mut path = vec![first];
                 let mut arguments = if self.generic_path_ahead() {
                     self.parse_generic_arguments("G4016", "expected `>` in pattern application")?
@@ -2204,15 +2195,12 @@ impl Parser<'_> {
         let index = self.current()?;
         (self.lexed.tokens[index].kind == TokenKind::Operator).then(|| self.text(index))
     }
-    /// Word-form boolean operators belong to the same flat operator stream as
-    /// symbolic operators. Keeping them here, rather than parsing a separate
-    /// expression grammar, lets the frozen module fixity table retain the
-    /// authority for their precedence and associativity.
+    /// Word operators are recognized solely by visible source declarations.
+    /// Symbolic tokens remain lossless so Core can diagnose missing fixities.
     fn infix_operator(&self) -> Option<&str> {
-        self.operator().or_else(|| match self.word() {
-            Some("and" | "or") => self.word(),
-            _ => None,
-        })
+        self.operator().or_else(|| self.word().filter(|word|
+            self.fixities.infix(word).is_some() || self.fixities.infix_is_ambiguous(word)
+        ))
     }
     fn at_operator(&self, operator: &str) -> bool {
         self.operator() == Some(operator)

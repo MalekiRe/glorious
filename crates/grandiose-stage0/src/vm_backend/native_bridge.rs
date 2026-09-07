@@ -154,13 +154,14 @@ fn destruction_code_identity(
                     pending.push(*callee);
                     pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
                 }
-                VmInstruction::Call { callee, .. } => {
+                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. } => {
                     pending.push(*callee)
                 }
                 VmInstruction::DeclareFrameCleanup { actions } => {
                     pending.extend(actions.iter().map(|action| action.destructor));
                 }
-                VmInstruction::HostCall {
+                VmInstruction::HostCallOwned { resident_operations, .. }
+                | VmInstruction::HostCall {
                     resident_operations,
                     ..
                 } => pending.extend(
@@ -267,12 +268,13 @@ pub(super) fn validate_resident_operations(
 ) -> Result<(), VmArtifactError> {
     for function in program.functions.values() {
         for instruction in &function.instructions {
-            let VmInstruction::HostCall {
+            let (VmInstruction::HostCallOwned { parameters, result, resident_operations, .. }
+            | VmInstruction::HostCall {
                 parameters,
                 result,
                 resident_operations,
                 ..
-            } = instruction
+            }) = instruction
             else {
                 continue;
             };
@@ -334,13 +336,14 @@ fn imports(program: &CandidateVmProgram) -> Result<Vec<VmNativeImport>, VmArtifa
                     pending.push(*callee);
                     pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
                 }
-                VmInstruction::Call { callee, .. } => {
+                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. } => {
                     pending.push(*callee)
                 }
                 VmInstruction::DeclareFrameCleanup { actions } => {
                     pending.extend(actions.iter().map(|action| action.destructor));
                 }
-                VmInstruction::HostCall {
+                VmInstruction::HostCallOwned { capability, symbol, source_contract, parameters, result, resident_operations, .. }
+                | VmInstruction::HostCall {
                     capability,
                     symbol,
                     source_contract,

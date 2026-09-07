@@ -7048,6 +7048,21 @@ fn partial_move_inside_a_closure_copies_a_duplicable_aggregate_capture_root() {
 }
 
 #[test]
+fn reading_a_written_capture_preserves_unique_access_to_the_outer_place() {
+    for body in ["value = 42; value", "let previous = value; value = 42; previous"] {
+        let core = core_for("core-write-capture@0.1.0", &format!(
+            "pub fn main(value: i64) -> i64 {{ let update = () -> i64 {{ {body} }}; update() }}"));
+        assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+        let environment = core.expressions.iter().find_map(|expression| match &expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment), _ => None,
+        }).unwrap();
+        assert_eq!(environment.captures[0].mode, CaptureMode::UniqueBorrow);
+        assert_eq!(environment.post_states[0].mode, CaptureMode::UniqueBorrow);
+        assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    }
+}
+
+#[test]
 fn escapeflow_fails_closed_on_a_forged_nested_aggregate_projection_path() {
     let mut core = core_for(
         "core-forged-nested-aggregate-path@0.1.0",

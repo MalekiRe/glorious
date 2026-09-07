@@ -1,7 +1,7 @@
 //! Typed Core, the semantic boundary before ownership facts and MIR.
 
 use crate::{
-    body::{BodySyntax, ClosureParameter, ExprId, ExprKind, HandlerClause, PatternKind},
+    body::{BodySyntax, ClosureParameter, ExprId, ExprKind, HandlerClause},
     fixity::FixityTable,
     header::FixityForm,
     identity::{DefKey, Digest, ModuleKey, PackageKey},
@@ -445,6 +445,11 @@ struct ActiveLabel {
     name: String,
     brand: LabelBrand,
     result: Type,
+}
+
+enum GroupedOperator {
+    Operand(ExprId),
+    Apply { name: String, operands: Vec<GroupedOperator> },
 }
 
 /// A single callable invocation opens two distinct lifetime namespaces. Source
@@ -2150,7 +2155,7 @@ fn handler_clause_error(clauses: &[CoreHandlerClause]) -> Option<String> {
     None
 }
 
-fn capture_environment_error(
+pub(crate) fn capture_environment_error(
     callable: CallableId,
     environment: &CaptureEnvironment,
     callable_ty: &Type,
@@ -4703,32 +4708,11 @@ impl Elaborator<'_> {
             ExprKind::UnsafeBlock(values) => self.unsafe_block(values, expected, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
             ExprKind::Array(values) => self.array_expected(values, expected, expression.span),
-            // A signed numeric literal is parsed as a prefix expression, so
-            // carry a direct call's scalar parameter contract through the
-            // prefix before the literal selects its default integer type.
-            // Canonical checked float conversions use this for lower bounds
-            // such as `-128.0`.
-            ExprKind::Prefix { operator, value }
-                if matches!(operator.as_str(), "+" | "-")
-                    && matches!(expected, Some(Type::Scalar(scalar)) if scalar_is_numeric(scalar)) =>
-            {
-                let value = self.expression_expected(value, expected.clone());
-                let ty = self.expressions[value.0 as usize].ty.clone();
-                if matches!(
-                    ty,
-                    Type::Scalar(ScalarType::I64 | ScalarType::F32 | ScalarType::F64)
-                ) {
-                    self.alloc(
-                        CoreKind::IntrinsicCall {
-                            operator,
-                            arguments: vec![value],
-                        },
-                        ty,
-                        expression.span,
-                    )
-                } else {
-                    self.operator_trait_call(operator, vec![value], expression.span)
+            ExprKind::Prefix { operator, value } => {
+                if self.fixities.prefix(&operator).is_none() {
+                    return self.fail(expression.span, "G4111", "operator has no unambiguous visible prefix fixity declaration");
                 }
+                self.grouped_operator(GroupedOperator::Apply { name: operator, operands: vec![GroupedOperator::Operand(value)] }, expected, expression.span)
             }
             // A direct call can carry result evidence backwards into a
             // generic callback argument.  This is essential for canonical
@@ -4836,24 +4820,7 @@ impl Elaborator<'_> {
                 operands,
                 operators,
             } if expected.is_some() => {
-                let fallback_expected = expected.clone();
-                if let ([left, right], [operator]) = (operands.as_slice(), operators.as_slice())
-                    && let Some(value) = self.direct_infix_callable(
-                        operator,
-                        *left,
-                        *right,
-                        expected,
-                        expression.span,
-                    )
-                {
-                    return value;
-                }
-                let value = self.expression(id);
-                self.lift_scalar_bool_to_canonical_carrier(
-                    value,
-                    fallback_expected,
-                    expression.span,
-                )
+                self.operators_expected(operands, operators, expression.span, expected)
             }
             ExprKind::Closure { parameters, body } => self.closure(
                 parameters
@@ -4921,6 +4888,19 @@ impl Elaborator<'_> {
                     return value;
                 }
                 let value = self.expression(id);
+                // A polymorphic initializer is instantiated at this use site.
+                // Apply its expected type now, even when a preceding terminal
+                // expression makes the enclosing block's result Never. Waiting
+                // for the block join loses constraints on this checked value.
+                if matches!(self.expressions[value.0 as usize].kind, CoreKind::Constant { .. })
+                    && let Some(expected) = expected.clone()
+                {
+                    let actual = self.expressions[value.0 as usize].ty.clone();
+                    if self.unify_rigid_lifetimes(expected, actual, expression.span).is_err() {
+                        self.error(expression.span, "G4107", "constant value does not match the contextual expected type");
+                        self.recovered = true;
+                    }
+                }
                 self.weaken_callable_invocation_for_expected(value, expected)
             }
             ExprKind::GenericPath {
@@ -4961,11 +4941,7 @@ impl Elaborator<'_> {
                     "contextual block requires explicit parameters for a nonzero-argument callable",
                 ),
                 Some(expected) => self.block_expected(values, Some(expected), expression.span),
-                None => self.fail(
-                    expression.span,
-                    "G4118",
-                    "contextual block has no resolved expected type",
-                ),
+                None => self.block_expected(values, None, expression.span),
             },
             ExprKind::Handle {
                 computation,
@@ -5079,24 +5055,6 @@ impl Elaborator<'_> {
     /// `Bool` as `Result<(), ()>`, so its ordinary `true` and `false`
     /// spellings must build that nominal carrier when a Bool is expected.
     fn literal_expected(&mut self, text: String, expected: Option<Type>, span: Span) -> CoreId {
-        if matches!(text.as_str(), "true" | "false")
-            && let Some((definition, arguments, variant)) =
-                self.canonical_bool_literal_variant(expected.as_ref(), &text)
-        {
-            let unit = self.alloc(CoreKind::Tuple(vec![]), Type::Unit, span);
-            return self.alloc(
-                CoreKind::Enum {
-                    definition,
-                    variant,
-                    fields: vec![unit],
-                },
-                Type::Nominal {
-                    definition,
-                    arguments,
-                },
-                span,
-            );
-        }
         // A string literal is compiler-emitted immutable data, but `Str` is
         // intentionally an ordinary source-defined view rather than another
         // compiler scalar. When the expected type is the distributed
@@ -5414,124 +5372,6 @@ impl Elaborator<'_> {
         Some(self.call(callee, vec![argument], span))
     }
 
-    fn canonical_bool_literal_variant(
-        &mut self,
-        expected: Option<&Type>,
-        literal: &str,
-    ) -> Option<(DefKey, Vec<GenericArgument>, u32)> {
-        let Type::Nominal {
-            definition,
-            arguments,
-        } = expected?
-        else {
-            return None;
-        };
-        let name = match literal {
-            "true" => "Ok",
-            "false" => "Err",
-            _ => return None,
-        };
-        let (variant, fields) = self
-            .signatures
-            .instantiate_enum_variant_generic(*definition, arguments, name)
-            .ok()?;
-        let [field] = fields.as_slice() else {
-            return None;
-        };
-        // `if` and `else` begin with a polymorphic `Result<A, E>` contract.
-        // A scalar predicate is the canonical `Result<(), ()>` carrier, so
-        // contextual conversion must be able to infer those fresh slots. Use
-        // a speculative inference context: an enum with only one unit-shaped
-        // arm must not leave a partial `A = ()` binding behind when its other
-        // arm proves it is not the Bool carrier.
-        let mut inference = self.inference.clone();
-        if inference.unify(field.clone(), Type::Unit).is_err() {
-            return None;
-        }
-        let other = match literal {
-            "true" => "false",
-            "false" => "true",
-            _ => return None,
-        };
-        let other_name = match other {
-            "true" => "Ok",
-            "false" => "Err",
-            _ => unreachable!("canonical Boolean literals are finite"),
-        };
-        let (_, other_fields) = self
-            .signatures
-            .instantiate_enum_variant_generic(*definition, arguments, other_name)
-            .ok()?;
-        let [other_field] = other_fields.as_slice() else {
-            return None;
-        };
-        if inference.unify(other_field.clone(), Type::Unit).is_err() {
-            return None;
-        }
-        self.inference = inference;
-        Some((*definition, arguments.clone(), variant))
-    }
-
-    /// A primitive comparison yields the VM scalar predicate, while the
-    /// distributed source surface represents control as `Bool = Result<(),
-    /// ()>`.  Literals already receive this contextual lift in
-    /// `literal_expected`; apply the same explicit two-arm conversion to a
-    /// computed scalar predicate so a nested branch may return `value < 7`
-    /// wherever the canonical Bool carrier is expected.
-    fn lift_scalar_bool_to_canonical_carrier(
-        &mut self,
-        value: CoreId,
-        expected: Option<Type>,
-        span: Span,
-    ) -> CoreId {
-        let Some(expected) = expected else {
-            return value;
-        };
-        if self.expressions[value.0 as usize].ty != Type::Scalar(ScalarType::Bool) {
-            return value;
-        }
-        let Some((definition, arguments, _true_variant)) =
-            self.canonical_bool_literal_variant(Some(&expected), "true")
-        else {
-            return value;
-        };
-        let Some((false_definition, false_arguments, _false_variant)) =
-            self.canonical_bool_literal_variant(Some(&expected), "false")
-        else {
-            return value;
-        };
-        if definition != false_definition || arguments != false_arguments {
-            return value;
-        }
-        let true_value = self.literal_expected("true".into(), Some(expected.clone()), span);
-        let false_value = self.literal_expected("false".into(), Some(expected.clone()), span);
-        self.alloc(
-            CoreKind::Completion {
-                computation: value,
-                clauses: vec![
-                    CoreCompletionClause {
-                        pattern: CorePattern::Literal("true".into()),
-                        bindings: vec![],
-                        refinement: None,
-                        body: true_value,
-                        span,
-                    },
-                    CoreCompletionClause {
-                        pattern: CorePattern::Literal("false".into()),
-                        bindings: vec![],
-                        refinement: None,
-                        body: false_value,
-                        span,
-                    },
-                ],
-            },
-            Type::Nominal {
-                definition,
-                arguments,
-            },
-            span,
-        )
-    }
     /// Strict expression forms evaluate their children from left to right. If
     /// any child cannot return normally, the enclosing construction cannot
     /// manufacture its nominal, tuple, array, call, or statement result.
@@ -7160,27 +7000,6 @@ impl Elaborator<'_> {
                 );
                 self.recovered = true;
                 return Type::Error;
-            }
-            // Keep body annotations consistent with signature elaboration:
-            // when the bundled library provides `type Bool = Result<(), ()>`,
-            // that ordinary source carrier takes precedence over the legacy
-            // VM scalar spelling. Without this, a typed closure `-> Bool`
-            // disagrees with the `Fn<..., Output = Bool>` bound that supplied
-            // its contextual callback type.
-            if name == "Bool"
-                && let ResolutionState::Resolved(definition) =
-                    self.index
-                        .resolve_path(DefinitionNamespace::Type, self.module, path)
-            {
-                let span = self.body.expression(self.body.root).span;
-                let Some(arguments) = self.header_nominal_arguments(definition, arguments, span)
-                else {
-                    return Type::Error;
-                };
-                return self.signatures.normalize_type_aliases(Type::Nominal {
-                    definition,
-                    arguments,
-                });
             }
             if let Some(scalar) = closure_scalar(name) {
                 return if arguments.is_empty() {
@@ -10220,52 +10039,15 @@ impl Elaborator<'_> {
     }
     fn prefix(&mut self, operator: String, value: ExprId, span: Span) -> CoreId {
         if self.fixities.prefix(&operator).is_none() {
-            return self.fail(
-                span,
-                "G4111",
-                if self.fixities.prefix_is_ambiguous(&operator) {
-                    "operator has ambiguous visible prefix fixity declarations"
-                } else {
-                    "operator has no visible prefix fixity declaration"
-                },
-            );
+            return self.fail(span, "G4111", "operator has no unambiguous visible prefix fixity declaration");
         }
-        let value = self.expression(value);
-        let value_ty = self.expressions[value.0 as usize].ty.clone();
-        if matches!(value_ty, Type::Never) {
-            return self.alloc(
-                CoreKind::IntrinsicCall {
-                    operator,
-                    arguments: vec![value],
-                },
-                Type::Never,
-                span,
-            );
-        }
-        let result = match (operator.as_str(), &value_ty) {
-            ("+" | "-", Type::Scalar(ScalarType::I64 | ScalarType::F32 | ScalarType::F64)) => {
-                value_ty.clone()
-            }
-            ("!", Type::Scalar(ScalarType::Bool)) => Type::Scalar(ScalarType::Bool),
-            _ => {
-                return self.operator_trait_call(operator, vec![value], span);
-            }
-        };
-        self.alloc(
-            CoreKind::IntrinsicCall {
-                operator,
-                arguments: vec![value],
-            },
-            result,
-            span,
-        )
+        self.grouped_operator(GroupedOperator::Apply { name: operator, operands: vec![GroupedOperator::Operand(value)] }, None, span)
     }
 
     /// Lower a source-declared operator through the same identity-carrying
     /// trait-method representation as an explicitly-qualified trait call.
-    /// Primitive scalar operators intentionally remain trusted Core nodes;
-    /// every other spelling is selected from traits actually in lexical scope
-    /// and carries the selected implementation `DefKey` to MIR.
+    /// Every spelling, including scalar arithmetic, is selected from traits
+    /// actually in lexical scope and carries implementation identity to MIR.
     fn operator_trait_call(&mut self, operator: String, values: Vec<CoreId>, span: Span) -> CoreId {
         let Some(receiver) = values.first().copied() else {
             return self.fail(span, "G4117", "operator has no receiver operand");
@@ -10316,7 +10098,7 @@ impl Elaborator<'_> {
                         evidence,
                         method,
                         signature,
-                    } => selected.push((
+                    } if signature.parameters.len() == values.len() => selected.push((
                         evidence,
                         method,
                         trait_arguments,
@@ -10327,6 +10109,7 @@ impl Elaborator<'_> {
                     TraitMethodAnswer::Overflow => solver_overflow = true,
                     TraitMethodAnswer::Refuted { .. } => refuted = true,
                     TraitMethodAnswer::NoSolution
+                    | TraitMethodAnswer::Selected { .. }
                     | TraitMethodAnswer::MissingMethod { .. }
                     | TraitMethodAnswer::MethodArity { .. } => {}
                 }
@@ -10364,6 +10147,7 @@ impl Elaborator<'_> {
                 ) else {
                     continue;
                 };
+                if signature.parameters.len() != values.len() { continue; }
                 deferred.push((
                     DeferredTraitMethod {
                         relation: goal.relation.clone(),
@@ -12152,81 +11936,10 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
     ) -> CoreId {
-        let subject = self.expression_expected(
-            computation,
-            self.completion_bool_subject_hint(computation, clauses),
-        );
+        let subject = self.expression(computation);
         self.completion_handle_core(subject, clauses, expected, span)
     }
 
-    fn completion_bool_subject_hint(
-        &self,
-        computation: ExprId,
-        clauses: &[HandlerClause],
-    ) -> Option<Type> {
-        // The synthetic `Result<(), ()>` carrier is only a contextual target
-        // for primitive predicates.  Supplying it to an ordinary call such
-        // as `handle option() { Result::Ok(_) => ... }` would instead try to
-        // coerce that real `Result<T, E>` into the carrier and erase its
-        // payload contract.  Operator chains are the body form that can
-        // directly produce the primitive comparison Bool we need to lift.
-        if !matches!(self.body.expression(computation).kind, ExprKind::OperatorChain { .. }) {
-            return None;
-        }
-        let mut definition = None;
-        let mut variants = std::collections::BTreeSet::new();
-        for clause in clauses {
-            let pattern = clause.completion?;
-            let PatternKind::Enum { path, arguments, .. } = &self.body.pattern(pattern).kind else {
-                return None;
-            };
-            if !arguments.is_empty() {
-                return None;
-            }
-            let (variant, type_path) = path.split_last()?;
-            let ResolutionState::Resolved(candidate) = self.index.resolve_path(
-                DefinitionNamespace::Type,
-                self.module,
-                type_path,
-            ) else {
-                return None;
-            };
-            if definition.replace(candidate).is_some_and(|known| known != candidate) {
-                return None;
-            }
-            variants.insert(variant.as_str());
-        }
-        if variants != std::collections::BTreeSet::from(["Ok", "Err"]) {
-            return None;
-        }
-        let definition = definition?;
-        let Some(ElaboratedHeader::Nominal { generic_kinds, .. }) =
-            self.signatures.definitions.get(&definition)
-        else {
-            return None;
-        };
-        if generic_kinds.as_slice() != [crate::GenericKind::Type, crate::GenericKind::Type] {
-            return None;
-        }
-        let arguments = vec![
-            GenericArgument::Type(Type::Unit),
-            GenericArgument::Type(Type::Unit),
-        ];
-        let ok = self
-            .signatures
-            .instantiate_enum_variant_generic(definition, &arguments, "Ok")
-            .ok();
-        let err = self
-            .signatures
-            .instantiate_enum_variant_generic(definition, &arguments, "Err")
-            .ok();
-        matches!(ok, Some((_, fields)) if fields == vec![Type::Unit])
-            .then_some(())
-            .and_then(|_| {
-                matches!(err, Some((_, fields)) if fields == vec![Type::Unit])
-                    .then_some(Type::Nominal { definition, arguments })
-            })
-    }
     fn completion_handle_core(
         &mut self,
         subject: CoreId,
@@ -12234,6 +11947,14 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
     ) -> CoreId {
+        // Structural value patterns contribute ordinary type constraints.
+        // A polymorphic initializer may leave an uninhabited variant's type
+        // parameter open; another value pattern can close it without any
+        // compiler knowledge of Boolean spellings or constructor names.
+        let subject_context = self.expressions[subject.0 as usize].ty.clone();
+        for pattern in clauses.iter().filter_map(|clause| clause.completion) {
+            self.constrain_constant_pattern_type(pattern, &subject_context);
+        }
         // Operation-arm inference has already established the handler result
         // by the time normal-completion dispatch is built.  Resolve that
         // result before elaborating literal or structural patterns: the
@@ -12456,6 +12177,34 @@ impl Elaborator<'_> {
             result,
             span,
         )
+    }
+
+    fn constrain_constant_pattern_type(&mut self, pattern: crate::PatternId, subject: &Type) {
+        let path = match &self.body.pattern(pattern).kind {
+            crate::PatternKind::Binding(name) => vec![name.clone()],
+            crate::PatternKind::Enum { path, arguments, fields } if arguments.is_empty() && fields.is_empty() => path.clone(),
+            crate::PatternKind::Tuple(patterns) => {
+                if let Type::Tuple(types) = subject {
+                    for (pattern, ty) in patterns.clone().into_iter().zip(types) { self.constrain_constant_pattern_type(pattern, ty); }
+                }
+                return;
+            }
+            _ => return,
+        };
+        let ResolutionState::Resolved(definition) = self.index.resolve_path(DefinitionNamespace::Value, self.module, &path) else { return; };
+        let Some((ty, _)) = self.signatures.pattern_values.get(&definition) else { return; };
+        let ty = ty.clone();
+        let arguments = match self.signatures.definitions.get(&definition) {
+            Some(ElaboratedHeader::ValueInitializer { generic_kinds, .. }) => generic_kinds.iter().map(|kind| match kind {
+                crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
+                crate::GenericKind::Lifetime => GenericArgument::Lifetime(self.inference.fresh_lifetime()),
+                crate::GenericKind::EffectRow => GenericArgument::EffectRow(self.inference.fresh_effects()),
+                crate::GenericKind::Const(kind) => self.inference.fresh_const(*kind),
+            }).collect::<Vec<_>>(),
+            _ => vec![],
+        };
+        let ty = self.signatures.instantiate_value_initializer_generic(definition, &arguments).unwrap_or(ty);
+        let _ = self.inference.unify(subject.clone(), ty);
     }
     /// Check an ordered pattern matrix against the finite structural domains
     /// available to Stage 0.  Unlike the former constructor-only check, this
@@ -14346,244 +14095,107 @@ impl Elaborator<'_> {
             .collect()
     }
     fn operators(&mut self, operands: Vec<ExprId>, operators: Vec<String>, span: Span) -> CoreId {
-        if operands.len() != operators.len().saturating_add(1) {
-            return self.fail(span, "G4108", "malformed operator chain");
-        }
-        // Some infix spellings are ordinary source callables rather than
-        // trait methods.  In particular, the canonical `else` combinator
-        // takes a lazy `Fn` fallback.  Resolve its frozen callable contract
-        // before elaborating either operand so a trailing contextual block
-        // receives the callable result/effect expectation instead of being
-        // prematurely treated as an untyped eager block.
-        if let ([left, right], [operator]) = (operands.as_slice(), operators.as_slice())
-            && let Some(value) = self.direct_infix_callable(operator, *left, *right, None, span)
-        {
-            return value;
-        }
-        let values = operands
-            .into_iter()
-            .map(|value| self.expression(value))
-            .collect::<Vec<_>>();
-        let Some(first) = values.first().copied() else {
-            return self.fail(span, "G4108", "operator chain has no operands");
-        };
-        let mut output = vec![first];
-        let mut stack = Vec::<String>::new();
-        for (operator, right) in operators.into_iter().zip(values.into_iter().skip(1)) {
-            let Some(fixity) = self.fixities.infix(&operator).cloned() else {
-                return self.fail(
-                    span,
-                    "G4111",
-                    if self.fixities.infix_is_ambiguous(&operator) {
-                        "operator has ambiguous visible infix fixity declarations"
-                    } else {
-                        "operator has no visible infix fixity declaration"
-                    },
-                );
-            };
-            if fixity.form == FixityForm::Prefix {
-                return self.fail(span, "G4111", "operator is only declared as prefix");
-            }
-            while let Some(top) = stack.last() {
-                let top_fixity = self
-                    .fixities
-                    .infix(top)
-                    .expect("operator stack contains only resolved fixities");
-                if top_fixity.precedence == fixity.precedence
-                    && (top_fixity.form == FixityForm::InfixNonAssociative
-                        || fixity.form == FixityForm::InfixNonAssociative)
-                {
-                    return self.fail(
-                        span,
-                        "G4112",
-                        "non-associative operators of equal precedence require parentheses",
-                    );
-                }
-                let reduce = top_fixity.precedence > fixity.precedence
-                    || (top_fixity.precedence == fixity.precedence
-                        && fixity.form != FixityForm::InfixRight);
-                if !reduce {
-                    break;
-                }
-                if !self.reduce_operator(&mut output, &mut stack, span) {
-                    return self.fail(span, "G4108", "malformed operator chain");
-                }
-            }
-            stack.push(operator);
-            output.push(right);
-        }
-        while !stack.is_empty() {
-            if !self.reduce_operator(&mut output, &mut stack, span) {
-                return self.fail(span, "G4108", "malformed operator chain");
-            }
-        }
-        output
-            .pop()
-            .expect("valid operator chain retains one result")
+        self.operators_expected(operands, operators, span, None)
     }
 
-    /// Elaborate a binary source-level infix callable.  Trait methods remain
-    /// the fallback for ordinary operator syntax; this path is intentionally
-    /// restricted to a real value declaration with a two-argument frozen
-    /// callable signature.  It is the same contextual argument protocol as
-    /// direct calls, including intrinsic `Fn` bounds for compact blocks.
-    fn direct_infix_callable(
-        &mut self,
-        operator: &str,
-        left: ExprId,
-        right: ExprId,
-        expected: Option<Type>,
-        span: Span,
-    ) -> Option<CoreId> {
-        let ResolutionState::Resolved(definition) = self.index.resolve_path(
-            DefinitionNamespace::Value,
-            self.module,
-            &[operator.to_owned()],
-        ) else {
-            return None;
+    fn operators_expected(&mut self, operands: Vec<ExprId>, operators: Vec<String>, span: Span, expected: Option<Type>) -> CoreId {
+        let Some(tree) = self.group_operators(operands, operators, span) else {
+            return self.fail(span, "G4108", "malformed or unresolved operator chain");
         };
-        let definition = self
-            .signatures
-            .value_alias_target(definition)
-            .unwrap_or(definition);
-        let signature = self
-            .signatures
-            .definitions
-            .get(&definition)
-            .and_then(callable)?;
-        if signature.parameters.len() != 2 {
-            return None;
-        }
-        let callee = self.path(vec![operator.to_owned()], span);
-        let Type::Callable {
-            parameters, result, ..
-        } = self.expressions[callee.0 as usize].ty.clone()
-        else {
-            return None;
-        };
-        if let Some(expected) = expected {
-            // This contributes generic inference evidence only.  The normal
-            // call boundary opens declaration-owned lifetimes after it has
-            // seen the actual arguments.
-            let result_context = self.freshen_call_context_lifetimes(*result);
-            let _ = self.inference.unify(result_context, expected);
-        }
-        let left_expected = parameters.first().cloned();
-        let right_expected = parameters
-            .get(1)
-            .and_then(|parameter| self.direct_bound_callable_contract(callee, parameter))
-            .or_else(|| parameters.get(1).cloned());
-        let left = self.expression_expected(left, left_expected);
-        let right = self.expression_expected(right, right_expected);
-        Some(self.call(callee, vec![left, right], span))
+        self.grouped_operator(tree, expected, span)
     }
-    fn reduce_operator(
-        &mut self,
-        values: &mut Vec<CoreId>,
-        operators: &mut Vec<String>,
-        span: Span,
-    ) -> bool {
-        let Some(operator) = operators.pop() else {
-            return false;
+
+    fn group_operators(&mut self, operands: Vec<ExprId>, operators: Vec<String>, span: Span) -> Option<GroupedOperator> {
+        if operands.len() != operators.len().checked_add(1)? { return None; }
+        fn reduce(values: &mut Vec<GroupedOperator>, operators: &mut Vec<String>) -> Option<()> {
+            let name = operators.pop()?;
+            let right = values.pop()?;
+            let left = values.pop()?;
+            values.push(GroupedOperator::Apply { name, operands: vec![left, right] });
+            Some(())
+        }
+        let mut source = operands.into_iter();
+        let mut values = vec![GroupedOperator::Operand(source.next()?)];
+        let mut pending = Vec::<String>::new();
+        for (operator, operand) in operators.into_iter().zip(source) {
+            let Some(fixity) = self.fixities.infix(&operator).cloned() else {
+                self.error(span, "G4111", "operator has no unambiguous visible infix fixity declaration");
+                return None;
+            };
+            while let Some(top) = pending.last() {
+                let previous = self.fixities.infix(top)?;
+                if previous.precedence == fixity.precedence && (previous.form == FixityForm::InfixNonAssociative || fixity.form == FixityForm::InfixNonAssociative) {
+                    self.error(span, "G4112", "non-associative operators of equal precedence require parentheses");
+                    return None;
+                }
+                if previous.precedence < fixity.precedence || (previous.precedence == fixity.precedence && fixity.form == FixityForm::InfixRight) { break; }
+                reduce(&mut values, &mut pending)?;
+            }
+            pending.push(operator);
+            values.push(GroupedOperator::Operand(operand));
+        }
+        while !pending.is_empty() { reduce(&mut values, &mut pending)?; }
+        values.pop()
+    }
+
+    fn grouped_operator(&mut self, tree: GroupedOperator, expected: Option<Type>, span: Span) -> CoreId {
+        let GroupedOperator::Apply { name, operands } = tree else {
+            let GroupedOperator::Operand(id) = tree else { unreachable!() };
+            return self.expression_expected(id, expected);
         };
-        let (Some(mut right), Some(mut left)) = (values.pop(), values.pop()) else {
-            return false;
-        };
-        // Operators are elaborated from their receiver outward.  A numeric
-        // source literal on the right has no inherent width, so preserve the
-        // receiver's concrete scalar width before testing the primitive or
-        // trait route.  Without this, `u32 <= 1114111` becomes a `u32`/`i64`
-        // trait call and the canonical character/float helpers fail before
-        // their nominal Bool result can reach source control flow.
-        let numeric_literal = match &self.expressions[right.0 as usize].kind {
-            CoreKind::Literal(text) if literal_is_numeric(text) => Some(text.clone()),
-            _ => None,
-        };
-        let left_ty = self.expressions[left.0 as usize].ty.clone();
-        if let Some(text) = numeric_literal {
-            let expected = match left_ty.clone() {
-                Type::Scalar(scalar) if scalar_is_numeric(scalar) => Some(Type::Scalar(scalar)),
-                Type::Generic(_) => Some(left_ty.clone()),
+        if let ResolutionState::Resolved(definition) = self.index.resolve_path(DefinitionNamespace::Value, self.module, &[name.clone()]) {
+            let definition = self.signatures.value_alias_target(definition).unwrap_or(definition);
+            if self.signatures.definitions.get(&definition).and_then(callable)
+                .is_some_and(|signature| signature.parameters.len() == operands.len()) {
+                let callee = self.path(vec![name], span);
+                let Type::Callable { parameters, result, .. } = self.expressions[callee.0 as usize].ty.clone() else {
+                    return self.fail(span, "G4117", "operator binding is not callable");
+                };
+                if let Some(expected) = expected {
+                    let result_context = self.freshen_call_context_lifetimes(*result);
+                    let _ = self.inference.unify(result_context, expected);
+                }
+                let mut arguments = vec![];
+                for (operand, parameter) in operands.into_iter().zip(parameters) {
+                    let expected = self.direct_bound_callable_contract(callee, &parameter).unwrap_or_else(|| parameter.clone());
+                    let expected = self.inference.zonk(expected.clone()).unwrap_or(expected);
+                    let argument = self.grouped_operator(operand, Some(expected), span);
+                    let actual = self.expressions[argument.0 as usize].ty.clone();
+                    let _ = self.inference.unify(parameter, actual);
+                    arguments.push(argument);
+                }
+                return self.call(callee, arguments, span);
+            }
+        }
+        let contextual_receiver = matches!(operands.first(), Some(GroupedOperator::Operand(id))
+            if matches!(&self.body.expression(*id).kind, ExprKind::Literal(text) if literal_is_numeric(text)))
+            && !expected.as_ref().is_some_and(|ty| matches!(ty, Type::Scalar(scalar) if scalar_is_numeric(*scalar)));
+        let mut arguments = vec![];
+        for operand in operands {
+            // A source numeric literal is contextual, independent of which
+            // operator name selected this ordinary receiver-based call.
+            let context = match (&operand, arguments.first().copied()) {
+                (GroupedOperator::Operand(id), None) if matches!(&self.body.expression(*id).kind,
+                    ExprKind::Literal(text) if literal_is_numeric(text)) => expected.clone().filter(|ty| matches!(ty, Type::Scalar(scalar) if scalar_is_numeric(*scalar))),
+                (GroupedOperator::Operand(id), Some(receiver)) if matches!(&self.body.expression(*id).kind,
+                    ExprKind::Literal(text) if literal_is_numeric(text)) => Some(self.expressions[receiver as usize].ty.clone()),
                 _ => None,
             };
-            if let Some(expected) = expected {
-                let literal_span = self.expressions[right.0 as usize].span;
-                right = self.literal_expected(text, Some(expected), literal_span);
+            let argument = self.grouped_operator(operand, context, span);
+            arguments.push(argument.0);
+        }
+        // Solve an otherwise uncontextualized numeric literal from the other
+        // operand's concrete type before selecting a receiver implementation.
+        // This updates only literal typing: emitted operand order is unchanged.
+        if contextual_receiver && let [left, right] = arguments.as_slice() {
+            let ty = self.expressions[*right as usize].ty.clone();
+            if matches!(&ty, Type::Scalar(scalar) if scalar_is_numeric(*scalar)) {
+                self.expressions[*left as usize].ty = ty;
             }
         }
-        let right_ty = self.expressions[right.0 as usize].ty.clone();
-        // The receiver need not be syntactically left-most. Comparisons such
-        // as `57343 < value` occur in the canonical character validator, and
-        // must contextualize the leading literal from the concrete right
-        // operand just as `value < 57343` does from the left operand.
-        let numeric_literal = match &self.expressions[left.0 as usize].kind {
-            CoreKind::Literal(text) if literal_is_numeric(text) => Some(text.clone()),
-            _ => None,
-        };
-        if let Some(text) = numeric_literal {
-            let expected = match right_ty.clone() {
-                Type::Scalar(scalar) if scalar_is_numeric(scalar) => Some(Type::Scalar(scalar)),
-                Type::Generic(_) => Some(right_ty.clone()),
-                _ => None,
-            };
-            if let Some(expected) = expected {
-                let literal_span = self.expressions[left.0 as usize].span;
-                left = self.literal_expected(text, Some(expected), literal_span);
-            }
-        }
-        let left_ty = self.expressions[left.0 as usize].ty.clone();
-        // Built-in arithmetic is homogeneous, but a trait operator is not:
-        // `Index::[]`, comparisons against a wrapper, and application-style
-        // domain operators may legitimately have different left/right types.
-        // Only require this unification on the trusted primitive fast path;
-        // a failed homogeneous probe falls through to the selected trait
-        // method, whose complete callable contract checks both operands.
-        let operand_ty = match self.inference.unify(left_ty.clone(), right_ty) {
-            Ok(ty) => ty,
-            Err(_) => {
-                values.push(self.operator_trait_call(operator, vec![left, right], span));
-                return true;
-            }
-        };
-        // Scalar comparisons are compiler primitives across every concrete
-        // integer width, not only the legacy default `i64`.  Their result is
-        // the scalar predicate consumed by `handle`/`is`; source-level Bool
-        // carriers are constructed at the surrounding contextual boundary.
-        // Routing `u32 <= value` through traits is wrong: `<=` and `!=` are
-        // primitive spellings rather than trait-method names in the canonical
-        // surface, and it leaves otherwise valid standard-library control
-        // flow without an implementation candidate.
-        let numeric = matches!(operand_ty, Type::Scalar(scalar) if scalar_is_numeric(scalar));
-        let text = matches!(operand_ty, Type::Scalar(ScalarType::Text));
-        let ordered = numeric || matches!(operand_ty, Type::Scalar(ScalarType::Char));
-        let equality = ordered
-            || matches!(
-                operand_ty,
-                Type::Scalar(ScalarType::Bool | ScalarType::Text)
-            );
-        let result = match operator.as_str() {
-            "and" | "or" if matches!(operand_ty, Type::Scalar(ScalarType::Bool)) => {
-                Type::Scalar(ScalarType::Bool)
-            }
-            "+" if text => operand_ty,
-            "+" | "-" | "*" | "/" | "%" if numeric => operand_ty,
-            "==" | "!=" if equality => Type::Scalar(ScalarType::Bool),
-            "<" | "<=" | ">" | ">=" if ordered => Type::Scalar(ScalarType::Bool),
-            _ => {
-                values.push(self.operator_trait_call(operator, vec![left, right], span));
-                return true;
-            }
-        };
-        values.push(self.alloc(
-            CoreKind::IntrinsicCall {
-                operator,
-                arguments: vec![left, right],
-            },
-            result,
-            span,
-        ));
-        true
+        self.operator_trait_call(name, arguments.into_iter().map(CoreId).collect(), span)
     }
+
     fn alloc(&mut self, kind: CoreKind, ty: Type, span: Span) -> CoreId {
         let id = CoreId(self.expressions.len() as u32);
         self.expressions.push(CoreExpr { kind, ty, span });
@@ -16284,21 +15896,6 @@ fn call_reference_origin(
     CallReferenceOrigin::Paths(paths)
 }
 
-/// Reinstantiate a sealed call's effect regions from its actual operands.
-/// The callee type keeps declaration/HRTB regions for provenance analysis;
-/// handler dispatch instead compares the opened protocol at this call site.
-pub(crate) fn instantiated_call_effects(
-    body: &TypedBody, callee: CoreId, arguments: &[CoreId],
-) -> Option<EffectRow> {
-    let Type::Callable { parameters, effects, .. } = &body.expression(callee).ty else { return None; };
-    if parameters.len() != arguments.len() { return None; }
-    let mut substitution = CallLifetimeSubstitution::default();
-    for (parameter, argument) in parameters.iter().zip(arguments) {
-        align_lifetime_types(parameter, &body.expression(*argument).ty,
-            &mut substitution, LifetimeMode::Instantiate, 0).ok()?;
-    }
-    substitute_call_effects(effects.clone(), &substitution, 0).ok()
-}
 
 /// Recover the reference-result relation directly from the interface-aware
 /// callable contract, before call instantiation turns distinct declaration or
@@ -16691,8 +16288,11 @@ fn record_capture(
 ) {
     let rank = |mode| match mode {
         CaptureMode::SharedBorrow => 0,
-        CaptureMode::UniqueBorrow => 1,
-        CaptureMode::Copy | CaptureMode::Move => 2,
+        CaptureMode::Copy => 1,
+        // Reading a copyable value must not turn an earlier write to the
+        // enclosing place into mutation of a private copied environment.
+        CaptureMode::UniqueBorrow => 2,
+        CaptureMode::Move => 3,
     };
     match captures.get_mut(name) {
         Some((existing, _)) if rank(*existing) >= rank(mode) => {}
@@ -16706,7 +16306,6 @@ fn record_capture(
 fn closure_scalar(name: &str) -> Option<ScalarType> {
     use ScalarType::*;
     Some(match name {
-        "Bool" => Bool,
         "u8" => U8,
         "u16" => U16,
         "u32" => U32,

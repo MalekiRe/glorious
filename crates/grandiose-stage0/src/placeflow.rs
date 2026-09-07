@@ -517,6 +517,7 @@ impl PlaceFlow {
             label_storage_exits: BTreeMap::new(),
             scope_refinement_starts: vec![0],
             ephemeral_borrow_owner: None,
+            nonretaining_call_owner: None,
             pending_results: BTreeSet::new(),
             next_shadow: 0,
             events: vec![],
@@ -632,6 +633,10 @@ struct Analyzer<'a> {
     /// the local immediately after an intrinsic whose result cannot retain a
     /// Grandiose reference.
     ephemeral_borrow_owner: Option<String>,
+    /// Anonymous callable operands of a call with a closed, reference-free
+    /// result cannot retain their capture loans after that call completes.
+    /// This is separate from a let initializer, whose result may escape.
+    nonretaining_call_owner: Option<String>,
     /// Computed values remain owned while their enclosing strict expression
     /// evaluates. Their reference leaves must survive arm/block scope exit
     /// and later operands, until the enclosing expression transfers or drops
@@ -1122,7 +1127,8 @@ impl Analyzer<'_> {
             | CoreKind::Constant { .. }
             | CoreKind::Error => {}
             CoreKind::Closure { environment, .. } => {
-                self.visit_closure_environment(&environment, e.span, None);
+                let owner = self.nonretaining_call_owner.clone();
+                self.visit_closure_environment(&environment, e.span, owner.as_deref());
             }
             // Ordinary value occurrences are owned by default.  The sealed
             // principal `Use` interval is the authority for whether that
@@ -1346,9 +1352,16 @@ impl Analyzer<'_> {
                         // calls rather than CoreKind::IntrinsicCall.
                         let owner = format!("<temporary-call-{}>", id.0);
                         let previous = self.ephemeral_borrow_owner.replace(owner.clone());
-                        self.visit_sequence(&values, live_after);
+                        let previous_capture = self.nonretaining_call_owner.clone();
+                        if self.result_has_no_capture_carriers(&e.ty, &mut BTreeSet::new()) {
+                            self.nonretaining_call_owner = Some(owner.clone());
+                        }
+                        let mut during_call = live_after.clone();
+                        during_call.insert(owner.clone());
+                        self.visit_sequence(&values, &during_call);
                         self.release_owner_loans(&owner, e.span);
                         self.ephemeral_borrow_owner = previous;
+                        self.nonretaining_call_owner = previous_capture;
                     } else {
                         self.visit_sequence(&values, live_after);
                     }
@@ -1855,6 +1868,40 @@ impl Analyzer<'_> {
             .collect::<BTreeSet<_>>();
         for owner in dead {
             self.release_owner_loans(&owner, span);
+        }
+    }
+
+    /// A callable's hidden environment is not a structural reference leaf.
+    /// Even a `CallReferenceShape::None` result therefore needs this separate
+    /// check before retiring anonymous callback capture loans. Unknown or
+    /// recursive layouts conservatively retain them.
+    fn result_has_no_capture_carriers(&self, ty: &Type, active: &mut BTreeSet<crate::DefKey>) -> bool {
+        match ty {
+            Type::Callable { .. } | Type::Generic(_) | Type::Projection { .. }
+                | Type::Infer(_) | Type::Error => false,
+            Type::Tuple(fields) => fields.iter().all(|ty| self.result_has_no_capture_carriers(ty, active)),
+            Type::Array(element) | Type::StaticData { element, .. } => self.result_has_no_capture_carriers(element, active),
+            Type::Nominal { definition, arguments } => {
+                if !active.insert(*definition) { return false; }
+                let no_captures = match self.signatures.and_then(|signatures| signatures.definitions.get(definition)) {
+                    Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(fields), .. }) =>
+                        fields.iter().all(|field| crate::core::instantiate_nominal_field_type(&field.ty, arguments)
+                            .is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
+                    Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Enum(variants), .. }) =>
+                        variants.iter().all(|variant| match &variant.payload {
+                            crate::signature::ElaboratedEnumVariantPayload::Unit => true,
+                            crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields.iter().all(|field|
+                                crate::core::instantiate_nominal_field_type(field, arguments).is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
+                            crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => fields.iter().all(|field|
+                                crate::core::instantiate_nominal_field_type(&field.ty, arguments).is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
+                        }),
+                    _ => false,
+                };
+                active.remove(definition);
+                no_captures
+            }
+            Type::Reference { .. } => false,
+            _ => true,
         }
     }
 

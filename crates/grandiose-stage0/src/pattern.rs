@@ -167,6 +167,47 @@ fn decision_refutable(decision: &PatternDecision) -> bool {
     }
 }
 
+/// Freeze only structural data, never execute a callable to obtain a pattern.
+/// Source constants with effects or nonstructural initializers stay ordinary
+/// values and are rejected in pattern position.
+pub(crate) fn initializer_pattern(body: &crate::TypedBody, id: crate::CoreId, signatures: &ElaboratedInterface) -> Option<PatternDecision> {
+    use crate::CoreKind;
+    let child = |id| initializer_pattern(body, id, signatures);
+    Some(match &body.expression(id).kind {
+        CoreKind::Literal(value) => PatternDecision::Literal(value.clone()),
+        CoreKind::Tuple(values) if values.is_empty() => PatternDecision::Any,
+        CoreKind::Tuple(values) => PatternDecision::Tuple(values.iter().copied().map(child).collect::<Option<_>>()?),
+        CoreKind::Array(values) => PatternDecision::Array(values.iter().copied().map(child).collect::<Option<_>>()?),
+        CoreKind::Record { definition, fields } => PatternDecision::Record {
+            definition: *definition,
+            fields: fields.iter().copied().enumerate().map(|(index, id)| child(id).map(|pattern| (index as u32, pattern))).collect::<Option<_>>()?,
+        },
+        CoreKind::Enum { definition, variant, fields } => PatternDecision::Enum {
+            definition: *definition, variant: *variant,
+            fields: fields.iter().copied().enumerate().map(|(index, id)| child(id).map(|pattern| (index as u32, pattern))).collect::<Option<_>>()?,
+        },
+        CoreKind::Constant { definition, .. } => signatures.pattern_values.get(definition)?.1.clone(),
+        CoreKind::Block(values) if values.len() == 1 => child(values[0])?,
+        _ => return None,
+    })
+}
+
+fn pattern_value_type_matches(pattern: &Type, subject: &Type, substitutions: &mut std::collections::BTreeMap<u32, Type>) -> bool {
+    match (pattern, subject) {
+        (Type::Generic(index), subject) => match substitutions.get(index) {
+            Some(previous) => previous == subject,
+            None => { substitutions.insert(*index, subject.clone()); true }
+        },
+        (Type::Nominal { definition: left, arguments: a }, Type::Nominal { definition: right, arguments: b }) => left == right && a.len() == b.len() && a.iter().zip(b).all(|(a, b)| match (a, b) {
+            (GenericArgument::Type(a), GenericArgument::Type(b)) => pattern_value_type_matches(a, b, substitutions),
+            _ => a == b,
+        }),
+        (Type::Tuple(a), Type::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a,b)| pattern_value_type_matches(a,b,substitutions)),
+        (Type::Array(a), Type::Array(b)) => pattern_value_type_matches(a,b,substitutions),
+        _ => pattern == subject,
+    }
+}
+
 struct Elaborator<'a> {
     body: &'a BodySyntax,
     index: &'a DefinitionIndex,
@@ -189,6 +230,21 @@ impl Elaborator<'_> {
                 PatternDecision::Any
             }
             PatternKind::Binding(name) => {
+                if let ResolutionState::Resolved(definition) = self.index.resolve_path(
+                    DefinitionNamespace::Value, self.module, &[name.clone()],
+                ) {
+                    if let Some((ty, decision)) = self.signatures.pattern_values.get(&definition) {
+                        if pattern_value_type_matches(ty, &subject, &mut Default::default()) {
+                            return decision.clone();
+                        }
+                        self.error(pattern.span, "G4201", "constant pattern does not match the subject type");
+                        return PatternDecision::Error;
+                    }
+                    if matches!(self.signatures.definitions.get(&definition), Some(crate::ElaboratedHeader::ValueInitializer { .. })) {
+                        self.error(pattern.span, "G4201", "pattern value requires a frozen structural initializer");
+                        return PatternDecision::Error;
+                    }
+                }
                 let key = BinderKey(self.next_binder);
                 self.next_binder += 1;
                 self.bindings.push(PatternBinding {
@@ -201,15 +257,6 @@ impl Elaborator<'_> {
                 PatternDecision::Bind(key)
             }
             PatternKind::Literal(literal) => {
-                if let Some((definition, variant)) =
-                    canonical_bool_literal_pattern(&subject, self.signatures, &literal)
-                {
-                    return PatternDecision::Enum {
-                        definition,
-                        variant,
-                        fields: vec![(0, PatternDecision::Any)],
-                    };
-                }
                 let literal_ty = literal_type(&literal);
                 // Pattern literals are contextual just like expression
                 // literals.  A handler payload such as `Branch::select(0)`
@@ -279,7 +326,16 @@ impl Elaborator<'_> {
                 path,
                 arguments,
                 fields,
-            } => self.enum_tuple(pattern.span, path, arguments, fields, subject),
+            } => {
+                if arguments.is_empty() && fields.is_empty()
+                    && let ResolutionState::Resolved(definition) = self.index.resolve_path(DefinitionNamespace::Value, self.module, &path)
+                    && let Some((ty, decision)) = self.signatures.pattern_values.get(&definition) {
+                    if pattern_value_type_matches(ty, &subject, &mut Default::default()) { return decision.clone(); }
+                    self.error(pattern.span, "G4201", "constant pattern does not match the subject type");
+                    return PatternDecision::Error;
+                }
+                self.enum_tuple(pattern.span, path, arguments, fields, subject)
+            }
             PatternKind::Recovered => {
                 self.recovered = true;
                 PatternDecision::Error
@@ -923,31 +979,6 @@ impl Elaborator<'_> {
     }
 }
 
-/// The canonical standard library represents `Bool` as `Result<(), ()>`.
-/// Accept its ordinary `true` and `false` source patterns by recognizing only
-/// the exact one-unit `Ok` and `Err` constructors of the normalized subject.
-fn canonical_bool_literal_pattern(
-    subject: &Type,
-    signatures: &ElaboratedInterface,
-    literal: &str,
-) -> Option<(DefKey, u32)> {
-    let Type::Nominal {
-        definition,
-        arguments,
-    } = subject
-    else {
-        return None;
-    };
-    let name = match literal {
-        "true" => "Ok",
-        "false" => "Err",
-        _ => return None,
-    };
-    let (variant, fields) = signatures
-        .instantiate_enum_variant_generic(*definition, arguments, name)
-        .ok()?;
-    (fields == vec![Type::Unit]).then_some((*definition, variant))
-}
 
 fn nominal_subject(subject: &Type) -> Option<(DefKey, Vec<crate::GenericArgument>)> {
     match subject {
@@ -1010,7 +1041,6 @@ fn scalar_is_numeric(scalar: ScalarType) -> bool {
 fn scalar(name: &str) -> Option<ScalarType> {
     use ScalarType::*;
     Some(match name {
-        "Bool" => Bool,
         "u8" => U8,
         "u16" => U16,
         "u32" => U32,

@@ -200,11 +200,70 @@ fn check_vec_drop_action_with_declarations(action: &str, declarations: &str, exp
         }} }}
     "#, include_str!("../../../stdlib/src/lib.glorious"));
     input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes());
-    let bytes = compiler.compile(input).unwrap().artifact.unwrap().canonical_bytes();
+    let bytes = compiler.compile(input).unwrap_or_else(|error| panic!("{action}: {error:#?}")).artifact.unwrap().canonical_bytes();
     let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
     // SAFETY: the counter allocation outlives every probe, each initialized
     // resident is consumed once, and the counter is released after inspection.
-    assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), expected, "{action}");
+    assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }
+        .unwrap_or_else(|error| panic!("{action}: {error:?}")), expected, "{action}");
+}
+
+#[test]
+fn source_forwarded_effect_packet_has_one_payload_owner_after_a_late_pattern_rejection() {
+    let declarations = r#"
+        effect PacketRelay { [0, 1] relay(value: DropPair, tag: i64) -> i64; }
+        fn send_packet(value: DropPair) -> i64 / PacketRelay {
+            PacketRelay::relay(value, 1)
+        }
+    "#;
+    check_vec_drop_action_with_declarations(r#"{
+        handle {
+            handle send_packet(DropPair { first: DropProbe { target: target }, second: DropProbe { target: target } }) {
+                PacketRelay::relay(payload, 0) with _ => 0
+            }
+        } {
+            PacketRelay::relay(payload, tag) with _ => 0
+        };
+        ()
+    }"#, declarations, 2);
+}
+
+#[test]
+fn source_native_projected_replacement_does_not_drop_a_moved_resident_twice() {
+    check_vec_drop_action(r#"{
+        let allocation = __g1_memory_allocate(__g1_memory_size_of<DropPair>(), __g1_memory_align_of<DropPair>());
+        let storage = __g1_memory_cast<u8, DropPair>(allocation);
+        __g1_memory_write(storage, DropPair { first: DropProbe { target: target }, second: DropProbe { target: target } });
+        {
+            let reference = __g1_memory_borrow_unique(storage);
+            let first = &mut (*reference).first;
+            let taken = move *first;
+            *first = DropProbe { target: target };
+            ()
+        };
+        {
+            let restored = __g1_memory_read(__g1_memory_as_const(storage));
+            ()
+        };
+        __g1_memory_deallocate(allocation, __g1_memory_size_of<DropPair>(), __g1_memory_align_of<DropPair>());
+        ()
+    }"#, 3);
+}
+
+#[test]
+fn source_copyable_referent_projection_and_explicit_copy_have_distinct_drop_owners() {
+    check_vec_drop_action(r#"{
+        let value = CopyDropProbe { target: target };
+        let reference = &value;
+        reference.target;
+        ()
+    }"#, 1);
+    check_vec_drop_action(r#"{
+        let value = CopyDropProbe { target: target };
+        let reference = &value;
+        let copied = *reference;
+        ()
+    }"#, 2);
 }
 
 #[test]
@@ -1475,6 +1534,31 @@ fn bundled_str_lifetime_elision_ties_one_input_to_its_output_and_rejects_ambigui
 }
 
 #[test]
+fn native_resident_field_replacement_runs_one_cleanup_plan() {
+    let source = r#"
+        use std::*;
+        struct Slot { values: Vec<i64> }
+        fn clear(slot: &mut Slot) -> { (*slot).values = Vec::new(); }
+        pub fn main() -> usize {
+            let values = Vec<i64>::new();
+            Vec::push(&mut values, 42);
+            let slots = Vec<Slot>::new();
+            Vec::push(&mut slots, Slot { values: values });
+            handle Vec::get_mut(&mut slots, 0) {
+                Result::Ok(slot) => clear(slot), Result::Err(_) => (),
+            };
+            Vec::len(&slots)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_std_usize().unwrap(), 1);
+    let verified = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(verified.run_std_usize().unwrap(), 1);
+}
+
+#[test]
 fn hasher_is_source_defined_and_deterministic() {
     let source = r#"
         use std::*;
@@ -1487,6 +1571,28 @@ fn hasher_is_source_defined_and_deterministic() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 177580);
+}
+
+#[test]
+fn hasher_wraps_both_multiplication_and_addition() {
+    let inputs = [usize::MAX, usize::MAX - 1, 17, usize::MAX, 42];
+    let writes = inputs
+        .iter()
+        .map(|input| format!("Hasher::write_usize(&mut state, {input});"))
+        .collect::<String>();
+    let source = format!(
+        "use std::*; pub fn main() -> usize {{ let state = Hasher::new(); {writes} Hasher::finish(state) }}"
+    );
+    let expected = inputs.into_iter().fold(5381_usize, |state, input| {
+        state.wrapping_mul(33).wrapping_add(input)
+    });
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_std_usize().unwrap(), expected as u64);
+    let verified =
+        grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(verified.run_std_usize().unwrap(), expected as u64);
 }
 
 #[test]

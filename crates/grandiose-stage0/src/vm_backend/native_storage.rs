@@ -63,6 +63,10 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
         | VmInstruction::BytesToArray { dst, .. }
         | VmInstruction::BytesUtf8ValidUpTo { dst, .. }
         | VmInstruction::Blake3 { dst, .. }
+        | VmInstruction::StoreUsize { dst, .. }
+        | VmInstruction::ArrayLen { dst, .. }
+        | VmInstruction::ArrayElementIsInitialized { dst, .. }
+        | VmInstruction::TakeArrayElement { dst, .. }
         | VmInstruction::ArrayGetBorrowShared { dst, .. }
         | VmInstruction::ArrayEmpty { dst, .. }
         | VmInstruction::U32CheckedAdd { dst, .. }
@@ -116,7 +120,7 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
         | VmInstruction::ProjectArray { dst, .. }
         | VmInstruction::UpdateRecord { dst, .. }
         | VmInstruction::PatternTest { dst, .. }
-        | VmInstruction::Perform { dst, .. }
+        | VmInstruction::Perform { dst, .. } | VmInstruction::PerformOwned { dst, .. }
         | VmInstruction::ResumeReturn { dst, .. }
         | VmInstruction::CaptureResumption { dst, .. }
         | VmInstruction::Copy { dst, .. }
@@ -161,6 +165,9 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
         | VmInstruction::EqText { dst, .. }
         | VmInstruction::NeText { dst, .. }
         | VmInstruction::CompareChar { dst, .. }
+        | VmInstruction::CallOwned { dst, .. }
+        | VmInstruction::CallIndirectOwned { dst, .. }
+        | VmInstruction::HostCallOwned { dst, .. }
         | VmInstruction::Call { dst, .. }
         | VmInstruction::HostCall { dst, .. }
         | VmInstruction::MakeCallable { dst, .. }
@@ -208,7 +215,9 @@ fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
         VmInstruction::FloatIntrinsic { dst, arguments, .. }
         | VmInstruction::MemoryIntrinsic { dst, arguments, .. }
         | VmInstruction::IntIntrinsic { dst, arguments, .. }
-        | VmInstruction::Perform { dst, arguments, .. }
+        | VmInstruction::Perform { dst, arguments, .. } | VmInstruction::PerformOwned { dst, arguments, .. }
+        | VmInstruction::CallOwned { dst, arguments, .. }
+        | VmInstruction::HostCallOwned { dst, arguments, .. }
         | VmInstruction::Call { dst, arguments, .. }
         | VmInstruction::HostCall { dst, arguments, .. } => {
             visit(*dst);
@@ -430,6 +439,12 @@ fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
             visit(*start);
             visit(*end);
         }
+        VmInstruction::StoreUsize { dst, value }
+        | VmInstruction::ArrayLen { dst, value } => { visit(*dst); visit(*value); }
+        VmInstruction::ArrayElementIsInitialized { dst, value, index }
+        | VmInstruction::TakeArrayElement { dst, value, index } => {
+            visit(*dst); visit(*value); visit(*index);
+        }
         VmInstruction::ArrayGetBorrowShared {
             dst, value, index, ..
         } => {
@@ -480,7 +495,12 @@ fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
             visit(*dst);
             visit(*subject);
         }
-        VmInstruction::InstallHandler {
+        VmInstruction::ClaimEffectPayloads { payloads: payload_destinations } |
+        VmInstruction::InstallHandlerOwned {
+            payload_destinations,
+            ..
+        }
+        | VmInstruction::InstallHandler {
             payload_destinations,
             ..
         } => {
@@ -545,7 +565,8 @@ fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
             visit(*dst);
             visit(*destination);
         }
-        VmInstruction::CallIndirect {
+        VmInstruction::CallIndirectOwned { dst, callee, arguments }
+        | VmInstruction::CallIndirect {
             dst,
             callee,
             arguments,
@@ -648,7 +669,7 @@ impl NativeFramePlan {
                     layouts[*src as usize] = Some(Arc::new(layout));
                 }
             }
-            if let VmInstruction::HostCall { dst, arguments, .. } = instruction {
+            if let VmInstruction::HostCall { dst, arguments, .. } | VmInstruction::HostCallOwned { dst, arguments, .. } = instruction {
                 for &local in arguments.iter().chain(std::iter::once(dst)) {
                     if matches!(
                         function.registers[local as usize],

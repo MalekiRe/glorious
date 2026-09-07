@@ -1,8 +1,7 @@
 //! Control MIR: explicit CFG and return continuations, consuming Evaluation
 //! MIR rather than rediscovering enclosing source-expression shapes.
 //!
-//! Migration is operation-based. Unsupported control capabilities leave the
-//! legacy pipeline in charge until their typed transition is implemented;
+//! Dynamic control capabilities retain typed delimiters and transitions;
 //! they are never erased into ordinary jumps or ordinary function returns.
 
 use crate::evaluation_mir::{
@@ -12,7 +11,26 @@ use crate::evaluation_mir::{
 use crate::{CoreId, DefKey, GenericArgument, Safety, Span, Type};
 use std::collections::{BTreeMap, BTreeSet};
 
-mod legacy_bridge;
+mod capabilities;
+pub use capabilities::*;
+
+// Regions and invocation quantities are semantic contracts retained in the
+// declarations; they are not additional operands of a value-flow edge.
+pub(crate) fn call_type_matches(expected: &Type, actual: &Type) -> bool {
+    match (expected, actual) {
+        (Type::Reference { mutability: a, referent: x, .. }, Type::Reference { mutability: b, referent: y, .. }) => a == b && call_type_matches(x, y),
+        (Type::Callable { parameters: a, result: x, .. }, Type::Callable { parameters: b, result: y, .. }) =>
+            a.len() == b.len() && a.iter().zip(b).all(|(a,b)| call_type_matches(a,b)) && call_type_matches(x,y),
+        (Type::Tuple(a), Type::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a,b)| call_type_matches(a,b)),
+        (Type::Array(a), Type::Array(b)) => call_type_matches(a,b),
+        (Type::Nominal { definition: a, arguments: x }, Type::Nominal { definition: b, arguments: y }) => a == b && x.len() == y.len() && x.iter().zip(y).all(|(a,b)| match (a,b) {
+            (GenericArgument::Type(a), GenericArgument::Type(b)) => call_type_matches(a,b),
+            (GenericArgument::Lifetime(_), GenericArgument::Lifetime(_)) => true,
+            _ => a == b,
+        }),
+        _ => expected == actual,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ControlValue(pub u32);
@@ -26,6 +44,7 @@ pub struct ControlValueDecl {
     pub ty: Type,
     pub source: CoreId,
     pub span: Span,
+    pub scope: Option<ControlScopeId>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlScope {
@@ -41,6 +60,9 @@ pub enum ControlOperation {
     /// Value flow; Ownership MIR decides whether this copies or transfers an
     /// owner. Control construction must not assert duplicability.
     Forward(ControlValue),
+    /// An observational view of lexical storage. The owning use occurs at
+    /// its consumer; merely resolving a local does not move a unique loan.
+    Read(ControlValue),
     Function {
         definition: DefKey,
         arguments: Vec<GenericArgument>,
@@ -59,6 +81,7 @@ pub enum ControlOperation {
         value: ControlValue,
         transferred: Option<ControlValue>,
     },
+    Capability(ControlCapabilityOperation),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlInstruction {
@@ -90,6 +113,7 @@ pub enum ControlTerminator {
     },
     Return(ControlValue),
     Unreachable,
+    Transfer(ControlTransfer),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlBlock {
@@ -100,19 +124,22 @@ pub struct ControlBlock {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlError {
     Invalid(String),
-    NotMigrated(&'static str),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlMir {
-    definition: DefKey,
-    safety: Safety,
-    unsafe_execution: bool,
-    parameters: Vec<ControlValue>,
-    values: Vec<ControlValueDecl>,
-    scopes: Vec<ControlScope>,
-    entry: ControlBlockId,
-    blocks: Vec<ControlBlock>,
+    pub(crate) definition: DefKey,
+    pub(crate) safety: Safety,
+    pub(crate) unsafe_execution: bool,
+    pub(crate) parameters: Vec<ControlValue>,
+    pub(crate) values: Vec<ControlValueDecl>,
+    pub(crate) scopes: Vec<ControlScope>,
+    pub(crate) entry: ControlBlockId,
+    pub(crate) blocks: Vec<ControlBlock>,
+    pub(crate) labels: Vec<ControlLabel>,
+    pub(crate) handlers: Vec<ControlHandler>,
+    pub(crate) closures: Vec<ControlClosure>,
+    pub(crate) source_bindings: BTreeMap<crate::placeflow::PlaceBindingOrigin, ControlValue>,
 }
 
 impl ControlMir {
@@ -136,33 +163,6 @@ impl ControlMir {
         evaluation
             .validate()
             .map_err(|error| ControlError::Invalid(error.0))?;
-        // Capability transitions are deliberately not ordinary expression
-        // instructions. The migration gate is independent of source nesting.
-        for region in evaluation.regions() {
-            for instruction in &region.instructions {
-                if !matches!(
-                    &instruction.operation,
-                    EvalOp::Literal(_)
-                        | EvalOp::ReadLocal(_)
-                        | EvalOp::Bind(_)
-                        | EvalOp::Discard
-                        | EvalOp::Intrinsic(_)
-                        | EvalOp::Tuple
-                        | EvalOp::Array
-                        | EvalOp::Call(_)
-                        | EvalOp::Function {
-                            host_import: None,
-                            ..
-                        }
-                        | EvalOp::Scope(_)
-                        | EvalOp::LazyBoolean { .. }
-                ) {
-                    return Err(ControlError::NotMigrated(
-                        "control capability or value operation",
-                    ));
-                }
-            }
-        }
         let root = &evaluation.regions()[evaluation.entry().0 as usize];
         let span = root.instructions[0].span;
         let mut builder = Builder {
@@ -180,13 +180,22 @@ impl ControlMir {
                 scopes: vec![],
                 entry: ControlBlockId(0),
                 blocks: vec![],
+                labels: vec![],
+                handlers: vec![],
+                closures: vec![],
+                source_bindings: BTreeMap::new(),
             },
             mapped: BTreeMap::new(),
+            active_labels: BTreeMap::new(),
+            active_resumptions: BTreeMap::new(),
+            active_handler_clauses: vec![],
+            proven_subjects: BTreeMap::new(),
         };
         let mut names = BTreeMap::new();
-        for (name, ty) in evaluation.parameters() {
+        for (index, (name, ty)) in evaluation.parameters().iter().enumerate() {
             let value = builder.value(ty.clone(), CoreId(u32::MAX), span)?;
             builder.result.parameters.push(value);
+            builder.result.source_bindings.insert(crate::placeflow::PlaceBindingOrigin::Parameter { index: index as u32 }, value);
             names.insert(name.clone(), value);
         }
         let entry = builder.block(builder.result.parameters.clone())?;
@@ -206,7 +215,13 @@ impl ControlMir {
         if self.blocks.get(self.entry.0 as usize).is_none() {
             return Err(invalid("missing entry block"));
         }
+        self.validate_payload_acceptance()?;
         let mut definitions = BTreeSet::new();
+        for label in &self.labels {
+            if !valid_label_handler_prefix(label, &self.handlers) {
+                return Err(invalid("invalid label retained-handler prefix"));
+            }
+        }
         for (index, scope) in self.scopes.iter().enumerate() {
             if scope
                 .parent
@@ -252,20 +267,27 @@ impl ControlMir {
                     continuation,
                     ..
                 } => {
+                    let mut callee_ty = self.ty(*callee)?;
+                    while let Type::Reference { referent, .. } = callee_ty { callee_ty = referent; }
                     let Type::Callable {
                         parameters,
                         result: result_ty,
                         ..
-                    } = self.ty(*callee)?
+                    } = callee_ty
                     else {
+                        if matches!(callee_ty, Type::Generic(_) | Type::Projection { .. }) {
+                            // The lexical Fn obligation is preserved for
+                            // generic ownership and concrete specialization.
+                            continue;
+                        }
                         return Err(invalid("invoke requires callable value"));
                     };
                     if parameters.len() != arguments.len()
                         || parameters
                             .iter()
                             .zip(arguments)
-                            .any(|(ty, value)| self.ty(*value).ok() != Some(ty))
-                        || self.ty(*result)? != result_ty.as_ref()
+                            .any(|(ty, value)| !self.ty(*value).is_ok_and(|actual| call_type_matches(ty, actual)))
+                        || !call_type_matches(result_ty, self.ty(*result)?)
                         || continuation.is_none() != (**result_ty == Type::Never)
                     {
                         return Err(invalid("invoke boundary disagrees with callable contract"));
@@ -389,7 +411,7 @@ impl ControlMir {
         }
         let valid = match &instruction.operation {
             ControlOperation::Unit | ControlOperation::Discard(_) => ty == &Type::Unit,
-            ControlOperation::Forward(value) => ty == self.ty(*value)?,
+            ControlOperation::Forward(value) | ControlOperation::Read(value) => call_type_matches(ty, self.ty(*value)?),
             ControlOperation::EndScope {
                 scope,
                 value,
@@ -414,32 +436,32 @@ impl ControlMir {
                 !matches!(ty, Type::Never | Type::Error | Type::Infer(_))
             }
             ControlOperation::Intrinsic { arguments, .. } => !arguments.is_empty(),
+            ControlOperation::Capability(operation) => operation.validate(self, ty)?,
         };
         if valid {
             Ok(())
         } else {
-            Err(ControlError::Invalid(
-                "operation result contract disagrees".into(),
-            ))
+            Err(ControlError::Invalid(format!("operation result contract disagrees: {:?}: {:?}", instruction.operation, ty)))
         }
     }
 }
 
 impl ControlOperation {
-    fn inputs(&self) -> Vec<ControlValue> {
+    pub(crate) fn inputs(&self) -> Vec<ControlValue> {
         match self {
-            Self::Forward(value) | Self::Discard(value) | Self::EndScope { value, .. } => {
+            Self::Forward(value) | Self::Read(value) | Self::Discard(value) | Self::EndScope { value, .. } => {
                 vec![*value]
             }
             Self::Intrinsic { arguments, .. } | Self::Tuple(arguments) | Self::Array(arguments) => {
                 arguments.clone()
             }
+            Self::Capability(operation) => operation.inputs(),
             _ => vec![],
         }
     }
 }
 impl ControlTerminator {
-    fn edges(&self) -> Vec<ControlEdge> {
+    pub(crate) fn edges(&self) -> Vec<ControlEdge> {
         match self {
             Self::Goto(edge) => vec![edge.clone()],
             Self::SwitchBool {
@@ -453,10 +475,11 @@ impl ControlTerminator {
                 target: *target,
                 arguments: vec![*result],
             }],
+            Self::Transfer(transfer) => transfer.edges(),
             _ => vec![],
         }
     }
-    fn inputs(&self) -> Vec<ControlValue> {
+    pub(crate) fn inputs(&self) -> Vec<ControlValue> {
         match self {
             Self::Goto(edge) => edge.arguments.clone(),
             Self::SwitchBool {
@@ -478,6 +501,7 @@ impl ControlTerminator {
             }
             Self::Return(value) => vec![*value],
             Self::Unreachable => vec![],
+            Self::Transfer(transfer) => transfer.inputs(),
         }
     }
 }
@@ -503,6 +527,7 @@ mod tests {
                 }),
                 source: CoreId(index),
                 span,
+                scope: Some(ControlScopeId(0)),
             })
             .collect();
         let instruction = |destination, text: &str| ControlInstruction {
@@ -553,6 +578,10 @@ mod tests {
                     terminator: ControlTerminator::Return(ControlValue(4)),
                 },
             ],
+            labels: vec![],
+            handlers: vec![],
+            closures: vec![],
+            source_bindings: BTreeMap::new(),
         };
         mir.validate().unwrap();
         mir
@@ -625,11 +654,13 @@ mod tests {
             },
             source: CoreId(5),
             span: mir.values[0].span,
+            scope: Some(ControlScopeId(0)),
         });
         mir.values.push(ControlValueDecl {
             ty: Type::Scalar(ScalarType::I64),
             source: CoreId(6),
             span: mir.values[0].span,
+            scope: Some(ControlScopeId(0)),
         });
         mir.blocks[0].instructions.push(ControlInstruction {
             scope: ControlScopeId(0),
@@ -663,6 +694,10 @@ struct Builder<'a> {
     evaluation: &'a EvaluationMir,
     result: ControlMir,
     mapped: BTreeMap<EvaluationValue, ControlValue>,
+    active_labels: BTreeMap<crate::LabelBrand, ControlLabelId>,
+    active_resumptions: BTreeMap<String, ControlValue>,
+    active_handler_clauses: Vec<(ControlHandlerId, u32)>,
+    proven_subjects: BTreeMap<CoreId, ControlValue>,
 }
 impl Builder<'_> {
     fn value(
@@ -677,7 +712,7 @@ impl Builder<'_> {
         );
         self.result
             .values
-            .push(ControlValueDecl { ty, source, span });
+            .push(ControlValueDecl { ty, source, span, scope: None });
         Ok(id)
     }
     fn block(&mut self, parameters: Vec<ControlValue>) -> Result<ControlBlockId, ControlError> {
@@ -692,19 +727,6 @@ impl Builder<'_> {
         });
         Ok(id)
     }
-    fn operands(&self, operands: &[EvaluationOperand]) -> Result<Vec<ControlValue>, ControlError> {
-        operands
-            .iter()
-            .map(|operand| match operand {
-                EvaluationOperand::Value(value) => {
-                    self.mapped.get(value).copied().ok_or_else(|| {
-                        ControlError::Invalid("evaluation dependency was not composed".into())
-                    })
-                }
-                EvaluationOperand::Place(_) => Err(ControlError::NotMigrated("place ownership")),
-            })
-            .collect()
-    }
     fn emit(
         &mut self,
         block: ControlBlockId,
@@ -712,6 +734,10 @@ impl Builder<'_> {
         destination: ControlValue,
         operation: ControlOperation,
     ) {
+        self.result.values[destination.0 as usize].scope = match &operation {
+            ControlOperation::EndScope { scope, .. } => self.result.scopes[scope.0 as usize].parent,
+            _ => Some(scope),
+        };
         self.result.blocks[block.0 as usize]
             .instructions
             .push(ControlInstruction {
@@ -751,7 +777,11 @@ impl Builder<'_> {
         });
         let mut names = outer.clone();
         for instruction in region.instructions {
-            let operands = self.operands(&instruction.operands)?;
+            let operands = instruction.operands.iter().filter_map(|operand| match operand {
+                EvaluationOperand::Value(value) => Some(self.mapped.get(value).copied()
+                    .ok_or_else(|| ControlError::Invalid("uncomposed operand".into()))),
+                EvaluationOperand::Place(_) => None,
+            }).collect::<Result<Vec<_>, _>>()?;
             // Allocate actual binding storage before its Unit statement result;
             // this retains the source binding origin used by ownership import.
             if let EvalOp::Bind(name) = &instruction.operation {
@@ -763,18 +793,32 @@ impl Builder<'_> {
                 )?;
                 self.emit(block, scope, binding, ControlOperation::Forward(source));
                 self.result.scopes[scope.0 as usize].bindings.push(binding);
+                self.result.source_bindings.insert(crate::placeflow::PlaceBindingOrigin::Let { expression: instruction.source }, binding);
                 names.insert(name.clone(), binding);
             }
             let destination =
                 self.value(instruction.ty.clone(), instruction.source, instruction.span)?;
+            self.result.values[destination.0 as usize].scope = Some(scope);
             self.mapped.insert(instruction.value, destination);
+            self.proven_subjects.insert(instruction.source, destination);
+            if self.compose_capability(&instruction, destination, &operands, &mut block, scope, &names)? {
+                if matches!(self.result.blocks[block.0 as usize].terminator, ControlTerminator::Transfer(_) | ControlTerminator::Unreachable)
+                    && instruction.ty == Type::Never
+                {
+                    return Ok((None, destination));
+                }
+                continue;
+            }
             let operation = match instruction.operation {
                 EvalOp::Literal(value) => ControlOperation::Literal(value),
-                EvalOp::ReadLocal(name) => ControlOperation::Forward(
-                    *names
-                        .get(&name)
-                        .ok_or_else(|| ControlError::Invalid(format!("unbound local {name}")))?,
-                ),
+                EvalOp::ReadLocal(name) => {
+                    let value = *names.get(&name).ok_or_else(|| ControlError::Invalid(format!("unbound local {name}")))?;
+                    if let Type::Reference { referent, .. } = self.result.ty(value)?
+                        && !matches!(instruction.ty, Type::Reference { .. })
+                        && call_type_matches(&instruction.ty, referent) {
+                        ControlOperation::Capability(ControlCapabilityOperation::ReadReference(value))
+                    } else { ControlOperation::Read(value) }
+                },
                 EvalOp::Bind(_) => ControlOperation::Unit,
                 EvalOp::Discard => ControlOperation::Discard(operands[0]),
                 EvalOp::Tuple => ControlOperation::Tuple(operands),
@@ -853,8 +897,8 @@ impl Builder<'_> {
                     continue;
                 }
                 _ => {
-                    return Err(ControlError::NotMigrated(
-                        "control capability or value operation",
+                    return Err(ControlError::Invalid(
+                        "uncomposed control capability or value operation".into(),
                     ));
                 }
             };

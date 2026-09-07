@@ -542,6 +542,9 @@ pub enum InstantiationError {
 #[derive(Clone, Debug, Default)]
 pub struct ElaboratedInterface {
     pub definitions: BTreeMap<DefKey, ElaboratedHeader>,
+    /// Structural initializer values admitted in patterns, keyed by resolved
+    /// declaration identity. No source spelling denotes a built-in constant.
+    pub pattern_values: BTreeMap<DefKey, (Type, crate::PatternDecision)>,
     /// Source-owned inherent heads in the member's callable generic slots.
     pub inherent_self_types: BTreeMap<DefKey, Type>,
     /// Host imports are interface facts rather than an ambient service map.
@@ -1084,6 +1087,7 @@ impl ElaboratedInterface {
         let mut merged = Self::default();
         for part in parts {
             merged.definitions.extend(part.definitions);
+            merged.pattern_values.extend(part.pattern_values);
             merged.inherent_self_types.extend(part.inherent_self_types);
             merged.host_imports.extend(part.host_imports);
             merged.diagnostics.extend(part.diagnostics);
@@ -1518,6 +1522,7 @@ impl ElaboratedInterface {
     fn validate_owned_nominal_layout_recursion(&mut self) {
         let signatures = ElaboratedInterface {
             definitions: self.definitions.clone(),
+            pattern_values: self.pattern_values.clone(),
             inherent_self_types: self.inherent_self_types.clone(),
             host_imports: self.host_imports.clone(),
             diagnostics: vec![],
@@ -5892,25 +5897,6 @@ impl Elaborator<'_> {
                 );
                 return Type::Error;
             }
-            // `Bool` is a source-level standard-library carrier in the
-            // canonical bootstrap.  A local alias must therefore win over
-            // Stage-0's legacy scalar fallback; otherwise
-            // `type Bool = Result<(), ()>` is silently ignored and every
-            // source-defined truth literal receives the wrong type.
-            if name == "Bool"
-                && let ResolutionState::Resolved(definition) =
-                    self.index
-                        .resolve_path(DefinitionNamespace::Type, self.module, path)
-            {
-                let Some(arguments) = self.nominal_generic_arguments(definition, name, &arguments)
-                else {
-                    return Type::Error;
-                };
-                return Type::Nominal {
-                    definition,
-                    arguments,
-                };
-            }
             if let Some(scalar) = scalar(name) {
                 return if arguments.is_empty() {
                     Type::Scalar(scalar)
@@ -6274,7 +6260,6 @@ fn type_contains_elided_lifetime(ty: &Type) -> bool {
 fn scalar(name: &str) -> Option<crate::types::ScalarType> {
     use crate::types::ScalarType::*;
     Some(match name {
-        "Bool" => Bool,
         "u8" => U8,
         "u16" => U16,
         "u32" => U32,

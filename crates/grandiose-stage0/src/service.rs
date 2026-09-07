@@ -17,15 +17,18 @@ use crate::{
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
     ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
-    InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirInstruction,
-    LogicalPath, MirLowering, MirProgram, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow,
+    InstanceKey, InstanceLimits,
+    LogicalPath, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow,
     PrimitiveRole, PrimitiveSelector,
     PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId, Severity,
     RuntimeManifestInput, SourceInput, SourceSpan, Span, TraitConstProjectionAnswer, TraitGoal,
     TraitSolver, TrustedRuntimeManifest,
-    PersistentArtifactCache, Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key,
+    PersistentArtifactCache, Type, TypedBody, UseFlow, VerifiedVmProgram, implementation_method_key,
     verify_vm_program,
 };
+
+#[cfg(test)]
+use crate::{MirFunction, MirInstance, MirInstruction};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompileDiagnostic {
@@ -615,49 +618,6 @@ impl BodySession<'_, '_> {
     }
 }
 
-/// Affine owner for MIR publication staging.
-///
-/// `MirLowering` keeps its detailed local arenas internally, while this
-/// context owns every package-level mutable product that survives an
-/// individual lowering call: the deterministic function table and constant
-/// roots.  A function crosses this boundary only after the lowerer and the
-/// optimizer have both returned a validated immutable product.  Dropping the
-/// context abandons the entire staged MIR set.
-#[derive(Debug, Default)]
-struct LoweringContext {
-    functions: BTreeMap<DefKey, MirFunction>,
-    constants: BTreeSet<DefKey>,
-}
-
-impl LoweringContext {
-    fn stage_root(&mut self, definition: DefKey, is_constant: bool, function: MirFunction) {
-        if is_constant {
-            self.constants.insert(definition);
-        }
-        self.functions.insert(definition, function);
-    }
-
-    /// Return the just-published product when its identity is fresh.  A
-    /// collision remains a diagnostic at the caller so one malformed body
-    /// cannot silently replace an earlier staged function.
-    fn stage_lifted(&mut self, definition: DefKey, function: MirFunction) -> Option<&MirFunction> {
-        if self.functions.insert(definition, function).is_some() {
-            None
-        } else {
-            self.functions.get(&definition)
-        }
-    }
-
-    fn function(&self, definition: DefKey) -> &MirFunction {
-        self.functions
-            .get(&definition)
-            .expect("a staged MIR function must remain owned by its lowering context")
-    }
-
-    fn finish(self) -> (BTreeMap<DefKey, MirFunction>, BTreeSet<DefKey>) {
-        (self.functions, self.constants)
-    }
-}
 
 #[derive(Debug)]
 enum EmissionFailure {
@@ -674,14 +634,14 @@ enum EmissionFailure {
 /// without publication.
 #[derive(Debug)]
 struct EmissionSession {
-    program: MirProgram,
+    program: crate::vm_lir::VmLirProgram,
     runtime_manifest: Option<TrustedRuntimeManifest>,
     budget: Arc<Budget>,
 }
 
 impl EmissionSession {
     fn new(
-        program: MirProgram,
+        program: crate::vm_lir::VmLirProgram,
         runtime_manifest: Option<TrustedRuntimeManifest>,
         budget: Arc<Budget>,
     ) -> Self {
@@ -698,7 +658,7 @@ impl EmissionSession {
 
     fn mir_dependencies(&self) -> Vec<DependencyNode> {
         self.program
-            .functions
+            .functions()
             .keys()
             .copied()
             .map(DependencyNode::Mir)
@@ -709,7 +669,7 @@ impl EmissionSession {
         self,
         capability_granted: impl Fn(&str) -> bool,
     ) -> Result<VerifiedVmProgram, EmissionFailure> {
-        let mut candidate = emit_vm_program(&self.program)
+        let mut candidate = self.program.emit()
             .map_err(|error| EmissionFailure::Emit(format!("{error:?}")))?;
         if let Some(capability) = candidate
             .host_capabilities
@@ -911,6 +871,17 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 PrimitiveRole::IntConvertCheckedToU128,
                 PrimitiveRole::IntConvertCheckedToI128,
                 PrimitiveRole::IntWrappingAdd,
+                PrimitiveRole::IntCheckedAdd,
+                PrimitiveRole::IntCheckedDiv,
+                PrimitiveRole::IntEqual,
+                PrimitiveRole::IntLess,
+                PrimitiveRole::IntGreater,
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Neg {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Neg {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                }),
                 PrimitiveRole::IntWrappingSub,
                 PrimitiveRole::IntWrappingMul,
                 PrimitiveRole::IntBitAnd,
@@ -1546,7 +1517,7 @@ impl StageZeroCompiler {
                 let Some(body_range) = declaration.body else {
                     continue;
                 };
-                let body = BodySyntax::parse_expression(&lexed, text, body_range);
+                let body = BodySyntax::parse_expression_with_fixities(&lexed, text, body_range, &fixities);
                 frozen_value_initializer_syntax.insert(declaration.key, body.clone());
                 if !body.diagnostics.is_empty() || body.recovered {
                     continue;
@@ -1560,6 +1531,9 @@ impl StageZeroCompiler {
                 );
                 if core.diagnostics.is_empty() && !core.recovered {
                     let (generic_kinds, ty) = core.value_initializer_type();
+                    if let Some(pattern) = crate::pattern::initializer_pattern(&core, core.root, &signatures) {
+                        signatures.pattern_values.insert(declaration.key, (ty.clone(), pattern));
+                    }
                     signatures.freeze_value_initializer(declaration.key, generic_kinds, ty);
                 }
             }
@@ -1763,7 +1737,7 @@ impl StageZeroCompiler {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         }
         let entry = entry.key;
-        let mut lowering = LoweringContext::default();
+        let mut lowering = BTreeMap::new();
         // Value-initializer types and runtime contracts are now frozen. Share
         // their immutable rule/layout snapshot across bodies, while every
         // body retains fresh tables and its original independent work limit.
@@ -1952,11 +1926,11 @@ impl StageZeroCompiler {
                 ) {
                     frozen_value_initializer_syntax
                         .remove(&declaration.key)
-                        .unwrap_or_else(|| BodySyntax::parse_expression(&lexed, text, body_range))
+                        .unwrap_or_else(|| BodySyntax::parse_expression_with_fixities(&lexed, text, body_range, &fixities))
                 } else if is_constant {
-                    BodySyntax::parse_expression(&lexed, text, body_range)
+                    BodySyntax::parse_expression_with_fixities(&lexed, text, body_range, &fixities)
                 } else {
-                    BodySyntax::parse(&lexed, text, body_range)
+                    BodySyntax::parse_with_fixities(&lexed, text, body_range, &fixities)
                 };
                 let body_session = package_sessions
                     .get_mut(&node.key.package)
@@ -2135,7 +2109,7 @@ impl StageZeroCompiler {
                         continue;
                     };
                     let method_key = implementation_method_key(implementation.key, &method.name);
-                    let body = BodySyntax::parse(&lexed, text, body_range);
+                    let body = BodySyntax::parse_with_fixities(&lexed, text, body_range, &fixities);
                     let body_session = package_sessions
                         .get_mut(&node.key.package)
                         .expect("every module graph has a request-local package session")
@@ -2278,350 +2252,6 @@ impl StageZeroCompiler {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
-        let typed_bodies = body_products
-            .iter()
-            .map(|body| (body.definition, body.core.clone()))
-            .collect::<BTreeMap<_, _>>();
-        // Demand-discover the executable spine before lowering.  This is not
-        // monomorphization: it records only concrete callable identities and
-        // direct callable dependencies, leaving generic substitutions for the
-        // later instance materializer.
-        let mut instance_graph = InstanceGraph::default();
-        let limits = self.instance_limits;
-        let entry_kinds = match signatures.definitions.get(&entry) {
-            Some(ElaboratedHeader::Callable(signature)) => signature.generic_kinds.clone(),
-            _ => Vec::new(),
-        };
-        let entry_instance = InstanceKey::new(entry, &entry_kinds, vec![]).map_err(|error| {
-            failed(
-                input_fingerprint,
-                vec![CompileDiagnostic::invariant(
-                    "G7030",
-                    format!("entry instance is not concrete: {error:?}"),
-                )],
-                &source_lengths,
-            )
-        })?;
-        instance_graph
-            .discover_root(
-                InstanceRoot {
-                    key: entry_instance,
-                    reason: "executable entry".into(),
-                },
-                limits,
-            )
-            .map_err(|error| {
-                failed(
-                    input_fingerprint,
-                    vec![CompileDiagnostic::resource(
-                        "G7031",
-                        format!("instance discovery limit: {error:?}"),
-                    )],
-                    &source_lengths,
-                )
-            })?;
-        let mut instance_trait_solver = TraitSolver::new(&signatures);
-        let mut destruction = crate::destruction::Planner::new(&signatures);
-        while let Some(caller) = instance_graph.pop_pending() {
-            if crate::destruction::is_glue(&caller) {
-                for callee in destruction.callees(&caller).map_err(|message| failed(input_fingerprint,
-                    vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
-                    instance_graph.discover_callee(&caller, callee, limits).map_err(|error| failed(input_fingerprint,
-                        vec![CompileDiagnostic::resource("G7031", format!("destruction instance discovery limit: {error:?}"))],
-                        &source_lengths))?;
-                }
-                continue;
-            }
-            let Some(body) = typed_bodies.get(&caller.callable) else {
-                continue;
-            };
-            // Trait executable keys contain selected evidence and a receiver,
-            // not the implementation body's binder slots. Discover nested
-            // calls with the SAME substitution used to materialize that body.
-            let caller_arguments = materialization_body_arguments(&caller, &signatures)
-                .map_err(|message| failed(input_fingerprint,
-                    vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))?;
-            let direct_callees = body.expressions.iter().filter_map(|expression| match &expression.kind {
-                crate::CoreKind::Call { callee, .. } => Some(*callee),
-                _ => None,
-            }).collect::<BTreeSet<_>>();
-            // Implicit destruction is a real call edge, even though source
-            // Core contains no explicit invocation of the selected hook.
-            // Discover it under the same concrete substitution as body calls.
-            let mut cleanup_normalization = TraitSolver::new(&signatures);
-            for ty in body.parameters.iter().map(|(_, ty)| ty)
-                .chain(body.expressions.iter().enumerate().filter_map(|(index, expression)| {
-                    // A direct-call callee is declaration evidence, not a
-                    // first-class environment requiring an owned destructor.
-                    (!direct_callees.contains(&crate::CoreId(index as u32))
-                        || !matches!(expression.kind, crate::CoreKind::Function { .. } | crate::CoreKind::TraitMethod { .. }))
-                        .then_some(&expression.ty)
-                }))
-                .chain(body.expressions.iter().flat_map(|expression| match &expression.kind {
-                    crate::CoreKind::Closure { environment, .. } => environment.captures.iter().map(|capture| &capture.ty).collect::<Vec<_>>(),
-                    _ => vec![],
-                })) {
-                // Frame cleanup names the executable glue itself, including
-                // for callable owners whose ordinary structural cleanup can
-                // be inlined. Normalize associated rows exactly as the later
-                // MIR instance does, before admitting that demanded edge.
-                let specialized = specialize_type(ty, &caller_arguments);
-                // Discovery is not the source diagnostic frontier. An open
-                // or invalid projection must still receive the existing
-                // semantic/materialization diagnostic rather than an early
-                // invariant error from this implicit-edge walk.
-                let ty = normalize_materialized_type(&specialized, &mut cleanup_normalization)
-                    .unwrap_or(specialized);
-                if let Some(glue) = destruction.discover(&ty)
-                    .map_err(|message| failed(input_fingerprint,
-                        vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
-                    instance_graph.discover_callee(&caller, glue, limits).map_err(|error| failed(input_fingerprint,
-                        vec![CompileDiagnostic::resource("G7031", format!("destruction instance discovery limit: {error:?}"))],
-                        &source_lengths))?;
-                }
-            }
-            // Native-visible pointees/referents need their concrete source
-            // operations even when this body never owns or destroys a T.
-            for expression in &body.expressions {
-                if !matches!(&expression.kind, crate::core::CoreKind::Function { host_import: Some(_), .. }) { continue; }
-                let roots = [specialize_type(&expression.ty, &caller_arguments)];
-                let residents = crate::mir::native_contract_residents(&roots, &signatures)
-                    .map_err(|message| failed(input_fingerprint,
-                        vec![CompileDiagnostic::invariant("G6005", message)], &source_lengths))?;
-                for ty in residents {
-                    if let Some(glue) = destruction.discover(&ty).map_err(|message| failed(input_fingerprint,
-                        vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))? {
-                        instance_graph.discover_callee(&caller, glue, limits).map_err(|error| failed(input_fingerprint,
-                            vec![CompileDiagnostic::resource("G7031", format!("native destruction instance discovery limit: {error:?}"))],
-                            &source_lengths))?;
-                    }
-                }
-            }
-            // A direct call owns its callable child in Core. Process that
-            // child through the call below, rather than once as a first-class
-            // function value and again as the call's callee. Retaining
-            // standalone callable values here is still essential: a value
-            // can flow through a closure or aggregate before invocation.
-            for (index, expression) in body.expressions.iter().enumerate() {
-                // An implementation head can introduce binders which do not
-                // occur in the trait relation (`impl<T, U> Trait<T> for
-                // Wrapper<U>`).  The concrete receiver is therefore part of
-                // a trait-method executable identity, not merely an ABI
-                // operand discarded after type checking.
-                let trait_receiver = match &expression.kind {
-                    crate::core::CoreKind::TraitMethod { .. } => match &expression.ty {
-                        Type::Callable {
-                            parameters, result, ..
-                        } => Some(specialize_type(
-                            parameters.first().unwrap_or(result),
-                            &caller_arguments,
-                        )),
-                        _ => None,
-                    },
-                    crate::core::CoreKind::Call {
-                        callee, arguments, ..
-                    } if matches!(
-                        body.expression(*callee).kind,
-                        crate::core::CoreKind::TraitMethod { .. }
-                    ) =>
-                    {
-                        arguments.first().map(|receiver| {
-                            specialize_type(
-                                &body.expression(*receiver).ty,
-                                &caller_arguments,
-                            )
-                        }).or_else(|| match &body.expression(*callee).ty {
-                            crate::Type::Callable { parameters, result, .. }
-                                if parameters.is_empty() =>
-                            {
-                                Some(specialize_type(result, &caller_arguments))
-                            }
-                            _ => None,
-                        })
-                    }
-                    _ => None,
-                };
-                let function = match &expression.kind {
-                    crate::core::CoreKind::Function { .. }
-                    | crate::core::CoreKind::TraitMethod { .. }
-                    | crate::core::CoreKind::Constant { .. }
-                        if !direct_callees.contains(&crate::CoreId(index as u32)) =>
-                    {
-                        Some(&expression.kind)
-                    }
-                    crate::core::CoreKind::Call { callee, .. } => {
-                        Some(&body.expression(*callee).kind)
-                    }
-                    _ => None,
-                };
-                let key = match function {
-                    Some(crate::core::CoreKind::Function {
-                        definition: callee,
-                        arguments,
-                        ..
-                    }) => {
-                        let Some(ElaboratedHeader::Callable(signature)) =
-                            signatures.definitions.get(callee)
-                        else {
-                            continue;
-                        };
-                        InstanceKey::new(
-                            *callee,
-                            &signature.generic_kinds,
-                            arguments
-                                .iter()
-                                .map(|argument| {
-                                    specialize_generic_argument(argument, &caller_arguments)
-                                })
-                                .collect(),
-                        )
-                    }
-                    Some(crate::core::CoreKind::Constant {
-                        definition: callee,
-                        arguments,
-                    }) => {
-                        let Some(ElaboratedHeader::ValueInitializer { generic_kinds, .. }) =
-                            signatures.definitions.get(callee)
-                        else {
-                            continue;
-                        };
-                        InstanceKey::new(
-                            *callee,
-                            generic_kinds,
-                            arguments
-                                .iter()
-                                .map(|argument| {
-                                    specialize_generic_argument(argument, &caller_arguments)
-                                })
-                                .collect(),
-                        )
-                    }
-                    Some(crate::core::CoreKind::TraitMethod {
-                        evidence,
-                        method,
-                        trait_arguments,
-                        method_arguments,
-                        deferred,
-                    }) => {
-                        let trait_arguments = trait_arguments
-                            .iter()
-                            .map(|argument| {
-                                specialize_generic_argument(argument, &caller_arguments)
-                            })
-                            .collect::<Vec<_>>();
-                        let method_arguments = method_arguments
-                            .iter()
-                            .map(|argument| {
-                                specialize_generic_argument(argument, &caller_arguments)
-                            })
-                            .collect::<Vec<_>>();
-                        let (evidence, method) = if let Some(deferred) = deferred {
-                            let relation = crate::ElaboratedTraitReference {
-                                definition: deferred.relation.definition,
-                                arguments: deferred
-                                    .relation
-                                    .arguments
-                                    .iter()
-                                    .map(|argument| {
-                                        specialize_generic_argument(argument, &caller_arguments)
-                                    })
-                                    .collect(),
-                            };
-                            let subject =
-                                specialize_type(&deferred.subject, &caller_arguments);
-                            match instance_trait_solver.select_method(
-                                TraitGoal { relation, subject },
-                                &deferred.name,
-                                &method_arguments,
-                            ) {
-                                crate::TraitMethodAnswer::Selected {
-                                    evidence, method, ..
-                                } => (evidence, method),
-                                // A source template can retain open binders;
-                                // it is not executable until an outer caller
-                                // materializes a closed instance.
-                                crate::TraitMethodAnswer::NoSolution
-                                | crate::TraitMethodAnswer::Ambiguous
-                                | crate::TraitMethodAnswer::Overflow
-                                | crate::TraitMethodAnswer::Refuted { .. }
-                                | crate::TraitMethodAnswer::MissingMethod { .. }
-                                | crate::TraitMethodAnswer::MethodArity { .. } => continue,
-                            }
-                        } else {
-                            (*evidence, *method)
-                        };
-                        let trait_receiver = trait_method_executable_receiver(
-                            evidence,
-                            method,
-                            trait_receiver.as_ref(),
-                            &signatures,
-                        )
-                        .map_err(|message| {
-                            failed(
-                                input_fingerprint,
-                                vec![CompileDiagnostic::invariant("G7032", message)],
-                                &source_lengths,
-                            )
-                        })?;
-                        trait_method_instance_key(
-                            evidence,
-                            method,
-                            &trait_arguments,
-                            &method_arguments,
-                            trait_receiver.as_ref(),
-                        )
-                    }
-                    _ => continue,
-                };
-                let key = match key {
-                    Ok(key) => key,
-                    Err(
-                        crate::InstanceKeyError::NonConcreteType { .. }
-                        | crate::InstanceKeyError::UnresolvedType { .. }
-                        | crate::InstanceKeyError::OpenEffectRow { .. }
-                        | crate::InstanceKeyError::NonConcreteLifetime { .. }
-                        | crate::InstanceKeyError::NonConcreteConst { .. },
-                    ) => continue,
-                    Err(error) => {
-                        return Err(failed(
-                            input_fingerprint,
-                            vec![CompileDiagnostic::invariant(
-                                "G7030",
-                                format!("callable instance is not concrete: {error:?}"),
-                            )],
-                            &source_lengths,
-                        ));
-                    }
-                };
-                instance_graph
-                    .discover_callee(&caller, key, limits)
-                    .map_err(|error| {
-                        failed(
-                            input_fingerprint,
-                            vec![CompileDiagnostic::resource(
-                                "G7031",
-                                format!("instance discovery limit: {error:?}"),
-                            )],
-                            &source_lengths,
-                        )
-                    })?;
-            }
-        }
-        for instance in instance_graph.ordered() {
-            session.checkpoint(1)?;
-            let mut instance_dependencies = vec![
-                DependencyNode::Core(instance.callable),
-                DependencyNode::Body(instance.callable),
-            ];
-            if let Some(callees) = instance_graph.callees(&instance) {
-                instance_dependencies.extend(callees.iter().cloned().map(DependencyNode::Instance));
-            }
-            dependencies.record(
-                DependencyNode::Instance(instance.clone()),
-                instance.fingerprint(),
-                instance_dependencies,
-            );
-        }
         for PublishedBody {
             definition,
             is_constant,
@@ -2639,70 +2269,53 @@ impl StageZeroCompiler {
             if !valid {
                 continue;
             }
-            let lowered = MirLowering::lower_with_bodies_signatures_and_primitives(
-                definition,
-                &core,
-                &flow,
-                &typed_bodies,
-                Some(&signatures),
-                runtime_primitives.as_ref(),
-            );
-            diagnostics.extend(lowered.diagnostics.into_iter().map(|diagnostic| {
-                CompileDiagnostic::invariant(diagnostic.code, diagnostic.message)
-            }));
-            if let Some(mir) = lowered.function {
-                let mir = match crate::mir::optimize(mir.clone()) {
-                    Ok((mir, _)) => mir,
-                    // Optimization is not a semantic admission boundary.
-                    // Keep the validated lowering available at O0 when a
-                    // speculative MIR edit cannot be proven safe.
-                    Err(_) => mir,
-                };
-                dependencies.record(
-                    DependencyNode::Mir(definition),
-                    mir_fingerprint(&mir),
-                    vec![DependencyNode::Core(definition)],
-                );
-                lowering.stage_root(definition, is_constant, mir);
-                for (lifted_definition, lifted) in lowered.lifted {
-                    let lifted = match crate::mir::optimize(lifted.clone()) {
-                        Ok((mir, _)) => mir,
-                        Err(_) => lifted,
-                    };
-                    if lowering.stage_lifted(lifted_definition, lifted).is_none() {
-                        diagnostics.push(CompileDiagnostic::invariant(
-                            "G7009",
-                            "lifted callable identity collided with another function",
-                        ));
-                    } else {
-                        let lifted = lowering.function(lifted_definition);
-                        dependencies.record(
-                            DependencyNode::Mir(lifted_definition),
-                            mir_fingerprint(lifted),
-                            vec![DependencyNode::Core(definition)],
-                        );
-                    }
+            match crate::ownership_mir::OwnershipMir::from_typed(definition, &core, &flow, Some(&signatures)) {
+                Ok((ownership, result)) => {
+                    lowering.insert(definition, crate::specialized_mir::SpecializationInput { ownership, result, is_constant });
                 }
+                Err(error) => diagnostics.push(CompileDiagnostic::invariant("G6001", error.0)),
             }
         }
-        let (mut functions, constants) = lowering.finish();
-        let instances = match materialize_concrete_instances(
-            &mut functions,
-            &instance_graph,
-            &signatures,
-            runtime_primitives.as_ref(),
-            &mut destruction,
-        ) {
-            Ok(instances) => instances,
-            Err(message) => {
-                diagnostics.push(CompileDiagnostic::invariant("G7032", message));
-                BTreeMap::new()
-            }
-        };
         if !diagnostics.is_empty() {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         }
-        if let Some(cycle) = constant_cycle(&functions, &constants) {
+        // Every concrete source instance crosses this distinct phase. No
+        // downstream representation failure retries source-shape lowering.
+        let mut destruction = crate::destruction::Planner::new(&signatures);
+        let (specialized, instance_graph) = crate::specialized_mir::SpecializedProgram::discover(entry, &lowering, &signatures, runtime_primitives.as_ref(), self.instance_limits, &mut destruction)
+            .map_err(|error| {
+                let diagnostic = match error {
+                    crate::specialized_mir::SpecializedDiscoveryError::Invalid(error) => CompileDiagnostic::invariant("G7032", error.0),
+                    crate::specialized_mir::SpecializedDiscoveryError::Limit(error) => CompileDiagnostic::resource("G7031", format!("instance discovery limit: {error:?}")),
+                };
+                failed(input_fingerprint, vec![diagnostic], &source_lengths)
+            })?;
+        for instance in instance_graph.ordered() {
+            session.checkpoint(1)?;
+            let mut instance_dependencies = vec![
+                DependencyNode::Core(instance.callable),
+                DependencyNode::Body(instance.callable),
+            ];
+            if let Some(callees) = instance_graph.callees(&instance) {
+                instance_dependencies.extend(callees.iter().cloned().map(DependencyNode::Instance));
+            }
+            dependencies.record(
+                DependencyNode::Instance(instance.clone()),
+                instance.fingerprint(),
+                instance_dependencies,
+            );
+        }
+        let cleanup = crate::cleanup_mir::CleanupProgram::lower(&specialized, &instance_graph, &signatures, &destruction)
+            .map_err(|error| failed(input_fingerprint, vec![CompileDiagnostic::invariant("G7040", error.0)], &source_lengths))?;
+        drop(lowering);
+        drop(specialized);
+        let runtime = crate::runtime_mir::RuntimeProgram::lower(&cleanup, &signatures, runtime_primitives.as_ref())
+            .map_err(|error| failed(input_fingerprint, vec![CompileDiagnostic::invariant("G7041", error.0)], &source_lengths))?;
+        drop(cleanup);
+        if !diagnostics.is_empty() {
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
+        }
+        if let Some(cycle) = runtime.constant_cycle() {
             return Err(failed(
                 input_fingerprint,
                 vec![CompileDiagnostic::source(
@@ -2712,6 +2325,20 @@ impl StageZeroCompiler {
                 )],
                 &source_lengths,
             ));
+        }
+        // Charge the backend stage before register lowering and verification,
+        // not after that work has already completed. Retain one budget owner
+        // through final emission and publication.
+        let emission_budget = session.emission_budget();
+        let backend_cost = u64::try_from(runtime.reachable_function_keys().len())
+            .expect("reachable function count fits in request work budget")
+            .saturating_add(1);
+        session.checkpoint_in(&emission_budget, backend_cost)?;
+        let program = crate::vm_lir::VmLirProgram::lower(&runtime)
+            .map_err(|error| failed(input_fingerprint, vec![CompileDiagnostic::invariant("G7042", format!("VM LIR lowering rejected Runtime MIR: {error:?}"))], &source_lengths))?;
+        drop(runtime);
+        for (definition, function) in program.functions() {
+            dependencies.record(DependencyNode::Mir(*definition), function.fingerprint(), vec![DependencyNode::Core(function.definition())]);
         }
         // A mode changes the requested product, never the source semantics.
         // Check/inspection/IDE requests may consume exactly the same frontend
@@ -2731,22 +2358,9 @@ impl StageZeroCompiler {
                 instance_graph: Some(instance_graph),
             });
         }
-        let linked_functions = reachable_functions(&functions, entry);
-        let linked_instances = instances
-            .into_iter()
-            .filter(|(executable, _)| linked_functions.contains_key(executable))
-            .collect();
-        let program = MirProgram {
-            entry,
-            functions: linked_functions,
-            instances: linked_instances,
-        };
-        let emission_cost = u64::try_from(program.functions.len())
-            .expect("reachable function count fits in request work budget")
-            .saturating_add(1);
         let emission =
-            EmissionSession::new(program, runtime_manifest.clone(), session.emission_budget());
-        emission.checkpoint(session, emission_cost)?;
+            EmissionSession::new(program, runtime_manifest.clone(), emission_budget);
+        emission.checkpoint(session, 0)?;
         let artifact_dependencies = emission.mir_dependencies();
         let artifact = emission
             .emit(|capability| {
@@ -2760,7 +2374,7 @@ impl StageZeroCompiler {
                 let diagnostic = match error {
                     EmissionFailure::Emit(error) => CompileDiagnostic::invariant(
                         "G7004",
-                        format!("VM emission rejected MIR: {error}"),
+                        format!("VM emission rejected LIR: {error}"),
                     ),
                     EmissionFailure::UnauthorizedCapability(capability) => {
                         CompileDiagnostic::verification(
@@ -2823,6 +2437,7 @@ impl StageZeroCompiler {
 /// The executable key is derived from the canonical `InstanceKey` digest, so
 /// `identity<i64>` and `identity<Text>` cannot alias merely because they
 /// share one source declaration key.
+#[cfg(test)]
 fn materialize_concrete_instances(
     functions: &mut BTreeMap<DefKey, MirFunction>,
     graph: &InstanceGraph,
@@ -2878,6 +2493,16 @@ fn materialize_concrete_instances(
         )?;
         instances.insert(executable, MirInstance { key, executable });
     }
+    finalize_materialized_instances(functions, graph, signatures, destruction, instances, targets)
+}
+
+
+#[cfg(test)]
+fn finalize_materialized_instances(
+    functions: &mut BTreeMap<DefKey, MirFunction>, graph: &InstanceGraph,
+    signatures: &ElaboratedInterface, destruction: &mut crate::destruction::Planner<'_>,
+    instances: BTreeMap<DefKey, MirInstance>, targets: BTreeMap<InstanceKey, DefKey>,
+) -> Result<BTreeMap<DefKey, MirInstance>, String> {
     let mut glue_definitions = instances.iter().filter_map(|(definition, instance)|
         crate::destruction::is_glue(&instance.key).then_some(*definition)).collect::<BTreeSet<_>>();
     glue_definitions.extend(destruction.seal_callable_environments(functions)?);
@@ -3108,6 +2733,7 @@ fn materialize_concrete_instances(
 /// The closure identity includes the enclosing instance and its source lifted
 /// definition. Nested closures are processed transitively because they inherit
 /// the same enclosing substitutions.
+#[cfg(test)]
 fn materialize_lifted_callable_instances(
     functions: &mut BTreeMap<DefKey, MirFunction>,
     instance: &InstanceKey,
@@ -3184,7 +2810,7 @@ fn materialize_lifted_callable_instances(
 /// body's generic substitution: its slots are implementation binders followed
 /// by method binders.  Treating the executable key itself as that substitution
 /// therefore shifted every method argument by the trait arity.
-fn materialization_body_arguments(
+pub(crate) fn materialization_body_arguments(
     key: &InstanceKey,
     signatures: &ElaboratedInterface,
 ) -> Result<Vec<GenericArgument>, String> {
@@ -3384,6 +3010,7 @@ fn bind_impl_head_slot(
 /// declarations are sealed and cannot themselves be materialized; ordinary
 /// source wrappers therefore carry this deferred operation through Typed Core
 /// and MIR until their enclosing instance fixes the local register types.
+#[cfg(test)]
 fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<(), String> {
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
@@ -3476,7 +3103,7 @@ fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<
 /// Recover Core's selected Self using the same declaration-owned receiver
 /// shape. In particular, a blanket impl head matches both T and &T, so matching
 /// the implementation head alone cannot distinguish Self from a borrow of it.
-fn trait_method_executable_receiver(
+pub(crate) fn trait_method_executable_receiver(
     evidence: DefKey,
     method: DefKey,
     receiver: Option<&Type>,
@@ -3583,6 +3210,7 @@ fn instance_argument_kind(argument: &GenericArgument) -> crate::GenericKind {
 /// Stage 0's first materializer specializes every local signature.  The
 /// general instruction-type substitution follows in the same product
 /// boundary; direct scalar calls already obtain fully concrete VM registers.
+#[cfg(test)]
 fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericArgument]) {
     for local in &mut function.locals {
         local.ty = specialize_type(&local.ty, arguments);
@@ -3730,6 +3358,7 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
 /// A template can contain a `T` local whose concrete nominal layout becomes
 /// knowable only while materializing an instance. Re-freeze that layout before
 /// the specialized MIR reaches VM emission.
+#[cfg(test)]
 pub(crate) fn register_specialized_nominal_copy_descriptors(
     function: &mut MirFunction,
     signatures: &ElaboratedInterface,
@@ -3772,6 +3401,7 @@ pub(crate) fn register_specialized_nominal_copy_descriptors(
     Ok(())
 }
 
+#[cfg(test)]
 fn register_specialized_nominal_copy_type(
     value: &Type,
     function: &mut MirFunction,
@@ -3886,6 +3516,7 @@ fn register_specialized_nominal_copy_type(
 /// independently of a local register declaration.  A concrete instance must
 /// specialize those witnesses too: otherwise a generic record layout or
 /// pattern can survive even when the value registers were made concrete.
+#[cfg(test)]
 fn specialize_mir_pattern(pattern: &mut crate::MirPattern, arguments: &[GenericArgument]) {
     match pattern {
         crate::MirPattern::Any | crate::MirPattern::Literal(_) => {}
@@ -3922,7 +3553,7 @@ fn specialize_mir_pattern(pattern: &mut crate::MirPattern, arguments: &[GenericA
     }
 }
 
-fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
+pub(crate) fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
     match value {
         Type::Generic(slot) => arguments
             .get(*slot as usize)
@@ -4043,7 +3674,7 @@ fn specialize_lifetime(
     }
 }
 
-fn specialize_effect_row(
+pub(crate) fn specialize_effect_row(
     value: &crate::EffectRow,
     arguments: &[GenericArgument],
 ) -> crate::EffectRow {
@@ -4093,7 +3724,7 @@ fn specialize_effect_row(
     row.canonicalized()
 }
 
-fn specialize_generic_argument(
+pub(crate) fn specialize_generic_argument(
     value: &GenericArgument,
     arguments: &[GenericArgument],
 ) -> GenericArgument {
@@ -4146,6 +3777,7 @@ fn specialize_generic_argument(
 /// separate pass from source elaboration: using the original template
 /// arguments here would select the wrong implementation for a concrete
 /// instance.
+#[cfg(test)]
 fn normalize_materialized_associated_projections(
     function: &mut MirFunction,
     signatures: &ElaboratedInterface,
@@ -4284,7 +3916,7 @@ fn normalize_materialized_associated_projections(
     Ok(())
 }
 
-fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result<Type, String> {
+pub(crate) fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result<Type, String> {
     Ok(match value {
         Type::Tuple(fields) => Type::Tuple(
             fields
@@ -4367,7 +3999,7 @@ fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result
     })
 }
 
-fn normalize_materialized_effect_row(
+pub(crate) fn normalize_materialized_effect_row(
     value: &crate::EffectRow,
     solver: &mut TraitSolver,
     lifetime_binders: u32,
@@ -4424,7 +4056,7 @@ fn normalize_materialized_effect_row(
     })
 }
 
-fn normalize_materialized_generic_argument(
+pub(crate) fn normalize_materialized_generic_argument(
     value: &GenericArgument,
     solver: &mut TraitSolver,
 ) -> Result<GenericArgument, String> {
@@ -4485,6 +4117,7 @@ fn normalize_materialized_const_projection(
     Err("materialized associated-const projection chain exceeded its limit".into())
 }
 
+#[cfg(test)]
 fn normalize_materialized_pattern(
     pattern: &mut crate::MirPattern,
     solver: &mut TraitSolver,
@@ -4529,21 +4162,7 @@ fn normalize_materialized_pattern(
 /// VM emitter to manufacture a normal runtime value for its terminal path.
 /// `MakeCallable` is an edge because an indirect call may invoke that code
 /// later; all iteration is ordered for byte-identical linking.
-fn reachable_functions(
-    functions: &BTreeMap<DefKey, MirFunction>,
-    entry: DefKey,
-) -> BTreeMap<DefKey, MirFunction> {
-    reachable_function_keys(functions, [entry])
-        .into_iter()
-        .filter_map(|definition| {
-            functions
-                .get(&definition)
-                .cloned()
-                .map(|body| (definition, body))
-        })
-        .collect()
-}
-
+#[cfg(test)]
 fn reachable_function_keys(
     functions: &BTreeMap<DefKey, MirFunction>,
     roots: impl IntoIterator<Item = DefKey>,
@@ -4560,12 +4179,13 @@ fn reachable_function_keys(
         pending.extend(function.control.frame_cleanup.iter().map(|action| action.destructor));
         for block in &function.blocks {
             for instruction in &block.instructions {
-                if let crate::MirInstruction::Call { callee, .. }
+                if let crate::MirInstruction::CallOwned { callee, .. }
+                | crate::MirInstruction::Call { callee, .. }
                 | crate::MirInstruction::MakeCallable { callee, .. } = instruction
                 {
                     pending.insert(*callee);
                 }
-                if let crate::MirInstruction::HostCall { resident_operations, .. } = instruction {
+                if let crate::MirInstruction::HostCall { resident_operations, .. } | crate::MirInstruction::HostCallOwned { resident_operations, .. } = instruction {
                     pending.extend(resident_operations.iter().filter_map(|(_, destructor)| *destructor));
                 }
                 if let crate::MirInstruction::MakeCallable { environment: Some(environment), .. } = instruction {
@@ -4595,24 +4215,25 @@ fn visible_fixities_for_module(
                 table.insert_declared(*definition, header);
             }
             crate::ResolutionState::Ambiguous(candidates) if candidates.contains(definition) => {
-                table.mark_ambiguous(header);
+                // Prefix and infix positions are distinct declaration slots.
+                // Name resolution returns all visible declarations for this
+                // spelling; only competing fixities in the same position
+                // constitute a grouping ambiguity.
+                let same_position = candidates.iter().filter(|candidate| {
+                    declarations.get(candidate).is_some_and(|candidate|
+                        candidate.form.is_prefix() == header.form.is_prefix())
+                }).count();
+                if same_position == 1 {
+                    table.insert_declared(*definition, header);
+                } else {
+                    table.mark_ambiguous(header);
+                }
             }
             _ => {}
         }
     }
     table.freeze();
     table
-}
-
-/// MIR contains no source spans; its deterministic structural debug form is
-/// sufficient as a stage-zero product identity until the MIR serialization
-/// boundary becomes the canonical persisted representation.  Keeping this
-/// helper at the service boundary makes that future replacement local.
-fn mir_fingerprint(function: &MirFunction) -> Digest {
-    Digest::of_parts([
-        b"grandiose-stage0-mir-v1".as_slice(),
-        format!("{function:?}").as_bytes(),
-    ])
 }
 
 /// Body syntax is a request-local frontend product. It includes recovery and
@@ -4714,74 +4335,6 @@ fn enrich_semantic_provenance(diagnostic: &mut CompileDiagnostic) {
     diagnostic.canonicalize_provenance();
 }
 
-fn constant_cycle(
-    functions: &BTreeMap<crate::DefKey, MirFunction>,
-    constants: &BTreeSet<crate::DefKey>,
-) -> Option<Vec<crate::DefKey>> {
-    fn visit(
-        definition: crate::DefKey,
-        functions: &BTreeMap<crate::DefKey, MirFunction>,
-        constants: &BTreeSet<crate::DefKey>,
-        visiting: &mut BTreeSet<crate::DefKey>,
-        visited: &mut BTreeSet<crate::DefKey>,
-        path: &mut Vec<crate::DefKey>,
-    ) -> Option<Vec<crate::DefKey>> {
-        if !visiting.insert(definition) {
-            let start = path.iter().position(|key| *key == definition).unwrap_or(0);
-            let mut cycle = path[start..].to_vec();
-            cycle.push(definition);
-            return Some(cycle);
-        }
-        path.push(definition);
-        let function = functions.get(&definition)?;
-        for callee in function
-            .blocks
-            .iter()
-            .flat_map(|block| block.instructions.iter())
-            .filter_map(|instruction| match instruction {
-                crate::MirInstruction::Call { callee, .. } if constants.contains(callee) => {
-                    Some(*callee)
-                }
-                _ => None,
-            })
-        {
-            if !visited.contains(&callee)
-                && let Some(cycle) = visit(callee, functions, constants, visiting, visited, path)
-            {
-                return Some(cycle);
-            }
-            if visiting.contains(&callee) {
-                let start = path.iter().position(|key| *key == callee).unwrap_or(0);
-                let mut cycle = path[start..].to_vec();
-                cycle.push(callee);
-                return Some(cycle);
-            }
-        }
-        path.pop();
-        visiting.remove(&definition);
-        visited.insert(definition);
-        None
-    }
-
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let mut path = vec![];
-    for definition in constants {
-        if !visited.contains(definition)
-            && let Some(cycle) = visit(
-                *definition,
-                functions,
-                constants,
-                &mut visiting,
-                &mut visited,
-                &mut path,
-            )
-        {
-            return Some(cycle);
-        }
-    }
-    None
-}
 
 #[cfg(test)]
 mod tests {

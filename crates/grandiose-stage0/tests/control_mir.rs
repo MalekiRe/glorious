@@ -155,19 +155,32 @@ fn statement_disposal_is_explicit_between_invocations() {
 }
 
 #[test]
-fn unimplemented_handler_transition_is_not_erased_to_function_return() {
-    assert!(matches!(
-        control(
+fn handler_transition_is_not_erased_to_function_return() {
+    let mir = control(
             "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }"
-        ),
-        Err(ControlError::NotMigrated(_))
-    ));
+        ).unwrap();
+    assert_eq!(mir.handlers().len(), 1);
+    assert!(mir.blocks().iter().any(|block| matches!(block.terminator,
+        ControlTerminator::Transfer(grandiose_stage0::control_mir::ControlTransfer::CompleteHandler { .. }))));
     assert_eq!(
         run(
             "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }"
         ),
         42
     );
+}
+
+#[test]
+fn all_structured_regions_compose_without_source_shape_dispatch() {
+    for source in [
+        "struct Pair { first: i64, second: i64 } pub fn main(value: Pair) -> i64 { let loan = &value.second; *loan }",
+        "pub fn main(target: &mut i64, rhs: () -> i64) -> i64 { *target = rhs(); 0 }",
+        "pub fn main() -> i64 { let callable = (value: i64) -> i64 { value + 1 }; callable(41) }",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+        "pub fn main() -> i64 { label done { transfer done 42 } }",
+        "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { 1 + handle Ask::ask() { Ask::ask() => 41 } }",
+        "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { 1 + handle Ask::ask() { Ask::ask() with _ => 41 } }",
+    ] { control(source).unwrap_or_else(|error| panic!("{source}\n{error:?}")); }
 }
 
 #[test]

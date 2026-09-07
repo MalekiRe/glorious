@@ -33,49 +33,12 @@ pub struct FixityTable {
 }
 
 impl FixityTable {
-    /// The stage-zero target has no separately compiled prelude yet.  These
-    /// declarations mirror the language prelude so isolated package requests
-    /// retain the same operator semantics.  Source declarations in the module
-    /// replace an entry in their own position namespace.
+    /// Empty until source declarations/imports populate the operator table.
+    /// Kept as a constructor name for existing API consumers; there is no
+    /// implicit compiler prelude and no privileged operator spelling.
     pub fn with_prelude() -> Self {
-        let mut entries = BTreeMap::new();
-        for (operator, precedence) in [
-            ("+", 30),
-            ("-", 30),
-            ("*", 40),
-            ("/", 40),
-            ("%", 40),
-            ("==", 20),
-            ("!=", 20),
-            ("<", 20),
-            ("<=", 20),
-            (">", 20),
-            (">=", 20),
-            ("or", 2),
-            ("and", 3),
-        ] {
-            entries.insert(
-                (FixityPosition::Infix, operator.into()),
-                Fixity {
-                    declaration: None,
-                    form: FixityForm::InfixLeft,
-                    precedence,
-                },
-            );
-        }
-        for (operator, precedence) in [("+", 50), ("-", 50), ("!", 50)] {
-            entries.insert(
-                (FixityPosition::Prefix, operator.into()),
-                Fixity {
-                    declaration: None,
-                    form: FixityForm::Prefix,
-                    precedence,
-                },
-            );
-        }
-        Self::from_entries(entries)
+        Self::from_entries(BTreeMap::new())
     }
-
     pub fn for_module(interface: &PackageInterface) -> Self {
         let mut table = Self::with_prelude();
         for definition in &interface.definitions {

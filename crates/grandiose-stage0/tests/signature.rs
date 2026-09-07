@@ -2850,6 +2850,7 @@ fn source_nominal_layouts_accept_distinct_finite_generic_instantiations() {
 fn forged_interface_nominal_layout_cycle_is_rejected_before_core_or_mir() {
     let node = DefKey(Digest::of_bytes(b"forged-owned-layout-node"));
     let forged = ElaboratedInterface {
+        pattern_values: BTreeMap::new(),
         inherent_self_types: BTreeMap::new(),
         definitions: BTreeMap::from([(
             node,

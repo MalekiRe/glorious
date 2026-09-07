@@ -2,8 +2,8 @@
 //! ownership elaboration. Core IDs below are provenance/proof references only;
 //! executable dependencies use this language's value, place and region IDs.
 //!
-//! This first migration product is deliberately separate from legacy MIR.
-//! It does not claim that legacy code generation consumes these regions yet.
+//! Production lowering composes these regions into Control MIR, then elaborates
+//! Ownership MIR before entering the existing concrete specialization/ABI path.
 
 use std::collections::{BTreeMap, BTreeSet};
 
