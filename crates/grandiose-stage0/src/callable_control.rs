@@ -144,6 +144,8 @@ pub enum ControlUnknown {
     MissingBody(CallableBrand),
     RecursiveCall(CallableBrand),
     OpaqueCall,
+    /// No complete invocation observation exists for the requested site.
+    UnobservedCall,
     Unsupported(&'static str),
     Limit,
 }
@@ -170,6 +172,43 @@ pub struct ControlAlternative {
     pub guards: Vec<ControlGuard>,
     pub events: Vec<ControlEvent>,
     pub outcome: ControlOutcome,
+}
+
+/// Read-only invocation coverage. Presence of alternatives is not itself a
+/// completeness proof: opaque or deferred invocations retain unknown outcomes.
+/// Unknown coverage is unconditional and must not be discarded by specializing
+/// guards from some separately observed execution of the same source call.
+#[derive(Clone, Debug)]
+pub enum ControlCallCoverage<'a> {
+    Alternatives(&'a [ControlAlternative]),
+    Unknown(ControlUnknown),
+}
+impl ControlCallCoverage<'_> {
+    pub fn is_complete(&self) -> bool {
+        matches!(self, Self::Alternatives(paths) if !paths.is_empty() && paths.iter().all(|path|
+            !matches!(path.outcome, ControlOutcome::Unknown(_) | ControlOutcome::UnresolvedInvocation(_))))
+    }
+    pub fn only_returns_normally(&self) -> bool {
+        self.is_complete()
+            && matches!(self, Self::Alternatives(paths) if paths.iter()
+            .all(|path| matches!(path.outcome, ControlOutcome::Return(_))))
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct CallContext {
+    callable: CallableBrand,
+    expression: CoreId,
+    calls: Vec<ControlLocation>,
+}
+impl From<&ControlSite> for CallContext {
+    fn from(site: &ControlSite) -> Self {
+        Self {
+            callable: site.location.callable,
+            expression: site.location.expression,
+            calls: site.calls.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,6 +241,8 @@ pub struct CallableControlSummary {
     identity: ControlBodyIdentity,
     dependencies: BTreeMap<DefKey, Arc<Seal>>,
     alternatives: Vec<ControlAlternative>,
+    calls: BTreeMap<ControlSite, Vec<ControlAlternative>>,
+    call_gaps: BTreeMap<CallContext, ControlUnknown>,
 }
 impl CallableControlSummary {
     pub fn callable(&self) -> CallableBrand {
@@ -213,6 +254,22 @@ impl CallableControlSummary {
     pub fn alternatives(&self) -> &[ControlAlternative] {
         &self.alternatives
     }
+    /// Invocation observations, captured before the caller's suffix or any
+    /// enclosing label rejoins. The iterator includes only observed sites;
+    /// absence is unknown, never evidence that a source call cannot exit.
+    /// Use `call` (as this iterator does) rather than bypassing coverage gaps.
+    pub fn calls(&self) -> impl Iterator<Item = (&ControlSite, ControlCallCoverage<'_>)> {
+        self.calls.keys().map(|site| (site, self.call(site)))
+    }
+    pub fn call(&self, site: &ControlSite) -> ControlCallCoverage<'_> {
+        if let Some(reason) = self.call_gaps.get(&CallContext::from(site)) {
+            return ControlCallCoverage::Unknown(reason.clone());
+        }
+        self.calls.get(site).map_or(
+            ControlCallCoverage::Unknown(ControlUnknown::UnobservedCall),
+            |paths| ControlCallCoverage::Alternatives(paths),
+        )
+    }
     pub fn dependencies(&self) -> impl Iterator<Item = ControlBodyIdentity> + '_ {
         self.dependencies.values().map(|seal| seal.identity)
     }
@@ -221,15 +278,22 @@ impl CallableControlSummary {
     pub fn matches(&self, bodies: &BTreeMap<DefKey, ControlBody<'_>>) -> bool {
         self.dependencies.iter().all(|(key, seal)| {
             bodies.get(key).is_some_and(|input| {
-                seal.valid.is_ok()
-                    && same_body(input.body, &seal.body)
-                    && input.body.semantic_fingerprint() == seal.identity.body
+                self.matches_body(*key, input.body)
                     && crate::signature::host_contract_fingerprint(*key, input.signature)
                         == seal.identity.contract
                     && input.body.diagnostics.is_empty()
                     && !input.body.recovered
                     && same_interface(input.interface, &seal.interface)
             })
+        })
+    }
+    /// Local half of binding an already batch-validated summary set to a
+    /// subsequent ownership request. This does not replace full `matches`.
+    pub(crate) fn matches_body(&self, definition: DefKey, body: &TypedBody) -> bool {
+        self.dependencies.get(&definition).is_some_and(|seal| {
+            seal.valid.is_ok()
+                && same_body(body, &seal.body)
+                && body.semantic_fingerprint() == seal.identity.body
         })
     }
     pub fn is_complete(&self) -> bool {
@@ -344,8 +408,39 @@ struct State {
     outcome: ControlOutcome,
 }
 impl State {
+    fn alternative(&self) -> ControlAlternative {
+        ControlAlternative {
+            guards: self.guards.clone(),
+            events: self.events.clone(),
+            outcome: self.outcome.clone(),
+        }
+    }
     fn running(&self) -> bool {
         matches!(self.outcome, ControlOutcome::Return(_))
+    }
+    fn coverage_gap(&self) -> Option<ControlUnknown> {
+        match &self.outcome {
+            ControlOutcome::Unknown(reason) => Some(reason.clone()),
+            // A callback may invoke a local label capability it was given.
+            // It then never returns to its call site, but execution rejoins
+            // after that label. Until the actual callback resolves this edge,
+            // skipped caller continuations are not proved unreachable.
+            ControlOutcome::UnresolvedInvocation(_) => Some(ControlUnknown::Unsupported(
+                "unresolved invocation continuation",
+            )),
+            // Reserved for future cleanup/cancellation modeling. Do not let an
+            // unmodeled cancellation silently prove a continuation absent.
+            ControlOutcome::Cancellation => {
+                Some(ControlUnknown::Unsupported("cancellation continuation"))
+            }
+            // Exact local label transfers are caught by `Label`. A terminal
+            // operation cannot resume this suffix: any intervening handler is
+            // stopped as unknown before its computation is evaluated.
+            ControlOutcome::Return(_)
+            | ControlOutcome::LabelExit { .. }
+            | ControlOutcome::TerminalOperation { .. }
+            | ControlOutcome::Divergence => None,
+        }
     }
     fn value(&self) -> ControlValue {
         match &self.outcome {
@@ -493,6 +588,8 @@ pub fn derive_control_summaries(
                 evaluating: vec![],
                 stack: vec![callable],
                 dependencies: BTreeMap::from([(*owner, seals[owner].clone())]),
+                calls: BTreeMap::new(),
+                call_gaps: BTreeMap::new(),
             };
             let states = match &seals[owner].valid {
                 Ok(()) => analyzer.eval(&frame, root, initial),
@@ -513,6 +610,8 @@ pub fn derive_control_summaries(
                     identity: seals[owner].identity,
                     dependencies: analyzer.dependencies,
                     alternatives,
+                    calls: analyzer.calls,
+                    call_gaps: analyzer.call_gaps,
                 },
             );
         }
@@ -577,8 +676,64 @@ struct Analyzer<'a, 'b> {
     stack: Vec<CallableBrand>,
     evaluating: Vec<(CallableBrand, CoreId, Vec<ControlLocation>)>,
     dependencies: BTreeMap<DefKey, Arc<Seal>>,
+    calls: BTreeMap<ControlSite, Vec<ControlAlternative>>,
+    call_gaps: BTreeMap<CallContext, ControlUnknown>,
 }
 impl Analyzer<'_, '_> {
+    fn record_call(&mut self, site: ControlSite, states: &[State]) {
+        let paths = self.calls.entry(site).or_default();
+        paths.extend(states.iter().map(State::alternative));
+        if paths.len() > self.limits.max_alternatives.max(1) {
+            paths.truncate(self.limits.max_alternatives.saturating_sub(1));
+            paths.push(ControlAlternative {
+                guards: vec![],
+                events: vec![],
+                outcome: ControlOutcome::Unknown(ControlUnknown::Limit),
+            });
+        }
+    }
+    fn call_gap(&mut self, frame: &Frame, id: CoreId, reason: &ControlUnknown) {
+        self.call_gaps
+            .entry(CallContext {
+                callable: frame.callable,
+                expression: id,
+                calls: frame.calls.clone(),
+            })
+            .or_insert_with(|| reason.clone());
+    }
+    /// Mark only an unvisited suffix/subtree. Retrospectively tainting a whole
+    /// enclosing block would erase valid observations before a later unknown.
+    fn unvisited(&mut self, frame: &Frame, id: CoreId, reason: &ControlUnknown) {
+        let mut pending = vec![id];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let Some(expr) = self.bodies[&frame.owner]
+                .body
+                .expressions
+                .get(id.0 as usize)
+            else {
+                continue;
+            };
+            let children = unvisited_children(&expr.kind);
+            if matches!(expr.kind, CoreKind::Call { .. } | CoreKind::Constant { .. }) {
+                self.call_gap(frame, id, reason);
+            }
+            pending.extend(children);
+        }
+    }
+    fn stop_unvisited(
+        &mut self,
+        frame: &Frame,
+        id: CoreId,
+        state: State,
+        reason: ControlUnknown,
+    ) -> Vec<State> {
+        self.unvisited(frame, id, &reason);
+        vec![state.stop(reason)]
+    }
     fn cap(&self, mut states: Vec<State>) -> Vec<State> {
         if states.len() > self.limits.max_alternatives.max(1) {
             let witness = states.pop().unwrap().limit_witness();
@@ -589,18 +744,21 @@ impl Analyzer<'_, '_> {
     }
     fn eval(&mut self, frame: &Frame, id: CoreId, state: State) -> Vec<State> {
         if !state.running() {
+            if let Some(reason) = state.coverage_gap() {
+                self.unvisited(frame, id, &reason);
+            }
             return vec![state];
         }
         self.steps += 1;
         if self.steps > self.limits.max_steps {
-            return vec![state.stop(ControlUnknown::Limit)];
+            return self.stop_unvisited(frame, id, state, ControlUnknown::Limit);
         }
         let site = (frame.callable, id, frame.calls.clone());
         if self.evaluating.contains(&site) {
-            return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
+            return self.stop_unvisited(frame, id, state, ControlUnknown::InvalidCore(frame.owner));
         }
         if self.evaluating.len() >= 512 {
-            return vec![state.stop(ControlUnknown::Limit)];
+            return self.stop_unvisited(frame, id, state, ControlUnknown::Limit);
         }
         self.evaluating.push(site);
         let mut evaluation = frame.clone();
@@ -861,6 +1019,12 @@ impl Analyzer<'_, '_> {
                 let mut output = vec![];
                 for state in self.eval(frame, callee, state) {
                     if !state.running() {
+                        if let Some(reason) = state.coverage_gap() {
+                            self.call_gap(frame, id, &reason);
+                            for argument in &arguments {
+                                self.unvisited(frame, *argument, &reason);
+                            }
+                        }
                         output.push(state);
                         continue;
                     }
@@ -876,6 +1040,9 @@ impl Analyzer<'_, '_> {
                                 state,
                             ));
                         } else {
+                            if let Some(reason) = state.coverage_gap() {
+                                self.call_gap(frame, id, &reason);
+                            }
                             output.push(state);
                         }
                     }
@@ -904,6 +1071,11 @@ impl Analyzer<'_, '_> {
                 );
                 for state in self.eval(frame, computation, state) {
                     if !state.running() {
+                        if let Some(reason) = state.coverage_gap() {
+                            for clause in &clauses {
+                                self.unvisited(frame, clause.body, &reason);
+                            }
+                        }
                         output.push(state);
                         continue;
                     }
@@ -915,6 +1087,13 @@ impl Analyzer<'_, '_> {
                             break;
                         };
                         if clause.refinement.is_some() {
+                            for clause in &clauses {
+                                self.unvisited(
+                                    frame,
+                                    clause.body,
+                                    &ControlUnknown::Unsupported("refinement completion"),
+                                );
+                            }
                             output.push(
                                 next.stop(ControlUnknown::Unsupported("refinement completion")),
                             );
@@ -1026,19 +1205,44 @@ impl Analyzer<'_, '_> {
                 );
             }
             CoreKind::Assign { .. } => {
-                return vec![state.stop(ControlUnknown::Unsupported("mutation"))];
+                return self.stop_unvisited(
+                    frame,
+                    id,
+                    state,
+                    ControlUnknown::Unsupported("mutation"),
+                );
             }
             CoreKind::Handle { .. } => {
-                return vec![state.stop(ControlUnknown::Unsupported("operation handler"))];
+                return self.stop_unvisited(
+                    frame,
+                    id,
+                    state,
+                    ControlUnknown::Unsupported("operation handler"),
+                );
             }
             CoreKind::IntrinsicCall { .. } => {
-                return vec![state.stop(ControlUnknown::Unsupported("primitive control contract"))];
+                return self.stop_unvisited(
+                    frame,
+                    id,
+                    state,
+                    ControlUnknown::Unsupported("primitive control contract"),
+                );
             }
             CoreKind::PatternTest { .. } | CoreKind::Completion { .. } => {
-                return vec![state.stop(ControlUnknown::Unsupported("refinement decision"))];
+                return self.stop_unvisited(
+                    frame,
+                    id,
+                    state,
+                    ControlUnknown::Unsupported("refinement decision"),
+                );
             }
             CoreKind::ReleaseAvailable(_) => {
-                return vec![state.stop(ControlUnknown::Unsupported("availability cleanup"))];
+                return self.stop_unvisited(
+                    frame,
+                    id,
+                    state,
+                    ControlUnknown::Unsupported("availability cleanup"),
+                );
             }
             CoreKind::Resumption { .. } => {
                 return vec![state.stop(ControlUnknown::Unsupported("resumption"))];
@@ -1062,6 +1266,9 @@ impl Analyzer<'_, '_> {
             let mut next = vec![];
             for (state, values) in states {
                 if !state.running() {
+                    if let Some(reason) = state.coverage_gap() {
+                        self.unvisited(frame, *id, &reason);
+                    }
                     next.push((state, values));
                     continue;
                 }
@@ -1083,6 +1290,19 @@ impl Analyzer<'_, '_> {
         states
     }
     fn invoke(
+        &mut self,
+        frame: &Frame,
+        id: CoreId,
+        callee: ControlValue,
+        arguments: Vec<ControlValue>,
+        result_ty: Type,
+        state: State,
+    ) -> Vec<State> {
+        let output = self.invoke_inner(frame, id, callee, arguments, result_ty, state);
+        self.record_call(frame.site(id), &output);
+        output
+    }
+    fn invoke_inner(
         &mut self,
         frame: &Frame,
         id: CoreId,
@@ -1237,6 +1457,68 @@ impl Analyzer<'_, '_> {
             }
             _ => vec![state.stop(ControlUnknown::OpaqueCall)],
         }
+    }
+}
+
+/// Children that may execute while evaluating this expression in the current
+/// callable. Merely constructing a closure does not run its body, and handler
+/// clause bodies belong to their own callable namespaces.
+fn unvisited_children(kind: &CoreKind) -> Vec<CoreId> {
+    match kind {
+        CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+            values.clone()
+        }
+        CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields.clone(),
+        CoreKind::Field { base, .. }
+        | CoreKind::PatternTest { subject: base, .. }
+        | CoreKind::Borrow { value: base, .. }
+        | CoreKind::Deref(base)
+        | CoreKind::Move(base)
+        | CoreKind::ReleaseAvailable(base) => vec![*base],
+        CoreKind::Let { value, .. }
+        | CoreKind::Label { body: value, .. }
+        | CoreKind::Transfer { value, .. } => vec![*value],
+        CoreKind::Assign { place, value } => {
+            let mut children = vec![*value];
+            let mut place = place;
+            loop {
+                match place {
+                    crate::CorePlace::Field { base, .. } => place = base,
+                    crate::CorePlace::Deref { reference, .. } => {
+                        children.push(*reference);
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+            children
+        }
+        CoreKind::Call {
+            callee, arguments, ..
+        } => std::iter::once(*callee)
+            .chain(arguments.iter().copied())
+            .collect(),
+        CoreKind::Perform { arguments, .. } | CoreKind::IntrinsicCall { arguments, .. } => {
+            arguments.clone()
+        }
+        CoreKind::Handle { computation, .. } => vec![*computation],
+        CoreKind::Completion {
+            computation,
+            clauses,
+            ..
+        } => std::iter::once(*computation)
+            .chain(clauses.iter().map(|clause| clause.body))
+            .collect(),
+        CoreKind::Closure { .. }
+        | CoreKind::Literal(_)
+        | CoreKind::ConstValue(_)
+        | CoreKind::Local(_)
+        | CoreKind::Resumption { .. }
+        | CoreKind::Function { .. }
+        | CoreKind::TraitMethod { .. }
+        | CoreKind::Constant { .. }
+        | CoreKind::LabelValue { .. }
+        | CoreKind::Error => vec![],
     }
 }
 

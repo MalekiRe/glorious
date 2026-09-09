@@ -978,3 +978,591 @@ fn repeated_capability_reads_share_the_exact_enclosing_label_activation() {
     assert_eq!(targets.len(), 3);
     assert!(targets.iter().all(|target| *target == targets[0]));
 }
+
+fn own_call_paths_to<'a>(
+    summary: &'a CallableControlSummary,
+    definition: DefKey,
+) -> Vec<(&'a ControlSite, &'a [ControlAlternative])> {
+    summary.calls().filter_map(|(site, coverage)| {
+        if site.location.callable != summary.callable() || !site.calls.is_empty() { return None; }
+        let ControlCallCoverage::Alternatives(paths) = coverage else { return None; };
+        paths.iter().any(|path| path.events.iter().any(|event| matches!(event,
+            ControlEvent::Invoke { site: actual, callee: ControlValue { shape: ControlValueShape::Callable { brand: CallableBrand::Named(key), .. }, .. }, .. }
+                if actual == site && *key == definition))).then_some((site, paths))
+    }).collect()
+}
+
+#[test]
+fn invocation_snapshots_preserve_send_alias_maybe_and_ignore_outcomes() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { Yes, No }
+        fn send<T,L>(value: T, exit: L) -> ! where L: Label<T> { let alias = exit; alias(value) }
+        fn ignore<L>(exit: L) where L: Label<i64> {}
+        fn maybe<L>(choice: Choice, exit: L) where L: Label<i64> {
+            handle choice { Choice::Yes => exit(42), Choice::No => () }
+        }
+        fn main<L>(choice: Choice, exit: L) where L: Label<i64> {
+            let alias = exit;
+            ignore(alias);
+            maybe(choice, alias);
+            send(43, alias)
+        }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let summary = fixture.get(&summaries, "main");
+    assert_eq!(
+        returns(summary),
+        0,
+        "the caller eventually exits on both paths"
+    );
+    let ignore = own_call_paths_to(summary, fixture.names["ignore"]);
+    assert_eq!(ignore.len(), 1);
+    assert!(
+        ignore[0]
+            .1
+            .iter()
+            .all(|path| matches!(path.outcome, ControlOutcome::Return(_)))
+    );
+    assert!(summary.call(ignore[0].0).only_returns_normally());
+    let maybe = own_call_paths_to(summary, fixture.names["maybe"]);
+    assert_eq!(maybe.len(), 1);
+    assert_eq!(maybe[0].1.len(), 2);
+    assert!(
+        maybe[0]
+            .1
+            .iter()
+            .any(|path| matches!(path.outcome, ControlOutcome::Return(_)))
+    );
+    assert!(maybe[0].1.iter().any(|path| matches!(
+        &path.outcome,
+        ControlOutcome::LabelExit {
+            target: ControlLabelTarget::Symbolic(ControlOrigin::Parameter(1)),
+            ..
+        }
+    )));
+    let send = own_call_paths_to(summary, fixture.names["send"]);
+    assert_eq!(send.len(), 1);
+    assert!(
+        send[0]
+            .1
+            .iter()
+            .all(|path| matches!(&path.outcome, ControlOutcome::LabelExit {
+        target: ControlLabelTarget::Symbolic(ControlOrigin::Parameter(1)),
+        value: ControlValue { shape: ControlValueShape::Literal(value), .. },
+    } if value == "43"))
+    );
+    assert!(
+        send[0].1.iter().all(|path| !path.guards.is_empty()),
+        "the send invocation retains the caller's normal-prefix guard"
+    );
+    assert!(summary.matches(&fixture.inputs()));
+}
+
+#[test]
+fn enclosing_label_rejoin_does_not_rewrite_the_call_own_exit() {
+    let fixture = Fixture::new(
+        r#"
+        fn send<T,L>(value: T, exit: L) -> ! where L: Label<T> { exit(value) }
+        fn main() -> i64 { label done { let alias = @done; send(42, alias) } }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let summary = fixture.get(&summaries, "main");
+    assert!(summary.only_returns_normally());
+    let calls = own_call_paths_to(summary, fixture.names["send"]);
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(
+        &calls[0].1[0].outcome,
+        ControlOutcome::LabelExit {
+            target: ControlLabelTarget::Lexical { .. },
+            ..
+        }
+    ));
+    assert!(!summary.call(calls[0].0).only_returns_normally());
+}
+
+#[test]
+fn later_unknown_caller_suffix_does_not_contaminate_an_earlier_invocation() {
+    let fixture = Fixture::new(
+        r#"
+        effect Read { value() -> i64; }
+        fn ignore() {}
+        fn main() -> i64 / {Read} { ignore(); Read::value() }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let summary = fixture.get(&summaries, "main");
+    assert!(!summary.is_complete());
+    let calls = own_call_paths_to(summary, fixture.names["ignore"]);
+    assert_eq!(calls.len(), 1);
+    assert!(summary.call(calls[0].0).only_returns_normally());
+    assert!(calls[0].1.iter().all(|path| {
+        path.events
+            .iter()
+            .all(|event| !matches!(event, ControlEvent::Perform { .. }))
+    }));
+}
+
+#[test]
+fn later_caller_consumption_does_not_hide_a_conditional_helper_exit() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { Yes, No }
+        effect Read { value() -> i64; }
+        fn maybe<L>(choice: Choice, exit: L) where L: Label<i64> {
+            handle choice { Choice::Yes => exit(42), Choice::No => () }
+        }
+        fn consume(value: i64) {}
+        fn main<L>(choice: Choice, exit: L) / {Read} where L: Label<i64> {
+            maybe(choice, exit);
+            consume(Read::value())
+        }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let summary = fixture.get(&summaries, "main");
+    assert!(!summary.is_complete());
+    let calls = own_call_paths_to(summary, fixture.names["maybe"]);
+    assert_eq!(calls.len(), 1);
+    assert!(summary.call(calls[0].0).is_complete());
+    assert!(
+        calls[0]
+            .1
+            .iter()
+            .any(|path| matches!(path.outcome, ControlOutcome::LabelExit { .. }))
+    );
+    assert!(
+        calls[0]
+            .1
+            .iter()
+            .any(|path| matches!(path.outcome, ControlOutcome::Return(_)))
+    );
+    assert!(calls[0].1.iter().all(|path| {
+        path.events
+            .iter()
+            .all(|event| !matches!(event, ControlEvent::Perform { .. }))
+    }));
+}
+
+#[test]
+fn actual_callback_and_capture_values_are_retained_at_nested_invocations() {
+    let fixture = Fixture::new(
+        r#"
+        fn apply(callback: () -> i64) -> i64 { callback() }
+        fn main() -> i64 { let value = 42; let callback = () -> i64 { value }; apply(callback) }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let summary = fixture.get(&summaries, "main");
+    let nested = summary
+        .calls()
+        .filter(|(site, _)| !site.calls.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(nested.len(), 1);
+    assert!(nested[0].1.only_returns_normally());
+    let ControlCallCoverage::Alternatives(paths) = &nested[0].1 else {
+        panic!("observed callback")
+    };
+    assert!(
+        matches!(&paths[0].outcome, ControlOutcome::Return(ControlValue { shape: ControlValueShape::Literal(value), .. }) if value == "42")
+    );
+    assert!(paths[0].events.iter().any(|event| matches!(event, ControlEvent::Invoke {
+        site, callee: ControlValue { shape: ControlValueShape::Callable { brand: CallableBrand::Closure(_), captures, .. }, .. }, ..
+    } if site == nested[0].0 && captures.len() == 1 && matches!(&captures[0].shape, ControlValueShape::Literal(value) if value == "42"))));
+}
+
+#[test]
+fn repeated_same_core_call_evaluations_have_distinct_invocation_entries() {
+    let mut fixture =
+        Fixture::new("fn answer() -> i64 { 42 } fn main() -> (i64, i64) { (answer(), answer()) }");
+    let body = fixture.bodies.get_mut(&fixture.names["main"]).unwrap();
+    for expr in &mut body.expressions {
+        if let CoreKind::Tuple(fields) = &mut expr.kind {
+            if fields.len() == 2 {
+                fields[1] = fields[0];
+            }
+        }
+    }
+    assert!(body.validate().is_empty());
+    let summaries = fixture.derive();
+    let summary = fixture.get(&summaries, "main");
+    let calls = own_call_paths_to(summary, fixture.names["answer"]);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0].0.location.expression,
+        calls[1].0.location.expression
+    );
+    assert_ne!(
+        calls[0].0.location.occurrence,
+        calls[1].0.location.occurrence
+    );
+    assert!(
+        calls
+            .iter()
+            .all(|(site, _)| summary.call(site).only_returns_normally())
+    );
+}
+
+#[test]
+fn partially_unvisited_prefixes_and_arguments_cannot_become_normal_only_call_proofs() {
+    for body in [
+        "let callback = handle choice { Choice::Yes => answer, Choice::No => (Read::value(), answer).1 }; callback()",
+        "identity(handle choice { Choice::Yes => 42, Choice::No => Read::value() })",
+    ] {
+        let source = format!(
+            r#"
+            enum Choice {{ Yes, No }}
+            effect Read {{ value() -> i64; }}
+            fn answer() -> i64 {{ 42 }}
+            fn identity(value: i64) -> i64 {{ value }}
+            fn main(choice: Choice) -> i64 / {{Read}} {{ {body} }}
+        "#
+        );
+        let fixture = Fixture::new(&source);
+        let summaries = fixture.derive();
+        let summary = fixture.get(&summaries, "main");
+        let calls = summary
+            .calls()
+            .filter(|(site, _)| site.calls.is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "{body}: {summary:#?}");
+        assert!(
+            matches!(calls[0].1, ControlCallCoverage::Unknown(_)),
+            "{body}: {summary:#?}"
+        );
+        assert!(!calls[0].1.only_returns_normally());
+    }
+}
+
+#[test]
+fn capped_invocation_results_and_unobserved_sites_are_explicitly_unknown() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { Yes, No }
+        fn choose(choice: Choice) -> i64 { handle choice { Choice::Yes => 1, Choice::No => 2 } }
+        fn main(choice: Choice) -> i64 { choose(choice) }
+    "#,
+    );
+    let summaries = derive_control_summaries(
+        &fixture.inputs(),
+        ControlSummaryLimits {
+            max_alternatives: 1,
+            ..Default::default()
+        },
+    );
+    let summary = fixture.get(&summaries, "main");
+    let calls = summary
+        .calls()
+        .filter(|(site, _)| site.calls.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert!(!calls[0].1.only_returns_normally());
+    let ControlCallCoverage::Alternatives(paths) = &calls[0].1 else {
+        panic!("the actual call was observed")
+    };
+    assert!(paths.iter().any(|path| matches!(
+        path.outcome,
+        ControlOutcome::Unknown(ControlUnknown::Limit)
+    ) && path.guards.is_empty()));
+    let missing = ControlSite {
+        location: ControlLocation {
+            callable: summary.callable(),
+            expression: grandiose_stage0::CoreId(u32::MAX),
+            occurrence: 0,
+        },
+        calls: vec![],
+    };
+    assert!(matches!(
+        summary.call(&missing),
+        ControlCallCoverage::Unknown(ControlUnknown::UnobservedCall)
+    ));
+    assert!(!summary.call(&missing).only_returns_normally());
+}
+
+#[test]
+fn call_entries_preserve_missing_body_and_actual_callback_label_unknown_boundaries() {
+    let mut fixture = Fixture::new(
+        r#"
+        fn missing() {}
+        fn caller() { missing() }
+        fn invoke<F>(callback: F) -> ! where F: Fn<(i64,), Output=!, Effects={}> { callback(42) }
+        fn main() -> i64 { label done { invoke(@done) } }
+    "#,
+    );
+    fixture.bodies.remove(&fixture.names["missing"]);
+    let summaries = fixture.derive();
+    let caller = fixture.get(&summaries, "caller");
+    let calls = caller.calls().collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    let ControlCallCoverage::Alternatives(paths) = &calls[0].1 else {
+        panic!("observed opaque invocation")
+    };
+    assert!(matches!(
+        paths[0].outcome,
+        ControlOutcome::Unknown(ControlUnknown::MissingBody(_))
+    ));
+    assert!(!calls[0].1.is_complete());
+    let main = fixture.get(&summaries, "main");
+    assert!(main.only_returns_normally());
+    let nested = main
+        .calls()
+        .filter(|(site, _)| !site.calls.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(nested.len(), 1);
+    let ControlCallCoverage::Alternatives(paths) = &nested[0].1 else {
+        panic!("actual label invocation")
+    };
+    assert!(matches!(
+        paths[0].outcome,
+        ControlOutcome::LabelExit {
+            target: ControlLabelTarget::Lexical { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_capped_caller_prefix_keeps_later_call_coverage_unknown() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { First, Second, Third }
+        fn answer() -> i64 { 42 }
+        fn main(choice: Choice) -> i64 {
+            handle choice { Choice::First => (), Choice::Second => (), Choice::Third => () };
+            answer()
+        }
+    "#,
+    );
+    let summaries = derive_control_summaries(
+        &fixture.inputs(),
+        ControlSummaryLimits {
+            max_alternatives: 2,
+            ..Default::default()
+        },
+    );
+    let summary = fixture.get(&summaries, "main");
+    let calls = summary
+        .calls()
+        .filter(|(site, _)| site.calls.is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        calls.len(),
+        1,
+        "one retained prefix actually invokes answer"
+    );
+    assert!(matches!(
+        calls[0].1,
+        ControlCallCoverage::Unknown(ControlUnknown::Limit)
+    ));
+    assert!(
+        !summary.call(calls[0].0).only_returns_normally(),
+        "unvisited prefix alternatives can never disappear behind an observed normal path"
+    );
+}
+
+fn named_call_id(body: &TypedBody, target: DefKey) -> grandiose_stage0::CoreId {
+    body.expressions
+        .iter()
+        .enumerate()
+        .find_map(|(index, expression)| match expression.kind {
+            CoreKind::Call { callee, .. }
+                if matches!(body.expressions[callee.0 as usize].kind,
+                    CoreKind::Function { definition, .. } if definition == target) =>
+            {
+                Some(grandiose_stage0::CoreId(index as u32))
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn unresolved_callback_can_rejoin_a_local_label_before_a_common_call() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { Yes, No }
+        fn before() {}
+        fn maybe<L>(choice: Choice, exit: L) where L: Label<i64> {
+            handle choice { Choice::Yes => exit(42), Choice::No => () }
+        }
+        fn audited<L>(flag: Choice, callback: ((Choice) -> !) -> !, exit: L) where L: Label<i64> {
+            before();
+            let choice = label done {
+                handle flag { Choice::Yes => callback(@done), Choice::No => @done(Choice::No) }
+            };
+            maybe(choice, exit)
+        }
+        fn rejoin(exit: (Choice) -> !) -> ! { exit(Choice::Yes) }
+        fn run() -> i64 { label outer { audited(Choice::Yes, rejoin, @outer); 0 } }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let audited = fixture.get(&summaries, "audited");
+    let body = &fixture.bodies[&fixture.names["audited"]];
+    let maybe_call = named_call_id(body, fixture.names["maybe"]);
+    let calls = audited
+        .calls()
+        .filter(|(site, _)| site.calls.is_empty() && site.location.expression == maybe_call)
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1, "the No branch reaches the common call");
+    assert!(
+        matches!(calls[0].1, ControlCallCoverage::Unknown(_)),
+        "an unresolved callback can transfer Choice::Yes to done, so the common maybe call is not proved normal-only: {audited:#?}"
+    );
+    assert!(!calls[0].1.only_returns_normally());
+    let before = own_call_paths_to(audited, fixture.names["before"]);
+    assert_eq!(before.len(), 1);
+    assert!(audited.call(before[0].0).only_returns_normally());
+    let run = fixture.get(&summaries, "run");
+    assert!(run.only_returns_normally(), "{run:#?}");
+    assert!(run.alternatives().iter().all(|path| matches!(
+        &path.outcome,
+        ControlOutcome::Return(ControlValue { shape: ControlValueShape::Literal(value), .. }) if value == "42"
+    )), "the actual callback rejoins done, and maybe exits outer: {run:#?}");
+}
+
+#[test]
+fn unresolved_rejoin_gaps_cover_arguments_completions_and_aggregate_suffixes() {
+    let choice = "label done { handle flag { Choice::Yes => callback(@done), Choice::No => @done(Choice::No) } }";
+    for body in [
+        format!("maybe({choice}, exit)"),
+        format!("handle {choice} {{ choice => maybe(choice, exit) }}"),
+        format!("let pair = ({choice}, maybe(Choice::No, exit)); ()"),
+    ] {
+        let fixture = Fixture::new(&format!(
+            r#"
+            enum Choice {{ Yes, No }}
+            fn maybe<L>(choice: Choice, exit: L) where L: Label<i64> {{
+                handle choice {{ Choice::Yes => exit(42), Choice::No => () }}
+            }}
+            fn audited<L>(flag: Choice, callback: ((Choice) -> !) -> !, exit: L) where L: Label<i64> {{ {body} }}
+        "#,
+        ));
+        let summaries = fixture.derive();
+        let audited = fixture.get(&summaries, "audited");
+        let call = named_call_id(
+            &fixture.bodies[&fixture.names["audited"]],
+            fixture.names["maybe"],
+        );
+        let calls = audited
+            .calls()
+            .filter(|(site, _)| site.calls.is_empty() && site.location.expression == call)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1, "the No branch reaches maybe: {body}");
+        assert!(
+            matches!(
+                calls[0].1,
+                ControlCallCoverage::Unknown(ControlUnknown::Unsupported(
+                    "unresolved invocation continuation"
+                ))
+            ),
+            "the unresolved rejoin cannot disappear from call coverage: {body}"
+        );
+    }
+}
+
+#[test]
+fn unresolved_rejoin_in_callee_evaluation_keeps_outer_invocation_unknown() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { Yes, No }
+        type Answer = () -> i64;
+        type Yield = (Answer) -> !;
+        fn answer() -> i64 { 42 }
+        fn audited(flag: Choice, callback: (Yield) -> !) -> i64 {
+            (label done {
+                handle flag { Choice::Yes => callback(@done), Choice::No => @done(answer) }
+            })()
+        }
+    "#,
+    );
+    let summaries = fixture.derive();
+    let audited = fixture.get(&summaries, "audited");
+    let body = &fixture.bodies[&fixture.names["audited"]];
+    let outer = body
+        .expressions
+        .iter()
+        .enumerate()
+        .find_map(|(index, expression)| match expression.kind {
+            CoreKind::Call { callee, .. }
+                if matches!(
+                    body.expressions[callee.0 as usize].kind,
+                    CoreKind::Label { .. }
+                ) =>
+            {
+                Some(grandiose_stage0::CoreId(index as u32))
+            }
+            _ => None,
+        })
+        .unwrap();
+    let calls = audited
+        .calls()
+        .filter(|(site, _)| site.calls.is_empty() && site.location.expression == outer)
+        .collect::<Vec<_>>();
+    assert_eq!(calls.len(), 1);
+    assert!(matches!(
+        calls[0].1,
+        ControlCallCoverage::Unknown(ControlUnknown::Unsupported(
+            "unresolved invocation continuation"
+        ))
+    ));
+}
+
+#[test]
+fn unknown_terminal_and_cancelling_handlers_cannot_prove_later_calls_normal_only() {
+    let fixture = Fixture::new(
+        r#"
+        enum Choice { Yes, No }
+        effect Halt { stop() -> !; }
+        effect Read { [0,1] value() -> i64; }
+        fn identity(value: i64) -> i64 { value }
+        fn terminal_handler(flag: Choice) -> i64 {
+            let value = handle flag { Choice::Yes => handle Halt::stop() { Halt::stop() => 42 }, Choice::No => 0 };
+            identity(value)
+        }
+        fn cancelling_handler(flag: Choice) -> i64 {
+            let value = handle flag { Choice::Yes => handle Read::value() { Read::value() with _ => 42 }, Choice::No => 0 };
+            identity(value)
+        }
+        fn unhandled_terminal(flag: Choice) -> i64 / {Halt} {
+            handle flag { Choice::Yes => Halt::stop(), Choice::No => 0 };
+            identity(0)
+        }
+    "#,
+    );
+    let summaries = fixture.derive();
+    for name in ["terminal_handler", "cancelling_handler"] {
+        let summary = fixture.get(&summaries, name);
+        let call = named_call_id(
+            &fixture.bodies[&fixture.names[name]],
+            fixture.names["identity"],
+        );
+        let calls = summary
+            .calls()
+            .filter(|(site, _)| site.calls.is_empty() && site.location.expression == call)
+            .collect::<Vec<_>>();
+        assert_eq!(calls.len(), 1);
+        assert!(
+            matches!(
+                calls[0].1,
+                ControlCallCoverage::Unknown(ControlUnknown::Unsupported("operation handler"))
+            ),
+            "the unmodeled handler can complete and reach identity: {name}"
+        );
+    }
+    let unhandled = fixture.get(&summaries, "unhandled_terminal");
+    assert!(
+        unhandled
+            .alternatives()
+            .iter()
+            .any(|path| matches!(path.outcome, ControlOutcome::TerminalOperation { .. }))
+    );
+    let identity = own_call_paths_to(unhandled, fixture.names["identity"]);
+    assert_eq!(identity.len(), 1);
+    assert!(
+        unhandled.call(identity[0].0).only_returns_normally(),
+        "an unhandled terminal operation cannot rejoin its own call-site suffix"
+    );
+}

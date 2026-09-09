@@ -5,6 +5,25 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Per-invocation control coverage
+
+Sealed control summaries expose invocation outcomes before the caller's suffix
+or enclosing label consumes them. Missing observations remain unknown. Skipped
+subtrees after opaque evaluation, resource limits and unresolved callbacks
+retain unconditional coverage gaps, including callbacks that can rejoin a
+local label. Earlier fully observed calls remain precise; concrete callback
+composition still resolves the local transfer and subsequent outer exit.
+
+All 38 module tests pass (`target/callable-control-per-invocation-v1.log`),
+including argument, callee, aggregate and completion-prefix gaps, repeated
+evaluations and terminal/cancelling handler boundaries. The all-target compile
+check passes (`target/callable-control-per-invocation-all-targets-v1.log`).
+This API is not yet consumed by the main compilation pipeline and does not
+change its cache epoch or close the five generic-helper ownership failures.
+The isolated ownership prototype passes the original 11 exit regressions, but
+a new callback-rejoin test exposes an unsound unknown-exit omission. Complete
+unknown-exit handling and guarded resource-state integration remain required.
+
 ## Cache 92: callable residents and captured owner stores
 
 Callable values retain their complete capture footprint through logical owning
