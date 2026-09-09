@@ -66,6 +66,20 @@ impl Analyzer<'_> {
             self.record_label_continuation(target, span);
         }
         self.restore_continuation(&incoming);
+        if control.normal {
+            // Snapshot the declared result before installing an additional
+            // body-derived root: a partial input projection must not mask it.
+            self.preserve_expression_result(call, call);
+            let result = Self::result_owner(call);
+            for payload in &control.returns {
+                let payload = crate::callable_control::resolve_payload(payload, &callable, &arguments, self);
+                self.record_known_payload_origins(&result, payload, call);
+            }
+            if self.reference_origins.keys().chain(self.logical.origins.keys())
+                .any(|key| key == &result || key.starts_with(&(result.clone() + "."))) {
+                self.pending_results.insert(call);
+            }
+        }
         if control.outer_transfer {
             let abandoned = self.minimum_bindings.keys().cloned().collect();
             self.check_minimum_scope(&abandoned, span);

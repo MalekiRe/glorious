@@ -8,12 +8,28 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/shared-label-dependencies-integration-v1.log`, cache 99). This includes a source
+ignored (`target/captured-label-provenance-integration-v3.log`, cache 100). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 100 retains label provenance through value aliases, aggregate residents,
+capture formation and ordinary captured-input returns. Label scope exits check
+outgoing results, pre-existing storage identities and pending outer-exit
+snapshots. Both escape and ownership consume normal payload projections from
+the shared invocation relation while preserving declared result checks and
+existing unique-reference result partitions. Previously accepted exported
+callables carrying expired factory labels now reject. The final selected run
+has 1,958 passes and the exact same 17 named failures as cache 99; all 891
+service, 39 array/container and 176 library API tests and the all-target compile
+check pass. SourceMap still executes. Structural fusion, full label-bearing
+callable authority, opaque result coverage and guarded storage remain open;
+the higher-order outer-label positive remains active and failing. See
+`implementation-progress.md` for the regression evidence and exact gate results.
+
+The following cache 99 and earlier checkpoints are historical.
 
 Cache 99 consolidates lexical label dependency rules across elaboration,
 independent Core validation, tail checks and escape checking. First-class label

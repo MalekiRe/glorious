@@ -372,6 +372,7 @@ pub(crate) struct InvocationControl {
     pub divergence: bool,
     pub unknown: bool,
     pub transfers: Vec<InvocationTransfer>,
+    pub returns: Vec<InvocationPayload>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -385,7 +386,10 @@ pub(crate) struct InvocationTransfer {
 impl InvocationControl {
     fn include(&mut self, outcome: &ControlOutcome, callable: CallableBrand, payload: Option<InvocationPayload>) {
         match outcome {
-            ControlOutcome::Return(_) => self.normal = true,
+            ControlOutcome::Return(_) => {
+                self.normal = true;
+                self.returns.push(payload.expect("return payload projection"));
+            }
             ControlOutcome::LabelExit { target: ControlLabelTarget::Lexical { brand, activation }, .. }
                 if activation.calls.is_empty() && activation.location.callable == callable => {
                     self.labels.insert(*brand);
@@ -434,7 +438,7 @@ impl BoundControlSummaries<'_> {
                 match coverage {
                     ControlCallCoverage::Alternatives(paths) if !paths.is_empty() => {
                         for path in paths {
-                            let payload = if let ControlOutcome::LabelExit { value, .. } = &path.outcome {
+                            let payload = if let ControlOutcome::LabelExit { value, .. } | ControlOutcome::Return(value) = &path.outcome {
                                 let inputs = path.events.iter().find_map(|event| match event {
                                     ControlEvent::Invoke { site: actual, callee, arguments } if actual == site => Some((callee, arguments)),
                                     _ => None,
@@ -497,6 +501,11 @@ impl BoundControlSummaries<'_> {
                     }
                 }
                 ControlOutcome::LabelExit { .. } => control.unknown = true,
+                ControlOutcome::Return(value) => {
+                    let mut payload = payloads::declared_payload(value);
+                    if let Some(arguments) = &substitutions { payload.instantiate_types(arguments); }
+                    control.include(&path.outcome, CallableBrand::Named(definition), Some(payload));
+                }
                 outcome => control.include(outcome, CallableBrand::Named(definition), None),
             }
         }

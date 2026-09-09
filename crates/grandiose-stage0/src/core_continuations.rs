@@ -352,6 +352,10 @@ impl CoreContinuations {
     pub(crate) fn label_independent(&self, id: CoreId) -> bool {
         self.label_dependencies.independent(id)
     }
+
+    pub(crate) fn label_reference(&self, id: CoreId) -> Option<LabelBrand> {
+        self.label_dependencies.reference(id)
+    }
 }
 
 pub(crate) fn input_error(body: &TypedBody, message: &str) -> CoreDiagnostic {

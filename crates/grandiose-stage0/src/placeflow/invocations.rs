@@ -183,20 +183,46 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Ordinary returns already have a declared provenance contract. Add
+    /// known body-derived inputs without treating missing projections as
+    /// either a new rejection or evidence that the result has no origins.
+    pub(super) fn record_known_payload_origins(
+        &mut self,
+        owner: &str,
+        payload: crate::callable_control::ResolvedPayload<Value>,
+        source: CoreId,
+    ) {
+        self.record_payload_origins_at(owner, payload, source, Some(&[]));
+    }
+
     pub(super) fn record_payload_origins(
         &mut self,
         owner: &str,
         payload: crate::callable_control::ResolvedPayload<Value>,
         source: CoreId,
     ) {
+        self.record_payload_origins_at(owner, payload, source, None);
+    }
+
+    fn record_payload_origins_at(
+        &mut self,
+        owner: &str,
+        payload: crate::callable_control::ResolvedPayload<Value>,
+        source: CoreId,
+        // Some denotes a normal result and retains its exact result prefix
+        // for the existing checked unique-reference partition relation.
+        result_path: Option<&[u32]>,
+    ) {
         use crate::callable_control::ResolvedPayload;
         match payload {
             ResolvedPayload::Aggregate(fields) => {
                 for (index, field) in fields.into_iter().enumerate() {
-                    self.record_payload_origins(
+                    let path = result_path.map(|path| path.iter().copied().chain([index as u32]).collect::<Vec<_>>());
+                    self.record_payload_origins_at(
                         &projection_key(owner, &[index as u32]),
                         field,
                         source,
+                        path.as_deref(),
                     );
                 }
             }
@@ -225,13 +251,17 @@ impl Analyzer<'_> {
                             .or_default()
                             .extend(regions);
                         for loan in loans {
+                            let loan = if let Some(prefix) = result_path {
+                                let fields = prefix.iter().chain(&path).copied().collect::<Vec<_>>();
+                                self.partition_call_result(source, &fields, loan)
+                            } else { loan };
                             self.install_reference_alias(&destination, loan, source);
                         }
                     }
                 }
             }
             ResolvedPayload::Unknown(ty) => {
-                if self.signatures.is_some_and(|signatures| {
+                if result_path.is_none() && self.signatures.is_some_and(|signatures| {
                     !crate::core::tail::tail_owned_type(signatures, &ty, &mut vec![])
                 }) {
                     self.error(

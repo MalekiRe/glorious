@@ -221,3 +221,29 @@ This product covers lexical references, not arbitrary value-alias propagation,
 higher-order control contracts or a fusion proof. It prevents first-class
 label literals from bypassing the existing source/Core boundary while the
 full label-bearing callable representation and structural fusion remain open.
+
+## Label-bearing snapshots and normal invocation results
+
+The existing escape value/storage domain now retains label brands through
+aliases, aggregates, invocation stores and capture formation. Owning a captured
+label does not make its destination frame-independent. A label boundary checks
+its outgoing result and pre-existing storage identities, including pending
+outer exits against their own snapshots rather than a sibling's current state.
+The lexical dependency product remains the authority for literal label brands;
+this adds no separate Core alias walker.
+
+The shared body-derived invocation relation projects ordinary return payloads
+as well as label-transfer payloads. Both ownership and escape instantiate
+explicit and captured input projections through the same input adapters used
+by stores. Known ordinary-result projections augment the existing declared
+reference/callable result contract; unknown fields neither erase that contract
+nor prove an empty footprint. Ownership preserves the declared result before
+installing extra roots and before releasing invocation temporaries.
+Normal payload origins also reuse the checked call-result partition relation:
+separate unique-reference leaves remain distinct even when their frozen input
+provenance is represented by an array wildcard. Transfer payloads do not acquire
+normal-result partitions from a bottom-typed call.
+
+These are may-dependencies, not a complete guarded storage product or permission
+to materialize outer-label closures independently. Structural fusion, nominal
+label-bearing callable authority and opaque-result coverage remain open.

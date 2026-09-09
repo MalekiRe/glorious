@@ -276,7 +276,10 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // facts and keeps helper label exits separate from normal ownership joins.
 // Cache 99 shares lexical label dependencies and rejects unfused first-class
 // label captures at both source and independent Typed Core boundaries.
-pub const STAGE0_CACHE_GENERATION: u32 = 99;
+// Cache 100 retains label provenance in ordinary value/capture snapshots and
+// checks outgoing values and stores at the label's own lexical boundary;
+// shared invocation payloads also retain ordinary captured-input returns.
+pub const STAGE0_CACHE_GENERATION: u32 = 100;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

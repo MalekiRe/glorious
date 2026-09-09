@@ -142,6 +142,10 @@ impl LabelDependencies {
     pub(crate) fn independent(&self, root: CoreId) -> bool {
         self.free(root).is_some_and(BTreeSet::is_empty)
     }
+
+    pub(crate) fn reference(&self, id: CoreId) -> Option<LabelBrand> {
+        self.rules.get(id.0 as usize)?.as_ref()?.reference
+    }
 }
 
 #[cfg(test)]

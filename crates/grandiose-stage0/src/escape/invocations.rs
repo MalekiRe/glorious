@@ -85,6 +85,7 @@ mod tests {
                 resident_captures: vec![existing.clone()],
                 frame_independent: false,
                 regions: BTreeSet::new(),
+                labels: BTreeSet::new(),
             }),
             resident_captures: vec![additional.clone()],
         };

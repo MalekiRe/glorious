@@ -221,6 +221,43 @@ fn abstract_label_payload_keeps_its_instantiated_input_type() {
 }
 
 #[test]
+fn normal_return_payloads_project_captured_and_explicit_inputs() {
+    let fixture = Fixture::new("#![no_std]
+        fn keep<T>(value:T) -> T { value }
+        fn select() -> i64 {
+            let target = @select;
+            let read = move (target) { (target,) };
+            let alias = read(); keep(alias); 42
+        }
+        fn after<F>(observe:F, value:&i64) -> &i64 where F:Fn<(),Output=()> {
+            observe(); keep(value)
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let owner = fixture.names["select"];
+    let body = &fixture.bodies[&owner];
+    let control = bound.body(owner).unwrap();
+    let read = body.expressions.iter().enumerate().find_map(|(index, expression)| {
+        let CoreKind::Call { callee, .. } = expression.kind else { return None; };
+        matches!(&body.expression(callee).kind, CoreKind::Local(name) if name == "read")
+            .then_some(CoreId(index as u32))
+    }).unwrap();
+    let invocation = control.get(read).unwrap();
+    assert!(invocation.normal && !invocation.unknown && invocation.transfers.is_empty());
+    let payloads::PayloadSource::Aggregate(fields) = &invocation.returns[0].source else {
+        panic!("captured return must preserve its tuple projection: {invocation:?}");
+    };
+    assert!(matches!(&fields[0].source, payloads::PayloadSource::Capture { path, .. } if path.is_empty()));
+    let owner = fixture.names["after"];
+    let control = bound.body(owner).unwrap();
+    let invocation = control.get(fixture.call_to(owner, fixture.names["keep"])).unwrap();
+    assert!(invocation.normal && !invocation.unknown);
+    assert!(matches!(invocation.returns[0].ty, Type::Reference { .. }));
+    assert_eq!(invocation.returns[0].source, payloads::PayloadSource::Argument { index: 0, path: vec![] });
+}
+
+#[test]
 fn payload_projection_shares_explicit_and_captured_inputs_without_erasing_unknowns() {
     use crate::resident_invocations::{CapturedInputs, Inputs, Operand};
     type Value = (u32, Vec<u32>);

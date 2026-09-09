@@ -290,6 +290,99 @@ fn unfused_closure_label_values_are_rejected_before_lowering() {
 }
 
 #[test]
+fn owned_label_aliases_cannot_escape_in_callable_environments() {
+    for initializer in ["@make", "(@make,)", "keep(@make)", "Carrier { label: @make }"] {
+        let source = format!("{TOKEN}
+            struct Carrier<T> {{ label: T }}
+            fn keep<T>(value:T) -> T {{ value }}
+            pub fn make() -> () -> i64 {{
+                let target = {initializer};
+                move (target) {{ let retained = target; 42 }}
+            }}
+            pub fn main() -> i64 {{ 42 }}");
+        for optimization in ["0", "2"] {
+            let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+                Err(failure) => failure,
+                Ok(_) => panic!("an exported callable cannot carry its factory's expired label: {source}"),
+            };
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{source}\n{failure:#?}");
+        }
+    }
+    accepts("fn keep<T>(value:T) -> T { value }
+        fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        pub fn main() -> i64 { @done: i64 { let target=keep(@done); leave(42,target) } }");
+    accepts("pub fn make() -> () -> i64 {
+        let target = () -> i64 { 42 }; move (target) { target() }
+    } pub fn main() -> i64 { make()() }");
+    accepts("pub fn main() -> i64 {
+        let task = @done: () -> i64 { let discarded = @done; () -> i64 { 42 } }; task()
+    }");
+}
+
+#[test]
+fn unknown_callback_prefix_preserves_later_label_capture_dependencies() {
+    let source = format!("{TOKEN}
+        pub fn make<F>(observe:F) -> () -> i64 where F:Fn<(),Output=()> {{
+            observe(); let target = @make;
+            move (target) {{ let retained = target; 42 }}
+        }} pub fn main() -> i64 {{ 42 }}");
+    for optimization in ["0", "2"] {
+        let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(failure) => failure,
+            Ok(_) => panic!("an unknown prefix cannot erase a subsequently formed label capture"),
+        };
+        assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{failure:#?}");
+    }
+}
+
+#[test]
+fn label_alias_captures_cannot_cross_a_local_or_outer_rejoin() {
+    for body in [
+        "let task = @inner: () -> i64 {
+            let target = @inner; move (target) { let retained = target; 42 }
+        }; task()",
+        "let task = @outer: () -> i64 {
+            @inner: () { let target = @inner;
+                @outer(move (target) { let retained = target; 42 })
+            }; () -> i64 { 42 }
+        }; task()",
+    ] {
+        let source = format!("{TOKEN} pub fn main() -> i64 {{ {body} }}");
+        for optimization in ["0", "2"] {
+            let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+                Err(failure) => failure,
+                Ok(_) => panic!("a callable cannot rejoin beyond a captured label's scope: {source}"),
+            };
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{source}\n{failure:#?}");
+        }
+    }
+}
+
+#[test]
+fn labels_returned_from_captured_inputs_keep_their_scope_dependency() {
+  for returned in ["target", "(target,)"] {
+    let source = format!("{TOKEN}
+        pub fn make() -> () -> i64 {{
+            let target = @make;
+            let read = move (target) {{ {returned} }};
+            let alias = read();
+            move (alias) {{ let retained = alias; 42 }}
+        }} pub fn main() -> i64 {{ 42 }}");
+    for optimization in ["0", "2"] {
+        let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(failure) => failure,
+            Ok(_) => panic!("returning an owned captured input cannot erase its label scope"),
+        };
+        assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{failure:#?}");
+    }
+  }
+  accepts("pub fn main() -> i64 {
+      let target = () -> i64 { 42 };
+      let read = move (target) { target }; let task = read(); task()
+  }");
+}
+
+#[test]
 fn helper_label_rejoins_cannot_hide_double_use() {
     let source = format!("{TOKEN}
         fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}

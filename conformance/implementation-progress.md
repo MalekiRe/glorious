@@ -5,6 +5,59 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 100: label-bearing value snapshots and ordinary return provenance
+
+The follow-up audit demonstrated an unsafe acceptance beyond lexical code
+dependencies: an unused public factory could capture an alias of its own label
+by value and return the callable after that destination expired
+(`target/captured-label-provenance-before-v1.log`). Direct, tuple, generic
+forwarding and nominal-wrapper aliases now retain exact label identities in
+the existing value/storage and capture-formation snapshots. Scope exits check
+outgoing results, pre-existing storage identities and pending outer-label exit
+snapshots; returned callables cannot bypass this check by owning the alias.
+An unknown callback prefix does not erase a subsequent label capture.
+
+A second regression exposed labels returned from captured inputs: the shared
+invocation product retained transfer payloads but not ordinary result payloads
+(`target/captured-label-provenance-return-before-v1.log`). Normal results now
+project from the same body-derived outcomes onto explicit and captured inputs.
+Escape and ownership instantiate these projections through their existing
+read-only invocation adapters, augmenting—not replacing—the declared result
+provenance. Unknown result projections are not empty-footprint proofs. The
+ordinary getter regression now rejects
+(`target/captured-label-provenance-return-after-v1.log`).
+
+The first normal-result integration exposed two unique-array false rejections
+(`target/captured-label-provenance-integration-v2.log`): supplemental loans had
+lost the existing checked result-partition identities. The payload adapter now
+applies that same partition relation with typed result prefixes, including
+wildcard array leaves; it does not infer reference separation independently.
+
+The final selected integration run has 1,958 passes, the exact same 17 named
+failures as cache 99, and no ignores
+(`target/captured-label-provenance-integration-v3.log`). All 321 unit,
+25 borrowed-callable, 38 callable-control, 271 Core, 111 destruction,
+39 fixed-array/container, 22 request/revision, 891 service and 176 library API
+tests pass. Minimum-use has 28 passes and its existing active higher-order
+outer-label positive; all four tail-label cases pass. Mandatory-tail retains
+16 passes and its existing activation-transfer ABI failure. The source matrix
+remains 16 passes and 15 failures, with SourceMap executing successfully.
+The targeted 39-test array rerun and the all-target compile check also pass
+(`target/captured-label-return-array-partitions-v1.log`,
+`target/captured-label-provenance-check-v3.log`). Three snapshot units and one
+normal-result rule unit cover exact label identities, storage updates,
+partial aggregate positions, explicit/captured returns and generic substitution
+after an unknown prefix. Source cases include local/outer rejoins, captured
+getter results and paired ordinary callable execution fresh/decoded at O0/O2.
+
+This is alias/capture provenance preservation, not structural fusion or full
+label-bearing callable contracts. Nominal `Label` authority, opaque result
+coverage, guard-correlated storage, operation/cancellation resource states,
+captured native/mixed execution and the active higher-order outer-label positive
+remain unfinished. Full compiler/library conformance and self-hosting are not
+complete. Source cache generation is 100; native, bytecode and verifier format
+generations are unchanged.
+
 ## Cache 99: shared lexical label dependencies
 
 The outer-label closure audit found that the early capture check recognized
