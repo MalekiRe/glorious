@@ -979,6 +979,14 @@ impl Analyzer<'_> {
         origins
     }
 
+    fn captured_origin_loans(&self, owner: &str) -> BTreeSet<ProjectionLoan> {
+        let prefix = format!("{owner}.");
+        self.reference_origins.iter().filter(|(key, _)| key.as_str() == owner || key.starts_with(&prefix))
+            .flat_map(|(_, loans)| loans.iter().cloned())
+            .chain(self.projection_loans.iter().filter(|loan| loan.owner.as_ref()
+                .is_some_and(|key| key == owner || key.starts_with(&prefix))).cloned()).collect()
+    }
+
     fn reference_ancestors(&self, owner: &str) -> BTreeSet<String> {
         let mut pending = vec![owner.to_owned()];
         let mut seen = BTreeSet::new();
@@ -1565,6 +1573,7 @@ impl Analyzer<'_> {
                     during_call.insert(owner.clone());
                     self.visit_closure_environment(&environment, e.span, Some(owner.as_str()));
                     self.visit_sequence(&arguments, &during_call);
+                    if operands_complete && self.normal_continuation { self.record_captured_call_stores(callee, Some(&owner), id); }
                     self.release_owner_loans(&owner, e.span);
                 } else {
                     if matches!(reference_shape, CallReferenceShape::None) {
@@ -1588,8 +1597,9 @@ impl Analyzer<'_> {
                         self.visit_call_operands(callee, &arguments, live_after);
                     }
                 }
-                if operands_complete {
+                if operands_complete && self.normal_continuation {
                     self.record_logical_call_stores(callee, &logical_arguments, id);
+                    self.record_captured_call_stores(callee, None, id);
                     if self.minimum_definitely_aborts(id) { self.minimum_states.clear(); }
                     else { self.check_minimum_call_suspensions(callee, &arguments, e.span); }
                 }
@@ -2195,7 +2205,8 @@ impl Analyzer<'_> {
         if crate::core::reference_leaf_paths(
             self.signatures.unwrap_or(&empty), &self.body.expression(subject).ty,
             &mut vec![], &mut leaves,
-        ).is_ok() && leaves.is_empty() {
+        ).is_ok() && leaves.is_empty()
+            && regions::callable_paths(self.signatures.unwrap_or(&empty), &self.body.expression(subject).ty, false).is_empty() {
             // Reading a scalar through a computed reference consumes that
             // intermediate handle. It is not a payload of the scalar's
             // completion and cannot suspend its parent across either arm.
@@ -2279,6 +2290,7 @@ impl Analyzer<'_> {
             return;
         }
         for (capture, post_state) in environment.captures.iter().zip(&environment.post_states) {
+            if let Some(owner) = owner { self.record_capture_origins(capture, owner); }
             self.capture_reference_loan(&capture.name, span, owner);
             match post_state.mode {
                 CaptureMode::SharedBorrow => {
@@ -2298,6 +2310,39 @@ impl Analyzer<'_> {
                     }, span);
                 }
             }
+        }
+    }
+
+    /// Capture contracts join sets of types, not physical environment indices.
+    /// Index snapshots by the opened capture type so two joined environments
+    /// with different capture orders cannot exchange their store operands.
+    /// These lexical analysis keys never become Core projection authority.
+    fn capture_origin_key(owner: &str, ty: &Type) -> String {
+        format!("{owner}.<capture-{:?}>", crate::Digest::of_bytes(&crate::types::canonical_type_encoding(ty)))
+    }
+
+    fn record_capture_origins(&mut self, capture: &crate::core::ClosureCapture, owner: &str) {
+        let source = self.resolve_name(&capture.name);
+        let borrowed = matches!(capture.mode, CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow);
+        let ty = if borrowed { Type::Reference {
+            lifetime: crate::Lifetime::Elided,
+            mutability: if matches!(capture.mode, CaptureMode::UniqueBorrow) { crate::Mutability::Unique } else { crate::Mutability::Shared },
+            referent: Box::new(capture.ty.clone()),
+        } } else { capture.ty.clone() };
+        let root = Self::capture_origin_key(owner, &ty);
+        let resident = if borrowed { projection_key(&root, &[crate::core::REFERENCE_PATH_DEREF]) } else { root.clone() };
+        let prefix = format!("{source}.");
+        let references = self.reference_origins.iter().filter(|(key, _)| **key == source || key.starts_with(&prefix))
+            .map(|(key, loans)| (format!("{resident}{}", &key[source.len()..]), loans.clone())).collect::<Vec<_>>();
+        let logical = self.logical.origins.iter().filter(|(key, _)| **key == source || key.starts_with(&prefix))
+            .map(|(key, regions)| (format!("{resident}{}", &key[source.len()..]), regions.clone())).collect::<Vec<_>>();
+        for (key, loans) in references { self.reference_origins.entry(key).or_default().extend(loans); }
+        for (key, regions) in logical { self.logical.origins.entry(key).or_default().extend(regions); }
+        if borrowed {
+            self.reference_origins.entry(root).or_default().insert(ProjectionLoan {
+                place: Projection { root: source, fields: vec![] }, unique: matches!(capture.mode, CaptureMode::UniqueBorrow),
+                owner: None, partitions: BTreeMap::new(), indirect: false, external: false,
+            });
         }
     }
 
@@ -2983,10 +3028,10 @@ impl Analyzer<'_> {
                     else { known }
                 }).collect();
             }
-            CoreKind::Call { arguments, reference_origin: CallReferenceOrigin::Paths(paths), .. }
-            | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(paths), .. } => {
+            CoreKind::Call { arguments, .. }
+            | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(_), .. } => {
                 let mut known = BTreeSet::new();
-                for path in paths {
+                for path in self.resident_call_paths(id) {
                     if !crate::core::reference_path_is_prefix(&path.result_fields, fields) { continue; }
                     let Some(argument) = arguments.get(path.argument as usize) else { continue; };
                     let mut source = path.argument_fields.clone();
@@ -3023,6 +3068,7 @@ impl Analyzer<'_> {
         let empty = ElaboratedInterface::default();
         let mut leaves = vec![];
         let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty, &mut vec![], &mut leaves);
+        leaves.extend(regions::callable_paths(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty, false));
         for (path, _) in leaves {
             let regions = self.logical_regions_from_value_path(id, &path);
             let Some(first) = regions.first().cloned() else { continue; };
@@ -3051,6 +3097,60 @@ impl Analyzer<'_> {
             changed = true;
         }
         if changed { self.refresh_logical_loans(call); }
+    }
+
+    /// Captures are implicit invocation inputs. Their contract describes the
+    /// same possible resident stores as explicit inputs, while the value's
+    /// live origins retain the actual capture roots after contextual erasure.
+    /// Capture unions need not have a common physical order; typed snapshots
+    /// preserve each operand without inventing environment projections.
+    fn record_captured_call_stores(&mut self, callee: CoreId, owner: Option<&str>, call: CoreId) {
+        let Some(signatures) = self.signatures else { return; };
+        let Type::Callable { contract, .. } = &self.body.expression(callee).ty else { return; };
+        if contract.captures.is_empty() && contract.environment.is_some() { return; }
+        let captures = contract.open(|_| None).map(|contract| contract.captures).unwrap_or_else(|| contract.captures.clone());
+        if !(captures.is_empty() && contract.environment.is_none())
+            && regions::parameter_transfers(signatures, &captures).is_empty() { return; }
+        let owned = owner.map(str::to_owned).or_else(|| self.reference_origin_key(callee));
+        if let Some(owner) = &owned {
+            let mut known = false;
+            for transfer in regions::parameter_transfers(signatures, &captures) {
+                let destination = projection_key(&Self::capture_origin_key(owner, &captures[transfer.destination]), &transfer.destination_path);
+                let source = projection_key(&Self::capture_origin_key(owner, &captures[transfer.source]), &transfer.source_path);
+                let mut regions = self.logical_origin_regions(&destination);
+                let Some(first) = regions.first().cloned() else { continue; };
+                regions.extend(self.logical_origin_regions(&source));
+                let loans = self.origin_loans(&source).into_iter().map(|loan| ProjectionLoan { owner: None, ..loan }).collect();
+                self.logical.regions.connect(&regions);
+                self.logical.regions.insert(first, loans, |loans, incoming| loans.extend(incoming));
+                known = true;
+            }
+            if known { self.refresh_logical_loans(call); return; }
+        }
+        let region_ids = if let Some(owner) = &owned {
+            self.logical.origins.iter().filter(|(key, _)| *key == owner || key.starts_with(&(owner.clone() + ".")))
+                .flat_map(|(_, regions)| regions.iter().cloned()).collect::<BTreeSet<_>>()
+        } else { self.logical_regions_from_value_path(callee, &[]) };
+        let Some(first) = region_ids.first().cloned() else { return; };
+        let loans = if let Some(owner) = &owned {
+            self.captured_origin_loans(owner)
+        } else { self.reference_loans_from_value(callee) };
+        self.logical.regions.connect(&region_ids);
+        self.logical.regions.insert(first, loans.into_iter().map(|loan| ProjectionLoan { owner: None, ..loan }).collect(),
+            |loans, incoming| loans.extend(incoming));
+        self.refresh_logical_loans(call);
+    }
+
+    fn resident_call_paths(&self, id: CoreId) -> Vec<crate::core::CallReferencePath> {
+        let mut paths = match &self.body.expression(id).kind {
+            CoreKind::Call { reference_origin: CallReferenceOrigin::Paths(paths), .. }
+            | CoreKind::Perform { reference_origin: CallReferenceOrigin::Paths(paths), .. } => paths.clone(),
+            _ => vec![],
+        };
+        if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(id).kind) {
+            paths.extend(regions::callable_result_paths(signatures, self.body.expression(*callee)));
+        }
+        paths
     }
 
     fn refresh_logical_loans(&mut self, source: CoreId) {
@@ -3113,7 +3213,7 @@ impl Analyzer<'_> {
             // owner yet. Reify the sealed projected loan under the aggregate
             // field identity now; scope exit can then release the unique
             // borrow instead of pinning the referent to the enclosing body.
-            CoreKind::Borrow { .. } => {
+            CoreKind::Borrow { .. } | CoreKind::Closure { .. } => {
                 for parent in self.reference_loans_from_value(id) {
                     self.install_reference_alias(name, parent, id);
                 }
@@ -3171,6 +3271,15 @@ impl Analyzer<'_> {
         arguments: &[CoreId],
         origin: CallReferenceOrigin,
     ) {
+        if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(call).kind) {
+            for path in regions::callable_result_paths(signatures, self.body.expression(*callee)) {
+                if let Some(argument) = arguments.get(path.argument as usize) {
+                    for parent in self.reference_loans_from_value_path(*argument, &path.argument_fields) {
+                        self.install_reference_alias(&projection_key(result, &path.result_fields), parent, call);
+                    }
+                }
+            }
+        }
         if matches!(origin, CallReferenceOrigin::External | CallReferenceOrigin::Unsafe) {
             let empty = ElaboratedInterface::default();
             let mut leaves = vec![];
@@ -3248,6 +3357,16 @@ impl Analyzer<'_> {
             return self.origin_loans(&Self::result_owner(id));
         }
         match &self.body.expression(id).kind {
+            CoreKind::Closure { environment, .. } => environment.captures.iter().flat_map(|capture| {
+                let name = self.resolve_name(&capture.name);
+                let mut loans = self.captured_origin_loans(&name);
+                if matches!(capture.mode, CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow) {
+                    loans.insert(ProjectionLoan { place: Projection { root: name, fields: vec![] },
+                        unique: matches!(capture.mode, CaptureMode::UniqueBorrow), owner: None,
+                        partitions: BTreeMap::new(), indirect: false, external: false });
+                }
+                loans
+            }).collect(),
             CoreKind::Deref(_) => self.reference_loans_through_deref(id, &[]),
             CoreKind::Borrow { unique, value } => {
                 if let Some(place) = self.projection(*value) {
@@ -3276,15 +3395,14 @@ impl Analyzer<'_> {
                 self.external_reference_loans(id, &[]),
             CoreKind::Call {
                 arguments,
-                reference_origin: CallReferenceOrigin::Paths(paths),
                 ..
             }
             | CoreKind::Perform {
                 arguments,
-                reference_origin: CallReferenceOrigin::Paths(paths),
+                reference_origin: CallReferenceOrigin::Paths(_),
                 ..
-            } => paths
-                .iter()
+            } => self.resident_call_paths(id)
+                .into_iter()
                 .filter(|path| path.result_fields.is_empty())
                 .flat_map(|path| arguments.get(path.argument as usize).map(|argument|
                     self.reference_loans_from_value_path(*argument, &path.argument_fields).into_iter()
@@ -3302,11 +3420,12 @@ impl Analyzer<'_> {
             let mut leaves = vec![];
             let _ = crate::core::input_reference_leaf_paths(self.signatures.unwrap_or(&empty),
                 &self.body.expression(id).ty, &mut leaves);
-            let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
+            leaves.extend(regions::callable_paths(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty, true));
+            let Some((_, ty)) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
                 return BTreeSet::new();
             };
             return self.reference_resident_loans(parents, &fields[deref + 1..],
-                matches!(mutability, crate::Mutability::Unique));
+                matches!(ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
         }
         if self.pending_results.contains(&id) {
             return self.origin_loans(&projection_key(&Self::result_owner(id), fields));
@@ -3326,16 +3445,15 @@ impl Analyzer<'_> {
                 return self.external_reference_loans(id, fields),
             CoreKind::Call {
                 arguments,
-                reference_origin: CallReferenceOrigin::Paths(paths),
                 ..
             }
             | CoreKind::Perform {
                 arguments,
-                reference_origin: CallReferenceOrigin::Paths(paths),
+                reference_origin: CallReferenceOrigin::Paths(_),
                 ..
             } => {
                 let mut loans = BTreeSet::new();
-                for path in paths {
+                for path in self.resident_call_paths(id) {
                     if !crate::core::reference_path_is_prefix(&path.result_fields, fields) {
                         continue;
                     }
@@ -3617,6 +3735,7 @@ impl Analyzer<'_> {
             let borrowed_move = moving && matches!(self.body.expression(root).kind, CoreKind::Deref(_));
             let mut leaves = vec![];
             let _ = crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves);
+            leaves.extend(regions::callable_paths(signatures, ty, false));
             let regions = leaves.iter().map(|(leaf, _)| {
                 let mut source = fields.clone();
                 source.extend_from_slice(leaf);

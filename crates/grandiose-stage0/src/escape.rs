@@ -217,6 +217,7 @@ impl Analyzer<'_> {
     fn seed_logical_value(&mut self, site: String, ty: &Type, mut value: Value) -> Value {
         let mut leaves = vec![];
         let _ = crate::core::reference_leaf_paths(self.signatures, ty, &mut vec![], &mut leaves);
+        leaves.extend(crate::placeflow::regions::callable_paths(self.signatures, ty, false));
         if !leaves.iter().any(|(path, _)| crate::core::reference_path_is_logical(path)) { return value; }
         let external = matches!(value, Value::ExternalBorrowed);
         if external { value = Value::None; }
@@ -507,14 +508,22 @@ impl Analyzer<'_> {
                 if strict_expression_abrupt(self.body, id) {
                     return Value::None;
                 }
-                self.reference_result_value(
+                let callable_paths = crate::placeflow::regions::callable_result_paths(self.signatures, self.body.expression(callee));
+                let callable_values = callable_paths.iter().filter_map(|path| values.get(path.argument as usize)
+                    .and_then(|value| self.reference_path_value(value, &path.argument_fields))
+                    .map(|value| (path.result_fields.clone(), value))).collect::<Vec<_>>();
+                let mut result = self.reference_result_value(
                     &reference_origin,
                     reference_shape,
                     &expression.ty,
                     values,
                     expression.span,
                     "call",
-                )
+                );
+                for (path, value) in callable_values {
+                    put_value_at_path(&mut result, &path, value);
+                }
+                result
             }
             CoreKind::Perform { .. } => self
                 .performed_value(id)

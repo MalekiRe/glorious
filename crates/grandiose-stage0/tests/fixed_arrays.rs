@@ -475,6 +475,7 @@ fn shared_slot_request(source: &str, optimization: &str) -> CompilationRequest {
     // different owner representation from Vec, with no compiler-recognized
     // spelling. Its allocation intentionally lives until the program ends.
     let support = r#"
+        pub fn capture_test_abort<T>(value:T) -> ! { __g1_abort() }
         pub struct SharedSlot<T> { private pointer:*mut Option<T>, private marker:PhantomData<T> }
         impl<T> SharedSlot<T> where T:Use<[0,*]> {
             pub fn new() -> Self {
@@ -581,6 +582,69 @@ fn empty_cloned_interior_mutable_owners_keep_later_region_updates() {
             let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("shared owner lost a later store: {source}"); };
             assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5007" | "G5013" | "G5017" | "G5022")), "{source}: {diagnostics:?}");
         }
+    }
+}
+
+#[test]
+fn logical_capture_probe_owning_container_keeps_borrowed_callable_environment() {
+    for source in [
+        "use std::*; fn bad() -> Vec<() -> i64> { let a:i64=42; let reference = &a; let task = () -> i64 { *reference }; let mut items:Vec<() -> i64> = Vec::new(); Vec::push(&mut items,task); items } pub fn main() -> i64 { 42 }",
+        "use std::*; pub fn main() -> i64 { let mut a:i64=41; let mut items:Vec<() -> i64> = Vec::new(); { let reference = &a; let task = () -> i64 { *reference }; Vec::push(&mut items,task); }; a=42; handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 } }",
+        "use std::*; struct Holder { task:() -> i64 } fn bad() -> Vec<Holder> { let a:i64=42; let reference = &a; let task = () -> i64 { *reference }; let mut items:Vec<Holder> = Vec::new(); Vec::push(&mut items,Holder { task:task }); items } pub fn main() -> i64 { 42 }",
+        "use std::*; fn factory<'a>(reference:&'a i64) -> () -> i64 { () -> i64 { *reference } } fn bad() -> Vec<() -> i64> { let a:i64=42; let mut items:Vec<() -> i64> = Vec::new(); Vec::push(&mut items,factory(&a)); items } pub fn main() -> i64 { 42 }",
+    ] {
+        for optimization in ["0", "2"] {
+            let outcome = StageZeroCompiler::new().compile(library_request(source, optimization));
+            let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("owning container erased callable captures: {source}"); };
+            assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5007" | "G5013" | "G5014" | "G5017" | "G5022")), "{source}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn logical_capture_probe_invocation_updates_an_empty_captured_owner() {
+    let source = "use std::*; pub fn main() -> i64 { let mut a:i64=41; let slot:SharedSlot<&i64> = SharedSlot::new(); { let alias = SharedSlot::copy(&slot); let task = () -> () { SharedSlot::set(&alias,&a); }; task(); }; a=42; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => 0 } }";
+    for optimization in ["0", "2"] {
+        let outcome = StageZeroCompiler::new().compile(shared_slot_request(source, optimization));
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("callable invocation lost an inserted reference"); };
+        assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5007" | "G5013" | "G5017" | "G5022")), "{diagnostics:?}");
+    }
+}
+
+#[test]
+fn logical_capture_probe_live_residents_and_expired_owners_validate() {
+    for (source, execute) in [
+        ("use std::*; pub fn main() -> i64 { let a:i64=42; let reference = &a; let task = () -> i64 { *reference }; let mut items = Vec::new(); Vec::push(&mut items,task); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }", false),
+        ("use std::*; pub fn main() -> i64 { let mut a:i64=41; { let reference = &a; let task = () -> i64 { *reference }; let mut items = Vec::new(); Vec::push(&mut items,task); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) }; }; a=42; a }", false),
+        ("use std::*; pub fn main() -> i64 { let a:i64=42; let slot:SharedSlot<&i64> = SharedSlot::new(); { let alias = SharedSlot::copy(&slot); let task = () -> () { SharedSlot::set(&alias,&a); }; task(); }; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => 0 } }", true),
+        ("use std::*; fn factory<'a>(reference:&'a i64) -> () -> i64 { () -> i64 { *reference } } pub fn main() -> i64 { let a:i64=42; let mut items:Vec<() -> i64> = Vec::new(); Vec::push(&mut items,factory(&a)); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }", false),
+    ] {
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(shared_slot_request(source, optimization))
+                .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+            let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+            // Raw Callable layout is a separate, explicitly recorded runtime
+            // cut-line below. These Vec cases prove ownership and decode,
+            // while the supported reference-resident slot also executes.
+            if execute {
+                // SAFETY: the slot's shared reference outlives both aliases.
+                assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+                assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "native raw storage does not yet support Callable layout; ownership and decode are covered above"]
+fn native_callable_owner_storage_executes() {
+    let source = "use std::*; pub fn main() -> i64 { let a:i64=42; let reference = &a; let task = () -> i64 { *reference }; let mut items = Vec::new(); Vec::push(&mut items,task); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }";
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(shared_slot_request(source, optimization)).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: every callback is invoked while the captured source lives.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
     }
 }
 

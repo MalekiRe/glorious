@@ -5,6 +5,33 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 92: callable residents and captured owner stores
+
+Callable values retain their complete capture footprint through logical owning
+containers, ordinary callable fields and plain-callable factories. These are
+whole-value resident paths, not manufactured physical-reference authority.
+Invocation records implicit stores between captured source operands and
+captured owner destinations. Type-keyed capture snapshots preserve operand
+identity across joined environments without retaining a short alias's handle
+slot as the stored referent. Substituted capture regions remain distinct from
+the independently elided receiver borrow.
+
+The main-tree integration run passes 1,860 tests, including all 891 service,
+176 library API, 269 Core and 30 fixed-array/container tests
+(`target/integration-callable-residents-v1.log`). The same five generic-helper
+exit and 16 source-library cases fail. One native-callable-storage execution
+test is explicitly ignored in that batch: running it separately fails at
+`UnsupportedNativeLayout` for `Callable`
+(`target/callable-native-layout-cutline-v1.log`). Its Vec controls currently
+prove compilation, decoding and ownership only; the captured-reference
+SharedSlot positive executes fresh and decoded artifacts at O0/O2.
+The all-target compile check passes (`target/callable-residents-all-targets-v1.log`).
+
+Combined capture-plus-invocation operands, higher-order implicit stores,
+nested closure footprints and complete callable raw/native execution remain
+open follow-ups. This checkpoint does not claim complete closure ownership or
+passing source-library roots.
+
 ## Cache 91: deterministic compilation under host floating-point modes
 
 The complete source-compilation and cached-artifact entry points now establish

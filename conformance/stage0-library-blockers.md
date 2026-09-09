@@ -8,12 +8,20 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/integration-compiler-float-v1.log`, cache 91). This includes a source
+ignored (`target/integration-callable-residents-v1.log`, cache 92). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 92 retains callable capture footprints in logical owners and records
+captured owner stores. The combined run passes 1,860 tests, with the same five
+generic-helper exit and 16 source-library failures. A separate, explicitly
+ignored callable raw-storage execution test was run and fails at unsupported
+native Callable layout; its compile/decode positives are not runtime acceptance.
+Mixed capture/parameter and higher-order store propagation, nested closure
+footprints and guarded ownership integration remain open.
 
 Cache 91 fixes compiler dependence on ambient floating-point modes, including
 literal products, cached artifacts and LLVM partition callbacks. Its combined

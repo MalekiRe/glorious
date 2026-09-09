@@ -68,6 +68,141 @@ pub(crate) struct ResidentTransfer {
     pub source_path: Vec<u32>,
 }
 
+/// A callable is a resident value, not a reference to its environment. Keep
+/// its entire value footprint even when a contextual nominal argument has
+/// erased the producer's capture refinements. These paths never participate
+/// in Core's physical-reference authority or manufacture a reference leaf.
+pub(crate) fn callable_paths(signatures: &crate::ElaboratedInterface, ty: &crate::Type, input: bool) -> Vec<(Vec<u32>, crate::Type)> {
+    use crate::{ElaboratedHeader, ElaboratedNominalLayout, GenericArgument, Type};
+    fn weight(ty: &Type) -> usize {
+        let arguments = |values: &[GenericArgument]| values.iter().fold(0usize, |sum, value|
+            sum.saturating_add(match value { GenericArgument::Type(ty) => weight(ty), _ => 1 }));
+        1usize.saturating_add(match ty {
+            Type::Nominal { arguments: values, .. } => arguments(values),
+            Type::Tuple(values) => values.iter().fold(0usize, |sum, value| sum.saturating_add(weight(value))),
+            Type::Reference { referent, .. } => weight(referent),
+            Type::Array(element) | Type::FixedArray { element, .. } => weight(element),
+            _ => 0,
+        })
+    }
+    fn visit(signatures: &crate::ElaboratedInterface, ty: &Type, input: bool, path: &mut Vec<u32>,
+        active: &mut BTreeMap<crate::DefKey, usize>, leaves: &mut Vec<(Vec<u32>, Type)>) {
+        match ty {
+            Type::Callable { .. } => leaves.push((path.clone(), ty.clone())),
+            Type::Reference { referent, .. } if input => {
+                path.push(crate::core::REFERENCE_PATH_DEREF);
+                visit(signatures, referent, input, path, active, leaves);
+                path.pop();
+            }
+            Type::Tuple(fields) => for (index, field) in fields.iter().enumerate() {
+                path.push(index as u32); visit(signatures, field, input, path, active, leaves); path.pop();
+            },
+            Type::Array(element) | Type::FixedArray { element, .. } if ty.fixed_array_length() != Some(0) => {
+                path.push(crate::core::REFERENCE_PATH_ARRAY_ELEMENT);
+                visit(signatures, element, input, path, active, leaves); path.pop();
+            }
+            Type::Nominal { definition, arguments } => {
+                let size = weight(ty);
+                if active.get(definition).is_some_and(|previous| size >= *previous) { return; }
+                let previous = active.insert(*definition, size);
+                let mut fields = vec![];
+                match signatures.definitions.get(definition) {
+                    Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Struct(values) | ElaboratedNominalLayout::TupleStruct(values), .. }) =>
+                        fields.extend(values.iter().enumerate().map(|(index, field)| (index, &field.ty))),
+                    Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(variants), .. }) => for variant in variants {
+                        match &variant.payload {
+                            crate::signature::ElaboratedEnumVariantPayload::Tuple(values) => fields.extend(values.iter().enumerate()),
+                            crate::signature::ElaboratedEnumVariantPayload::Struct(values) => fields.extend(values.iter().enumerate().map(|(index, field)| (index, &field.ty))),
+                            crate::signature::ElaboratedEnumVariantPayload::Unit => {},
+                        }
+                    },
+                    _ => {},
+                }
+                for (index, field) in fields {
+                    if let Ok(field) = crate::core::instantiate_nominal_field_type(field, arguments) {
+                        path.push(index as u32); visit(signatures, &field, input, path, active, leaves); path.pop();
+                    }
+                }
+                for (index, argument) in arguments.iter().enumerate() {
+                    if let GenericArgument::Type(argument) = argument {
+                        path.extend([crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
+                        visit(signatures, argument, input, path, active, leaves); path.truncate(path.len() - 2);
+                    }
+                }
+                if let Some(previous) = previous { active.insert(*definition, previous); }
+                else { active.remove(definition); }
+            }
+            _ => {},
+        }
+    }
+    let mut leaves = vec![];
+    visit(signatures, ty, input, &mut vec![], &mut BTreeMap::new(), &mut leaves);
+    leaves.dedup();
+    leaves
+}
+
+fn same_callable_abi(left: &crate::Type, right: &crate::Type) -> bool {
+    match (left, right) {
+        (crate::Type::Callable { safety: a, lifetime_binders: b, parameters: c, result: d, effects: e, .. },
+         crate::Type::Callable { safety: f, lifetime_binders: g, parameters: h, result: i, effects: j, .. }) =>
+            (a, b, c, d, e) == (f, g, h, i, j),
+        _ => false,
+    }
+}
+
+/// Logical callable result forwarding is separate from checked reference
+/// provenance. A plain callable nominal argument still forwards the actual
+/// value's capture footprint; no environment address is exposed.
+pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Vec<crate::core::CallReferencePath> {
+    let crate::Type::Callable { parameters, result, .. } = &expression.ty else { return vec![]; };
+    if callable_paths(signatures, result, false).is_empty() { return vec![]; }
+    let rigid = rigid_callable_signature(signatures, expression);
+    let (parameters, result) = rigid.as_ref().map(|signature| (&signature.parameters, &signature.result)).unwrap_or((parameters, result));
+    let inputs = parameters.iter().enumerate().flat_map(|(index, parameter)|
+        callable_paths(signatures, parameter, true).into_iter().map(move |(path, ty)| (index, path, ty))).collect::<Vec<_>>();
+    let literal_results = match &expression.kind {
+        crate::core::CoreKind::Function { definition, .. } => match signatures.definitions.get(definition) {
+            Some(crate::ElaboratedHeader::Callable(signature)) => Some(callable_paths(signatures, &signature.result, false)),
+            _ => None,
+        },
+        _ => None,
+    };
+    let mut paths = vec![];
+    for (result_fields, result_ty) in callable_paths(signatures, result, false) {
+        let mut matched = false;
+        for (argument, argument_fields, ty) in &inputs {
+            if !same_callable_abi(&result_ty, ty) { continue; }
+            matched = true;
+            paths.push(crate::core::CallReferencePath { result_fields: result_fields.clone(),
+                argument: *argument as u32, argument_fields: argument_fields.clone() });
+        }
+        let crate::Type::Callable { contract, .. } = &result_ty else { unreachable!("callable resident"); };
+        let captures = contract.open(|_| None).map(|contract| contract.captures).unwrap_or_else(|| contract.captures.clone());
+        let mut captured_regions = vec![];
+        for capture in &captures {
+            let _ = crate::core::input_reference_leaf_paths(signatures, capture, &mut captured_regions);
+        }
+        // A declared plain Fn result can close over a non-callable input even
+        // though its ABI mentions no region. In contrast, `pop<T> -> T`
+        // forwards T's existing environment, not the short receiver borrow.
+        // A known empty environment is positive noncapture evidence.
+        let unknown_factory = contract.environment.is_none() && (!matched || literal_results.as_ref()
+            .is_none_or(|results| results.iter().any(|(path, _)| crate::core::reference_path_matches(path, &result_fields))));
+        if !unknown_factory && captured_regions.is_empty() { continue; }
+        for (argument, parameter) in parameters.iter().enumerate() {
+            let mut references = vec![];
+            let _ = crate::core::input_reference_leaf_paths(signatures, parameter, &mut references);
+            for (argument_fields, ty) in references {
+                let crate::Type::Reference { lifetime, .. } = ty else { continue; };
+                if !unknown_factory && !captured_regions.iter().any(|(_, ty)|
+                    matches!(ty, crate::Type::Reference { lifetime: captured, .. } if *captured == lifetime)) { continue; }
+                paths.push(crate::core::CallReferencePath { result_fields: result_fields.clone(), argument: argument as u32, argument_fields });
+            }
+        }
+    }
+    paths
+}
+
 /// Recover the selected declaration before its independently elided outer
 /// receiver is conflated with a reference supplied as T. A Vec<&T> resident
 /// and the short &mut Vec receiver are distinct regions, even if their final
@@ -113,15 +248,19 @@ pub(crate) fn parameter_transfers(signatures: &crate::ElaboratedInterface, param
     for (index, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
         let _ = crate::core::input_reference_leaf_paths(signatures, parameter, &mut leaves);
+        leaves.extend(callable_paths(signatures, parameter, true));
         inputs.extend(leaves.into_iter().map(|(path, ty)| (index, path, ty)));
     }
     let mut transfers = vec![];
     for (destination, destination_path, destination_ty) in &inputs {
         if !crate::core::reference_path_is_logical(destination_path) { continue; }
-        let crate::Type::Reference { lifetime, .. } = destination_ty else { continue; };
         for (source, source_path, source_ty) in &inputs {
             if destination == source { continue; }
-            if !matches!(source_ty, crate::Type::Reference { lifetime: source_lifetime, .. } if lifetime == source_lifetime) { continue; }
+            let related = match (destination_ty, source_ty) {
+                (crate::Type::Reference { lifetime, .. }, crate::Type::Reference { lifetime: other, .. }) => lifetime == other,
+                _ => same_callable_abi(destination_ty, source_ty),
+            };
+            if !related { continue; }
             transfers.push(ResidentTransfer { destination: *destination, destination_path: destination_path.clone(),
                 source: *source, source_path: source_path.clone() });
         }
@@ -155,6 +294,16 @@ fn rigid_resident_type(ty: &crate::Type, regions: &mut BTreeMap<crate::Lifetime,
         Type::FixedArray { element, length } => Type::FixedArray { element: Box::new(rigid_resident_type(element, regions)), length: length.clone() },
         Type::Array(element) => Type::Array(Box::new(rigid_resident_type(element, regions))),
         Type::Nominal { definition, arguments } => Type::Nominal { definition: *definition, arguments: arguments.iter().map(|argument| rigid_resident_argument(argument, regions)).collect() },
+        Type::Callable { contract, safety, lifetime_binders, parameters, result, effects, invocation } => {
+            let mut contract = (**contract).clone();
+            // A substituted callable's free capture regions belong to T,
+            // just like an ordinary substituted reference. They are not the
+            // independently elided &mut Owner<T> receiver. Its invocation
+            // binder and proof-only environment identities stay untouched.
+            contract.captures = contract.captures.iter().map(|capture| rigid_resident_type(capture, regions)).collect();
+            Type::Callable { contract: Box::new(contract), safety: *safety, lifetime_binders: *lifetime_binders,
+                parameters: parameters.clone(), result: result.clone(), effects: effects.clone(), invocation: *invocation }
+        }
         Type::Projection { subject, trait_definition, trait_arguments, name, item_generic_kinds, item_arguments } => Type::Projection {
             subject: Box::new(rigid_resident_type(subject, regions)), trait_definition: *trait_definition,
             trait_arguments: trait_arguments.iter().map(|argument| rigid_resident_argument(argument, regions)).collect(), name: name.clone(),
@@ -167,6 +316,28 @@ fn rigid_resident_type(ty: &crate::Type, regions: &mut BTreeMap<crate::Lifetime,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callable_residents_are_whole_values_not_physical_reference_leaves() {
+        let callable = crate::Type::Callable {
+            contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0,
+            parameters: vec![], result: Box::new(crate::Type::Unit), effects: crate::EffectRow::empty(),
+            invocation: crate::Quantity::ONCE,
+        };
+        let signatures = crate::ElaboratedInterface::default();
+        let array = crate::Type::fixed_array(callable.clone(), u64::MAX);
+        let paths = callable_paths(&signatures, &array, false);
+        assert_eq!(paths, vec![(vec![crate::core::REFERENCE_PATH_ARRAY_ELEMENT], callable.clone())]);
+        assert!(callable_paths(&signatures, &crate::Type::fixed_array(callable.clone(), 0), false).is_empty());
+        let mut references = vec![];
+        crate::core::reference_leaf_paths(&signatures, &array, &mut vec![], &mut references).unwrap();
+        assert!(references.is_empty(), "callable residency must not mint reference authority");
+        let borrowed = crate::Type::Reference { lifetime: crate::Lifetime::Elided,
+            mutability: crate::Mutability::Shared, referent: Box::new(array) };
+        assert!(callable_paths(&signatures, &borrowed, false).is_empty());
+        assert_eq!(callable_paths(&signatures, &borrowed, true), vec![(
+            vec![crate::core::REFERENCE_PATH_DEREF, crate::core::REFERENCE_PATH_ARRAY_ELEMENT], callable)]);
+    }
 
     #[test]
     fn empty_aliases_receive_later_stores_and_branch_joins() {
@@ -194,5 +365,12 @@ mod tests {
         assert_eq!(first, crate::Type::Tuple(vec![second.clone()]));
         assert!(matches!(second, crate::Type::Reference { lifetime: crate::Lifetime::Placeholder(_), .. }));
         assert_eq!(rigid_resident_lifetime(crate::Lifetime::Static, &mut regions), crate::Lifetime::Static);
+        let callable = crate::Type::Callable {
+            contract: Box::new(crate::CallableContract { captures: vec![reference], ..Default::default() }),
+            safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(crate::Type::Unit),
+            effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE,
+        };
+        let crate::Type::Callable { contract, .. } = rigid_resident_type(&callable, &mut regions) else { unreachable!() };
+        assert_eq!(contract.captures, vec![second]);
     }
 }
