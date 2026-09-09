@@ -5,6 +5,34 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 90: sealed derived control summaries and callable inference
+
+The source-independent control-summary module derives ordered invocations,
+guarded normal returns, label exits, aliases, captures and helper composition
+from validated bodies. Exact body arenas, callable contracts and interfaces
+seal its dependencies. Missing bodies, recursion, unsupported control forms and
+resource limits remain explicit unknowns. Capped alternatives use unconditional
+unknowns so specializing one guard cannot hide another discarded branch.
+Each lexical label evaluation mints a distinct activation, while aliases and
+forwarded capabilities retain that same activation.
+
+This product does not yet grant ownership or lowering authority: connecting
+per-call exits and guarded resource states remains open. All 24 derived-control
+tests pass in the main tree, including forged arenas/contracts, actual versus
+uninvoked callbacks, repeated evaluation and limit specialization.
+
+Contextual argument inference now preserves cells selected by earlier invariant
+nominal, unique-reference or raw-pointer arguments. Ordinary generic callable
+value arguments still join their receiver permissions. Separate fresh/decoded
+O0/O2 regressions prove both cases; nominal VM invariance is unchanged. Later
+invariant constraints and general control/resource fusion remain follow-ups.
+
+The combined main-tree run passes 2,116 tests, including all 891 service,
+176 library API, 21 borrowed-contract, 269 Core and 180 VM-backend tests
+(`target/integration-derived-control-v1.log`). The all-target compile check also
+passes (`target/derived-control-all-targets-v1.log`). The same five generic-helper
+exit cases and 16 actual source-library cases fail; the latter retains 15 passes.
+
 ## Typed-body staging for cross-function control analysis
 
 All demanded ordinary and implementation-method bodies now finish typing before

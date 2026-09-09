@@ -11512,6 +11512,32 @@ impl Elaborator<'_> {
         parameters: &[Type],
         arguments: Vec<ExprId>,
     ) -> Vec<CoreId> {
+        fn invariant_variables(ty: &Type, invariant: bool, variables: &mut Vec<Type>) {
+            match ty {
+                Type::Infer(_) if invariant => {
+                    if !variables.contains(ty) { variables.push(ty.clone()); }
+                }
+                Type::Nominal { arguments, .. } => {
+                    for argument in arguments {
+                        if let GenericArgument::Type(ty) = argument { invariant_variables(ty, true, variables); }
+                    }
+                }
+                Type::Reference { mutability, referent, .. } => {
+                    invariant_variables(referent, invariant || *mutability == Mutability::Unique, variables);
+                }
+                Type::RawPointer { pointee, .. } => invariant_variables(pointee, true, variables),
+                Type::Tuple(types) => {
+                    for ty in types { invariant_variables(ty, invariant, variables); }
+                }
+                Type::Array(element) | Type::FixedArray { element, .. }
+                | Type::StaticData { element, .. } => invariant_variables(element, invariant, variables),
+                Type::Callable { parameters, result, .. } => {
+                    for ty in parameters { invariant_variables(ty, invariant, variables); }
+                    invariant_variables(result, invariant, variables);
+                }
+                _ => {}
+            }
+        }
         // Contextual type unification must use caller-local holes, never the
         // callee's declaration region names. Open the whole parameter pack
         // together so repeated regions constrain the same hole across operands.
@@ -11520,6 +11546,7 @@ impl Elaborator<'_> {
         let Type::Tuple(contextual_parameters) = self.freshen_call_context_lifetimes(Type::Tuple(parameters.to_vec())) else {
             unreachable!("freshening preserves the parameter pack shape");
         };
+        let mut selected_invariants = Vec::new();
         arguments
             .into_iter()
             .enumerate()
@@ -11542,6 +11569,20 @@ impl Elaborator<'_> {
                     })
                     .unwrap_or(argument);
                 if let Some(parameter) = parameter {
+                    // Earlier operands may have selected this generic through
+                    // an invariant nominal/reference boundary. Unify its
+                    // selected structure, not the solved cell: a later
+                    // callable value can provide stronger receiver access
+                    // without changing that nominal application's identity.
+                    // Ordinary value arguments still join refinements. Only
+                    // cells selected through earlier invariant positions are
+                    // fixed; unresolved nested cells remain inferable.
+                    let replacements = selected_invariants.iter().map(|variable: &Type|
+                        (variable.clone(), self.inference.resolve_type_structure(variable.clone()))).collect::<Vec<_>>();
+                    let raw_parameter = parameter.clone();
+                    let GenericArgument::Type(parameter) = crate::CallableContract::replace_value_types(
+                        GenericArgument::Type(parameter), &replacements, 0,
+                    ) else { unreachable!("type replacement preserves kind") };
                     let actual = self.expressions[argument.0 as usize].ty.clone();
                     // A declared elided region is a call-site relation, not
                     // an equality with the caller's named region. Align it
@@ -11555,6 +11596,7 @@ impl Elaborator<'_> {
                             let _ = self.inference.unify(aligned, actual);
                         }
                     }
+                    invariant_variables(&raw_parameter, false, &mut selected_invariants);
                 }
                 argument
             })

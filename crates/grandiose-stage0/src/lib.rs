@@ -11,6 +11,7 @@ pub mod artifact_cache;
 pub mod bootstrap;
 pub mod coherence;
 pub mod core;
+pub mod callable_control;
 pub mod refinement;
 pub mod dependency;
 pub mod diagnostic;

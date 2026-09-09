@@ -8,12 +8,18 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/integration-shared-float-v1.log`, cache 89). This includes a source
+ignored (`target/integration-derived-control-v1.log`, cache 90). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 90 integrates sealed, body-derived callable control summaries and preserves
+earlier invariant-selected callback type arguments while retaining ordinary value
+joins. Its combined run passes 2,116 tests; the same five generic-helper exit
+cases and 16 source-library cases fail. Per-call summary consumption in ownership
+analysis is not active yet. The source matrix and library API counts are unchanged.
 
 Cache 89 shares the floating-environment guard across VM/native execution and
 foreign callbacks. Its combined run passes 2,346 tests with the same five

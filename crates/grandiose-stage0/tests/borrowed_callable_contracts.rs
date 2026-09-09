@@ -44,6 +44,36 @@ fn reject_library_cancellation(source: &str, dependencies: &[&str]) {
 }
 
 #[test]
+fn generic_callable_value_arguments_still_join_their_receiver_permissions() {
+    run(r#"
+        fn pair<T>(first: T, second: T) -> (T, T) { (first, second) }
+        fn answer() -> i64 { 21 }
+        pub fn main() -> i64 {
+            let mut count = 20;
+            let first: () -> i64 = answer;
+            let second: () -> i64 = () -> i64 { count = count + 1; count };
+            let (first, second) = pair(first, second);
+            first() + second()
+        }
+    "#, 42);
+}
+
+#[test]
+fn later_callable_argument_preserves_an_earlier_nominal_generic_identity() {
+    run(r#"
+        struct Slot<T> { value: T }
+        fn select<T>(slot: &mut Slot<T>, value: T) -> T { value }
+        fn answer() -> i64 { 21 }
+        pub fn main() -> i64 {
+            let mut slot: Slot<() -> i64> = Slot { value: answer };
+            let selected = select(&mut slot, answer);
+            let Slot { value } = slot;
+            selected() + value()
+        }
+    "#, 42);
+}
+
+#[test]
 fn shared_named_callable_is_invoked_through_its_original_borrowed_receiver() {
     run(r#"
         fn answer() -> i64 { 21 }
