@@ -242,6 +242,7 @@ pub(crate) struct CoreContinuations {
     rules: Box<[Rule]>,
     facts: Box<[Continuation]>,
     invocation_control: Option<crate::callable_control::BodyInvocationControl>,
+    label_dependencies: crate::core::label_dependencies::LabelDependencies,
 }
 
 impl CoreContinuations {
@@ -253,6 +254,8 @@ impl CoreContinuations {
         body: &TypedBody,
         invocation_control: Option<crate::callable_control::BodyInvocationControl>,
     ) -> Result<Self, CoreDiagnostic> {
+        let label_dependencies = crate::core::label_dependencies::LabelDependencies::derive(&body.expressions)
+            .map_err(|_| input_error(body, "label dependencies require a complete acyclic Core graph"))?;
         if invocation_control.as_ref().is_some_and(|control| !control.matches(body)) {
             return Err(input_error(body, "invocation outcomes do not match the frozen Core body"));
         }
@@ -307,6 +310,7 @@ impl CoreContinuations {
             rules: rules.into_boxed_slice(),
             facts: facts.into_boxed_slice(),
             invocation_control,
+            label_dependencies,
         })
     }
 
@@ -316,6 +320,7 @@ impl CoreContinuations {
     /// typed input and its validated interprocedural dependencies.
     pub(crate) fn bind(&self, body: &TypedBody) -> Result<&Self, CoreDiagnostic> {
         if self.root != body.root
+            || !self.label_dependencies.matches(&body.expressions)
             || self.invocation_control.as_ref().is_some_and(|control| !control.matches(body))
             || self.rules.len() != body.expressions.len()
             || !self
@@ -342,6 +347,10 @@ impl CoreContinuations {
 
     pub(crate) fn invocation(&self, id: CoreId) -> Option<&crate::callable_control::InvocationControl> {
         self.invocation_control.as_ref()?.get(id)
+    }
+
+    pub(crate) fn label_independent(&self, id: CoreId) -> bool {
+        self.label_dependencies.independent(id)
     }
 }
 

@@ -8,12 +8,26 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/shared-call-outcomes-integration-v2.log`, cache 98). This includes a source
+ignored (`target/shared-label-dependencies-integration-v1.log`, cache 99). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 99 consolidates lexical label dependency rules across elaboration,
+independent Core validation, tail checks and escape checking. First-class label
+values can no longer bypass the early unfused-closure check and surface only
+as an internal CFG error. Label declarations discharge only their own body's
+dependencies; missing, cyclic or stale input does not prove independence.
+The final selected run has 1,950 passes and the same 17 named failures as cache
+98. All 891 service and 176 library API tests and the all-target compile check
+pass; SourceMap still executes. This is a lexical dependency product, not
+complete value-alias propagation, label-bearing callable contracts or structural
+fusion. The outer-label closure positive remains active and failing. See
+`implementation-progress.md` for exact gate results and remaining boundaries.
+
+The following cache 98 and earlier checkpoints are historical.
 
 Cache 98 feeds sealed body-derived invocation outcomes and typed label payload
 projections into shared continuations, ownership and escape checking. Generic

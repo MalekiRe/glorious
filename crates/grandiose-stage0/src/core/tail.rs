@@ -138,38 +138,10 @@ pub(crate) fn tail_owned_type(
     }
 }
 
-/// Lexical control captures are not ordinary captured locals. An empty
-/// closure environment therefore does not prove that its code is independent
-/// of the activation that created it. Labels introduced by the invocation
-/// itself are harmless; a reference to any other brand retains its owner.
-pub(crate) fn has_outer_label_dependency(body: &TypedBody, root: CoreId) -> bool {
-    let mut declared = std::collections::BTreeSet::new();
-    let mut referenced = std::collections::BTreeSet::new();
-    let mut seen = std::collections::BTreeSet::new();
-    let mut pending = vec![root];
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        let Some(expression) = body.expressions.get(id.0 as usize) else {
-            return true;
-        };
-        match expression.kind {
-            CoreKind::Label { brand, .. } => {
-                declared.insert(brand);
-            }
-            CoreKind::LabelValue { brand } | CoreKind::Transfer { brand, .. } => {
-                referenced.insert(brand);
-            }
-            _ => {}
-        }
-        pending.extend(core_children(&expression.kind));
-    }
-    !referenced.is_subset(&declared)
-}
-
 impl TypedBody {
-    pub(super) fn validate_mandatory_tails(&self, diagnostics: &mut Vec<CoreDiagnostic>) {
+    pub(super) fn validate_mandatory_tails(&self, diagnostics: &mut Vec<CoreDiagnostic>,
+        label_dependencies: Option<&super::label_dependencies::LabelDependencies>,
+    ) {
         if !self.expressions.iter().any(|expression| {
             matches!(
                 expression.kind,
@@ -262,7 +234,8 @@ impl TypedBody {
                     pending.push((
                         *body,
                         true,
-                        !environment.captures.is_empty() || has_outer_label_dependency(self, *body),
+                        !environment.captures.is_empty() || !label_dependencies
+                            .is_some_and(|facts| facts.independent(*body)),
                         *body,
                     ));
                 }

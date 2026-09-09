@@ -271,6 +271,25 @@ fn higher_order_captured_outer_label_exits_preserve_ownership() {
 }
 
 #[test]
+fn unfused_closure_label_values_are_rejected_before_lowering() {
+    for body in [
+        "pub fn main() -> i64 { @done: i64 { let task = () -> ! { leave(42,@done) }; task() } }",
+        "fn ignore<T>(value:T) -> () {} pub fn main() -> i64 { @done: i64 { let task = () -> i64 { ignore(@done); 42 }; task() } }",
+        "pub fn make() -> () -> i64 { () -> i64 { let label = @make; 42 } } pub fn main() -> i64 { 42 }",
+    ] {
+        let source = format!("{TOKEN} fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }} {body}");
+        for optimization in ["0", "2"] {
+            let failure = StageZeroCompiler::new().compile(request(&source, optimization))
+                .expect_err("an unfused callable cannot retain an outer label value");
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{source}\n{failure:#?}");
+            assert!(!failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G6001"), "label lifetime must be checked before CFG lowering: {failure:#?}");
+        }
+    }
+    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        pub fn main() -> i64 { let task = () -> i64 { @done: i64 { leave(42,@done) } }; task() }");
+}
+
+#[test]
 fn helper_label_rejoins_cannot_hide_double_use() {
     let source = format!("{TOKEN}
         fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}

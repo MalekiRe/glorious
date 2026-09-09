@@ -7872,6 +7872,25 @@ fn closures_cannot_capture_an_enclosing_label_transfer_target() {
 }
 
 #[test]
+fn frozen_core_rejects_unfused_lexical_label_dependencies_without_source_diagnostics() {
+    for closure in [
+        "() -> i64 { @done(42) }",
+        "() -> i64 { let target = @done; 42 }",
+    ] {
+        let mut core = core_for("core-unfused-label-dependencies@0.1.0", &format!(
+            "pub fn main() -> i64 {{ @done: i64 {{ let task = {closure}; 42 }} }}"));
+        core.diagnostics.clear();
+        core.recovered = false;
+        assert!(core.validate().iter().any(|diagnostic| diagnostic.code == "G4183"
+            && diagnostic.message.contains("label dependency")), "{core:#?}");
+    }
+    let core = core_for("core-local-label-dependencies@0.1.0",
+        "pub fn main() -> i64 { let task = () -> i64 { @done: i64 { @done(42) } }; task() }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+}
+
+#[test]
 fn nested_labels_can_transfer_to_an_enclosing_brand_through_the_vm_edge() {
     let core = core_for(
         "core-nested-label-transfer@0.1.0",

@@ -198,3 +198,26 @@ nominal payloads without input provenance, unified storage identities and
 structural fusion of closures capturing outer labels remain open. The latter
 has an active failing source regression; this checkpoint does not relax its
 label-lifetime check or claim captured native/mixed execution.
+
+## Lexical label dependency rules
+
+`core/label_dependencies.rs` produces the lexical free-label dependencies of
+Core subgraphs. Direct transfers and first-class label values reference the
+same generative identities. Union combines dependencies; a `Label` discharges
+its own brand only in its body. A declaration in a sibling subgraph cannot
+discharge another reference. Closure bodies participate because this is code
+dependence, not evidence that formation executes those bodies.
+
+Elaboration uses these rules for result contextualization and unfused closure
+rejection. Independent Core validation checks closure dependence again without
+trusting source diagnostics. Mandatory-tail validation consumes that same
+derived product, and escape checking queries the immutable product retained by
+shared continuations. The old transfer/value scans and separate tail/escape
+dependency walk are removed. Graph inputs are checked, and missing, cyclic or
+unqueried input cannot establish independence; consumer binding validates the
+retained projection, including label-value brands.
+
+This product covers lexical references, not arbitrary value-alias propagation,
+higher-order control contracts or a fusion proof. It prevents first-class
+label literals from bypassing the existing source/Core boundary while the
+full label-bearing callable representation and structural fusion remain open.

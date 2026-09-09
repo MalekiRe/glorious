@@ -274,7 +274,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // containment distinct from aliasing the captured owner's stored residents.
 // Cache 98 binds body-derived invocation outcomes to the shared continuation
 // facts and keeps helper label exits separate from normal ownership joins.
-pub const STAGE0_CACHE_GENERATION: u32 = 98;
+// Cache 99 shares lexical label dependencies and rejects unfused first-class
+// label captures at both source and independent Typed Core boundaries.
+pub const STAGE0_CACHE_GENERATION: u32 = 99;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

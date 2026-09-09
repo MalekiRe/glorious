@@ -449,7 +449,7 @@ impl Analyzer<'_> {
                 // external arguments into captured storage. Invocation applies
                 // the shared relation using its real explicit/captured inputs.
                 let frame_independent = capture_dependency_roots(&returned_snapshot).is_empty()
-                    && !crate::core::tail::has_outer_label_dependency(self.body, body)
+                    && self.continuations.label_independent(body)
                     && environment.captures.iter().all(|capture| {
                         !matches!(CaptureFormation::new(capture).source(), CaptureSource::Borrow(_))
                             && self.values.get(&capture.name).is_some_and(|value| frame_independent_value(&self.resolved_value(value)))

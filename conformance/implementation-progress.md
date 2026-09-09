@@ -5,6 +5,47 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 99: shared lexical label dependencies
+
+The outer-label closure audit found that the early capture check recognized
+direct transfers but not first-class label values. A closure that forwarded
+`@done` through a helper passed that check and failed later with internal
+Control MIR error G6001 (`target/shared-label-dependencies-before-v1.log`).
+The three new source variants now reject with G4179 before CFG lowering,
+including an unused public factory. A closure whose label belongs to its own
+invocation still executes fresh and decoded at O0/O2
+(`target/shared-label-dependencies-after-v2.log`).
+
+One rule producer now computes lexical free-label dependencies for elaboration,
+independent Core validation, mandatory-tail checks and escape checking through
+shared continuations. Direct transfers and label values retain the same brand;
+only its enclosing `Label` body discharges it. The previous separate walkers
+are removed. Missing/cyclic/unqueried inputs cannot prove independence, and
+binding checks the label-value identities as well as graph edges. Four unit
+tests cover exact identities, sibling scope isolation, invalid/stale products
+and a 10,000-node shared graph. The independent Core regression first fails
+after source diagnostics and recovery status are cleared
+(`target/shared-label-dependencies-validation-before-v1.log`), demonstrating
+that producer-side diagnostics were not an independent admission check.
+
+The final selected integration run has 1,950 passes, the same 17 named failures
+as cache 98, and no ignores (`target/shared-label-dependencies-integration-v1.log`).
+All 317 unit, 25 borrowed-callable, 38 callable-control, 271 Core,
+111 destruction, 39 fixed-array/container, 22 request/revision, 891 service and
+176 library API tests pass. Minimum-use has 24 passes and the existing active
+outer-label capture positive. All four tail-label cases pass; mandatory-tail
+retains 16 passes and its activation-transfer ABI failure. The source matrix
+remains 16 passes and 15 failures, including successful SourceMap execution.
+The all-target compile check passes (`target/shared-label-dependencies-check-v1.log`).
+
+This is lexical dependency consolidation, not permission to capture a label
+in an independently materialized callable. Value-alias propagation, complete
+label-bearing callable contracts and structural fusion remain open; the
+higher-order outer-label positive remains active and failing. Full guarded
+ownership/cancellation, captured native/mixed execution, compiler/library
+conformance and self-hosting are still incomplete. Source cache generation is
+99; bytecode, verifier and native format generations are unchanged.
+
 ## Cache 98: shared invocation outcomes and label payload provenance
 
 Body-derived callable summaries now feed the shared continuation product and

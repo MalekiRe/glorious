@@ -2,6 +2,7 @@
 
 mod fingerprint;
 mod callable_contracts;
+pub(crate) mod label_dependencies;
 pub(crate) mod tail;
 mod tuple_struct;
 
@@ -900,6 +901,13 @@ impl TypedBody {
             .expressions
             .get(self.root.0 as usize)
             .map(|expression| expression.span);
+        let label_dependencies = label_dependencies::LabelDependencies::derive(&self.expressions);
+        if let Err(reason) = &label_dependencies {
+            diagnostics.push(CoreDiagnostic { code: "G4180",
+                span: parameter_span.unwrap_or_else(invalid_typed_core_span),
+                message: format!("Typed Core label dependency graph is invalid: {reason:?}"),
+            });
+        }
         for (_, parameter) in &self.parameters {
             if !is_canonical_type_identity(parameter) {
                 diagnostics.push(CoreDiagnostic {
@@ -954,6 +962,12 @@ impl TypedBody {
             };
             for child in core_children(&expression.kind) {
                 check(child);
+            }
+            if let CoreKind::Closure { body, .. } = expression.kind
+                && label_dependencies.as_ref().is_ok_and(|facts| !facts.independent(body))
+            {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "unfused Typed Core closure retains an outer lexical label dependency".into() });
             }
             if let CoreKind::Field { base, index, field_count } = &expression.kind
                 && let Some(CoreExpr { ty: Type::Tuple(fields), .. }) = self.expressions.get(base.0 as usize)
@@ -1055,7 +1069,7 @@ impl TypedBody {
             self.validate_unsafe_scopes(&mut diagnostics);
         }
         self.validate_binding_pack_accesses(&mut diagnostics);
-        self.validate_mandatory_tails(&mut diagnostics);
+        self.validate_mandatory_tails(&mut diagnostics, label_dependencies.as_ref().ok());
         diagnostics
     }
 
@@ -4260,11 +4274,7 @@ impl Elaborator<'_> {
                     .pop()
                     .expect("label scope must outlive its body");
                 let body_type = self.expressions[body.0 as usize].ty.clone();
-                let mut transfers = Vec::new();
-                collect_transfer_brands(&self.expressions, body, &mut transfers);
-                let rejoined_by_own_transfer = transfers.into_iter().any(|target| target == brand);
-                let rejoined_by_own_value =
-                    contains_label_value_brand(&self.expressions, body, brand);
+                let rejoined = self.may_retain_label(body, brand);
                 // A transfer does not produce the label result at its source
                 // location: it abandons that continuation.  Its payload was
                 // unified with `result` while elaborating the transfer, so a
@@ -4290,8 +4300,7 @@ impl Elaborator<'_> {
                 // its fresh result variable in the frozen Core would turn a
                 // valid nested transfer into an inference-hole diagnostic.
                 let label_type = if matches!(body_type, Type::Never)
-                    && !rejoined_by_own_transfer
-                    && !rejoined_by_own_value
+                    && !rejoined
                 {
                     Type::Never
                 } else {
@@ -4707,10 +4716,7 @@ impl Elaborator<'_> {
         let body = self.expression_expected(self.body.root, expected_result);
         let Some((brand, result)) = implicit_label else { return body; };
         self.active_labels.pop().expect("implicit callable label must outlive its body");
-        let mut transfers = vec![];
-        collect_transfer_brands(&self.expressions, body, &mut transfers);
-        let rejoined = transfers.contains(&brand)
-            || contains_label_value_brand(&self.expressions, body, brand);
+        let rejoined = self.may_retain_label(body, brand);
         let ty = if matches!(self.expressions[body.0 as usize].ty, Type::Never) && !rejoined {
             Type::Never
         } else { result };
@@ -8137,10 +8143,15 @@ impl Elaborator<'_> {
                 .any(|child| self.core_contains_local(child, name)),
         }
     }
-    /// A closure executes after its surrounding label scope may have exited.
-    /// Keep transfers to an outer label out of its environment rather than
-    /// deferring an invalid nonlocal edge to MIR. Labels declared inside the
-    /// closure have fresh brands and are not in `active_labels` here.
+    fn may_retain_label(&self, body: CoreId, brand: LabelBrand) -> bool {
+        label_dependencies::LabelDependencies::for_root(&self.expressions, body)
+            .ok().and_then(|facts| facts.free(body).map(|labels| labels.contains(&brand)))
+            .unwrap_or(true)
+    }
+
+    /// First-class label values and direct transfers have the same lexical
+    /// dependency. No escaping callable gains permission merely because it
+    /// forwards its target through a helper instead of invoking it directly.
     fn check_label_transfer_escape(&mut self, body: CoreId, span: Span) {
         let active = self
             .active_labels
@@ -8150,39 +8161,16 @@ impl Elaborator<'_> {
         if active.is_empty() {
             return;
         }
-        let mut transfers = Vec::new();
-        collect_transfer_brands(&self.expressions, body, &mut transfers);
-        if transfers.into_iter().any(|brand| active.contains(&brand)) {
+        let retained = label_dependencies::LabelDependencies::for_root(&self.expressions, body)
+            .ok().and_then(|facts| facts.free(body).map(|labels| !labels.is_disjoint(&active)))
+            .unwrap_or(true);
+        if retained {
             self.error(
                 span,
                 "G4179",
-                "closure cannot capture a transfer target from an enclosing label scope",
+                "unfused closure cannot retain a label value or transfer target from an enclosing scope",
             );
             self.recovered = true;
-        }
-    }
-    /// Handler clauses retain the exact enclosing label brand in Core.  MIR
-    /// now has a cleanup-carrying `Leave` terminator and the VM preserves it
-    /// across a suspended handler frame, so a lexically valid transfer is not
-    /// discarded merely because its source lies in a clause.  Closure escape
-    /// remains separately rejected above; unsupported handler CFG shapes fail
-    /// closed during MIR lowering rather than losing this proof here.
-    fn check_handler_label_transfer_escape(&mut self, body: CoreId, span: Span) {
-        let active = self
-            .active_labels
-            .iter()
-            .map(|label| label.brand)
-            .collect::<std::collections::BTreeSet<_>>();
-        if active.is_empty() {
-            return;
-        }
-        let mut transfers = Vec::new();
-        collect_transfer_brands(&self.expressions, body, &mut transfers);
-        if transfers.into_iter().any(|brand| active.contains(&brand)) {
-            // The active-set membership is the owner/brand proof consumed by
-            // `MirTerminator::Leave`; do not turn it into a recovered Core
-            // error now that the target survives handler lowering.
-            let _ = span;
         }
     }
     fn collect_captures(
@@ -13006,7 +12994,6 @@ impl Elaborator<'_> {
             !matches!(clause.resumption, CoreHandlerResumption::Tail { .. })
                 && self.expressions[clause.body.0 as usize].ty != Type::Never);
         self.expressions[handler.0 as usize].kind = CoreKind::Handle { computation, clauses: core_clauses };
-        self.check_handler_label_transfer_escape(handler, span);
         if let Some(completion) = completion {
             if operation_can_finish && self.expressions[completion.0 as usize].ty == Type::Never {
                 self.expressions[completion.0 as usize].ty = result;
@@ -15392,34 +15379,6 @@ fn collect_pattern_bindings(pattern: &CorePattern, bindings: &mut Vec<String>) {
         }
         CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
     }
-}
-
-fn collect_transfer_brands(expressions: &[CoreExpr], id: CoreId, brands: &mut Vec<LabelBrand>) {
-    let Some(expression) = expressions.get(id.0 as usize) else {
-        return;
-    };
-    if let CoreKind::Transfer { brand, .. } = expression.kind {
-        brands.push(brand);
-    }
-    for child in core_children(&expression.kind) {
-        collect_transfer_brands(expressions, child, brands);
-    }
-}
-
-/// A first-class label capability may transfer only after crossing an
-/// ordinary generic call.  Its Core body is therefore `Never` at the source
-/// site even though the owning label regains its declared result at the
-/// dynamic rejoin.  Preserve that result contract just as direct branded
-/// transfers do, without treating a same-spelled label in another scope as
-/// evidence.
-fn contains_label_value_brand(expressions: &[CoreExpr], id: CoreId, target: LabelBrand) -> bool {
-    let Some(expression) = expressions.get(id.0 as usize) else {
-        return false;
-    };
-    matches!(expression.kind, CoreKind::LabelValue { brand } if brand == target)
-        || core_children(&expression.kind)
-            .into_iter()
-            .any(|child| contains_label_value_brand(expressions, child, target))
 }
 
 /// Align the lifetime leaves of two structurally corresponding types while
