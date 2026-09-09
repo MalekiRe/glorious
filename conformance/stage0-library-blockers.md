@@ -8,12 +8,26 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/shared-continuation-integration-v3.log`, cache 95). This includes a source
+ignored (`target/shared-capture-integration-v1.log`, cache 96). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 96 consolidates capture formation rules across Core contracts, ownership,
+escape and quantity checking. The factory-local closure escape regression now
+rejects borrowed local slots while owned captures preserve their referents'
+dependencies. Nested closures and aggregate wrappers retain those dependencies.
+One container and five service fixtures had the same invalid source pattern;
+their original sources remain rejection checks and their owned positive variants
+pass. Final per-target gates have 1,919 passes and 17 existing failures: the
+tail-call ABI case and 16 source-library cases. All 891 service, 34 fixed-array
+and 176 library API tests pass. Shared invocation/store provenance and complete
+guarded control remain open; see `implementation-progress.md` for exact logs
+and the limits of this migration.
+
+The following cache 95 and earlier checkpoints are historical.
 
 Cache 95 consolidates local continuation reasoning into a frozen rule product
 shared by ownership, escape and quantity checking. Definite and conditional
@@ -24,8 +38,6 @@ negative, tail-call ABI case and 16 source-library cases. All 891 service and
 176 library API tests pass. This is the first architectural migration slice;
 full interprocedural guarded control and storage/capture provenance remain
 open. See `implementation-progress.md` and `docs/compiler-architecture.md`.
-
-The following cache 94 and earlier checkpoints are historical.
 
 Cache 94 enables callable raw storage with execution-domain environment leases;
 the previously ignored execution test and all 33 fixed-array/container tests now

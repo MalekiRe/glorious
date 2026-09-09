@@ -615,6 +615,8 @@ impl Analyzer<'_> {
                 // root, so this records capture transfer without rebuilding
                 // a source projection in UseFlow.
                 for capture in capture_environment.captures {
+                    use crate::capture_formation::{CaptureFormation, CaptureSource};
+                    let source = CaptureFormation::new(&capture).source();
                     let binding = environment
                         .bindings
                         .get(&capture.name)
@@ -623,18 +625,17 @@ impl Analyzer<'_> {
                     if let Some(place) = self.closure_place_fact(
                         expression.span,
                         &capture.name,
-                        capture.mode,
+                        source,
                     ) {
-                        match capture.mode {
-                            crate::core::CaptureMode::Move => {
+                        match source {
+                            CaptureSource::Move => {
                                 self.record_transfer(&binding, place, expression.span);
                                 environment.bindings.insert(capture.name, Binding::Other);
                             }
-                            crate::core::CaptureMode::SharedBorrow
-                            | crate::core::CaptureMode::UniqueBorrow => {
+                            CaptureSource::Borrow(_) => {
                                 self.record_borrow(&binding, place, expression.span);
                             }
-                            crate::core::CaptureMode::Copy => {
+                            CaptureSource::Copy => {
                                 // A copy is an owned environment entry but
                                 // leaves its unrestricted source binding
                                 // available for later ordinary uses.
@@ -1553,14 +1554,15 @@ impl Analyzer<'_> {
         &self,
         span: Span,
         root: &str,
-        mode: crate::core::CaptureMode,
+        source: crate::capture_formation::CaptureSource,
     ) -> Option<MoveFact> {
         self.ownership.events.iter().find_map(|event| {
-            let matches_kind = match (&event.kind, mode) {
-                (FlowEventKind::Move(name), crate::core::CaptureMode::Move)
-                | (FlowEventKind::BorrowShared(name), crate::core::CaptureMode::SharedBorrow)
-                | (FlowEventKind::BorrowUnique(name), crate::core::CaptureMode::UniqueBorrow)
-                | (FlowEventKind::Read(name), crate::core::CaptureMode::Copy) => name == root,
+            use crate::capture_formation::CaptureSource;
+            let matches_kind = match (&event.kind, source) {
+                (FlowEventKind::Move(name), CaptureSource::Move)
+                | (FlowEventKind::BorrowShared(name), CaptureSource::Borrow(crate::Mutability::Shared))
+                | (FlowEventKind::BorrowUnique(name), CaptureSource::Borrow(crate::Mutability::Unique))
+                | (FlowEventKind::Read(name), CaptureSource::Copy) => name == root,
                 _ => false,
             };
             matches_kind

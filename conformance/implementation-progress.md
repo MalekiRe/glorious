@@ -5,6 +5,53 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 96: shared capture formation and retained slot dependencies
+
+Frozen Core captures now project into common formation actions: retain the
+contents' dependencies, then borrow, copy or move the source. Core callable
+contracts and PlaceFlow snapshots use the same resident-type and contents-path
+rules. Ownership formation, escape checking and quantity source-state handling
+consume that projection. Core, ownership and escape checking also share the
+sealed capture-environment shape validator instead of maintaining separate
+versions of its invariants.
+
+The original returned-callback regression now rejects its factory-local slot
+borrows with G5014. A borrowed reference capture retains both the handle's local
+slot and the dependencies reached through its value; an owned handle retains
+the latter without borrowing the former. Nested callable dependencies survive
+owned closures and tuple wrappers. The new source tests cover borrowed shared
+reference parameters, mutable scalar captures, nested wrappers and owned
+references to dead locals, alongside valid owned captures executing fresh and
+decoded at O0/O2. The two rule tests cover all formation modes and reference
+layering. Before-fix evidence remains in
+`target/shared-capture-factory-before-v1.log` and
+`target/shared-capture-dependencies-before-v1.log`.
+
+The stronger boundary exposed the same invalid borrowed-factory-slot pattern
+in one container fixture and five service fixtures. Their original sources
+remain G5014 rejection checks; the corresponding positive cases now explicitly
+own their handles. The corrected container factory also executes through raw
+callable storage, fresh and decoded at O0/O2. No failing source was ignored or
+made valid by prolonging its dead runtime storage.
+
+Final per-target gates total 1,919 passes and 17 existing failures, with no
+ignores. All 300 unit, 25 borrowed-callable, 38 callable-control, 270 Core,
+111 destruction, 34 fixed-array/container, 17 minimum-use, 22 request/revision,
+891 service and 176 library API tests pass. The mandatory-tail suite retains
+16 passes and its existing activation-transfer ABI failure; all four tail-label
+tests pass. The source-library matrix remains 15 passes and 16 failures.
+The broad production-code run is `target/shared-capture-integration-v1.log`;
+its invalid fixture expectations are superseded by the complete 34-test
+`target/shared-capture-fixed-v2.log` and 891-test
+`target/shared-capture-service-v3.log` reruns. The final all-target compile
+check passes (`target/shared-capture-check-v3.log`).
+
+This migrates capture formation, not the entire provenance/control boundary.
+Common storage identities, guarded higher-order invocation/store relations,
+complete callable-control consumers and captured native/mixed execution remain
+open. Source cache generation is 96; bytecode, verifier and native representation
+generations are unchanged.
+
 ## Cache 95: shared continuation rules and semantic consumers
 
 Typed Core's local continuation projection is now a shared immutable product.

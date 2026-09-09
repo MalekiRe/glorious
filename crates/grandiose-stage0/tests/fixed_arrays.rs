@@ -679,21 +679,36 @@ fn logical_capture_probe_live_residents_and_expired_owners_validate() {
         ("use std::*; pub fn main() -> i64 { let a:i64=42; let reference = &a; let task = () -> i64 { *reference }; let mut items = Vec::new(); Vec::push(&mut items,task); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }", false),
         ("use std::*; pub fn main() -> i64 { let mut a:i64=41; { let reference = &a; let task = () -> i64 { *reference }; let mut items = Vec::new(); Vec::push(&mut items,task); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) }; }; a=42; a }", false),
         ("use std::*; pub fn main() -> i64 { let a:i64=42; let slot:SharedSlot<&i64> = SharedSlot::new(); { let alias = SharedSlot::copy(&slot); let task = () -> () { SharedSlot::set(&alias,&a); }; task(); }; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => 0 } }", true),
-        ("use std::*; fn factory<'a>(reference:&'a i64) -> () -> i64 { () -> i64 { *reference } } pub fn main() -> i64 { let a:i64=42; let mut items:Vec<() -> i64> = Vec::new(); Vec::push(&mut items,factory(&a)); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }", false),
+        ("use std::*; fn factory<'a>(reference:&'a i64) -> () -> i64 { move (reference) { *reference } } pub fn main() -> i64 { let a:i64=42; let mut items:Vec<() -> i64> = Vec::new(); Vec::push(&mut items,factory(&a)); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }", true),
     ] {
         for optimization in ["0", "2"] {
             let artifact = StageZeroCompiler::new().compile(shared_slot_request(source, optimization))
                 .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
             let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
-            // Raw Callable layout is a separate, explicitly recorded runtime
-            // cut-line below. These Vec cases prove ownership and decode,
-            // while the supported reference-resident slot also executes.
+            // The original local Vec probes check formation and decoding;
+            // the slot and owned factory capture also execute. The separate
+            // raw-storage test below executes a borrowed local capture.
             if execute {
                 // SAFETY: the slot's shared reference outlives both aliases.
                 assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
                 assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
             }
         }
+    }
+}
+
+#[test]
+fn callable_container_cannot_hide_a_factory_local_capture_slot() {
+    // Preserve the original factory source: its reference handle belongs to
+    // the factory frame even though the referenced integer lives in main.
+    let source = "use std::*; fn factory<'a>(reference:&'a i64) -> () -> i64 { () -> i64 { *reference } } pub fn main() -> i64 { let a:i64=42; let mut items:Vec<() -> i64> = Vec::new(); Vec::push(&mut items,factory(&a)); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }";
+    for optimization in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(shared_slot_request(source, optimization)) {
+            Err(error) => error,
+            Ok(_) => panic!("container storage cannot extend the factory capture slot's lifetime"),
+        };
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"),
+            "O{optimization}: {:#?}", error.diagnostics());
     }
 }
 

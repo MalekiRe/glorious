@@ -2206,51 +2206,29 @@ impl Analyzer<'_> {
         span: Span,
         owner: Option<&str>,
     ) {
-        if !environment.runs_in.sealed
-            || environment.runs_in.environment != environment.brand
-            || environment.runs_in.callable != environment.brand.callable
-            || environment.runs_in.post_states != environment.post_states
-        {
-            self.error(
-                span,
-                "G5020",
-                "closure RunsIn evidence does not match its sealed environment".into(),
-            );
+        use crate::capture_formation::{CaptureAction, CaptureFormation, CaptureSource};
+        if let Some(error) = crate::core::capture_environment_shape_error(environment.brand.callable, environment) {
+            self.error(span, "G5020", error);
             return;
         }
-        if environment.post_states.len() != environment.captures.len()
-            || environment
-                .captures
-                .iter()
-                .zip(&environment.post_states)
-                .any(|(capture, state)| capture.name != state.name || capture.mode != state.mode)
-        {
-            self.error(
-                span,
-                "G5020",
-                "closure environment capture post-state disagrees with its sealed layout".into(),
-            );
-            return;
-        }
-        for (capture, post_state) in environment.captures.iter().zip(&environment.post_states) {
+        for capture in &environment.captures {
             if let Some(owner) = owner { self.record_capture_origins(capture, owner); }
-            self.capture_reference_loan(&capture.name, span, owner);
-            match post_state.mode {
-                CaptureMode::SharedBorrow => {
-                    self.capture_place_loan(&capture.name, false, span, owner);
-                }
-                CaptureMode::UniqueBorrow => {
-                    self.capture_place_loan(&capture.name, true, span, owner);
-                }
-                CaptureMode::Copy => {
-                    // An owned copy is a value transfer into the environment,
-                    // not a loan on the source binding.
-                    self.read_place_by_name(&capture.name, span);
-                }
-                CaptureMode::Move => {
-                    self.move_projection(Projection {
-                        root: self.resolve_name(&capture.name), fields: vec![],
-                    }, span);
+            for action in CaptureFormation::new(capture).actions() {
+                match action {
+                    CaptureAction::RetainContents => self.capture_reference_loan(&capture.name, span, owner),
+                    CaptureAction::Source(CaptureSource::Borrow(mutability)) => {
+                        self.capture_place_loan(&capture.name, mutability == crate::Mutability::Unique, span, owner);
+                    }
+                    CaptureAction::Source(CaptureSource::Copy) => {
+                        // An owned copy is a value transfer into the environment,
+                        // not a loan on the source binding.
+                        self.read_place_by_name(&capture.name, span);
+                    }
+                    CaptureAction::Source(CaptureSource::Move) => {
+                        self.move_projection(Projection {
+                            root: self.resolve_name(&capture.name), fields: vec![],
+                        }, span);
+                    }
                 }
             }
         }
@@ -2266,14 +2244,10 @@ impl Analyzer<'_> {
 
     fn record_capture_origins(&mut self, capture: &crate::core::ClosureCapture, owner: &str) {
         let source = self.resolve_name(&capture.name);
-        let borrowed = matches!(capture.mode, CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow);
-        let ty = if borrowed { Type::Reference {
-            lifetime: crate::Lifetime::Elided,
-            mutability: if matches!(capture.mode, CaptureMode::UniqueBorrow) { crate::Mutability::Unique } else { crate::Mutability::Shared },
-            referent: Box::new(capture.ty.clone()),
-        } } else { capture.ty.clone() };
+        let formation = crate::capture_formation::CaptureFormation::new(capture);
+        let ty = formation.resident_type();
         let root = Self::capture_origin_key(owner, &ty);
-        let resident = if borrowed { projection_key(&root, &[crate::core::REFERENCE_PATH_DEREF]) } else { root.clone() };
+        let resident = projection_key(&root, formation.contents_path());
         let prefix = format!("{source}.");
         let references = self.reference_origins.iter().filter(|(key, _)| **key == source || key.starts_with(&prefix))
             .map(|(key, loans)| (format!("{resident}{}", &key[source.len()..]), loans.clone())).collect::<Vec<_>>();
@@ -2281,9 +2255,9 @@ impl Analyzer<'_> {
             .map(|(key, regions)| (format!("{resident}{}", &key[source.len()..]), regions.clone())).collect::<Vec<_>>();
         for (key, loans) in references { self.reference_origins.entry(key).or_default().extend(loans); }
         for (key, regions) in logical { self.logical.origins.entry(key).or_default().extend(regions); }
-        if borrowed {
+        if let crate::capture_formation::CaptureSource::Borrow(mutability) = formation.source() {
             self.reference_origins.entry(root).or_default().insert(ProjectionLoan {
-                place: Projection { root: source, fields: vec![] }, unique: matches!(capture.mode, CaptureMode::UniqueBorrow),
+                place: Projection { root: source, fields: vec![] }, unique: mutability == crate::Mutability::Unique,
                 owner: None, partitions: BTreeMap::new(), indirect: false, external: false,
             });
         }

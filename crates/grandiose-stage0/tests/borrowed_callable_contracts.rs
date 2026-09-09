@@ -129,6 +129,48 @@ fn returned_callback_cannot_borrow_its_factory_local_capture_slots() {
 }
 
 #[test]
+fn capture_formation_retains_source_slots_and_nested_value_dependencies() {
+    for source in [
+        "fn make<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value } }
+         pub fn main() -> i64 { let value = 42; make(&value)() }",
+        "fn make() -> () -> i64 {
+            let mut seed = 40; () -> i64 { seed = seed + 1; seed }
+         } pub fn main() -> i64 { make()() }",
+        "fn make<'a>(value: &'a i64) -> () -> i64 {
+            let inner = () -> i64 { *value }; move (inner) { inner() }
+         } pub fn main() -> i64 { let value = 42; make(&value)() }",
+        "fn make<'a>(value: &'a i64) -> () -> i64 {
+            let inner = () -> i64 { *value }; let wrapped = (inner,);
+            move (wrapped) { wrapped.0() }
+         } pub fn main() -> i64 { let value = 42; make(&value)() }",
+        "fn make() -> () -> i64 {
+            let value = 42; let reference = &value; move (reference) { *reference }
+         } pub fn main() -> i64 { make()() }",
+    ] {
+        for level in ["0", "2"] {
+            let error = match StageZeroCompiler::new().compile(request(source, level)) {
+                Err(error) => error,
+                Ok(_) => panic!("a capture must retain every dependency on an ending frame: {source}"),
+            };
+            assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"),
+                "O{level}: {source}\n{:#?}", error.diagnostics());
+        }
+    }
+}
+
+#[test]
+fn owned_capture_handles_do_not_borrow_their_source_slots() {
+    run("fn make<'a>(value: &'a i64) -> () -> i64 { move (value) { *value } }
+        pub fn main() -> i64 { let value = 42; make(&value)() }", 42);
+    run("fn make<'a>(value: &'a i64) -> () -> i64 {
+            let inner = move (value) { *value }; move (inner) { inner() }
+        } pub fn main() -> i64 { let value = 42; make(&value)() }", 42);
+    run("fn make() -> () -> i64 {
+            let mut seed = 41; move (seed) { seed = seed + 1; seed }
+        } pub fn main() -> i64 { make()() }", 42);
+}
+
+#[test]
 fn shared_named_callable_is_invoked_through_its_original_borrowed_receiver() {
     run(r#"
         fn answer() -> i64 { 21 }

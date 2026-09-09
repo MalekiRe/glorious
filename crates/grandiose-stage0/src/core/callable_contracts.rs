@@ -287,13 +287,8 @@ impl Elaborator<'_> {
                 // conversely a Copy capture can contain mutable local state.
                 let (shared_receiver, unique_receiver) = self.callable_capture_access(*body, parameters, environment);
                 let empty = environment.captures.is_empty();
-                contract.captures = environment.captures.iter().map(|capture| match capture.mode {
-                    CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow => Type::Reference {
-                        mutability: if capture.mode == CaptureMode::UniqueBorrow { Mutability::Unique } else { Mutability::Shared },
-                        lifetime: Lifetime::Elided, referent: Box::new(capture.ty.clone()),
-                    },
-                    CaptureMode::Copy | CaptureMode::Move => capture.ty.clone(),
-                }).collect();
+                contract.captures = environment.captures.iter().map(|capture|
+                    crate::capture_formation::CaptureFormation::new(capture).resident_type()).collect();
                 contract.environment = Some(Box::new(if empty { Type::Unit } else { generated_environment_type(environment.brand, false, &contract.captures) }));
                 contract.after_environment = Some(Box::new(if empty { Type::Unit } else { generated_environment_type(environment.brand, true, &contract.captures) }));
                 contract.shared_receiver = shared_receiver;

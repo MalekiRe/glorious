@@ -205,7 +205,8 @@ fn parameter_value(ty: &Type) -> Value {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Capture {
-    /// A reference value whose backing place is body-local.
+    /// A retained body-local dependency: either the borrowed capture slot or
+    /// a backing place reached through its contents (including nested closures).
     Borrowed {
         root: String,
         environment: EnvironmentBrand,
@@ -276,7 +277,7 @@ impl Analyzer<'_> {
                     arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
                 Value::Closure { environment, captures, frame_independent, regions } => {
                     let possible = resolve(&Value::Region(regions.clone()), graph, active);
-                    let roots = borrowed_roots(&possible);
+                    let roots = capture_dependency_roots(&possible);
                     let mut captures = captures.clone();
                     captures.extend(roots.iter().cloned().map(|root| Capture::Borrowed { root, environment: *environment }));
                     Value::Closure { environment: *environment, captures,
@@ -395,24 +396,8 @@ impl Analyzer<'_> {
                 environment,
                 body,
             } => {
-                let runs_in_matches = environment.runs_in.sealed
-                    && environment.runs_in.environment == environment.brand
-                    && environment.runs_in.callable == callable
-                    && environment.runs_in.post_states == environment.post_states
-                    && matches!(
-                        &expression.ty,
-                        Type::Callable { lifetime_binders, effects, .. }
-                            if environment.runs_in.effects
-                                == if *lifetime_binders == 0 {
-                                    effects.clone()
-                                } else {
-                                    crate::core::open_hrtb_callable_body_effect_row(
-                                        effects.clone(),
-                                        0,
-                                    )
-                                }
-                    );
-                if !runs_in_matches {
+                use crate::capture_formation::{CaptureAction, CaptureFormation, CaptureSource};
+                if crate::core::capture_environment_error(callable, &environment, &expression.ty).is_some() {
                     self.error(
                         expression.span,
                         "G5014",
@@ -435,10 +420,10 @@ impl Analyzer<'_> {
                 self.values = outer_values;
                 self.values.regions.merge_from(&possible_regions, merge_region_values);
 
-                let frame_independent = borrowed_roots(&self.resolved_value(&returned)).is_empty()
+                let frame_independent = capture_dependency_roots(&self.resolved_value(&returned)).is_empty()
                     && !crate::core::tail::has_outer_label_dependency(self.body, body)
                     && environment.captures.iter().all(|capture| {
-                        matches!(capture.mode, crate::core::CaptureMode::Copy | crate::core::CaptureMode::Move)
+                        !matches!(CaptureFormation::new(capture).source(), CaptureSource::Borrow(_))
                             && self.values.get(&capture.name).is_some_and(|value| frame_independent_value(&self.resolved_value(value)))
                     });
                 let regions = environment.captures.iter().flat_map(|capture|
@@ -453,15 +438,15 @@ impl Analyzer<'_> {
                             .get(&capture.name)
                             .cloned()
                             .unwrap_or(Value::None);
-                        // Moving a reference into a callable changes the
-                        // owner of the reference slot, not the provenance of
-                        // its backing place.  Treat move captures exactly as
-                        // borrowed captures at this outlives boundary: a
-                        // returned callable, aggregate, or effect payload
-                        // must still carry every backing root.  PlaceFlow
-                        // separately records the move/reborrow and keeps the
-                        // loan live for the callable environment.
-                        borrowed_roots(&self.resolved_value(&value))
+                        let mut roots = BTreeSet::new();
+                        for action in CaptureFormation::new(&capture).actions() {
+                            match action {
+                                CaptureAction::RetainContents => roots.extend(capture_dependency_roots(&self.resolved_value(&value))),
+                                CaptureAction::Source(CaptureSource::Borrow(_)) => { roots.insert(capture.name.clone()); }
+                                CaptureAction::Source(CaptureSource::Copy | CaptureSource::Move) => {}
+                            }
+                        }
+                        roots
                             .into_iter()
                             .map(|root| Capture::Borrowed {
                                 root,
@@ -470,7 +455,7 @@ impl Analyzer<'_> {
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
-                captures.extend(borrowed_roots(&self.resolved_value(&returned)).into_iter().map(|root| {
+                captures.extend(capture_dependency_roots(&self.resolved_value(&returned)).into_iter().map(|root| {
                     Capture::Borrowed {
                         root,
                         environment: environment.brand,
@@ -1507,6 +1492,16 @@ fn frame_independent_value(value: &Value) -> bool {
 fn borrowed_roots(value: &Value) -> BTreeSet<String> {
     let mut roots = BTreeSet::new();
     collect_borrowed_roots(value, &mut roots);
+    roots
+}
+
+/// Capturing a value retains both its physical loans and dependencies already
+/// carried by nested callable environments, including inside aggregates.
+fn capture_dependency_roots(value: &Value) -> BTreeSet<String> {
+    let mut roots = borrowed_roots(value);
+    roots.extend(closure_captures(value).into_iter().map(|capture| match capture {
+        Capture::Borrowed { root, .. } => root,
+    }));
     roots
 }
 

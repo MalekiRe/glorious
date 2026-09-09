@@ -12,6 +12,7 @@ pub mod bootstrap;
 pub mod coherence;
 pub mod core;
 mod core_continuations;
+mod capture_formation;
 pub mod callable_control;
 pub mod refinement;
 pub mod dependency;

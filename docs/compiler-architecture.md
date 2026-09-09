@@ -112,3 +112,23 @@ of a double use. See `conformance/implementation-progress.md` for gate results.
 This is the first migrated slice, not the end of the architectural work.
 Interprocedural guarded resource states, complete operation-handler control,
 and shared storage/capture provenance still require consumer-level migration.
+
+## Capture formation boundary
+
+`crates/grandiose-stage0/src/capture_formation.rs` projects each frozen capture
+into ordered formation actions: retain contents, then borrow, copy, or move the
+source. It also defines the resident type and the path to its captured contents.
+Core callable contracts, PlaceFlow capture snapshots and formation, EscapeFlow
+dependencies, and UseFlow source-state classification consume that projection.
+Core, ownership and escape checking share the sealed environment shape check.
+
+A borrowed reference capture retains two distinct dependencies: the source
+slot holding the handle and any backing places reached through the handle.
+Copying or moving retains the latter without borrowing the former. Nested
+callables carry their existing dependencies through owned aggregate wrappers.
+Formation mode does not establish shared or unique invocation authority.
+
+This consolidates formation rules, not the entire provenance analysis. Storage
+identities and guarded invocation/store relations still need a common published
+product across analyses. The existing per-consumer environments and higher-order
+store propagation are not claimed to be complete by this migration.

@@ -5106,7 +5106,7 @@ fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler
     // closure is invoked from a handler arm, exercising the source-storage
     // cleanup boundary across package import, Core, MIR, VM, and decoding.
     let root = "use facade::{capture, make}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<i64>(2); let closure = capture(&packet.tail); move packet.head; handle Tick::tick() { Tick::tick() with _ => closure() } }";
-    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { pub head: T, pub tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { () -> i64 { *value = *value + 1; *value } }";
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { pub head: T, pub tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { move (value) { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { move (value) { *value = *value + 1; *value } }";
     let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
@@ -5123,6 +5123,12 @@ fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler
         input
     };
 
+    // Preserve the original provider as a negative: a returned closure must
+    // own the handle instead of borrowing its provider-local parameter slot.
+    let borrowed_provider = provider.replace("move (value)", "() -> i64");
+    let error = StageZeroCompiler::new().compile(world(root, &borrowed_provider))
+        .expect_err("facade publication must reject a borrowed factory parameter slot");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"), "{:#?}", error.diagnostics());
     let mut reordered = world(root, provider);
     let artifact = StageZeroCompiler::new()
         .compile(reordered.clone())
@@ -7861,9 +7867,13 @@ fn service_composes_facaded_hrtb_callback_reborrows_closure_capture_and_unique_r
 
 #[test]
 fn service_preserves_caller_reference_closure_results_and_rejects_invocation_locals() {
-    let legal = "pub fn retain<'a>(value: &'a i64) -> () -> &'a i64 { () -> &'a i64 { value } } pub fn main() -> i64 { let value = 41; let closure = retain(&value); 42 }";
+    let borrowed_slot = "pub fn retain<'a>(value: &'a i64) -> () -> &'a i64 { () -> &'a i64 { value } } pub fn main() -> i64 { let value = 41; let closure = retain(&value); 42 }";
+    let error = StageZeroCompiler::new().compile(request(borrowed_slot))
+        .expect_err("a caller-owned referent does not extend the factory handle slot");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"), "{:#?}", error.diagnostics());
+    let legal = borrowed_slot.replace("() -> &'a i64 { value }", "move (value) { value }");
     let artifact = StageZeroCompiler::new()
-        .compile(request(legal))
+        .compile(request(&legal))
         .expect("a returned closure may retain a caller-provided reference")
         .artifact
         .unwrap();
@@ -12191,9 +12201,13 @@ fn service_dynamic_label_rejoin_completion_returns_a_closure_without_stale_capab
 #[test]
 fn service_rolls_back_private_reference_closure_facade_revisions() {
     let root = "use top_facade::make; pub fn main() -> i64 { let value = 42; make(&value)() }";
-    let public = "pub fn make<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value } }";
+    let borrowed_public = "pub fn make<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value } }";
+    let public = "pub fn make<'a>(value: &'a i64) -> () -> i64 { move (value) { *value } }";
     let private = "fn make<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value } }";
     let world = |provider: &str| { let mut input = request(root); for (package, source) in [("reference-core@0.1.0", provider), ("middle-facade@0.1.0", "pub use reference_core::make;"), ("top-facade@0.1.0", "pub use middle_facade::*;")] { input.sources.push(SourceInput::new(PackageKey(package.into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes())); } input };
+    let error = StageZeroCompiler::new().compile(world(borrowed_public))
+        .expect_err("a public facade cannot extend the factory's borrowed capture slot");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"), "{:#?}", error.diagnostics());
     let compiler = StageZeroCompiler::new(); let parent = compiler.import_revision(world(public), None).unwrap();
     assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().run_i64().unwrap(), 42);
     let cached = compiler.interface_cache_stats();
@@ -12341,7 +12355,7 @@ fn service_dynamic_label_rejoin_returns_a_shared_reference_closure() {
                     }
                 }
             } {
-                value => () -> i64 { *outer + value },
+                value => move (outer, value) { *outer + value },
             }
         }
         pub fn main() -> i64 {
@@ -12350,6 +12364,10 @@ fn service_dynamic_label_rejoin_returns_a_shared_reference_closure() {
             callback()
         }
     "#;
+    let borrowed_slot = source.replace("value => move (outer, value)", "value => () -> i64");
+    let error = StageZeroCompiler::new().compile(request(&borrowed_slot))
+        .expect_err("label rejoin cannot extend a borrowed factory parameter slot");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"), "{:#?}", error.diagnostics());
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -12379,7 +12397,7 @@ fn service_vm_preserves_a_native_home_unique_capture_across_dynamic_label_rejoin
                     }
                 }
             } {
-                value => () -> i64 { *outer = *outer + value; *outer },
+                value => move (outer, value) { *outer = *outer + value; *outer },
             }
         }
         pub fn main() -> i64 {
@@ -12388,6 +12406,10 @@ fn service_vm_preserves_a_native_home_unique_capture_across_dynamic_label_rejoin
             callback()
         }
     "#;
+    let borrowed_slot = source.replace("value => move (outer, value)", "value => () -> i64");
+    let error = StageZeroCompiler::new().compile(request(&borrowed_slot))
+        .expect_err("a unique capture cannot borrow an ending factory parameter slot");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"), "{:#?}", error.diagnostics());
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();

@@ -2075,20 +2075,33 @@ pub(crate) fn capture_environment_error(
     environment: &CaptureEnvironment,
     callable_ty: &Type,
 ) -> Option<String> {
+    if let Some(error) = capture_environment_shape_error(callable, environment) {
+        return Some(error);
+    }
+    let Type::Callable { lifetime_binders, effects, .. } = callable_ty else {
+        return Some("Typed Core closure lacks a callable type for its RunsIn evidence".into());
+    };
+    let body_effects = if *lifetime_binders == 0 {
+        effects.clone()
+    } else {
+        open_hrtb_callable_body_effect_row(effects.clone(), 0)
+    };
+    if environment.runs_in.effects != body_effects {
+        return Some("Typed Core RunsIn evidence does not match the closure effect contract".into());
+    }
+    None
+}
+
+pub(crate) fn capture_environment_shape_error(
+    callable: CallableId,
+    environment: &CaptureEnvironment,
+) -> Option<String> {
     if !environment.sealed {
         return Some("Typed Core closure has an unsealed capture environment".into());
     }
     if environment.brand.callable != callable {
         return Some("Typed Core closure environment brand belongs to another callable".into());
     }
-    let Type::Callable {
-        lifetime_binders,
-        effects,
-        ..
-    } = callable_ty
-    else {
-        return Some("Typed Core closure lacks a callable type for its RunsIn evidence".into());
-    };
     if !environment.runs_in.sealed
         || environment.runs_in.environment != environment.brand
         || environment.runs_in.callable != callable
@@ -2096,16 +2109,6 @@ pub(crate) fn capture_environment_error(
     {
         return Some(
             "Typed Core closure has forged or incomplete RunsIn environment evidence".into(),
-        );
-    }
-    let body_effects = if *lifetime_binders == 0 {
-        effects.clone()
-    } else {
-        open_hrtb_callable_body_effect_row(effects.clone(), 0)
-    };
-    if environment.runs_in.effects != body_effects {
-        return Some(
-            "Typed Core RunsIn evidence does not match the closure effect contract".into(),
         );
     }
     let mut names = std::collections::BTreeSet::new();
