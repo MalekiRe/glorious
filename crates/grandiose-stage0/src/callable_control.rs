@@ -200,6 +200,15 @@ impl ControlCallCoverage<'_> {
     }
 }
 
+/// Coverage and observations are independent components. An unconditional
+/// coverage gap forbids absence proofs, but does not erase dependencies from
+/// executions that were positively observed. Consumers must retain the gap
+/// when using those observations; guards cannot specialize it away.
+struct ControlCallEvidence<'a> {
+    coverage: ControlCallCoverage<'a>,
+    observed: &'a [ControlAlternative],
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct CallContext {
     callable: CallableBrand,
@@ -267,13 +276,19 @@ impl CallableControlSummary {
         self.calls.keys().map(|site| (site, self.call(site)))
     }
     pub fn call(&self, site: &ControlSite) -> ControlCallCoverage<'_> {
-        if let Some(reason) = self.call_gaps.get(&CallContext::from(site)) {
-            return ControlCallCoverage::Unknown(reason.clone());
-        }
-        self.calls.get(site).map_or(
-            ControlCallCoverage::Unknown(ControlUnknown::UnobservedCall),
-            |paths| ControlCallCoverage::Alternatives(paths),
-        )
+        self.call_evidence(site).coverage
+    }
+    fn call_evidence(&self, site: &ControlSite) -> ControlCallEvidence<'_> {
+        let observed = self.calls.get(site).map(Vec::as_slice).unwrap_or(&[]);
+        let coverage = match self.call_gaps.get(&CallContext::from(site)) {
+            Some(reason) => ControlCallCoverage::Unknown(reason.clone()),
+            None if observed.is_empty() => ControlCallCoverage::Unknown(ControlUnknown::UnobservedCall),
+            None => ControlCallCoverage::Alternatives(observed),
+        };
+        ControlCallEvidence { coverage, observed }
+    }
+    fn invocation_evidence(&self) -> impl Iterator<Item = (&ControlSite, ControlCallEvidence<'_>)> {
+        self.calls.keys().map(|site| (site, self.call_evidence(site)))
     }
     pub fn dependencies(&self) -> impl Iterator<Item = ControlBodyIdentity> + '_ {
         self.dependencies.values().map(|seal| seal.identity)
@@ -430,28 +445,26 @@ impl BoundControlSummaries<'_> {
         let body = seal.body.clone();
         let mut calls = BTreeMap::<CoreId, InvocationControl>::new();
         for (callable, summary) in self.summaries.iter().filter(|(_, summary)| summary.identity.definition == owner) {
-            for (site, coverage) in summary.calls() {
+            for (site, evidence) in summary.invocation_evidence() {
                 // Expanded helper/closure activations have their own frame.
                 // Only standalone observations belong to this arena's owners.
                 if !site.calls.is_empty() || site.location.callable != callable { continue; }
                 let control = calls.entry(site.location.expression).or_default();
-                match coverage {
-                    ControlCallCoverage::Alternatives(paths) if !paths.is_empty() => {
-                        for path in paths {
-                            let payload = if let ControlOutcome::LabelExit { value, .. } | ControlOutcome::Return(value) = &path.outcome {
-                                let inputs = path.events.iter().find_map(|event| match event {
-                                    ControlEvent::Invoke { site: actual, callee, arguments } if actual == site => Some((callee, arguments)),
-                                    _ => None,
-                                });
-                                Some(match inputs {
-                                    Some((callee, arguments)) => self.observed_payload(value, callee, arguments),
-                                    None => InvocationPayload::unknown(value.ty.clone()),
-                                })
-                            } else { None };
-                            control.include(&path.outcome, callable, payload);
-                        }
-                    }
-                    _ => control.unknown = true,
+                // Keep the unconditional gap even while projecting positive
+                // payload dependencies from a represented guarded execution.
+                control.unknown |= !evidence.coverage.is_complete();
+                for path in evidence.observed {
+                    let payload = if let ControlOutcome::LabelExit { value, .. } | ControlOutcome::Return(value) = &path.outcome {
+                        let inputs = path.events.iter().find_map(|event| match event {
+                            ControlEvent::Invoke { site: actual, callee, arguments } if actual == site => Some((callee, arguments)),
+                            _ => None,
+                        });
+                        Some(match inputs {
+                            Some((callee, arguments)) => self.observed_payload(value, callee, arguments),
+                            None => InvocationPayload::unknown(value.ty.clone()),
+                        })
+                    } else { None };
+                    control.include(&path.outcome, callable, payload);
                 }
             }
         }
@@ -463,7 +476,14 @@ impl BoundControlSummaries<'_> {
         for (index, expression) in body.expressions.iter().enumerate() {
             let id = CoreId(index as u32);
             if calls.get(&id).is_some_and(|control| !control.unknown) { continue; }
-            if let Some(control) = self.declared_call_control(&body, expression) {
+            if let Some(mut control) = self.declared_call_control(&body, expression) {
+                // A complete abstract callee contract can settle coverage,
+                // but cannot erase a more precise observed input dependency.
+                if let Some(observed) = calls.get(&id) {
+                    for payload in &observed.returns {
+                        if !control.returns.contains(payload) { control.returns.push(payload.clone()); }
+                    }
+                }
                 calls.insert(id, control);
             }
         }

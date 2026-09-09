@@ -247,3 +247,21 @@ normal-result partitions from a bottom-typed call.
 These are may-dependencies, not a complete guarded storage product or permission
 to materialize outer-label closures independently. Structural fusion, nominal
 label-bearing callable authority and opaque-result coverage remain open.
+
+## Positive observations under incomplete coverage
+
+Invocation evidence retains guarded observed executions independently of its
+unconditional coverage gap. The public coverage view remains unknown when a
+prefix, handler, resource limit or unresolved invocation leaves missing paths;
+specializing an observed guard cannot discard that gap. The bound invocation
+product may nevertheless retain payload dependencies from observed paths.
+An independent static callee contract can settle invocation coverage without
+erasing more precise observed result dependencies.
+
+Escape and ownership add these positive ordinary-result dependencies to their
+existing snapshots even when invocation coverage is partial. Ownership retains
+its conservative normal/abrupt state and cannot infer disposal permission from
+the observations. This is the distinction between retaining a known possible
+dependency and proving that no other outcomes or dependencies exist. It does
+not supply missing higher-order result projections or complete guarded storage
+states, and adds no independent Core reconstruction.

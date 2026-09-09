@@ -258,6 +258,42 @@ fn normal_return_payloads_project_captured_and_explicit_inputs() {
 }
 
 #[test]
+fn an_unconditional_coverage_gap_retains_observed_captured_return_dependencies() {
+    let fixture = Fixture::new("#![no_std]
+        fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> {
+            observe();
+            let target = @select;
+            let read = move (target) { target };
+            let alias = read(); 42
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let owner = fixture.names["select"];
+    let body = &fixture.bodies[&owner];
+    let read = body.expressions.iter().enumerate().find_map(|(index, expression)| {
+        let CoreKind::Call { callee, .. } = expression.kind else { return None; };
+        matches!(&body.expression(callee).kind, CoreKind::Local(name) if name == "read")
+            .then_some(CoreId(index as u32))
+    }).unwrap();
+    let summary = summaries.get(CallableBrand::Named(owner)).unwrap();
+    let (site, evidence) = summary.invocation_evidence().find(|(site, _)|
+        site.calls.is_empty() && site.location.expression == read).unwrap();
+    assert!(matches!(evidence.coverage, ControlCallCoverage::Unknown(_)));
+    assert!(!summary.call(site).only_returns_normally());
+    assert!(!evidence.observed.is_empty());
+    assert!(evidence.observed.iter().all(|path|
+        path.guards.iter().any(|guard| matches!(guard, ControlGuard::InvocationReturned(_)))));
+    let control = summaries.bind(&inputs).unwrap().body(owner).unwrap();
+    let invocation = control.get(read).unwrap();
+    assert!(invocation.unknown && invocation.normal);
+    assert!(invocation.returns.iter().any(|payload|
+        matches!(payload.source, payloads::PayloadSource::Capture { .. })));
+    assert!(invocation.labels.is_empty() && invocation.transfers.is_empty());
+    let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, Some(control)).unwrap();
+    assert!(!facts.is_abrupt(read), "known dependencies do not settle unknown control coverage");
+}
+
+#[test]
 fn payload_projection_shares_explicit_and_captured_inputs_without_erasing_unknowns() {
     use crate::resident_invocations::{CapturedInputs, Inputs, Operand};
     type Value = (u32, Vec<u32>);

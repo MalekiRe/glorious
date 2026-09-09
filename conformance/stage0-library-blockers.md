@@ -8,12 +8,27 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/captured-label-provenance-integration-v3.log`, cache 100). This includes a source
+ignored (`target/unknown-prefix-captured-return-integration-v1.log`, cache 101). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 101 retains positively observed invocation result dependencies alongside
+unconditional coverage gaps. An unknown callback prefix no longer erases a
+later captured-label getter's result, while the public coverage query still
+reports unknown and cannot prove normal-only execution. Ownership adds known
+result origins without granting disposal permission from partial observations;
+escape consumes the same retained payloads. The final selected run has 1,960
+passes and the exact same 17 named failures as cache 100, with no ignores.
+All 891 service, 39 array/container and 176 library API tests and the all-target
+compile check pass; SourceMap still executes. Full guarded resource states,
+opaque/higher-order result coverage, generative label authority and structural
+fusion remain open. See `implementation-progress.md` for the unsafe-acceptance
+regression and the final gate.
+
+The following cache 100 and earlier checkpoints are historical.
 
 Cache 100 retains label provenance through value aliases, aggregate residents,
 capture formation and ordinary captured-input returns. Label scope exits check

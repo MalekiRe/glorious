@@ -5,6 +5,46 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 101: observed invocation dependencies survive coverage gaps
+
+An unresolved callback before a captured-label getter exposed another unsafe
+acceptance: an unused public factory could still return a callable retaining
+its expired label (`target/unknown-prefix-captured-return-before-v1.log`). The
+shared analysis had observed the getter on the callback's guarded normal edge,
+but the coverage query discarded all observations because the unresolved edge
+left an unconditional coverage gap.
+
+Invocation evidence now retains both components: observed guarded executions
+and unconditional coverage status. The existing public coverage query still
+reports unknown and cannot prove normal-only execution. The bound invocation
+product preserves observed return dependencies while retaining its unknown
+flag; an independently checked static callee contract cannot overwrite those
+dependencies. Escape checking consumes the retained payloads, and ownership
+adds their known result origins without using partial coverage to authorize
+disposal or suppress possible continuations. No second Core evaluator or alias
+walker is introduced.
+
+The initial captured-return regression now rejects
+(`target/unknown-prefix-captured-return-after-v1.log`). Added coverage includes
+direct and tuple getter results, ordinary label-free callable execution, and
+an evidence-level assertion that an unknown call can retain a captured return
+projection without becoming a normal-only proof. Existing coverage-gap tests
+are unchanged. Full guard-correlated resource states, opaque/higher-order
+result coverage, label-bearing callable authority, structural fusion, complete
+compiler/library conformance and self-hosting remain unfinished. Source cache
+generation is 101; native, bytecode and verifier generations are unchanged.
+
+The final selected integration run has 1,960 passes, the exact same 17 named
+failures as cache 100, and no ignores
+(`target/unknown-prefix-captured-return-integration-v1.log`). All 322 unit,
+25 borrowed-callable, 38 callable-control, 271 Core, 111 destruction,
+39 fixed-array/container, 22 request/revision, 891 service and 176 library API
+tests pass. Minimum-use has 29 passes and the existing active outer-label
+fusion positive. The four tail-label tests pass; mandatory-tail retains
+16 passes and its existing ABI failure. The source matrix remains 16 passes
+and 15 failures, with SourceMap still executing. The all-target compile check
+passes (`target/unknown-prefix-captured-return-check-v1.log`).
+
 ## Cache 100: label-bearing value snapshots and ordinary return provenance
 
 The follow-up audit demonstrated an unsafe acceptance beyond lexical code

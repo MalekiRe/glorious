@@ -21,11 +21,6 @@ impl Analyzer<'_> {
         let Some(control) = self.continuations.invocation(call).cloned() else {
             return;
         };
-        // Partial observations cannot suppress a normal path or authorize
-        // disposal. Keep the existing conservative state when coverage is open.
-        if control.unknown || control.terminal_operation || control.cancellation {
-            return;
-        }
         let CoreKind::Call {
             callee, arguments, ..
         } = &self.body.expression(call).kind
@@ -37,6 +32,12 @@ impl Analyzer<'_> {
             .iter()
             .map(|id| invocations::Value::core(*id))
             .collect::<Vec<_>>();
+        // Partial observations cannot suppress a normal path or authorize
+        // disposal. They can still add positively observed result origins.
+        if control.unknown || control.terminal_operation || control.cancellation {
+            self.preserve_invocation_returns(call, &control.returns, &callable, &arguments);
+            return;
+        }
         let incoming = self.capture_continuation();
         for target in control.labels {
             self.restore_continuation(&incoming);
@@ -67,18 +68,7 @@ impl Analyzer<'_> {
         }
         self.restore_continuation(&incoming);
         if control.normal {
-            // Snapshot the declared result before installing an additional
-            // body-derived root: a partial input projection must not mask it.
-            self.preserve_expression_result(call, call);
-            let result = Self::result_owner(call);
-            for payload in &control.returns {
-                let payload = crate::callable_control::resolve_payload(payload, &callable, &arguments, self);
-                self.record_known_payload_origins(&result, payload, call);
-            }
-            if self.reference_origins.keys().chain(self.logical.origins.keys())
-                .any(|key| key == &result || key.starts_with(&(result.clone() + "."))) {
-                self.pending_results.insert(call);
-            }
+            self.preserve_invocation_returns(call, &control.returns, &callable, &arguments);
         }
         if control.outer_transfer {
             let abandoned = self.minimum_bindings.keys().cloned().collect();
@@ -87,6 +77,28 @@ impl Analyzer<'_> {
         if !control.normal {
             self.minimum_states.clear();
             self.normal_continuation = false;
+        }
+    }
+
+    fn preserve_invocation_returns(
+        &mut self,
+        call: CoreId,
+        returns: &[crate::callable_control::InvocationPayload],
+        callable: &invocations::Value,
+        arguments: &[invocations::Value],
+    ) {
+        if returns.is_empty() { return; }
+        // Snapshot the declared result before installing an additional
+        // body-derived root: a partial input projection must not mask it.
+        self.preserve_expression_result(call, call);
+        let result = Self::result_owner(call);
+        for payload in returns {
+            let payload = crate::callable_control::resolve_payload(payload, callable, arguments, self);
+            self.record_known_payload_origins(&result, payload, call);
+        }
+        if self.reference_origins.keys().chain(self.logical.origins.keys())
+            .any(|key| key == &result || key.starts_with(&(result.clone() + "."))) {
+            self.pending_results.insert(call);
         }
     }
 

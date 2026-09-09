@@ -279,7 +279,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // Cache 100 retains label provenance in ordinary value/capture snapshots and
 // checks outgoing values and stores at the label's own lexical boundary;
 // shared invocation payloads also retain ordinary captured-input returns.
-pub const STAGE0_CACHE_GENERATION: u32 = 100;
+// Cache 101 retains positive invocation dependencies alongside unconditional
+// coverage gaps; an unknown prefix is not proof of an empty result footprint.
+pub const STAGE0_CACHE_GENERATION: u32 = 101;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

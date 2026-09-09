@@ -383,6 +383,33 @@ fn labels_returned_from_captured_inputs_keep_their_scope_dependency() {
 }
 
 #[test]
+fn unknown_prefix_cannot_erase_a_later_captured_label_return() {
+  for returned in ["target", "(target,)"] {
+    let source = format!("{TOKEN}
+        pub fn make<F>(observe:F) -> () -> i64 where F:Fn<(),Output=()> {{
+            observe();
+            let target = @make;
+            let read = move (target) {{ {returned} }};
+            let alias = read();
+            move (alias) {{ let retained = alias; 42 }}
+        }} pub fn main() -> i64 {{ 42 }}");
+    for optimization in ["0", "2"] {
+        let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(failure) => failure,
+            Ok(_) => panic!("an unresolved prefix cannot erase a later captured return's label scope"),
+        };
+        assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{failure:#?}");
+    }
+  }
+  accepts("fn observe() {}
+      fn make<F>(observe:F) -> () -> i64 where F:Fn<(),Output=()> {
+          observe(); let target = () -> i64 { 42 };
+          let read = move (target) { target }; read()
+      }
+      pub fn main() -> i64 { make(observe)() }");
+}
+
+#[test]
 fn helper_label_rejoins_cannot_hide_double_use() {
     let source = format!("{TOKEN}
         fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
