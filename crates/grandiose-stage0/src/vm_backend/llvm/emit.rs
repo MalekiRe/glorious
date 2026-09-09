@@ -276,6 +276,19 @@ impl<'a> Plan<'a> {
                 .collect::<String>()
         )
         .unwrap();
+        // One immutable native allocation per source literal site. Omitting
+        // unnamed_addr preserves site identity where raw addresses are observed.
+        for (index, key) in self.functions.iter().enumerate() {
+            if self.vm_functions.contains(key) { continue; }
+            for (pc, instruction) in self.program.functions[key].instructions.iter().enumerate() {
+                if let I::ConstStaticData { bytes, .. } = instruction {
+                    let data = if bytes.is_empty() { "\\00".into() } else {
+                        bytes.iter().map(|byte| format!("\\{byte:02X}")).collect::<String>()
+                    };
+                    writeln!(ir, "@g1_static_{index}_{pc} = private constant [{} x i8] c\"{data}\", align 1", bytes.len().max(1)).unwrap();
+                }
+            }
+        }
         ir.push_str(include_str!("runtime.ll"));
         let mut declarations = BTreeSet::new();
         for index in 0..self.functions.len() {
@@ -541,6 +554,77 @@ impl<'a, 'p> Body<'a, 'p> {
         }
     }
 
+    /// The portable verifier admits any statically matching variant, while
+    /// execution checks the actual discriminant before selecting its payload.
+    /// Never choose an arbitrary same-index layout or bitcast a different type.
+    fn typed_projection(
+        &mut self,
+        pointer: String,
+        layout: Arc<NativeLayout>,
+        fields: &[u32],
+        expected: &VmType,
+        field_count: Option<u32>,
+    ) -> Result<String, LlvmError> {
+        fn admits(layout: &NativeLayout, fields: &[u32], expected: &VmType) -> bool {
+            let Some((&first, rest)) = fields.split_first() else { return &layout.ty == expected; };
+            match &layout.shape {
+                NativeShape::Product(items) => items.get(first as usize).is_some_and(|field| admits(&field.layout, rest, expected)),
+                NativeShape::Enum { variants, .. } => variants.iter().any(|items|
+                    items.get(first as usize).is_some_and(|field| admits(&field.layout, rest, expected))),
+                _ => false,
+            }
+        }
+        let Some((&first, rest)) = fields.split_first() else {
+            return if &layout.ty == expected { Ok(pointer) }
+                else { Err(self.unsupported("native projection result has a different concrete layout")) };
+        };
+        match &layout.shape {
+            NativeShape::Product(items) => {
+                if field_count.is_some_and(|count| count as usize != items.len()) {
+                    return Err(self.unsupported("native projection field count differs from the concrete product"));
+                }
+                let field = items.get(first as usize)
+                    .ok_or_else(|| self.unsupported("native projection index is outside its product"))?;
+                let next = self.value(format!("getelementptr i8, ptr {pointer}, i64 {}", field.offset));
+                self.typed_projection(next, field.layout, rest, expected, None)
+            }
+            NativeShape::Enum { payload_offset, variants } => {
+                let alternatives = variants.iter().enumerate().filter_map(|(tag, items)| {
+                    if field_count.is_some_and(|count| count as usize != items.len()) { return None; }
+                    let field = items.get(first as usize)?;
+                    admits(&field.layout, rest, expected).then_some((tag, field))
+                }).collect::<Vec<_>>();
+                if alternatives.is_empty() { return Err(self.unsupported("native enum has no variant matching the exact projection type")); }
+                let tag = self.value(format!("load i32, ptr {pointer}, align 4"));
+                let rejected = self.label();
+                let join = self.label();
+                let branches = alternatives.iter().map(|_| self.label()).collect::<Vec<_>>();
+                self.line(format!("switch i32 {tag}, label %{rejected} ["));
+                for ((tag, _), branch) in alternatives.iter().zip(&branches) {
+                    self.line(format!("  i32 {tag}, label %{branch}"));
+                }
+                self.line("]");
+                self.block(&rejected);
+                let failure = self.value("call i32 @g1_fault(ptr %ctx, i32 14)");
+                self.line(format!("ret i32 {failure}"));
+                let mut incoming = Vec::new();
+                for ((_, field), branch) in alternatives.into_iter().zip(branches) {
+                    self.block(&branch);
+                    let next = self.value(format!("getelementptr i8, ptr {pointer}, i64 {}", payload_offset + field.offset));
+                    let selected = self.typed_projection(next, field.layout, rest, expected, None)?;
+                    let end = self.label();
+                    self.line(format!("br label %{end}"));
+                    self.block(&end);
+                    self.line(format!("br label %{join}"));
+                    incoming.push(format!("[ {selected}, %{end} ]"));
+                }
+                self.block(&join);
+                Ok(self.value(format!("phi ptr {}", incoming.join(", "))))
+            }
+            _ => Err(self.unsupported("native projection requires a structural resident")),
+        }
+    }
+
     fn emit(&mut self) -> Result<(), LlvmError> {
         writeln!(self.output, "define internal i32 @g1_body_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:", self.index).unwrap();
         let maxargs = 2 * self.plan.max_arguments.max(1);
@@ -642,6 +726,16 @@ impl<'a, 'p> Body<'a, 'p> {
             }
             I::DeclareResult { .. } | I::DeclareFrameCleanup { .. } => {}
             I::ConstUnit { dst } => self.mark(*dst, &[], true),
+            I::ConstStaticData { dst, bytes, .. } => {
+                self.line(format!("store ptr @g1_static_{}_{}, ptr %r{dst}, align 8", self.index, self.pc));
+                let length_slot = self.value(format!("getelementptr i8, ptr %r{dst}, i64 8"));
+                self.line(format!("store i64 {}, ptr {length_slot}, align 8", bytes.len()));
+                self.mark(*dst, &[], true);
+            }
+            I::StaticLen { dst, value } => {
+                let length = self.static_data_word(*value, true);
+                self.store_scalar(*dst, &length)?;
+            }
             I::MakeCallable {
                 dst,
                 callee,
@@ -784,7 +878,10 @@ impl<'a, 'p> Body<'a, 'p> {
                 } else {
                     (self.pointer(*src), self.data.layouts[*src as usize].clone())
                 };
-                let (pointer, _) = self.projection(pointer, layout, fields)?;
+                let VmType::Reference { referent, .. } = &self.function.registers[*dst as usize] else {
+                    return Err(self.unsupported("native borrow destination has no reference layout"));
+                };
+                let pointer = self.typed_projection(pointer, layout, fields, referent, None)?;
                 self.store_scalar(*dst, &pointer)?;
             }
             I::DerefCopy { dst, reference } => {
@@ -805,27 +902,33 @@ impl<'a, 'p> Body<'a, 'p> {
                 );
             }
             I::ProjectRecord {
-                dst, base, index, ..
+                dst, base, index, field_count, ..
             }
             | I::ProjectTuple {
-                dst, base, index, ..
+                dst, base, index, field_count, ..
             }
             | I::ProjectArray {
-                dst, base, index, ..
+                dst, base, index, field_count, ..
             } => {
-                let (pointer, layout) = self.projection(
+                let layout = self.data.layouts[*dst as usize].clone();
+                let pointer = self.typed_projection(
                     self.pointer(*base),
                     self.data.layouts[*base as usize].clone(),
                     &[*index],
+                    &layout.ty,
+                    Some(*field_count),
                 )?;
                 self.copy_bytes(&self.pointer(*dst), &pointer, &layout);
                 self.copy_flags(*dst, *base, &[*index]);
             }
             I::TakeProjection { dst, base, fields } => {
-                let (pointer, layout) = self.projection(
+                let layout = self.data.layouts[*dst as usize].clone();
+                let pointer = self.typed_projection(
                     self.pointer(*base),
                     self.data.layouts[*base as usize].clone(),
                     fields,
+                    &layout.ty,
+                    None,
                 )?;
                 self.copy_bytes(&self.pointer(*dst), &pointer, &layout);
                 self.copy_flags(*dst, *base, fields);

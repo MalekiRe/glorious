@@ -5,6 +5,20 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 84: pinned static-data windows across LLVM and VM
+
+Integrated the exact `ce0e4bc3` delta. Shared VM/native ABI 4 and LLVM native
+ABI 6 transport sealed byte and UTF-8 static data as pointer/extent windows.
+Native globals and VM literal sites keep their backing storage alive throughout
+execution, including empty literals. Enum projection validates the active tag,
+field count and expected field type before reading a field window.
+
+The main-tree batch passes all 1,491 tests: 279 unit, 21 fixed-array,
+21 generated-native, 29 native-bridge, 22 request, 38 semantic, 891 service,
+10 static-data and 180 VM tests (`target/integration-native-static-v1.log`).
+This bounded ABI checkpoint does not complete the native callable/effect
+frontier, source-library matrix or overall semantic conformance.
+
 ## Cache 83: mandatory tail transfers across LLVM and VM
 
 Integrated the exact `af6f2b29` and `e470225c` changes. Identical unique-reference

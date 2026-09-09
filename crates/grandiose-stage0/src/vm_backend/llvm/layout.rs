@@ -58,6 +58,7 @@ pub struct NativeTypeLayout {
 pub enum NativeTypeShape {
     Scalar,
     Reference,
+    StaticData,
     Product(Vec<(u64, NativeTypeLayout)>),
     FixedArray {
         element: Box<NativeTypeLayout>,
@@ -86,6 +87,7 @@ impl NativeTypeLayout {
             shape: match &layout.shape {
                 NativeShape::Scalar => NativeTypeShape::Scalar,
                 NativeShape::Reference { .. } => NativeTypeShape::Reference,
+                NativeShape::StaticData => NativeTypeShape::StaticData,
                 NativeShape::Product(NativeFields::Repeated {
                     element,
                     count,
@@ -122,6 +124,7 @@ impl NativeTypeLayout {
         match &self.shape {
             NativeTypeShape::Scalar => bytes.push(0),
             NativeTypeShape::Reference => bytes.push(1),
+            NativeTypeShape::StaticData => bytes.push(5),
             NativeTypeShape::Product(items) => {
                 bytes.push(2);
                 fields(items, bytes);
@@ -182,6 +185,7 @@ fn validate_selected_layout(layout: &NativeLayout) -> Result<(), LlvmError> {
         | VmType::Reference { .. }
         | VmType::RawPointer { .. } => Some((8, 8)),
         VmType::I128 | VmType::U128 => Some((16, 16)),
+        VmType::StaticData { .. } => Some((16, 8)),
         _ => None,
     };
     if let Some((size, alignment)) = expected
@@ -192,7 +196,7 @@ fn validate_selected_layout(layout: &NativeLayout) -> Result<(), LlvmError> {
         ));
     }
     match &layout.shape {
-        NativeShape::Scalar | NativeShape::Reference { .. } => {}
+        NativeShape::Scalar | NativeShape::StaticData | NativeShape::Reference { .. } => {}
         NativeShape::Product(fields) => {
             for field in fields.distinct() {
                 validate_selected_layout(&field.layout)?;

@@ -16,7 +16,7 @@ remain distinct from the generated-code tests in `tests/llvm_native.rs`.
 The initial selected profile is little-endian, 64-bit x86-64 Linux. Its explicit
 LLVM data layout is checked against the shared native storage layouts. Other
 profiles fail closed. Scalar integer widths include i128/u128; records, tuples,
-fixed arrays, enums, references, raw pointers, and zero-sized
+fixed arrays, enums, references, raw pointers, sealed static byte views, and zero-sized
 residents use the same concrete offsets, alignment, stride, and enum tag rules
 as shared VM storage. Initialization metadata is separate from resident bytes.
 
@@ -27,6 +27,9 @@ loads and stores, direct calls, branches, final lexical transfers, source
 destructor glue expressed by admitted operations, and direct mandatory tails.
 Fixed-array patterns include nested elements and sparse remainders; native array
 cleanup loops track dynamically indexed move holes, including zero-sized elements.
+Typed enum projections select the active discriminant's exact payload layout;
+wrong active types or field counts fail before a field is read. Different
+variant offsets are not silently treated as one common struct layout.
 The exact admissible boundary is whole-graph instruction/layout admission, not
 a promise that every operation on the listed type families is supported.
 
@@ -83,6 +86,17 @@ referent backing address is preserved. Source Drop glue remains the exact checke
 source implementation bound by the full code identity; no same-shaped foreign
 destructor is selected by a symbol name.
 
+Sealed UTF-8 and raw-u8 static data uses two native words: an immutable byte
+pointer followed by its `usize` extent. The checked type identity carries its
+tag and alignment; no Rust/VM handle is stored in those words. LLVM emits an
+immutable allocation per literal site, and the VM retains its own literal-site
+allocations for the execution data domain. Both engines pass and derive views
+over the original allocation without copying its bytes. Module/import owners
+pin generated constants until execution ends; external unsafe bindings must
+provide the same lifetime and immutability. Private VM views never escape through
+the public i64 runner. Invalid null/overflowing extents and unsupported static
+tags/layouts reject before the resident can be accessed.
+
 The mixed VM execution adapter remains private; it is not published or serialized
 as portable verified bytecode. Its native bodies are the LLVM implementations of
 the original immutable verified body graph, so tail preservation is reconstructed
@@ -104,6 +118,7 @@ generated capability name. Ordinary native result slots require complete values.
 
 Source tests run actual LLVM↔VM chains at O0 and O2, including unique-reference
 mutation and return, raw observation of unchanged reference backing addresses,
+static byte/UTF-8 slots, empty literals, stable literal-site addresses and derived views,
 owned records/results, fixed-array results and VM patterns, linear zero-sized
 owners, and once-only source Drop on both sides. Tests also cover partially
 moved records and nested array/enum owners. They run the
@@ -136,13 +151,11 @@ outward effects, resumptions, or captured lexical control. Float conversions,
 private dynamic-array/text layouts, and some pattern/projection forms are also
 rejected. Ordinary closed-graph VM calls from native bodies are supported;
 they are not yet a public callable-value ABI. Pointer address/cast/comparison and
-size/alignment intrinsics are supported. Static-data machine leaves remain
-unavailable until the shared static-data slot layout is implemented.
+size/alignment and static-data machine leaves are supported.
 
 The public runner currently exposes only a zero-argument i64 entry. Expanding the boundary
 requires source-level differential tests and actual generated LLVM↔VM calls for
-callable values, static data, and
-supported outward control contracts.
+callable values and supported outward control contracts.
 
 Run the targeted regression with:
 

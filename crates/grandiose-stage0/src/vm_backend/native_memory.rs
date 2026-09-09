@@ -26,6 +26,7 @@ pub(super) struct NativeMemory {
     /// Source `'static` values live for this execution's module/data domain;
     /// no public runner returns a reference beyond that domain.
     static_data: BTreeMap<usize, Arc<[u8]>>,
+    static_literals: BTreeMap<(super::DefKey, usize), Arc<[u8]>>,
     /// Authority installed by the explicit native runner after exact linking.
     /// It is never obtained from an artifact or an ambient process registry.
     pub(super) imports: Option<Arc<super::native_bridge::BoundNativeImports>>,
@@ -48,6 +49,14 @@ fn error(message: &'static str) -> VmArtifactError {
 }
 
 impl NativeMemory {
+    /// Keep a source literal's genuine allocation stable for this execution's
+    /// data domain, even after all of its temporary view slots are retired.
+    pub(super) fn static_literal(&mut self, function: super::DefKey, pc: usize, bytes: &[u8]) -> StaticBytes {
+        let bytes = self.static_literals.entry((function, pc))
+            .or_insert_with(|| Arc::from(bytes)).clone();
+        self.static_data.entry(bytes.as_ptr().addr()).or_insert_with(|| bytes.clone());
+        StaticBytes(StaticBytesBacking::Owned(bytes))
+    }
     pub(super) fn profiled() -> Self {
         Self { measurements: Some(Rc::default()), ..Self::default() }
     }
@@ -183,6 +192,43 @@ impl NativeMemory {
     }
 }
 
+/// Private interpreter view of immutable data, never the native payload. A
+/// native slot is exactly the pointer and extent below, with no Rust handle.
+#[derive(Clone, Debug)]
+pub(super) struct StaticBytes(StaticBytesBacking);
+
+#[derive(Clone, Debug)]
+enum StaticBytesBacking {
+    Owned(Arc<[u8]>),
+    Native { pointer: *const u8, length: usize },
+}
+
+impl StaticBytes {
+    /// # Safety
+    /// These bytes are immutable, valid and pinned for the execution's entire
+    /// data domain. Generated libraries are pinned by the active module/import
+    /// owners; an external unsafe binding must provide the same static lifetime.
+    unsafe fn native(pointer: *const u8, length: usize) -> Result<Self, VmArtifactError> {
+        if pointer.is_null() || length > isize::MAX as usize
+            || pointer.addr().checked_add(length).is_none() {
+            return Err(error("native static-data view has an invalid pointer or extent"));
+        }
+        Ok(Self(StaticBytesBacking::Native { pointer, length }))
+    }
+}
+
+impl std::ops::Deref for StaticBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        match &self.0 {
+            StaticBytesBacking::Owned(bytes) => bytes,
+            // SAFETY: only `native` constructs this arm under the data-domain
+            // obligation above. No public runner exports this private view.
+            StaticBytesBacking::Native { pointer, length } => unsafe { std::slice::from_raw_parts(*pointer, *length) },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct NativeField {
     pub(super) offset: usize,
@@ -241,6 +287,9 @@ impl<'a> IntoIterator for &'a NativeFields {
 #[derive(Clone, Debug)]
 pub(super) enum NativeShape {
     Scalar,
+    /// Two words: a genuine immutable byte pointer, then its usize extent.
+    /// The static tag and element alignment are frozen in `NativeLayout::ty`.
+    StaticData,
     /// A checked reference is one genuine referent pointer in storage. Its
     /// pointee layout is resolved lazily so indirection terminates recursive
     /// layouts; the descriptor table is metadata, never resident bytes.
@@ -273,7 +322,7 @@ impl NativeLayout {
             if !seen.insert(key) { return true; }
             if depth >= 96 { return false; }
             match &layout.shape {
-                NativeShape::Scalar => true,
+                NativeShape::Scalar | NativeShape::StaticData => true,
                 NativeShape::Reference { referent, .. } => native_layout(referent, descriptors, &mut vec![])
                     .is_ok_and(|layout| visit(&layout, descriptors, seen, depth + 1)),
                 NativeShape::Product(fields) => fields.distinct().all(|field| visit(&field.layout, descriptors, seen, depth + 1)),
@@ -501,6 +550,12 @@ pub(super) fn native_layout(
         }
         VmType::U128 | VmType::I128 => MemoryLayout::of::<u128>(),
         VmType::RawPointer { .. } => MemoryLayout::of::<*mut u8>(),
+        VmType::StaticData { element, tag, alignment: 1 }
+            if element.as_ref() == &VmType::U8
+                && matches!(*tag, crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG) => {
+            return Ok(NativeLayout { ty: ty.clone(),
+                memory: MemoryLayout::of::<[*const u8; 2]>(), shape: NativeShape::StaticData });
+        }
         VmType::Reference { unique, referent } => {
             return Ok(NativeLayout {
                 ty: ty.clone(),
@@ -602,6 +657,13 @@ impl NativeLayout {
             };
         }
         match &self.shape {
+            NativeShape::StaticData => {
+                let pointer = unsafe { source.cast::<*const u8>().read() };
+                let length = unsafe { source.add(std::mem::size_of::<usize>()).cast::<usize>().read() };
+                let bytes = unsafe { StaticBytes::native(pointer, length)? };
+                let VmType::StaticData { tag, alignment, .. } = &self.ty else { unreachable!() };
+                Ok(VmValue::StaticData { tag: *tag, alignment: *alignment, bytes, offset: 0, length })
+            }
             NativeShape::Reference { referent, unique, descriptors } => {
                 // SAFETY: an initialized reference resident stores a genuine
                 // pointer; reading it as a pointer retains its provenance.
@@ -709,6 +771,14 @@ impl NativeLayout {
         }
         match (&self.shape, value) {
             (_, VmValue::Resident(home)) => unsafe { home.write_bytes(destination)?; },
+            (NativeShape::StaticData, VmValue::StaticData { bytes, offset, length, .. }) => {
+                let end = offset.checked_add(length).ok_or_else(|| error("static byte window overflow"))?;
+                if bytes.get(offset..end).is_none() { return Err(error("static byte window exceeds its backing storage")); }
+                unsafe {
+                    destination.cast::<*const u8>().write(bytes.as_ptr().add(offset));
+                    destination.add(std::mem::size_of::<usize>()).cast::<usize>().write(length);
+                }
+            }
             (NativeShape::Reference { referent, .. }, VmValue::Reference { target: super::ReferenceTarget::Home(home), fields, .. }) => {
                 let (pointer, layout) = home.project(&fields)?;
                 if &layout.ty != referent || !home.is_fully_initialized(&fields) {
@@ -951,7 +1021,9 @@ pub(super) fn execute_memory_intrinsic(
             // SAFETY: the checked window is within the retained immutable byte
             // allocation; a zero-length endpoint never dereferences its pointer.
             let pointer = unsafe { bytes.as_ptr().add(offset) };
-            budget.native_memory.static_data.entry(bytes.as_ptr().addr()).or_insert(bytes);
+            if let StaticBytesBacking::Owned(bytes) = bytes.0 {
+                budget.native_memory.static_data.entry(bytes.as_ptr().addr()).or_insert(bytes);
+            }
             result_pointer(pointer.cast_mut())
         }
         BorrowShared | BorrowUnique => {
@@ -1026,6 +1098,50 @@ mod tests {
     fn budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
             limits: Default::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn static_data_slots_keep_the_original_allocation_and_site_lifetime() {
+        #[repr(C)]
+        struct Slot { pointer: *const u8, length: usize }
+        let ty = VmType::StaticData { element: Box::new(VmType::U8), tag: crate::STATIC_RAW_U8_DATA_TAG, alignment: 1 };
+        let layout = native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap();
+        assert_eq!((layout.memory.size(), layout.memory.alignment()), (16,8));
+        let mut budget = budget();
+        let key = super::super::DefKey(super::super::Digest::of_bytes(b"static-site"));
+        let bytes = budget.native_memory.static_literal(key, 7, &[20,22]);
+        let pointer = bytes.as_ptr();
+        let value = VmValue::StaticData { tag: crate::STATIC_RAW_U8_DATA_TAG, alignment: 1, bytes, offset: 1, length: 1 };
+        let mut slot = Slot { pointer: ptr::null(), length: 0 };
+        unsafe { layout.write((&mut slot as *mut Slot).cast(), value) }.unwrap();
+        assert_eq!(slot.pointer, unsafe { pointer.add(1) });
+        assert_eq!(slot.length, 1);
+        assert_eq!(unsafe { slot.pointer.read() }, 22);
+        let view = unsafe { layout.read((&slot as *const Slot).cast(), &mut budget) }.unwrap();
+        let VmValue::StaticData { bytes, .. } = view else { panic!() };
+        assert_eq!(bytes.as_ptr(), slot.pointer, "native return must not allocate or marshal bytes");
+        assert_eq!(&*bytes, &[22]);
+        assert_eq!(budget.native_memory.static_literal(key, 7, &[20,22]).as_ptr(), pointer);
+        assert!(budget.native_memory.allocations.is_empty(), "static data is not a raw owned allocation");
+    }
+
+    #[test]
+    fn malformed_static_extents_and_layout_tags_fail_before_access() {
+        for (pointer, length) in [
+            (ptr::null(),0), (ptr::null(),1),
+            (ptr::without_provenance(1),usize::MAX),
+            (ptr::without_provenance(usize::MAX),1),
+        ] {
+            assert!(unsafe { StaticBytes::native(pointer, length) }.is_err());
+        }
+        for (element, tag, alignment) in [
+            (VmType::U16, crate::STATIC_RAW_U8_DATA_TAG, 1),
+            (VmType::U8, crate::STATIC_RAW_U8_DATA_TAG, 2),
+            (VmType::U8, 7, 1),
+        ] {
+            let ty = VmType::StaticData { element: Box::new(element), tag, alignment };
+            assert!(native_layout(&ty, &Arc::from([]), &mut vec![]).is_err());
+        }
     }
 
     #[test]

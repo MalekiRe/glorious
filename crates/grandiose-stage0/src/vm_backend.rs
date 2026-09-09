@@ -9833,7 +9833,7 @@ enum VmValue {
     StaticData {
         tag: u128,
         alignment: u32,
-        bytes: Arc<[u8]>,
+        bytes: native_memory::StaticBytes,
         offset: usize,
         length: usize,
     },
@@ -12172,7 +12172,7 @@ fn expect_text(value: impl Borrow<VmValue>) -> Result<Arc<str>, VmArtifactError>
 }
 fn expect_static_utf8(
     value: impl Borrow<VmValue>,
-) -> Result<(Arc<[u8]>, usize, usize), VmArtifactError> {
+) -> Result<(native_memory::StaticBytes, usize, usize), VmArtifactError> {
     match value.borrow() {
         VmValue::StaticData {
             tag: crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG,
@@ -12793,7 +12793,7 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::StaticData {
                     tag,
                     alignment,
-                    bytes: Arc::from(bytes),
+                    bytes: budget.native_memory.static_literal(function.definition, pc, &bytes),
                     offset: 0,
                     length,
                 });
@@ -15345,7 +15345,7 @@ fn execute_program_with_tail_boundary(
                 registers[*dst as usize] = Some(VmValue::StaticData {
                     tag: *tag,
                     alignment: *alignment,
-                    bytes: Arc::from(bytes.as_slice()),
+                    bytes: budget.native_memory.static_literal(function.definition, pc, bytes),
                     offset: 0,
                     length: bytes.len(),
                 });

@@ -20,7 +20,7 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 5;
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 6;
 pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:mixed-tail-v5";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
@@ -356,6 +356,9 @@ impl NativeContext {
             13 => VmArtifactError::NativeAbi {
                 message: "native result requires a fully initialized source resident",
             },
+            14 => VmArtifactError::NativeMemory {
+                message: "native enum projection does not match the active variant layout",
+            },
             6 => VmArtifactError::NativeAbi {
                 message: "native execution reached a verified terminal trap",
             },
@@ -372,4 +375,58 @@ pub struct LlvmExecutionProfile {
     pub instructions: u64,
     pub peak_call_depth: u32,
     pub recycled_tail_calls: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vm_backend::{VmFunction, VmInstruction as I, VmNominalCopyDescriptor, verify_program};
+
+    #[test]
+    fn native_enum_projection_checks_the_active_type_and_field_count() {
+        for count_mismatch in [false, true] {
+            let definition = DefKey(Digest::of_bytes(b"native-projection-type"));
+            let entry = DefKey(Digest::of_bytes(b"native-projection-entry"));
+            let nominal = VmType::Nominal { definition, arguments: vec![] };
+            let descriptor = VmNominalCopyDescriptor {
+                definition, source_contract: Digest::of_bytes(b"native-projection-source"),
+                is_enum: true, arguments: vec![],
+                variants: if count_mismatch { vec![vec![VmType::I64,VmType::I64],vec![VmType::I64]] }
+                    else { vec![vec![VmType::I64],vec![VmType::Bool]] },
+            };
+            let function = VmFunction {
+                definition: entry, safety: crate::Safety::Safe, unsafe_execution: false,
+                nominal_copy_descriptors: vec![descriptor], captures: 0, parameters: 0,
+                registers: vec![VmType::I64,VmType::Bool,nominal,VmType::I64],
+                instructions: vec![
+                    I::DeclareResult { result: VmType::I64, returns: true },
+                    I::ConstI64 { dst: 0, value: 42 }, I::ConstBool { dst: 1, value: true },
+                    I::MakeEnumOwned { dst: 2, definition, variant: 1,
+                        fields: vec![if count_mismatch { 0 } else { 1 }],
+                        field_types: vec![if count_mismatch { VmType::I64 } else { VmType::Bool }] },
+                    if count_mismatch {
+                        I::ProjectRecord { dst: 3, base: 2, index: 0, field_count: 2, field_type: VmType::I64 }
+                    } else { I::TakeProjection { dst: 3, base: 2, fields: vec![0] } },
+                    I::Return { value: 3 },
+                ],
+            };
+            let mut candidate = CandidateVmProgram {
+                schema: crate::STAGE0_VM_SCHEMA, runtime_manifest: None, host_capabilities: vec![],
+                entry, functions: [(entry,function)].into(), callable_environments: Default::default(),
+                fingerprint: Digest::of_bytes(b"pending"),
+            };
+            candidate.fingerprint = candidate.computed_fingerprint();
+            let verified = verify_program(candidate).unwrap();
+            assert!(verified.run_i64().is_err(), "VM must reject the wrong active payload");
+            let ir = LlvmIrProgram::lower_partitioned(verified, Digest::of_bytes(b"projection-runtime-test"),
+                LlvmTarget::host().unwrap(), Default::default()).unwrap();
+            for optimization in [0,2] {
+                let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert!(matches!(native.run_i64_with_limits(Default::default()),
+                    Err(LlvmError::Runtime(VmArtifactError::NativeMemory {
+                        message: "native enum projection does not match the active variant layout",
+                    }))));
+            }
+        }
+    }
 }

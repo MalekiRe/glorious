@@ -2,6 +2,13 @@ use super::{Body, LlvmError, NativeLayout, VmType, layout};
 use crate::MemoryPrimitive as M;
 
 impl Body<'_, '_> {
+    pub(super) fn static_data_word(&mut self, register: u32, length: bool) -> String {
+        let pointer = if length {
+            self.value(format!("getelementptr i8, ptr %r{register}, i64 8"))
+        } else { self.pointer(register) };
+        let ty = if length { "i64" } else { "ptr" };
+        self.value(format!("load {ty}, ptr {pointer}, align 8"))
+    }
     fn memory_layout(&self, ty: &VmType) -> Result<std::sync::Arc<NativeLayout>, LlvmError> {
         layout::concrete_layout(ty, &self.function.nominal_copy_descriptors.clone().into())
     }
@@ -170,7 +177,8 @@ impl Body<'_, '_> {
                 self.mark(dst, &[], true);
             }
             M::StaticBytesLen | M::StaticUtf8Address | M::StaticBytesAddress => {
-                return Err(self.unsupported("native static-data slot ABI is not implemented"));
+                let word = self.static_data_word(arguments[0], primitive == M::StaticBytesLen);
+                self.store_scalar(dst, &word)?;
             }
         }
         Ok(())

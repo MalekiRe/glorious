@@ -47,7 +47,7 @@ pub struct VmNativeAbi {
 impl VmNativeAbi {
     pub fn current() -> Self {
         Self {
-            generation: 3,
+            generation: 4,
             architecture: std::env::consts::ARCH.into(),
             operating_system: std::env::consts::OS.into(),
             pointer_bits: usize::BITS,
@@ -67,6 +67,9 @@ pub struct VmNativeLayoutField {
 pub enum VmNativeLayoutShape {
     Scalar,
     Reference,
+    /// Immutable byte pointer at offset zero, followed by a usize extent.
+    /// Backing remains pinned for the complete execution data domain.
+    StaticData,
     Product(Vec<VmNativeLayoutField>),
     Repeated { element: Box<VmNativeLayout>, count: usize, stride: usize },
     Enum {
@@ -102,6 +105,7 @@ impl From<&NativeLayout> for VmNativeLayout {
             shape: match &layout.shape {
                 NativeShape::Scalar => VmNativeLayoutShape::Scalar,
                 NativeShape::Reference { .. } => VmNativeLayoutShape::Reference,
+                NativeShape::StaticData => VmNativeLayoutShape::StaticData,
                 NativeShape::Product(super::native_memory::NativeFields::Repeated { element, count, stride }) =>
                     VmNativeLayoutShape::Repeated { element: Box::new(Self::from(element.as_ref())), count: *count, stride: *stride },
                 NativeShape::Product(items) => VmNativeLayoutShape::Product(fields(items)),

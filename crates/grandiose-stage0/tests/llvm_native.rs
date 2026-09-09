@@ -41,6 +41,8 @@ fn actual_llvm_native_scalar_control_matches_vm_at_o0_and_o2() {
         "fn add(left: i64, right: i64) -> i64 { left + right } pub fn main() -> i64 { add(40, 2) }",
         "struct Pair { first: i64, second: i64 } fn sum(value: &Pair) -> i64 { value.first + value.second } pub fn main() -> i64 { let pair = Pair { first: 40, second: 2 }; sum(&pair) }",
         "enum Choice { Yes(i64), No } fn choose(value: Choice) -> i64 { handle value { Choice::Yes(number) => number, Choice::No => 0 } } pub fn main() -> i64 { choose(Choice::Yes(42)) }",
+        "enum Choice { Small(u8,i64), Wide(i128,i64), Other(Bool) } fn choose(value: Choice) -> i64 { handle value { Choice::Small(_,number) => number, Choice::Wide(_,number) => number, _ => 0 } } pub fn main() -> i64 { choose(Choice::Small(1,20)) + choose(Choice::Wide(1,22)) }",
+        "enum Inner { Number(i64), Flag(Bool) } enum Outer { Nested(Inner), Number(i128) } fn choose(value: &Outer) -> i64 { handle *value { Outer::Nested(Inner::Number(number)) => number, _ => 0 } } pub fn main() -> i64 { let value = Outer::Nested(Inner::Number(42)); choose(&value) }",
         "fn update(value: &mut i64) { *value = *value + 2; } pub fn main() -> i64 { let mut value = 40; update(&mut value); value }",
         "pub fn main() -> i64 { let value: i128 = 170141183460469231731687303715884105700; handle value + 27 == 170141183460469231731687303715884105727 { true => 42, false => 0 } }",
         "pub fn main() -> i64 { let left: f64 = 8.5; let right: f64 = 3.0; handle left % right == 2.5 { true => 42, false => 0 } }",
@@ -82,6 +84,79 @@ fn actual_native_source_destructors_and_zero_sized_residents() {
         }
         .unwrap();
         assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
+}
+
+#[test]
+fn static_byte_and_utf8_slots_share_native_backing_across_engines() {
+    for source in [
+        "fn literal() -> Slice<'static,u8> { b\"*\" } pub fn main() -> i64 { handle *Slice::get_unchecked(literal(), 0) == 42 { true => 42, false => 0 } }",
+        "fn literal() -> Str<'static> { \"é🙂\" } pub fn main() -> i64 { handle Str::len(literal()) == 6 { true => 42, false => 0 } }",
+        "pub fn main() -> i64 { let value: Slice<'static,u8> = b\"\"; handle Slice::len(&value) == 0 { true => 42, false => 0 } }",
+        "pub fn main() -> i64 { handle Str::len(\"\") == 0 { true => 42, false => 0 } }",
+    ] {
+        let ir = compile(source);
+        assert_eq!(unsafe { ir.vm_program().run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        let wrappers = ir.function_keys().iter().copied().filter(|key| {
+            let function = ir.function(*key).unwrap();
+            function.parameters > 0 && matches!(function.registers[0], grandiose_stage0::VmType::StaticData { .. })
+        }).collect::<Vec<_>>();
+        let literals = ir.function_keys().iter().copied().filter(|key| {
+            ir.function(*key).unwrap().instructions.iter().any(|instruction|
+                matches!(instruction, grandiose_stage0::VmInstruction::ConstStaticData { .. }))
+        }).collect::<Vec<_>>();
+        assert!(!wrappers.is_empty() && !literals.is_empty());
+        for plan in [ir.clone(), ir.with_vm_functions(wrappers).unwrap(), ir.with_vm_functions(literals).unwrap()] {
+            for optimization in [0,2] {
+                let native = unsafe { plan.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert_eq!(unsafe { native.run_i64_with_unsafe(Default::default()) }
+                    .unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
+            }
+        }
+    }
+}
+
+#[test]
+fn static_literal_addresses_and_derived_views_survive_engine_returns() {
+    for marker in ["", "let marker = 41001;"] {
+        let source = format!("use std::*;
+            fn literal() -> Slice<'static,u8> {{ {marker} b\"!*\" }}
+            fn vm_observe<'a>(value: Slice<'a,u8>, expected: *const u8) -> i64 {{
+                let marker = 41001;
+                handle ptr_eq(ptr_from_ref(Slice::get_unchecked(value, 0)), expected) {{
+                    true => handle *Slice::get_unchecked(value,0) == 42 {{ true => 42, false => 0 }}, false => 0,
+                }}
+            }}
+            fn native_relay<'a>(value: Slice<'a,u8>, expected: *const u8) -> i64 {{
+                handle Slice::slice(value, Range {{ start: 1, end: 2 }}) {{
+                    Result::Ok(view) => vm_observe(view, expected), Result::Err(_) => 0,
+                }}
+            }}
+            pub fn main() -> i64 {{
+                let marker = 41002;
+                let value = literal(); let again = literal();
+                let expected = ptr_from_ref(Slice::get_unchecked(value,1));
+                handle ptr_eq(ptr_from_ref(Slice::get_unchecked(again,1)), expected) {{
+                    true => native_relay(value,expected), false => 0,
+                }}
+            }}");
+        let mut input = request(&source);
+        input.sources.push(SourceInput::new(
+            PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(),
+            format!("{}\n{}\n{}", include_str!("../../../stdlib/src/lib.glorious"),
+                include_str!("../../../stdlib/src/foundation.glorious"),
+                include_str!("../../../stdlib/src/memory.glorious")).as_bytes(),
+        ));
+        let ir = StageZeroCompiler::new().compile_llvm_partitioned(input, LlvmTarget::host().unwrap(), |function|
+            function.instructions.iter().any(|instruction| matches!(instruction,
+                grandiose_stage0::VmInstruction::ConstI64 { value: 41001 | 41002, .. })))
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        assert_eq!(unsafe { ir.vm_program().run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        for optimization in [0,2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(unsafe { native.run_i64_with_unsafe(Default::default()) }
+                .unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
+        }
     }
 }
 

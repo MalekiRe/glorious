@@ -970,7 +970,7 @@ impl NativeHome {
                     home.state.borrow_mut().variants.insert(path.clone(), tag);
                     (*payload_offset, fields)
                 }
-                NativeShape::Scalar | NativeShape::Reference { .. } => {
+                NativeShape::Scalar | NativeShape::StaticData | NativeShape::Reference { .. } => {
                     let value = unsafe { layout.read(pointer, budget)? };
                     if let VmValue::Reference {
                         target,
@@ -1124,7 +1124,7 @@ impl NativeHome {
                     }
                     Ok(false)
                 }
-                NativeShape::Scalar => Ok(false),
+                NativeShape::Scalar | NativeShape::StaticData => Ok(false),
             }
         }
         inspect(&self.layout, budget)
@@ -1356,7 +1356,7 @@ impl NativeHome {
         }
         if matches!(
             layout.shape,
-            NativeShape::Scalar | NativeShape::Reference { .. }
+            NativeShape::Scalar | NativeShape::StaticData | NativeShape::Reference { .. }
         ) {
             return self.load_leaf(&layout, pointer, path, budget);
         }

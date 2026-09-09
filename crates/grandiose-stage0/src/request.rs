@@ -244,7 +244,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
 // retains every conjunct in a `where T: A + B` bound rather than ignoring B.
 // Cache 83 preserves identity unique-reference tail results through joins
 // and introduces the private mixed LLVM/VM mandatory-tail dispatcher (ABI 5).
-pub const STAGE0_CACHE_GENERATION: u32 = 83;
+// Cache 84 pins static literal sites and admits exact shared byte-view slots
+// (native ABI 4 / LLVM ABI 6), with checked heterogeneous enum projections.
+pub const STAGE0_CACHE_GENERATION: u32 = 84;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
