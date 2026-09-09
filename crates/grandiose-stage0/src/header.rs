@@ -1452,25 +1452,28 @@ impl Parser<'_> {
                 self.error("G3256", "expected `:` in where bound");
                 break;
             }
-            let predicate = if self.word().is_some_and(|word| word.starts_with('\'')) {
-                let lifetime = self.identifier().unwrap();
-                if let Some(longer) = region_subject {
-                    PredicateHeader::RegionOutlives { longer, shorter: lifetime }
+            loop {
+                let predicate = if self.word().is_some_and(|word| word.starts_with('\'')) {
+                    let lifetime = self.identifier().unwrap();
+                    if let Some(longer) = &region_subject {
+                        PredicateHeader::RegionOutlives { longer: longer.clone(), shorter: lifetime }
+                    } else {
+                        PredicateHeader::TypeOutlives { subject: subject.clone(), lifetime }
+                    }
                 } else {
-                    PredicateHeader::TypeOutlives { subject, lifetime }
-                }
-            } else {
-                if region_subject.is_some() {
-                    self.error("G3335", "a region predicate requires an outlives lifetime");
-                }
-                PredicateHeader::Trait { subject, relation: self.trait_ref() }
-            };
-            let end = self.previous().unwrap_or(start);
-            bounds.push(WhereBoundHeader {
-                universal,
-                predicate,
-                span: self.span(start, end),
-            });
+                    if region_subject.is_some() {
+                        self.error("G3335", "a region predicate requires an outlives lifetime");
+                    }
+                    PredicateHeader::Trait { subject: subject.clone(), relation: self.trait_ref() }
+                };
+                let end = self.previous().unwrap_or(start);
+                bounds.push(WhereBoundHeader {
+                    universal: universal.clone(),
+                    predicate,
+                    span: self.span(start, end),
+                });
+                if !self.operator("+") { break; }
+            }
             if !self.punctuation(',') {
                 break;
             }

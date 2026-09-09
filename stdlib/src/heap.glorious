@@ -6,7 +6,7 @@ fn heap_sift_up<T>(values: &mut Vec<T>, child: usize) where T: Ord {
         true => (),
         false => {
             let parent = (child - 1) / 2;
-            handle Ord::compare(Vec::get_unchecked(values, parent), Vec::get_unchecked(values, child)) {
+            handle Ord::cmp(Vec::get_unchecked(values, parent), Vec::get_unchecked(values, child)) {
                 Ordering::Less => { Vec::swap(&mut *values, parent, child); tail heap_sift_up(values, parent) },
                 _ => (),
             }
@@ -23,11 +23,11 @@ fn heap_sift_down<T>(values: &mut Vec<T>, parent: usize) where T: Ord {
             let right = left + 1;
             let child = handle right < length {
                 false => left,
-                true => handle Ord::compare(Vec::get_unchecked(values, left), Vec::get_unchecked(values, right)) {
+                true => handle Ord::cmp(Vec::get_unchecked(values, left), Vec::get_unchecked(values, right)) {
                     Ordering::Less => right, _ => left,
                 },
             };
-            handle Ord::compare(Vec::get_unchecked(values, parent), Vec::get_unchecked(values, child)) {
+            handle Ord::cmp(Vec::get_unchecked(values, parent), Vec::get_unchecked(values, child)) {
                 Ordering::Less => { Vec::swap(&mut *values, parent, child); tail heap_sift_down(values, child) },
                 _ => (),
             }

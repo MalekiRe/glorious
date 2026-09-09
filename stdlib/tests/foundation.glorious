@@ -3,15 +3,21 @@ use std::*;
 pub fn main() -> i64 {
     // Alias equality is the single structural Result policy, including unit
     // payloads; no Bool- or Option-specific overlapping implementation.
-    assert_true(Eq::eq(&true, &true));
-    assert_true(!Eq::eq(&true, &false));
+    assert_true(PartialEq::eq(&true, &true));
+    assert_true(!PartialEq::eq(&true, &false));
     let empty: Option<i64> = None;
-    assert_true(Eq::eq(&empty, &empty));
+    assert_true(PartialEq::eq(&empty, &empty));
+    let zero: Option<f64> = Some(-0.0);
+    let nan: Option<f64> = Some(0.0 / 0.0);
+    assert_true(Result::contains(&zero, &0.0));
+    assert_true(not(Result::contains(&nan, &(0.0 / 0.0))));
+    let error: Result<(),f32> = Result::Err(-0.0);
+    assert_true(Result::contains_err(&error, &0.0));
     let left = Result<String,u8>::Ok(owned("retained"));
     let right = Result<String,u8>::Ok(owned("retained"));
-    assert_true(Eq::eq(&left, &right));
-    assert_true(Eq::eq(&left, &right));
-    assert_true(!Eq::eq(&Result<i64,u8>::Ok(1), &Result<i64,u8>::Err(1)));
+    assert_true(PartialEq::eq(&left, &right));
+    assert_true(PartialEq::eq(&left, &right));
+    assert_true(!PartialEq::eq(&Result<i64,u8>::Ok(1), &Result<i64,u8>::Err(1)));
     let parsed = Bool::parse("false");
     let score = handle parsed {
         Result::Ok(value) => handle value { true => 0, false => 10 },

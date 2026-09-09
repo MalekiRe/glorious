@@ -69,8 +69,8 @@ pub fn class(value: Class) -> u32 {
 }
 pub fn compare_span(left: &Span, right: &Span) -> Ordering {
     handle identity::compare_digest(left.file.digest, right.file.digest) {
-        Ordering::Equal => handle Ord::compare(&left.start, &right.start) {
-            Ordering::Equal => Ord::compare(&left.end, &right.end), order => order,
+        Ordering::Equal => handle Ord::cmp(&left.start, &right.start) {
+            Ordering::Equal => Ord::cmp(&left.end, &right.end), order => order,
         },
         order => order,
     }
@@ -89,7 +89,7 @@ pub fn compare_fact(left: &CompileDiagnostic, right: &CompileDiagnostic) -> Orde
 fn fact_class(left: &CompileDiagnostic, right: &CompileDiagnostic) -> Ordering {
     let a = class(left.class);
     let b = class(right.class);
-    handle Ord::compare(&a, &b) {
+    handle Ord::cmp(&a, &b) {
         Ordering::Equal => handle compare_severity(left.severity, right.severity) {
             Ordering::Equal => handle compare_primary(left.primary, right.primary) {
                 Ordering::Equal => identity::compare_text(&left.message, &right.message), order => order,
@@ -102,13 +102,13 @@ fn fact_class(left: &CompileDiagnostic, right: &CompileDiagnostic) -> Ordering {
 fn compare_severity(left: Severity, right: Severity) -> Ordering {
     let a = severity(left);
     let b = severity(right);
-    Ord::compare(&a, &b)
+    Ord::cmp(&a, &b)
 }
 fn absent(primary: Option<Span>) -> u32 { handle primary { Result::Err(_) => 1, Result::Ok(_) => 0 } }
 pub fn compare_presentation(left: &CompileDiagnostic, right: &CompileDiagnostic) -> Ordering {
     let a = absent(left.primary);
     let b = absent(right.primary);
-    handle Ord::compare(&a, &b) {
+    handle Ord::cmp(&a, &b) {
         Ordering::Equal => handle compare_primary(left.primary, right.primary) {
             Ordering::Equal => handle compare_severity(left.severity, right.severity) {
                 Ordering::Equal => compare_fact(left, right), order => order,
@@ -119,20 +119,41 @@ pub fn compare_presentation(left: &CompileDiagnostic, right: &CompileDiagnostic)
     }
 }
 pub impl Ord for Related {
-    compare(left: &Related, right: &Related) -> Ordering {
+    cmp(left: &Related, right: &Related) -> Ordering {
         handle identity::compare_text(&left.label, &right.label) { Ordering::Equal => compare_span(&left.span, &right.span), order => order }
     }
 }
+pub impl PartialOrd for Related {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+pub impl PartialEq for Related {
+    fn eq(left: &Self, right: &Self) -> Bool { handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false } }
+}
+pub impl Eq for Related {}
 pub impl Ord for Fact {
-    compare(left: &Fact, right: &Fact) -> Ordering {
+    cmp(left: &Fact, right: &Fact) -> Ordering {
         handle identity::compare_text(&left.name, &right.name) { Ordering::Equal => identity::compare_text(&left.value, &right.value), order => order }
     }
 }
+pub impl PartialOrd for Fact {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+pub impl PartialEq for Fact {
+    fn eq(left: &Self, right: &Self) -> Bool { handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false } }
+}
+pub impl Eq for Fact {}
 pub impl Ord for Explanation {
-    compare(left: &Explanation, right: &Explanation) -> Ordering {
+    cmp(left: &Explanation, right: &Explanation) -> Ordering {
         handle identity::compare_text(&left.kind, &right.kind) { Ordering::Equal => identity::compare_text(&left.message, &right.message), order => order }
     }
 }
+pub impl PartialOrd for Explanation {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+pub impl PartialEq for Explanation {
+    fn eq(left: &Self, right: &Self) -> Bool { handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false } }
+}
+pub impl Eq for Explanation {}
 
 pub fn begin(limits: Limits, policy: Policy) -> Builder {
     Builder { limits: limits, work: Result::Ok(Work { values: Vec::new(), output: Vec::new(), phase: Phase::Recording,
@@ -387,7 +408,7 @@ fn sort_step<T>(values: &mut Vec<T>, outer: usize, inner: usize) -> Cursor where
         true => handle Vec::len(& *values) { 0 => Cursor::Done, _ => Cursor::Dedup { read: 1, write: 1 } },
         false => handle inner == 0 {
             true => Cursor::Sort { outer: outer + 1, inner: outer + 1 },
-            false => handle Ord::compare(Vec::get_unchecked(& *values, inner - 1), Vec::get_unchecked(& *values, inner)) {
+            false => handle Ord::cmp(Vec::get_unchecked(& *values, inner - 1), Vec::get_unchecked(& *values, inner)) {
                 Ordering::Greater => { Vec::swap(values, inner - 1, inner); Cursor::Sort { outer: outer, inner: inner - 1 } },
                 _ => Cursor::Sort { outer: outer + 1, inner: outer + 1 },
             },
@@ -397,7 +418,7 @@ fn sort_step<T>(values: &mut Vec<T>, outer: usize, inner: usize) -> Cursor where
 fn dedup_step<T>(values: &mut Vec<T>, read: usize, write: usize) -> Cursor where T: Ord {
     handle read == Vec::len(& *values) {
         true => Cursor::Trim { length: write },
-        false => handle Ord::compare(Vec::get_unchecked(& *values, read), Vec::get_unchecked(& *values, write - 1)) {
+        false => handle Ord::cmp(Vec::get_unchecked(& *values, read), Vec::get_unchecked(& *values, write - 1)) {
             Ordering::Equal => Cursor::Dedup { read: read + 1, write: write },
             _ => {
                 Vec::swap(values, read, write);

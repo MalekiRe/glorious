@@ -173,14 +173,15 @@ pub fn discard<T>(value: T) where T: Use<[0,1]>;
 ### 3.1 Fundamental ordinary traits
 
 ```glorious
-pub trait Eq {
+pub trait PartialEq {
     fn eq(left: &Self, right: &Self) -> Bool;
 }
-pub trait Ord: Eq {
-    fn cmp(left: &Self, right: &Self) -> Ordering;
-}
-pub trait PartialOrd: Eq {
+pub trait Eq: PartialEq {}
+pub trait PartialOrd: PartialEq {
     fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering>;
+}
+pub trait Ord: Eq + PartialOrd {
+    fn cmp(left: &Self, right: &Self) -> Ordering;
 }
 pub trait Hash {
     fn hash(value: &Self, state: &mut Hasher);
@@ -208,7 +209,7 @@ pub fn as<T,S>(value: S) -> T where S: As<T>;
 pub fn try_as<T,S>(value: S) -> Result<T,S::Error> where S: TryAs<T>;
 ```
 
-Eq is an equivalence relation. Ord is a total order consistent with Eq. Hash must feed identical streams for equal values, though unequal values may collide. Clone produces an independently owned logical value; it grants no additional uses of the original owner. TryAs implementations must preserve required ownership on their Error path, ordinarily by using `Rejected<Self,Reason>` as Error when Self is not discardable.
+PartialEq is symmetric and transitive where comparison is defined; it need not be reflexive. Eq is a marker strengthening PartialEq to an equivalence relation, including reflexivity. PartialOrd returns None for unordered operands and must agree with PartialEq: Some(Equal) exactly when equality holds. Ord strengthens these contracts to a total order; its partial_cmp returns Some of cmp. These are ordinary coherent traits, with explicit instance families rather than overlapping blanket conversions between traits. Hash must feed identical streams for equal values, though unequal values may collide. Clone produces an independently owned logical value; it grants no additional uses of the original owner. TryAs implementations must preserve required ownership on their Error path, ordinarily by using `Rejected<Self,Reason>` as Error when Self is not discardable.
 
 There is no blanket Clone for every duplicable T if it would overlap structured implementations. Scalar, tuple, Result, String and collection implementations are explicit coherent families. There is no automatic derive framework in this version.
 
@@ -226,7 +227,7 @@ For scalar pairs its Error is ConversionError. User implementations must preserv
 
 ### 3.2 Alias-coherent defaults and formatting
 
-Result has one structural Eq/Ord/Hash policy inherited by Option and Bool. Enum ordering follows declared variant order, then payload order. Option<T> defaults to None without T:Default. Consequently Bool defaults to false. There is no overlapping generic Default for every Result<T,E>.
+Result has one structural PartialEq/Eq/PartialOrd/Ord/Hash policy inherited by Option and Bool. Each instance requires the corresponding payload traits; Eq and Ord are not implied merely by partial comparisons. Enum ordering follows declared variant order, then payload order, propagating unordered payload comparisons within the same variant. Option<T> defaults to None without T:Default. Consequently Bool defaults to false. There is no overlapping generic Default for every Result<T,E>.
 
 Generic Result Debug uses Ok/Err. Bool Display uses true/false and does not coexist with an overlapping blanket Display for every Result. Named `fmt_result` and `fmt_option` adapters provide alternative presentation without alias-dependent trait identity. `Clone::clone` is the canonical operation, not an additional inherent clone name on every container.
 
@@ -268,12 +269,12 @@ pub fn div<L,R>(left: L, right: R) -> L::Output where L: Div<R>;
 pub fn rem<L,R>(left: L, right: R) -> L::Output where L: Rem<R>;
 pub fn neg<T>(value: T) -> T::Output where T: Neg;
 pub fn positive<T>(value: T) -> T::Output where T: Positive;
-pub fn equal<T>(left: T, right: T) -> Bool where T: Eq + Use<[0,1]>;
-pub fn not_equal<T>(left: T, right: T) -> Bool where T: Eq + Use<[0,1]>;
-pub fn less<T>(left: T, right: T) -> Bool where T: Ord + Use<[0,1]>;
-pub fn less_equal<T>(left: T, right: T) -> Bool where T: Ord + Use<[0,1]>;
-pub fn greater<T>(left: T, right: T) -> Bool where T: Ord + Use<[0,1]>;
-pub fn greater_equal<T>(left: T, right: T) -> Bool where T: Ord + Use<[0,1]>;
+pub fn equal<T>(left: T, right: T) -> Bool where T: PartialEq + Use<[0,1]>;
+pub fn not_equal<T>(left: T, right: T) -> Bool where T: PartialEq + Use<[0,1]>;
+pub fn less<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]>;
+pub fn less_equal<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]>;
+pub fn greater<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]>;
+pub fn greater_equal<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]>;
 
 pub prefix 50 - = neg;
 pub prefix 50 + = positive;
@@ -290,7 +291,7 @@ pub infix 20 > = greater;
 pub infix 20 >= = greater_equal;
 ```
 
-Comparison wrappers consume their operands and compare through borrowed Eq/Ord internally. Their affine bound accounts for disposal after observation. Scalars copy into these calls; nonduplicable objects are compared as `&left == &right` or with `Eq::eq(&left,&right)`. No implicit owner borrow or function-arity overload is hidden in the punctuation.
+Comparison wrappers consume their operands and compare through borrowed PartialEq/PartialOrd internally. Their affine bound accounts for disposal after observation. Scalars copy into these calls; nonduplicable objects are compared as `&left == &right` or with `PartialEq::eq(&left,&right)`. No implicit owner borrow or function-arity overload is hidden in the punctuation. `!=` negates partial equality; each ordered operator returns false for None, rather than deriving `<=` or `>=` by negating an opposite strict comparison.
 
 These ordinary operator traits have empty outward rows. An operation that needs host effects uses a named effectful interface instead. Comparison bindings use the declared by-value wrapper above; explicit borrowed operands select reference instances. Source operators do not gain general implicit argument borrowing. Scalar operators use duplicable values; noncopy user operators supply the exact owned/reference trait instances they support.
 
@@ -299,7 +300,7 @@ These ordinary operator traits have empty outward rows. An operation that needs 
 | prefix `+`, prefix `-` | 50 | Positive/Neg, distinct from their binary bindings. |
 | `*`, `/`, `%` | left 40 | Mul/Div/Rem. |
 | `+`, `-` | left 30 | Add/Sub. |
-| `==`, `!=`, `<`, `<=`, `>`, `>=` | nonassociative 20 | Eq/Ord-derived comparison; return Bool. |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | nonassociative 20 | PartialEq/PartialOrd-derived comparison; return Bool. |
 | `not` | prefix 6 | Swap success and failure, including contextual test branches. |
 | infix `if` | left 5 | Same ordinary binding as callable if. Parenthesized `if(c)` application is primary syntax. |
 | `and` | left 3 | Conditional success sequencing. |
@@ -587,8 +588,8 @@ pub fn abort(message: Str) -> !;
 pub fn unreachable(message: Str) -> !;
 pub fn assert(condition: Bool);
 pub fn assert_message(condition: Bool, message: Str);
-pub fn assert_eq<T>(left: &T, right: &T) where T: Eq + Debug;
-pub fn assert_ne<T>(left: &T, right: &T) where T: Eq + Debug;
+pub fn assert_eq<T>(left: &T, right: &T) where T: PartialEq + Debug;
+pub fn assert_ne<T>(left: &T, right: &T) where T: PartialEq + Debug;
 ```
 
 Fail is a terminal operation with no resumption. Report resumes exactly once and supports reporting without aborting a phase. Neither operation has a same-named forwarding function. Catch-fail invokes body once and handles Fail<E>; normal return produces Ok and a legally handled fail produces Err. Its full control contract requires all normally returning handler paths to have compatible E1, accounting for terminal cleanup and transferred E. It is not a license to cancel a body with outstanding must-move residents.
@@ -686,8 +687,8 @@ impl<T,E> Result<T,E> {
     pub fn ok(value: Self) -> Option<T> where E: Use<[0,1]>;
     pub fn err(value: Self) -> Option<E> where T: Use<[0,1]>;
     pub fn swap(value: Self) -> Result<E,T>;
-    pub fn contains(value: &Self, expected: &T) -> Bool where T: Eq;
-    pub fn contains_err(value: &Self, expected: &E) -> Bool where E: Eq;
+    pub fn contains(value: &Self, expected: &T) -> Bool where T: PartialEq;
+    pub fn contains_err(value: &Self, expected: &E) -> Bool where E: PartialEq;
     pub fn unwrap_or(value: Self, fallback: T) -> T
         where T: Use<[0,1]>, E: Use<[0,1]>;
     pub fn unwrap_or_default(value: Self) -> T where T: Default, E: Use<[0,1]>;
@@ -893,7 +894,7 @@ NonZero is supplied for each concrete integer type only, with private representa
 
 The integer family below expands for each of `u8,u16,u32,u64,u128,usize,i8,i16,i32,i64,i128,isize`. In the declarations, `I` denotes one such concrete type, `U` its same-width unsigned counterpart, and `N` its bit width. `F` later denotes one of f32/f64, with `Bits` u32/u64 respectively. These are enumerated interface families, not unconstrained nominal Int/Float types.
 
-Every applicable scalar implements Eq, Ord, Hash, Clone, Default, Display, Debug, and the applicable independent operator traits. Default integer/float is positive zero. No operation silently promotes operands to a different scalar type.
+Every applicable scalar implements PartialEq, PartialOrd, Clone, Default, Display, Debug, and the applicable independent operator traits. Unit, integers and char additionally implement Eq, Ord and Hash. Floating scalars do not implement Eq, Ord or Hash; callers needing map-key or total-order semantics must supply an explicit policy in a user-owned wrapper. Default integer/float is positive zero. No operation silently promotes operands to a different scalar type.
 
 ### 11.2 Integer namespace interface
 
@@ -1022,7 +1023,7 @@ pub enum FloatClass { Zero, Subnormal, Normal, Infinite, Nan }
 pub struct Tolerance<F> { pub absolute: F, pub relative: F }
 ```
 
-Canonical NaNs are positive quiet NaNs. Bit constructors/views canonicalize NaNs and preserve signed zero. Eq/Ord/Hash use the same canonical-bit policy: NaN is reflexive, −0 differs from +0, and the total order is negative infinity, negative finite, −0, +0, positive finite, positive infinity, canonical NaN. Scalar comparison operators use that coherent trait policy. Named IEEE comparisons treat NaN as unordered and the zeros as equal. The ordinary PartialOrd instance is consistent with Ord/Eq; `ieee_partial_cmp` deliberately uses the distinct numeric policy.
+Canonical NaNs are positive quiet NaNs. Bit constructors/views canonicalize NaNs and preserve signed zero. Ordinary floating comparisons obey IEEE semantics through PartialEq and PartialOrd: NaN is unequal to every value including itself; −0 equals +0; and any comparison involving NaN is unordered. Consequently `!=` is true for NaN, while `<`, `<=`, `>` and `>=` are false for an unordered pair. `partial_cmp` returns None for NaN and Some(Equal) for the two zeros. Named IEEE comparisons and `ieee_partial_cmp` use this same policy. Floating scalars do not implement Eq, Ord or Hash. The explicitly named `total_cmp` retains the deterministic canonical-bit total order: negative infinity, negative finite, −0, +0, positive finite, positive infinity, canonical NaN. It does not change ordinary comparisons or establish an Eq instance.
 
 Floating arithmetic preserves defined IEEE behavior and canonicalizes NaNs. No implicit fast math. Mul-add performs one rounded fused operation where the target advertises it or an exactly equivalent implementation. Min-num/max-num choose the numeric operand when exactly one input is NaN and use −0/+0 tie policy consistently with numeric minimum/maximum. Approximate comparison rejects negative/nonfinite tolerances. It returns false for a NaN operand, true for IEEE-equal operands (including equal infinities and the two zeros), and false for the other cases involving infinity. For unequal finite operands it tests the mathematical inequality `abs(a-b) <= max(absolute, relative*max(abs(a),abs(b)))` on the exact values represented by the supplied floats, without letting an overflowing intermediate spuriously make the test true. It is not Eq and not a map key equivalence.
 
@@ -1204,10 +1205,10 @@ impl<'a,T> Slice<'a,T> {
     pub fn iter(value: Self) -> SliceIter<'a,T>;
     pub fn chunks(value: Self, size: NonZero<usize>) -> Chunks<'a,T>;
     pub fn windows(value: Self, size: NonZero<usize>) -> Windows<'a,T>;
-    pub fn starts_with(value: Self, prefix: Slice<T>) -> Bool where T: Eq;
-    pub fn ends_with(value: Self, suffix: Slice<T>) -> Bool where T: Eq;
-    pub fn contains(value: Self, needle: &T) -> Bool where T: Eq;
-    pub fn position(value: Self, needle: &T) -> Option<usize> where T: Eq;
+    pub fn starts_with(value: Self, prefix: Slice<T>) -> Bool where T: PartialEq;
+    pub fn ends_with(value: Self, suffix: Slice<T>) -> Bool where T: PartialEq;
+    pub fn contains(value: Self, needle: &T) -> Bool where T: PartialEq;
+    pub fn position(value: Self, needle: &T) -> Option<usize> where T: PartialEq;
     pub fn compare(value: Self, other: Slice<T>) -> Ordering where T: Ord;
     pub fn to_vec(value: Self) -> Vec<T> where T: Clone;
     pub fn copied_to_vec(value: Self) -> Vec<T> where T: Use<[0,*]>;
@@ -1783,11 +1784,11 @@ pub fn lower_bound<T>(items: Slice<T>, needle: &T) -> usize where T: Ord;
 pub fn upper_bound<T>(items: Slice<T>, needle: &T) -> usize where T: Ord;
 pub fn equal_range<T>(items: Slice<T>, needle: &T) -> Range<usize> where T: Ord;
 pub fn lex_compare<T>(left: Slice<T>, right: Slice<T>) -> Ordering where T: Ord;
-pub fn common_prefix_len<T>(left: Slice<T>, right: Slice<T>) -> usize where T: Eq;
-pub fn common_suffix_len<T>(left: Slice<T>, right: Slice<T>) -> usize where T: Eq;
-pub fn find_subslice<T>(haystack: Slice<T>, needle: Slice<T>) -> Option<usize> where T: Eq;
-pub fn dedup<T>(values: &mut Vec<T>) where T: Eq + Use<[0,1]>;
-pub fn dedup_take<T>(values: &mut Vec<T>) -> Vec<T> where T: Eq;
+pub fn common_prefix_len<T>(left: Slice<T>, right: Slice<T>) -> usize where T: PartialEq;
+pub fn common_suffix_len<T>(left: Slice<T>, right: Slice<T>) -> usize where T: PartialEq;
+pub fn find_subslice<T>(haystack: Slice<T>, needle: Slice<T>) -> Option<usize> where T: PartialEq;
+pub fn dedup<T>(values: &mut Vec<T>) where T: PartialEq + Use<[0,1]>;
+pub fn dedup_take<T>(values: &mut Vec<T>) -> Vec<T> where T: PartialEq;
 
 pub fn sort_by<'env,Env,T,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F) / { | e }
 where Env: Environment<'env>,
@@ -2791,10 +2792,10 @@ An async runtime is conforming only if it preserves deep-handler semantics, corr
 
 The table is a declaration-family contract. A condition in a cell applies only to that instance. No row grants a blanket implementation for arbitrary user nominal types. `—` means no required instance, not a negative implementation.
 
-| Type family | Eq / Ord | Hash | Clone | Default | Display / Debug |
+| Type family | PartialEq / Eq / PartialOrd / Ord | Hash | Clone | Default | Display / Debug |
 |---|---|---|---|---|---|
 | Unit, integer scalars, char | Required | Required | Required | Unit/zero/U+0000 | Required |
-| f32, f64 | Required total-bit-consistent policy of §11 | Same equality policy | Required | +0 | Required deterministic forms |
+| f32, f64 | PartialEq and PartialOrd only, IEEE policy of §11 | No instance | Required | +0 | Required deterministic forms |
 | Bool | Inherited Result policy | Inherited | Inherited | false | Bool Display; inherited Result Debug |
 | Result<T,E> | Corresponding traits on both payloads | Both payloads Hash | Both payloads Clone | — | Debug with both Debug; named formatter for display |
 | Option<T> | Inherited Result policy | Inherited | Inherited | None, no T:Default | Inherited Debug; named fmt_option |
@@ -2812,7 +2813,7 @@ The table is a declaration-family contract. A condition in a cell applies only t
 
 Collection Eq/Hash/Debug methods borrow. They do not require resident discardability. Empty construction does not weaken an owner's static principal class: `Vec<Linear>` still needs lawful finalization even when currently empty. String and Str hashing are compatible for heterogeneous lookups. Raw pointers may support address comparison, but that is not referent equality or a lifetime proof.
 
-Float total Eq intentionally differs from IEEE comparison. The generic PartialOrd implementation required for an Ord type returns Some of that total comparison; the separate named IEEE comparison APIs can report unordered NaN. Do not install mutually inconsistent trait equality and hashing just to imitate a host language's floating operators.
+Every Ord instance has a matching PartialOrd instance returning Some of its total comparison. Floating PartialEq/PartialOrd use IEEE equality and unordered NaN; no float Eq/Ord/Hash instance may silently replace that policy. `total_cmp` is an explicit operation rather than a trait instance. A user-owned float-key wrapper must choose, document and consistently implement its own equality, ordering and hashing policy.
 
 ### 31.2 Iterator adapter instances
 
@@ -2928,8 +2929,8 @@ These are acceptance requirements for future implementations, not a report of te
 | S30 | Loop execution retains bounded auxiliary control storage, not a hidden growing handler chain. |
 | S31 | Integer boundaries cover every width, MIN negation, division zero/MIN÷−1, and invalid shifts. |
 | S32 | Every scalar conversion pair follows the selected checked/wrapping/As policy. |
-| S33 | Float NaNs canonicalize; signed zeros remain distinct for total Eq/Ord/Hash. |
-| S34 | IEEE comparison and total comparison are deliberately distinguishable. |
+| S33 | Float NaNs canonicalize; IEEE PartialEq/PartialOrd treat signed zeros as equal and NaN as unordered; floats have no Eq/Ord/Hash instance. |
+| S34 | Ordinary and named IEEE comparisons agree; explicit total_cmp remains deliberately distinguishable. |
 | S35 | Decimal parsing rounds at destination precision; f32 does not silently parse through f64. |
 | S36 | UTF-8 rejects malformed/overlong/surrogate/truncated input with stable byte offsets. |
 | S37 | String slicing checks reversal, range and scalar boundaries before exposing a Str. |

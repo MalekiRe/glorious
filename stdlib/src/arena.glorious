@@ -46,7 +46,7 @@ pub struct GenId<Tag> { private owner: IdentityToken, private index: u32, privat
 pub impl<Tag> Clone for GenId<Tag> {
     fn clone(value: &Self) -> Self { GenId { owner: Clone::clone(&value.owner), index: value.index, generation: value.generation } }
 }
-pub impl<Tag> Eq for GenId<Tag> {
+pub impl<Tag> PartialEq for GenId<Tag> {
     fn eq(left: &Self, right: &Self) -> Bool {
         handle identity_same(&left.owner, &right.owner) {
             false => false,
@@ -54,17 +54,21 @@ pub impl<Tag> Eq for GenId<Tag> {
         }
     }
 }
+pub impl<Tag> Eq for GenId<Tag> {}
 pub impl<Tag> Ord for GenId<Tag> {
-    fn compare(left: &Self, right: &Self) -> Ordering {
+    fn cmp(left: &Self, right: &Self) -> Ordering {
         let left_owner = ptr_address(ptr_as_const(left.owner.pointer));
         let right_owner = ptr_address(ptr_as_const(right.owner.pointer));
-        handle Ord::compare(&left_owner, &right_owner) {
-            Ordering::Equal => handle Ord::compare(&left.index, &right.index) {
-                Ordering::Equal => Ord::compare(&left.generation, &right.generation), order => order,
+        handle Ord::cmp(&left_owner, &right_owner) {
+            Ordering::Equal => handle Ord::cmp(&left.index, &right.index) {
+                Ordering::Equal => Ord::cmp(&left.generation, &right.generation), order => order,
             },
             order => order,
         }
     }
+}
+pub impl<Tag> PartialOrd for GenId<Tag> {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl<Tag> Hash for GenId<Tag> {
     fn hash(value: &Self, state: &mut Hasher) {

@@ -240,7 +240,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
 // GAT item lifetime holes before contextual argument matching.
 // Cache 80/interface 19 retain explicit position-specific operator targets,
 // their declaring-scope resolution and target contracts in fixity keys.
-pub const STAGE0_CACHE_GENERATION: u32 = 80;
+// Cache 81 is reserved for the callable-contract integration. Cache 82
+// retains every conjunct in a `where T: A + B` bound rather than ignoring B.
+pub const STAGE0_CACHE_GENERATION: u32 = 82;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

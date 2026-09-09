@@ -18,6 +18,23 @@ fn parse_higher_ranked_header(source: &str) -> HeaderParse {
 }
 
 #[test]
+fn plus_separated_where_bounds_preserve_each_subject_and_universal_binder() {
+    let parsed = parse_higher_ranked_header(
+        "fn observe<T>() where T: Eq + Use<[0,1]>, for<'a> &'a T: Inspect<'a> + Stable<'a> {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else { panic!("callable"); };
+    assert_eq!(header.where_bounds.len(), 4);
+    assert_eq!(trait_bound(&header.where_bounds[0]).0, trait_bound(&header.where_bounds[1]).0);
+    assert_eq!(trait_bound(&header.where_bounds[1]).1.path, ["Use"]);
+    for bound in &header.where_bounds[2..] {
+        assert_eq!(bound.universal.as_ref().unwrap().names, ["'a"]);
+    }
+    assert_eq!(trait_bound(&header.where_bounds[2]).0, trait_bound(&header.where_bounds[3]).0);
+    assert_eq!(trait_bound(&header.where_bounds[3]).1.path, ["Stable"]);
+}
+
+#[test]
 fn nominal_where_predicates_are_retained_instead_of_skipped() {
     for source in [
         "struct Cache<I> where I: Iterator { item: <I as Iterator>::Item }",

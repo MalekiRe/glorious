@@ -66,7 +66,7 @@ impl f32 {
         let right = Self::to_bits(right);
         let left_key = handle bit_and(left, 2147483648) == 0 { true => bit_or(left, 2147483648), false => bit_not(left) };
         let right_key = handle bit_and(right, 2147483648) == 0 { true => bit_or(right, 2147483648), false => bit_not(right) };
-        Ord::compare(&left_key, &right_key)
+        Ord::cmp(&left_key, &right_key)
     }
     pub fn min_num(left: Self, right: Self) -> Self {
         handle Self::is_nan(left) { true => @min_num(Self::from_bits(Self::to_bits(right))), false => () };
@@ -144,9 +144,6 @@ impl f32 {
         }
     }
 }
-pub impl Eq for f32 { fn eq(left: &Self, right: &Self) -> Bool { f32::to_bits(*left) == f32::to_bits(*right) } }
-pub impl Ord for f32 { fn compare(left: &Self, right: &Self) -> Ordering { f32::total_cmp(*left, *right) } }
-pub impl Hash for f32 { fn hash(value: &Self, state: &mut Hasher) { let bits = f32::to_bits(*value); Hash::hash(&bits, state) } }
 
 fn f64_canonical(bits: u64) -> u64 {
     handle bit_and(bits, 9218868437227405312) == 9218868437227405312 {
@@ -205,7 +202,7 @@ impl f64 {
         let right = Self::to_bits(right);
         let left_key = handle bit_and(left, 9223372036854775808) == 0 { true => bit_or(left, 9223372036854775808), false => bit_not(left) };
         let right_key = handle bit_and(right, 9223372036854775808) == 0 { true => bit_or(right, 9223372036854775808), false => bit_not(right) };
-        Ord::compare(&left_key, &right_key)
+        Ord::cmp(&left_key, &right_key)
     }
     pub fn min_num(left: Self, right: Self) -> Self {
         handle Self::is_nan(left) { true => @min_num(Self::from_bits(Self::to_bits(right))), false => () };
@@ -283,6 +280,3 @@ impl f64 {
         }
     }
 }
-pub impl Eq for f64 { fn eq(left: &Self, right: &Self) -> Bool { f64::to_bits(*left) == f64::to_bits(*right) } }
-pub impl Ord for f64 { fn compare(left: &Self, right: &Self) -> Ordering { f64::total_cmp(*left, *right) } }
-pub impl Hash for f64 { fn hash(value: &Self, state: &mut Hasher) { let bits = f64::to_bits(*value); Hash::hash(&bits, state) } }

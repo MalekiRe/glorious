@@ -78,7 +78,7 @@ CARGO_TARGET_DIR=target/conformance-groundwork CARGO_PROFILE_TEST_DEBUG=0 CARGO_
 | `lib.glorious` | Existing control/operators, owning Vec/String/slices, queues/maps/sets, hashing and bootstrap host integration. This predates the consolidated interface and still requires migration. |
 | `foundation.glorious` | Ownership-preserving Result/Option operations, lossless zip/unzip, ordering helpers and checked ranges. |
 | `integer.glorious`, `integer_text.glorious` | Twelve concrete integer widths: checked/wrapping/saturating arithmetic, bits, radix parse/format and integer conversion matrix. Pointer-sized expansion currently assumes a 64-bit target. |
-| `float*.glorious` | Canonical NaN/zero bit policy, total Eq/Ord/Hash, named IEEE comparison, classification, adjacent values, integral rounding, exact and shortest decimal formatting, midpoint/ties-to-even parsing directly at each width, exact dyadic FMA, overflow-safe approximate comparison, and the remaining 52 checked/exact scalar conversion pairs. Base operator and Display/Debug instance migration remain unfinished. |
+| `float*.glorious` | Canonical NaN bits, IEEE PartialEq/PartialOrd and ordinary comparisons (NaN unordered; signed zeros equal), explicit total_cmp, classification, adjacent values, integral rounding, exact and shortest decimal formatting, midpoint/ties-to-even parsing directly at each width, exact dyadic FMA, overflow-safe approximate comparison, and the remaining 52 checked/exact scalar conversion pairs. Floats have no Eq/Ord/Hash instances. Complete Display/Debug instance migration remains unfinished. |
 | `algorithm.glorious`, `heap.glorious` | Sequence search, ownership-preserving deduplication and max binary heap. |
 | `traversal.glorious`, `sorting.glorious` | Ordered borrowed callback traversals, predicate/fallible searches, stable borrowed partitions; heapsort, stable insertion sort, callback/fallible insertion sorting and binary search. Stable/callback sorting is O(n²); scratch stays empty and no resident holes or Clone/discard requirements are introduced. |
 | `iterator.glorious`, `iterator_callbacks.glorious` | Separate iterator/stepper/lending protocols; eight structural and five callback adapters; ownership-preserving zip/peek buffers and remainder extraction; slice/vector instances; count, folds and exact-linear step collection. Callback rows/environment evidence are explicit. |
@@ -112,8 +112,7 @@ These are unfinished library work, not merely compiler blockers:
 
 - Canonical core/alloc/std namespace closure, prelude migration, consolidated
   control/BranchResult contracts, and retirement of superseded root APIs.
-- Migration of legacy float comparison operators and complete scalar formatting
-  trait instances to the consolidated float policy.
+- Complete scalar formatting trait instances under the consolidated float policy.
 - Complete lending concrete instances and iterator marker matrix,
   collection entries and all consolidated collection mutation signatures.
 - ByteReader owner-bound marks and the full canonical ByteBuf interface. UndoLog

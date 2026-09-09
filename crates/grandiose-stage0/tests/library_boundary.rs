@@ -2,6 +2,10 @@ use grandiose_stage0::*;
 use std::collections::BTreeMap;
 
 fn compile(source: &str) -> Result<CompilationOutcome, ServiceError> {
+    compile_at(source, "0")
+}
+
+fn compile_at(source: &str, optimization: &str) -> Result<CompilationOutcome, ServiceError> {
     // These fixtures deliberately define their own truth/operator contracts.
     // Opt out of the distribution's prelude while keeping explicit std imports
     // available to the tests which exercise the real library boundary.
@@ -18,22 +22,21 @@ fn compile(source: &str) -> Result<CompilationOutcome, ServiceError> {
         )],
         target: "stage0-vm".into(),
         semantic_options: BTreeMap::new(),
-        codegen_options: BTreeMap::new(),
+        codegen_options: BTreeMap::from([("optimization-level".into(), optimization.into())]),
         capability_manifest: vec![],
         runtime_manifest: None,
     })
 }
 fn run(source: &str) -> i64 {
-    let artifact = compile(source).unwrap().artifact.unwrap();
-    let result = artifact.run_i64().unwrap();
-    assert_eq!(
-        decode_and_verify_program(&artifact.canonical_bytes())
-            .unwrap()
-            .run_i64()
-            .unwrap(),
-        result
-    );
-    result
+    let mut result = None;
+    for optimization in ["0", "2"] {
+        let artifact = compile_at(source, optimization).unwrap().artifact.unwrap();
+        let actual = artifact.run_i64().unwrap();
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), actual);
+        if let Some(expected) = result { assert_eq!(actual, expected, "O{optimization}"); }
+        result = Some(actual);
+    }
+    result.unwrap()
 }
 
 #[test]
@@ -359,6 +362,68 @@ fn standard_operators_are_source_calls_to_manifest_machine_leaves() {
 }
 
 #[test]
+fn canonical_comparisons_use_structural_eq_and_ord_instances() {
+    assert_eq!(run("use std::*; pub fn main() -> i64 { handle true == true and { true != false } and { true < false } and { false >= true } { true => 42, false => 0 } }"), 42);
+    assert_eq!(run("use std::*; struct Item { value: i64 } impl Use<[1,1]> for Item {}
+        impl PartialEq for Item { fn eq(left: &Self, right: &Self) -> Bool { left.value == right.value } }
+        impl Eq for Item {}
+        impl PartialOrd for Item { fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) } }
+        impl Ord for Item { fn cmp(left: &Self, right: &Self) -> Ordering { Ord::cmp(&left.value, &right.value) } }
+        fn equal(left: i64, right: i64) -> Bool { false }
+        pub fn main() -> i64 { let left = Item { value: 21 }; let right = Item { value: 21 };
+            let answer = handle &left == &right and { &left <= &right } { true => 42, false => 0 };
+            let Item { value: a } = left; let Item { value: b } = right; answer + a - b }"), 42);
+}
+
+#[test]
+fn scalar_float_comparisons_follow_ieee_nan_and_signed_zero_policy() {
+    for scalar in ["f32", "f64"] {
+        let source = format!("use std::*; pub fn check(nan: {scalar}, negative_zero: {scalar}, zero: {scalar}, infinity: {scalar}) -> i64 {{
+            handle nan != nan and {{ not(nan == zero) }} and {{ not(nan < zero) }}
+                and {{ not(nan <= infinity) }} and {{ not(nan > zero) }} and {{ not(zero >= nan) }}
+                and {{ negative_zero == zero }} and {{ not(negative_zero < zero) }}
+                and {{ negative_zero <= zero }} and {{ infinity > zero }} {{ true => 42, false => 0 }}
+        }} pub fn main() -> i64 {{ check(0.0 / 0.0, -0.0, 0.0, 1.0 / 0.0) }}");
+        assert_eq!(run(&source), 42, "{scalar}");
+    }
+}
+
+#[test]
+fn float_partial_traits_do_not_grant_total_order_or_hash_key_evidence() {
+    for scalar in ["f32", "f64"] {
+        assert_eq!(run(&format!("use std::*; pub fn check(left: {scalar}, right: {scalar}) -> i64 {{
+            handle PartialOrd::partial_cmp(&left, &right) {{ None => handle PartialEq::eq(&left, &right) {{ false => 42, true => 0 }}, Some(_) => 0 }}
+        }} pub fn main() -> i64 {{ check(0.0 / 0.0, 0.0) }}")), 42);
+        for bound in ["Eq", "Ord", "Hash"] {
+            let source = format!("use std::*; fn require<T>(value: T) -> T where T: {bound} {{ value }}
+                pub fn check(value: {scalar}) -> i64 {{ require(value); 42 }} pub fn main() -> i64 {{ check(1.0) }}");
+            for optimization in ["0", "2"] {
+                let error = compile_at(&source, optimization).expect_err("IEEE floats do not satisfy total or hash-key traits");
+                assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4143"), "{bound}: {error:#?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn structural_partial_comparisons_propagate_unordered_payloads() {
+    for scalar in ["f32", "f64"] {
+        assert_eq!(run(&format!("use std::*;
+            pub fn check(nan: {scalar}, zero: {scalar}, negative_zero: {scalar}) -> i64 {{
+                let unordered: Option<{scalar}> = Some(nan);
+                let positive: Option<{scalar}> = Some(zero);
+                let negative: Option<{scalar}> = Some(negative_zero);
+                handle unordered != unordered and {{ not(unordered < positive) }}
+                    and {{ not(unordered <= positive) }} and {{ not(unordered > positive) }}
+                    and {{ not(unordered >= positive) }} and {{ positive == negative }} {{
+                    true => handle PartialOrd::partial_cmp(&unordered, &positive) {{ None => 42, Some(_) => 0 }},
+                    false => 0,
+                }}
+            }} pub fn main() -> i64 {{ check(0.0 / 0.0, 0.0, -0.0) }}")), 42);
+    }
+}
+
+#[test]
 fn immutable_function_aliases_preserve_direct_calls() {
     assert_eq!(
         run(
@@ -366,6 +431,34 @@ fn immutable_function_aliases_preserve_direct_calls() {
         ),
         42
     );
+}
+
+#[test]
+fn constructor_alias_patterns_preserve_nested_payload_and_nominal_identity() {
+    let source = "#![no_std]\nenum Inner { A, B } enum Choice<T> { Value(T), Empty }
+        let Selected = Choice::Value; let Alias = Selected; let Nothing = Choice::Empty;
+        fn read(value: Choice<Inner>) -> i64 { handle value { Alias(Inner::A) => 42, Alias(Inner::B) => 0, Nothing => 0 } }
+        pub fn main() -> i64 { read(Selected(Inner::A)) }";
+    assert_eq!(run(source), 42);
+    let wrong = "#![no_std]\nenum First { Value(i64) } enum Second { Value(i64) }
+        let Selected = First::Value;
+        pub fn main() -> i64 { handle Second::Value(42) { Selected(value) => value } }";
+    let error = compile(wrong).expect_err("a constructor alias cannot match an unrelated same-shaped enum");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4212"), "{error:#?}");
+}
+
+#[test]
+fn plus_where_bounds_enforce_every_relation_and_authorize_affine_disposal() {
+    let declarations = "#![no_std]\ntrait First {} trait Second {} impl First for i64 {}
+        fn keep<T>(value: T) -> T where T: First + Second { value }";
+    let bad = format!("{declarations} pub fn main() -> i64 {{ keep(42) }}");
+    let error = compile(&bad).expect_err("the second conjunct is a required caller obligation");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4143"), "{error:#?}");
+    assert_eq!(run(&format!("{declarations} impl Second for i64 {{}} pub fn main() -> i64 {{ keep(42) }}")), 42);
+    assert_eq!(run("#![no_std]\ntrait Observe { fn read(value: &Self) -> i64; }
+        struct Owner {} impl Use<[0,1]> for Owner {} impl Observe for Owner { fn read(value: &Self) -> i64 { 42 } }
+        fn observe<T>(value: T) -> i64 where T: Observe + Use<[0,1]> { Observe::read(&value) }
+        pub fn main() -> i64 { observe(Owner {}) }"), 42);
 }
 
 #[test]

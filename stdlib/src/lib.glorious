@@ -8,17 +8,18 @@
 // imports it at lowest lexical priority; it does not synthesize library names.
 pub mod prelude {
     pub use crate::{Result, Ok, Err, Option, Some, None, Bool, true, false, Ordering, Range,
-        Default, Clone, Eq, Ord, Hash, Display, Debug, As, as,
-        Arithmetic, NumericPrefix, Comparison, LogicalNot,
+        Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Display, Debug, As, as,
+        equal, not_equal, less, less_equal, greater, greater_equal,
+        Arithmetic, NumericPrefix, LogicalNot,
         if, else, and, or, not, loop, loop_state, return, try,
         Vec, String, Str, Slice, SliceMut};
 
-    pub infix 20 ==;
-    pub infix 20 !=;
-    pub infix 20 <;
-    pub infix 20 <=;
-    pub infix 20 >;
-    pub infix 20 >=;
+    pub infix 20 == = crate::equal;
+    pub infix 20 != = crate::not_equal;
+    pub infix 20 < = crate::less;
+    pub infix 20 <= = crate::less_equal;
+    pub infix 20 > = crate::greater;
+    pub infix 20 >= = crate::greater_equal;
     pub infixl 30 +;
     pub infixl 30 -;
     pub infixl 40 *;
@@ -216,12 +217,12 @@ pub let false = Result<(), ()>::Err(());
 
 // Arithmetic syntax and policy are source declarations. The machine leaves
 // return integer predicates; their conversion to this library's Bool is local.
-pub infix 20 ==;
-pub infix 20 !=;
-pub infix 20 <;
-pub infix 20 <=;
-pub infix 20 >;
-pub infix 20 >=;
+pub infix 20 == = crate::equal;
+pub infix 20 != = crate::not_equal;
+pub infix 20 < = crate::less;
+pub infix 20 <= = crate::less_equal;
+pub infix 20 > = crate::greater;
+pub infix 20 >= = crate::greater_equal;
 pub infixl 30 +;
 pub infixl 30 -;
 pub infixl 40 *;
@@ -239,14 +240,6 @@ pub trait Arithmetic {
     %(left: Self, right: Self) -> Self;
 }
 pub trait NumericPrefix { +(value: Self) -> Self; -(value: Self) -> Self; }
-pub trait Comparison {
-    ==(left: Self, right: Self) -> Bool;
-    !=(left: Self, right: Self) -> Bool;
-    <(left: Self, right: Self) -> Bool;
-    <=(left: Self, right: Self) -> Bool;
-    >(left: Self, right: Self) -> Bool;
-    >=(left: Self, right: Self) -> Bool;
-}
 pub trait LogicalNot { !(value: Self) -> Self; }
 pub impl LogicalNot for Bool { !(value: Bool) -> Bool { handle value { true => false; false => true } } }
 
@@ -264,14 +257,6 @@ pub impl NumericPrefix for u8 {
     +(value: u8) -> u8 { value }
     -(value: u8) -> u8 { 0 - value }
 }
-pub impl Comparison for u8 {
-    ==(left: u8, right: u8) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: u8, right: u8) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: u8, right: u8) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: u8, right: u8) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: u8, right: u8) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: u8, right: u8) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
-}
 
 pub impl Arithmetic for u16 {
     +(left: u16, right: u16) -> u16 { __g1_int_checked_add(left, right) }
@@ -283,14 +268,6 @@ pub impl Arithmetic for u16 {
 pub impl NumericPrefix for u16 {
     +(value: u16) -> u16 { value }
     -(value: u16) -> u16 { 0 - value }
-}
-pub impl Comparison for u16 {
-    ==(left: u16, right: u16) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: u16, right: u16) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: u16, right: u16) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: u16, right: u16) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: u16, right: u16) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: u16, right: u16) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
 }
 
 pub impl Arithmetic for u32 {
@@ -304,14 +281,6 @@ pub impl NumericPrefix for u32 {
     +(value: u32) -> u32 { value }
     -(value: u32) -> u32 { 0 - value }
 }
-pub impl Comparison for u32 {
-    ==(left: u32, right: u32) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: u32, right: u32) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: u32, right: u32) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: u32, right: u32) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: u32, right: u32) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: u32, right: u32) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
-}
 
 pub impl Arithmetic for u64 {
     +(left: u64, right: u64) -> u64 { __g1_int_checked_add(left, right) }
@@ -323,14 +292,6 @@ pub impl Arithmetic for u64 {
 pub impl NumericPrefix for u64 {
     +(value: u64) -> u64 { value }
     -(value: u64) -> u64 { 0 - value }
-}
-pub impl Comparison for u64 {
-    ==(left: u64, right: u64) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: u64, right: u64) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: u64, right: u64) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: u64, right: u64) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: u64, right: u64) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: u64, right: u64) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
 }
 
 pub impl Arithmetic for u128 {
@@ -344,14 +305,6 @@ pub impl NumericPrefix for u128 {
     +(value: u128) -> u128 { value }
     -(value: u128) -> u128 { 0 - value }
 }
-pub impl Comparison for u128 {
-    ==(left: u128, right: u128) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: u128, right: u128) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: u128, right: u128) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: u128, right: u128) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: u128, right: u128) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: u128, right: u128) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
-}
 
 pub impl Arithmetic for usize {
     +(left: usize, right: usize) -> usize { __g1_int_checked_add(left, right) }
@@ -363,14 +316,6 @@ pub impl Arithmetic for usize {
 pub impl NumericPrefix for usize {
     +(value: usize) -> usize { value }
     -(value: usize) -> usize { 0 - value }
-}
-pub impl Comparison for usize {
-    ==(left: usize, right: usize) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: usize, right: usize) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: usize, right: usize) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: usize, right: usize) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: usize, right: usize) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: usize, right: usize) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
 }
 
 pub impl Arithmetic for i8 {
@@ -384,14 +329,6 @@ pub impl NumericPrefix for i8 {
     +(value: i8) -> i8 { value }
     -(value: i8) -> i8 { 0 - value }
 }
-pub impl Comparison for i8 {
-    ==(left: i8, right: i8) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: i8, right: i8) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: i8, right: i8) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: i8, right: i8) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: i8, right: i8) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: i8, right: i8) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
-}
 
 pub impl Arithmetic for i16 {
     +(left: i16, right: i16) -> i16 { __g1_int_checked_add(left, right) }
@@ -403,14 +340,6 @@ pub impl Arithmetic for i16 {
 pub impl NumericPrefix for i16 {
     +(value: i16) -> i16 { value }
     -(value: i16) -> i16 { 0 - value }
-}
-pub impl Comparison for i16 {
-    ==(left: i16, right: i16) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: i16, right: i16) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: i16, right: i16) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: i16, right: i16) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: i16, right: i16) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: i16, right: i16) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
 }
 
 pub impl Arithmetic for i32 {
@@ -424,14 +353,6 @@ pub impl NumericPrefix for i32 {
     +(value: i32) -> i32 { value }
     -(value: i32) -> i32 { 0 - value }
 }
-pub impl Comparison for i32 {
-    ==(left: i32, right: i32) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: i32, right: i32) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: i32, right: i32) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: i32, right: i32) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: i32, right: i32) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: i32, right: i32) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
-}
 
 pub impl Arithmetic for i64 {
     +(left: i64, right: i64) -> i64 { __g1_int_checked_add(left, right) }
@@ -443,14 +364,6 @@ pub impl Arithmetic for i64 {
 pub impl NumericPrefix for i64 {
     +(value: i64) -> i64 { value }
     -(value: i64) -> i64 { 0 - value }
-}
-pub impl Comparison for i64 {
-    ==(left: i64, right: i64) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: i64, right: i64) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: i64, right: i64) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: i64, right: i64) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: i64, right: i64) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: i64, right: i64) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
 }
 
 pub impl Arithmetic for i128 {
@@ -464,14 +377,6 @@ pub impl NumericPrefix for i128 {
     +(value: i128) -> i128 { value }
     -(value: i128) -> i128 { 0 - value }
 }
-pub impl Comparison for i128 {
-    ==(left: i128, right: i128) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: i128, right: i128) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: i128, right: i128) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: i128, right: i128) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: i128, right: i128) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: i128, right: i128) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
-}
 
 pub impl Arithmetic for isize {
     +(left: isize, right: isize) -> isize { __g1_int_checked_add(left, right) }
@@ -483,14 +388,6 @@ pub impl Arithmetic for isize {
 pub impl NumericPrefix for isize {
     +(value: isize) -> isize { value }
     -(value: isize) -> isize { 0 - value }
-}
-pub impl Comparison for isize {
-    ==(left: isize, right: isize) -> Bool { predicate(__g1_int_equal(left, right)) }
-    !=(left: isize, right: isize) -> Bool { inverse_predicate(__g1_int_equal(left, right)) }
-    <(left: isize, right: isize) -> Bool { predicate(__g1_int_less(left, right)) }
-    <=(left: isize, right: isize) -> Bool { inverse_predicate(__g1_int_greater(left, right)) }
-    >(left: isize, right: isize) -> Bool { predicate(__g1_int_greater(left, right)) }
-    >=(left: isize, right: isize) -> Bool { inverse_predicate(__g1_int_less(left, right)) }
 }
 
 pub impl Arithmetic for f32 {
@@ -504,14 +401,6 @@ pub impl NumericPrefix for f32 {
     +(value: f32) -> f32 { value }
     -(value: f32) -> f32 { __g1_f32_neg(value) }
 }
-pub impl Comparison for f32 {
-    ==(left: f32, right: f32) -> Bool { predicate(__g1_f32_eq(left, right)) }
-    !=(left: f32, right: f32) -> Bool { predicate(__g1_f32_ne(left, right)) }
-    <(left: f32, right: f32) -> Bool { predicate(__g1_f32_lt(left, right)) }
-    <=(left: f32, right: f32) -> Bool { predicate(__g1_f32_le(left, right)) }
-    >(left: f32, right: f32) -> Bool { predicate(__g1_f32_gt(left, right)) }
-    >=(left: f32, right: f32) -> Bool { predicate(__g1_f32_ge(left, right)) }
-}
 
 pub impl Arithmetic for f64 {
     +(left: f64, right: f64) -> f64 { __g1_f64_add(left, right) }
@@ -524,23 +413,7 @@ pub impl NumericPrefix for f64 {
     +(value: f64) -> f64 { value }
     -(value: f64) -> f64 { __g1_f64_neg(value) }
 }
-pub impl Comparison for f64 {
-    ==(left: f64, right: f64) -> Bool { predicate(__g1_f64_eq(left, right)) }
-    !=(left: f64, right: f64) -> Bool { predicate(__g1_f64_ne(left, right)) }
-    <(left: f64, right: f64) -> Bool { predicate(__g1_f64_lt(left, right)) }
-    <=(left: f64, right: f64) -> Bool { predicate(__g1_f64_le(left, right)) }
-    >(left: f64, right: f64) -> Bool { predicate(__g1_f64_gt(left, right)) }
-    >=(left: f64, right: f64) -> Bool { predicate(__g1_f64_ge(left, right)) }
-}
 
-pub impl Comparison for char {
-    ==(left: char, right: char) -> Bool { predicate(__g1_int_equal(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
-    !=(left: char, right: char) -> Bool { inverse_predicate(__g1_int_equal(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
-    <(left: char, right: char) -> Bool { predicate(__g1_int_less(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
-    <=(left: char, right: char) -> Bool { inverse_predicate(__g1_int_greater(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
-    >(left: char, right: char) -> Bool { predicate(__g1_int_greater(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
-    >=(left: char, right: char) -> Bool { inverse_predicate(__g1_int_less(__g1_char_to_u32(left), __g1_char_to_u32(right))) }
-}
 
 pub enum Ordering { Less, Equal, Greater }
 pub struct Range<T> { pub start: T, pub end: T }
@@ -800,7 +673,7 @@ impl<T> Slice<'_, T> {
         let index = Slice::lower_bound(value, needle);
         handle index < value.length {
             false => Result::Err(index),
-            true => handle Ord::compare(
+            true => handle Ord::cmp(
                 Slice::get_unchecked(value, index),
                 needle,
             ) {
@@ -816,7 +689,7 @@ impl<T> Slice<'_, T> {
             true => left.length, false => right.length,
         };
         handle slice_lex_compare_range(left, right, 0, common) {
-            Ordering::Equal => Ord::compare(&left.length, &right.length),
+            Ordering::Equal => Ord::cmp(&left.length, &right.length),
             result => result,
         }
     }
@@ -843,7 +716,7 @@ fn slice_lower_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         true => {
             let middle = start + ((end - start) / 2);
             let item = Slice::get_unchecked(value, middle);
-            handle Ord::compare(item, needle) {
+            handle Ord::cmp(item, needle) {
                 Ordering::Less => slice_lower_bound_from(value, needle, middle + 1, end),
                 _ => slice_lower_bound_from(value, needle, start, middle),
             }
@@ -858,7 +731,7 @@ fn slice_upper_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         true => {
             let middle = start + ((end - start) / 2);
             let item = Slice::get_unchecked(value, middle);
-            handle Ord::compare(item, needle) {
+            handle Ord::cmp(item, needle) {
                 Ordering::Greater => slice_upper_bound_from(value, needle, start, middle),
                 _ => slice_upper_bound_from(value, needle, middle + 1, end),
             }
@@ -873,7 +746,7 @@ fn slice_lex_compare_range<T>(left: Slice<T>, right: Slice<T>, start: usize, end
     handle start >= end {
         true => Ordering::Equal,
         false => handle end - start == 1 {
-            true => Ord::compare(
+            true => Ord::cmp(
                 Slice::get_unchecked(left, start),
                 Slice::get_unchecked(right, start),
             ),
@@ -983,17 +856,15 @@ fn utf8_decode(value: Slice<u8>, index: usize) -> Option<(char, usize)> {
 fn utf8_valid_up_to(value: Slice<u8>, index: usize) -> usize {
     utf8_valid_range(value, index, value.length)
 }
-// A decoded character can cross the subdivision boundary. Return its real
-// end to the right traversal; an error before the boundary stops immediately.
+// A decoded character can cross a subdivision boundary. Return its real end
+// to the right traversal; an earlier error stops immediately. Small chunks
+// avoid a separate branching frame per byte while bounding linear recursion.
 // Decoding always sees the whole slice, never an artificially truncated one.
 fn utf8_valid_range(value: Slice<u8>, start: usize, end: usize) -> usize {
     handle start >= end {
         true => start,
-        false => handle end - start == 1 {
-            true => handle utf8_decode(value, start) {
-                Result::Err(_) => start,
-                Result::Ok((_, width)) => start + width,
-            },
+        false => handle end - start <= 32 {
+            true => utf8_valid_chunk(value, start, end),
             false => {
                 let middle = start + ((end - start) / 2);
                 let next = utf8_valid_range(value, start, middle);
@@ -1002,6 +873,15 @@ fn utf8_valid_range(value: Slice<u8>, start: usize, end: usize) -> usize {
                     false => utf8_valid_range(value, next, end),
                 }
             },
+        },
+    }
+}
+fn utf8_valid_chunk(value: Slice<u8>, index: usize, end: usize) -> usize {
+    handle index >= end {
+        true => index,
+        false => handle utf8_decode(value, index) {
+            Result::Err(_) => index,
+            Result::Ok((_, width)) => utf8_valid_chunk(value, index + width, end),
         },
     }
 }
@@ -1801,7 +1681,7 @@ impl<T> Vec<T> {
     }
 
     pub fn dedup(value: &mut Self) -> ()
-        where T: Eq, T: Use<[0, 1]> {
+        where T: PartialEq, T: Use<[0, 1]> {
         vec_dedup_from(&mut *value, 0)
     }
 
@@ -1834,18 +1714,25 @@ impl<T> Vec<T> {
 // this stronger bound because duplicable values may be discarded.
 fn vec_resize_grow<T>(value: &mut Vec<T>, length: usize, fill: &T) -> ()
     where T: Use<[0, *]> {
-    handle Vec::len(& *value) < length {
-        false => (),
-        true => {
-            let remaining = length - Vec::len(& *value);
-            handle remaining == 1 {
-                true => Vec::push(&mut *value, *fill),
-                false => {
-                    let middle = Vec::len(& *value) + (remaining / 2);
-                    vec_resize_grow(&mut *value, middle, fill);
-                    vec_resize_grow(&mut *value, length, fill)
-                },
-            }
+    let additional = length - Vec::len(& *value);
+    Vec::reserve(&mut *value, additional);
+    vec_fill_reserved(&mut *value, additional, fill)
+}
+
+// Only called after reserving all additional slots. Publish each initialized
+// resident immediately; balanced subdivision keeps stack usage logarithmic.
+fn vec_fill_reserved<T>(value: &mut Vec<T>, additional: usize, fill: &T) -> ()
+    where T: Use<[0, *]> {
+    handle additional {
+        0 => (),
+        1 => {
+            unsafe { __g1_memory_write(__g1_memory_offset(value.pointer, value.length), *fill); };
+            (*value).length = value.length + 1;
+        },
+        _ => {
+            let first = additional / 2;
+            vec_fill_reserved(&mut *value, first, fill);
+            vec_fill_reserved(&mut *value, additional - first, fill)
         },
     }
 }
@@ -1904,7 +1791,7 @@ fn vec_selection_min<T>(value: &Vec<T>, best: usize, index: usize) -> usize
     where T: Ord {
     handle index >= Vec::len(value) {
         true => best,
-        false => handle Ord::compare(Vec::get_unchecked(value, index), Vec::get_unchecked(value, best)) {
+        false => handle Ord::cmp(Vec::get_unchecked(value, index), Vec::get_unchecked(value, best)) {
             Ordering::Less => vec_selection_min(value, index, index + 1),
             _ => vec_selection_min(value, best, index + 1),
         },
@@ -1964,10 +1851,10 @@ fn vec_partition_by_from<T, F>(value: &mut Vec<T>, predicate: F, left: usize, en
 }
 
 fn vec_dedup_from<T>(value: &mut Vec<T>, index: usize) -> ()
-    where T: Eq, T: Use<[0, 1]> {
+    where T: PartialEq, T: Use<[0, 1]> {
     handle index + 1 >= Vec::len(& *value) {
         true => (),
-        false => handle Eq::eq(
+        false => handle PartialEq::eq(
             Vec::get_unchecked(& *value, index),
             Vec::get_unchecked(& *value, index + 1),
         ) {
@@ -2025,7 +1912,7 @@ fn hash_map_matches<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize, sl
         true => false,
         false => handle Vec::get_unchecked(&(*value).indices, slot - 2).fingerprint == fingerprint {
             false => false,
-            true => Eq::eq(&Vec::get_unchecked(&(*value).entries, slot - 2).key, key),
+            true => PartialEq::eq(&Vec::get_unchecked(&(*value).entries, slot - 2).key, key),
         },
     }
 }
@@ -2879,26 +2766,136 @@ pub impl<T> Default for Stack<T> { default() -> Stack<T> { Stack::new() } }
 pub impl<T> Default for WorkList<T> { default() -> WorkList<T> { WorkList::new() } }
 pub impl Default for String { default() -> String { String::new() } }
 
-pub trait Eq { eq(left: &Self, right: &Self) -> Bool; }
-pub trait Ord { compare(left: &Self, right: &Self) -> Ordering; }
+pub trait PartialEq { eq(left: &Self, right: &Self) -> Bool; }
+pub trait Eq: PartialEq {}
+pub trait PartialOrd: PartialEq { partial_cmp(left: &Self, right: &Self) -> Option<Ordering>; }
+pub trait Ord: Eq + PartialOrd { cmp(left: &Self, right: &Self) -> Ordering; }
+
+// Observation followed by disposal of the owned affine operands. In
+// particular, unordered is false for all four ordered comparisons.
+pub fn equal<T>(left: T, right: T) -> Bool where T: PartialEq + Use<[0,1]> { PartialEq::eq(&left, &right) }
+pub fn not_equal<T>(left: T, right: T) -> Bool where T: PartialEq + Use<[0,1]> {
+    handle PartialEq::eq(&left, &right) { true => false, false => true }
+}
+pub fn less<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]> {
+    handle PartialOrd::partial_cmp(&left, &right) { Some(Ordering::Less) => true, _ => false }
+}
+pub fn less_equal<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]> {
+    handle PartialOrd::partial_cmp(&left, &right) { Some(Ordering::Less) => true, Some(Ordering::Equal) => true, _ => false }
+}
+pub fn greater<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]> {
+    handle PartialOrd::partial_cmp(&left, &right) { Some(Ordering::Greater) => true, _ => false }
+}
+pub fn greater_equal<T>(left: T, right: T) -> Bool where T: PartialOrd + Use<[0,1]> {
+    handle PartialOrd::partial_cmp(&left, &right) { Some(Ordering::Greater) => true, Some(Ordering::Equal) => true, _ => false }
+}
 pub trait Hash { hash(value: &Self, state: &mut Hasher) -> (); }
 pub trait Display { display(value: &Self, formatter: &mut Formatter) -> (); }
 pub trait Debug { debug(value: &Self, formatter: &mut Formatter) -> (); }
 
-pub impl Eq for () {
+pub impl PartialEq for () {
     eq(left: &(), right: &()) -> Bool { true }
 }
-pub impl<T,E> Eq for Result<T,E> where T: Eq, E: Eq {
+pub impl Eq for () {}
+pub impl<T,E> PartialEq for Result<T,E> where T: PartialEq, E: PartialEq {
     eq(left: &Self, right: &Self) -> Bool {
         handle *left {
             Result::Ok(_) => handle *right {
-                Result::Ok(_) => Eq::eq(&left.0, &right.0),
+                Result::Ok(_) => PartialEq::eq(&left.0, &right.0),
                 Result::Err(_) => false,
             },
             Result::Err(_) => handle *right {
                 Result::Ok(_) => false,
-                Result::Err(_) => Eq::eq(&left.0, &right.0),
+                Result::Err(_) => PartialEq::eq(&left.0, &right.0),
             },
+        }
+    }
+}
+pub impl<T,E> Eq for Result<T,E> where T: Eq, E: Eq {}
+
+pub impl PartialOrd for () {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ordering::Equal) }
+}
+pub impl Ord for () {
+    cmp(left: &Self, right: &Self) -> Ordering { Ordering::Equal }
+}
+pub impl<T,E> PartialOrd for Result<T,E> where T: PartialOrd, E: PartialOrd {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> {
+        handle *left {
+            Result::Ok(_) => handle *right {
+                Result::Ok(_) => PartialOrd::partial_cmp(&left.0, &right.0),
+                Result::Err(_) => Some(Ordering::Less),
+            },
+            Result::Err(_) => handle *right {
+                Result::Ok(_) => Some(Ordering::Greater),
+                Result::Err(_) => PartialOrd::partial_cmp(&left.0, &right.0),
+            },
+        }
+    }
+}
+pub impl<T,E> Ord for Result<T,E> where T: Ord, E: Ord {
+    cmp(left: &Self, right: &Self) -> Ordering {
+        handle *left {
+            Result::Ok(_) => handle *right {
+                Result::Ok(_) => Ord::cmp(&left.0, &right.0),
+                Result::Err(_) => Ordering::Less,
+            },
+            Result::Err(_) => handle *right {
+                Result::Ok(_) => Ordering::Greater,
+                Result::Err(_) => Ord::cmp(&left.0, &right.0),
+            },
+        }
+    }
+}
+
+pub impl<'a,T> PartialEq for &'a T where T: PartialEq {
+    eq(left: &Self, right: &Self) -> Bool { PartialEq::eq(&(*(*left)), &(*(*right))) }
+}
+pub impl<'a,T> Eq for &'a T where T: Eq {}
+pub impl<'a,T> PartialOrd for &'a T where T: PartialOrd {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { PartialOrd::partial_cmp(&(*(*left)), &(*(*right))) }
+}
+pub impl<'a,T> Ord for &'a T where T: Ord {
+    cmp(left: &Self, right: &Self) -> Ordering { Ord::cmp(&(*(*left)), &(*(*right))) }
+}
+pub impl<'a,T> PartialEq for &'a mut T where T: PartialEq {
+    eq(left: &Self, right: &Self) -> Bool { PartialEq::eq(&(*(*left)), &(*(*right))) }
+}
+pub impl<'a,T> Eq for &'a mut T where T: Eq {}
+pub impl<'a,T> PartialOrd for &'a mut T where T: PartialOrd {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { PartialOrd::partial_cmp(&(*(*left)), &(*(*right))) }
+}
+pub impl<'a,T> Ord for &'a mut T where T: Ord {
+    cmp(left: &Self, right: &Self) -> Ordering { Ord::cmp(&(*(*left)), &(*(*right))) }
+}
+
+// IEEE comparisons are partial: NaNs are unordered and the signed zeros
+// compare equal. Floats intentionally have no Eq, Ord, or Hash instance.
+pub impl PartialEq for f32 {
+    eq(left: &Self, right: &Self) -> Bool { predicate(__g1_f32_eq(*left, *right)) }
+}
+pub impl PartialOrd for f32 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> {
+        handle __g1_f32_eq(*left, *right) {
+            0 => handle __g1_f32_lt(*left, *right) {
+                0 => handle __g1_f32_gt(*left, *right) { 0 => None, _ => Some(Ordering::Greater) },
+                _ => Some(Ordering::Less),
+            },
+            _ => Some(Ordering::Equal),
+        }
+    }
+}
+pub impl PartialEq for f64 {
+    eq(left: &Self, right: &Self) -> Bool { predicate(__g1_f64_eq(*left, *right)) }
+}
+pub impl PartialOrd for f64 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> {
+        handle __g1_f64_eq(*left, *right) {
+            0 => handle __g1_f64_lt(*left, *right) {
+                0 => handle __g1_f64_gt(*left, *right) { 0 => None, _ => Some(Ordering::Greater) },
+                _ => Some(Ordering::Less),
+            },
+            _ => Some(Ordering::Equal),
         }
     }
 }
@@ -2946,30 +2943,40 @@ pub fn format_debug_value<T>(value: &T) -> String where T: Debug {
 pub let format = format_value;
 pub let format_debug = format_debug_value;
 
-pub impl Eq for i64 { eq(left: &i64, right: &i64) -> Bool { *left == *right } }
-pub impl Eq for usize { eq(left: &usize, right: &usize) -> Bool { *left == *right } }
+pub impl PartialEq for i64 { eq(left: &i64, right: &i64) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for i64 {}
+pub impl PartialEq for usize { eq(left: &usize, right: &usize) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for usize {}
 pub impl Ord for String {
-    compare(left: &String, right: &String) -> Ordering {
+    cmp(left: &String, right: &String) -> Ordering {
         let left_view = String::as_str(left);
         let right_view = String::as_str(right);
         Slice::lex_compare(Str::as_bytes(left_view), Str::as_bytes(right_view))
     }
 }
-pub impl Eq for String {
+pub impl PartialOrd for String {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+pub impl PartialEq for String {
     eq(left: &String, right: &String) -> Bool {
-        handle Ord::compare(left, right) { Ordering::Equal => true, _ => false }
+        handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false }
     }
 }
+pub impl Eq for String {}
 pub impl<'a> Ord for Str<'a> {
-    compare(left: &Str<'a>, right: &Str<'a>) -> Ordering {
+    cmp(left: &Str<'a>, right: &Str<'a>) -> Ordering {
         Slice::lex_compare(Str::as_bytes(*left), Str::as_bytes(*right))
     }
 }
-pub impl<'a> Eq for Str<'a> {
+pub impl<'a> PartialOrd for Str<'a> {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+pub impl<'a> PartialEq for Str<'a> {
     eq(left: &Str<'a>, right: &Str<'a>) -> Bool {
-        handle Ord::compare(left, right) { Ordering::Equal => true, _ => false }
+        handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false }
     }
 }
+pub impl<'a> Eq for Str<'a> {}
 fn hash_string_bytes(bytes: Slice<u8>, state: &mut Hasher, cursor: usize) -> () {
     handle cursor < Slice::len(&bytes) {
         false => (),
@@ -3015,17 +3022,28 @@ pub impl Hash for char {
         Hasher::write_usize(state, __g1_int_convert_wrapping_to_usize(char_to_u32(*value)))
     }
 }
-pub impl Eq for u8 { eq(left: &u8, right: &u8) -> Bool { *left == *right } }
-pub impl Eq for u16 { eq(left: &u16, right: &u16) -> Bool { *left == *right } }
-pub impl Eq for u32 { eq(left: &u32, right: &u32) -> Bool { *left == *right } }
-pub impl Eq for u64 { eq(left: &u64, right: &u64) -> Bool { *left == *right } }
-pub impl Eq for u128 { eq(left: &u128, right: &u128) -> Bool { *left == *right } }
-pub impl Eq for i8 { eq(left: &i8, right: &i8) -> Bool { *left == *right } }
-pub impl Eq for i16 { eq(left: &i16, right: &i16) -> Bool { *left == *right } }
-pub impl Eq for i32 { eq(left: &i32, right: &i32) -> Bool { *left == *right } }
-pub impl Eq for i128 { eq(left: &i128, right: &i128) -> Bool { *left == *right } }
-pub impl Eq for isize { eq(left: &isize, right: &isize) -> Bool { *left == *right } }
-pub impl Eq for char { eq(left: &char, right: &char) -> Bool { *left == *right } }
+pub impl PartialEq for u8 { eq(left: &u8, right: &u8) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for u8 {}
+pub impl PartialEq for u16 { eq(left: &u16, right: &u16) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for u16 {}
+pub impl PartialEq for u32 { eq(left: &u32, right: &u32) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for u32 {}
+pub impl PartialEq for u64 { eq(left: &u64, right: &u64) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for u64 {}
+pub impl PartialEq for u128 { eq(left: &u128, right: &u128) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for u128 {}
+pub impl PartialEq for i8 { eq(left: &i8, right: &i8) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for i8 {}
+pub impl PartialEq for i16 { eq(left: &i16, right: &i16) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for i16 {}
+pub impl PartialEq for i32 { eq(left: &i32, right: &i32) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for i32 {}
+pub impl PartialEq for i128 { eq(left: &i128, right: &i128) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for i128 {}
+pub impl PartialEq for isize { eq(left: &isize, right: &isize) -> Bool { predicate(__g1_int_equal(*left, *right)) } }
+pub impl Eq for isize {}
+pub impl PartialEq for char { eq(left: &char, right: &char) -> Bool { predicate(__g1_int_equal(__g1_char_to_u32(*left), __g1_char_to_u32(*right))) } }
+pub impl Eq for char {}
 pub impl Display for String {
     display(value: &String, formatter: &mut Formatter) -> () {
         Formatter::write_str(formatter, String::as_str(value))
@@ -3057,93 +3075,147 @@ pub impl Debug for String {
 }
 
 pub impl Ord for i64 {
-    compare(left: &i64, right: &i64) -> Ordering {
-        handle *left < *right {
-            true => Ordering::Less,
-            false => handle *left == *right {
-                true => Ordering::Equal,
-                false => Ordering::Greater,
-            },
+    cmp(left: &i64, right: &i64) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
         }
     }
+}
+pub impl PartialOrd for i64 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for usize {
-    compare(left: &usize, right: &usize) -> Ordering {
-        handle *left < *right {
-            true => Ordering::Less,
-            false => handle *left == *right {
-                true => Ordering::Equal,
-                false => Ordering::Greater,
-            },
+    cmp(left: &usize, right: &usize) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
         }
     }
+}
+pub impl PartialOrd for usize {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for u8 {
-    compare(left: &u8, right: &u8) -> Ordering {
-        handle *left < *right {
-            true => Ordering::Less,
-            false => handle *left == *right {
-                true => Ordering::Equal,
-                false => Ordering::Greater,
-            },
+    cmp(left: &u8, right: &u8) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
         }
     }
+}
+pub impl PartialOrd for u8 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for char {
-    compare(left: &char, right: &char) -> Ordering {
-        handle *left < *right {
-            true => Ordering::Less,
-            false => handle *left == *right {
-                true => Ordering::Equal,
-                false => Ordering::Greater,
-            },
+    cmp(left: &char, right: &char) -> Ordering {
+        handle __g1_int_less(__g1_char_to_u32(*left), __g1_char_to_u32(*right)) {
+            0 => handle __g1_int_equal(__g1_char_to_u32(*left), __g1_char_to_u32(*right)) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
         }
     }
 }
+pub impl PartialOrd for char {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
 pub impl Ord for u16 {
-    compare(left: &u16, right: &u16) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &u16, right: &u16) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for u16 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for u32 {
-    compare(left: &u32, right: &u32) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &u32, right: &u32) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for u32 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for u64 {
-    compare(left: &u64, right: &u64) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &u64, right: &u64) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for u64 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for u128 {
-    compare(left: &u128, right: &u128) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &u128, right: &u128) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for u128 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for i8 {
-    compare(left: &i8, right: &i8) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &i8, right: &i8) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for i8 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for i16 {
-    compare(left: &i16, right: &i16) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &i16, right: &i16) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for i16 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for i32 {
-    compare(left: &i32, right: &i32) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &i32, right: &i32) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for i32 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 pub impl Ord for i128 {
-    compare(left: &i128, right: &i128) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &i128, right: &i128) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
 }
+pub impl PartialOrd for i128 {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
 pub impl Ord for isize {
-    compare(left: &isize, right: &isize) -> Ordering {
-        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    cmp(left: &isize, right: &isize) -> Ordering {
+        handle __g1_int_less(*left, *right) {
+            0 => handle __g1_int_equal(*left, *right) { 0 => Ordering::Greater, _ => Ordering::Equal },
+            _ => Ordering::Less,
+        }
     }
+}
+pub impl PartialOrd for isize {
+    partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
 }
 
 // Unicode scalar values exclude both values past the Unicode maximum and the
@@ -3316,22 +3388,22 @@ pub fn f32_to_i64_checked(value: f32) -> Option<i64> {
 // Choosing either value leaves the other unused, hence the explicit affine
 // contract.  Duplicable scalars satisfy it automatically.
 pub fn min<T>(left: T, right: T) -> T where T: Ord, T: Use<[0, 1]> {
-    handle Ord::compare(&left, &right) {
+    handle Ord::cmp(&left, &right) {
         Ordering::Greater => right,
         _ => left,
     }
 }
 pub fn max<T>(left: T, right: T) -> T where T: Ord, T: Use<[0, 1]> {
-    handle Ord::compare(&left, &right) {
+    handle Ord::cmp(&left, &right) {
         Ordering::Less => right,
         _ => left,
     }
 }
 pub fn clamp<T>(value: T, lower: T, upper: T) -> T
     where T: Ord, T: Use<[0, 1]> {
-    handle Ord::compare(&value, &lower) {
+    handle Ord::cmp(&value, &lower) {
         Ordering::Less => lower,
-        _ => handle Ord::compare(&value, &upper) {
+        _ => handle Ord::cmp(&value, &upper) {
             Ordering::Greater => upper,
             _ => value,
         },

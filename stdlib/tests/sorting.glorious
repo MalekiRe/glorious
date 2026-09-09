@@ -1,6 +1,13 @@
 struct Resident { key: i64, serial: i64 }
 impl Use<[1,1]> for Resident {}
-impl Ord for Resident { fn compare(a: &Self, b: &Self) -> Ordering { Ord::compare(&a.key, &b.key) } }
+impl Ord for Resident { fn cmp(a: &Self, b: &Self) -> Ordering { Ord::cmp(&a.key, &b.key) } }
+impl PartialOrd for Resident {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+impl PartialEq for Resident {
+    fn eq(left: &Self, right: &Self) -> Bool { handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false } }
+}
+impl Eq for Resident {}
 fn residents() -> Vec<Resident> {
     let mut items = Vec::new();
     Vec::push(&mut items, Resident { key: 2, serial: 0 });
@@ -16,11 +23,11 @@ fn finish_residents(items: Vec<Resident>, total: i64) -> i64 {
         Result::Ok(Resident { key: key, serial: serial }) => tail finish_residents(items, total + serial),
     }
 }
-fn descending(a: &i64, b: &i64) -> Ordering { Ord::compare(b, a) }
+fn descending(a: &i64, b: &i64) -> Ordering { Ord::cmp(b, a) }
 fn fail_on_two(a: &i64, b: &i64) -> Result<Ordering,i64> {
-    handle *b == 2 { true => Result::Err(2), false => Result::Ok(Ord::compare(a, b)) }
+    handle *b == 2 { true => Result::Err(2), false => Result::Ok(Ord::cmp(a, b)) }
 }
-fn compare_two(value: &i64) -> Ordering { Ord::compare(value, &2) }
+fn compare_two(value: &i64) -> Ordering { Ord::cmp(value, &2) }
 fn numbers() -> Vec<i64> {
     let mut items = Vec::new();
     Vec::push(&mut items, 4); Vec::push(&mut items, 1); Vec::push(&mut items, 3); Vec::push(&mut items, 2);

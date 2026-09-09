@@ -520,23 +520,45 @@ impl PlaceFlow {
         Self::analyze_root(body, root, parameters, Some(signatures), bounds, &[], None, None)
     }
 
-    pub(crate) fn analyze_lifted_with_frozen_solver(
-        body: &TypedBody,
-        root: CoreId,
-        parameters: &[(String, Type)],
-        signatures: &ElaboratedInterface,
-        bounds: &[(Type, crate::ElaboratedTraitReference)],
-        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
-        solver: &crate::TraitSolver,
-        abort_primitive: Option<crate::DefKey>,
-    ) -> Self {
-        Self::analyze_root(body, root, parameters, Some(signatures), bounds, effect_bindings, Some(solver), abort_primitive)
-    }
-
     fn analyze_root(
         body: &TypedBody,
         root: CoreId,
         parameters: &[(String, Type)],
+        signatures: Option<&ElaboratedInterface>,
+        bounds: &[(Type, crate::ElaboratedTraitReference)],
+        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
+        frozen_solver: Option<&crate::TraitSolver>,
+        abort_primitive: Option<crate::DefKey>,
+    ) -> Self {
+        Self::analyze_root_with_captures(body, root, parameters, &[], signatures, bounds,
+            effect_bindings, frozen_solver, abort_primitive)
+    }
+
+    /// A borrowed capture names its caller-owned referent in Core. Its source
+    /// type is not a newly transferred owner and must not acquire a second
+    /// destructor or positive-use obligation in the lifted body.
+    pub(crate) fn analyze_closure(
+        body: &TypedBody,
+        root: CoreId,
+        parameters: &[(String, Type)],
+        environment: &crate::core::CaptureEnvironment,
+        signatures: Option<&ElaboratedInterface>,
+        parent: &PlaceFlow,
+        solver: Option<&crate::TraitSolver>,
+    ) -> Self {
+        let abi = environment.captures.iter()
+            .map(|capture| (capture.name.clone(), capture.ty.clone()))
+            .chain(parameters.iter().cloned()).collect::<Vec<_>>();
+        let modes = environment.captures.iter().map(|capture| capture.mode).collect::<Vec<_>>();
+        Self::analyze_root_with_captures(body, root, &abi, &modes, signatures,
+            &parent.lexical_bounds, &parent.lexical_effect_bindings, solver, parent.abort_primitive)
+    }
+
+    fn analyze_root_with_captures(
+        body: &TypedBody,
+        root: CoreId,
+        parameters: &[(String, Type)],
+        capture_modes: &[CaptureMode],
         signatures: Option<&ElaboratedInterface>,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
         effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
@@ -599,8 +621,10 @@ impl PlaceFlow {
             a.record_storage_binding(binding);
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
-            a.record_destructor_paths(name, ty);
-            a.record_minimum_binding(name, ty, body.expression(root).span);
+            if !matches!(capture_modes.get(index), Some(CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow)) {
+                a.record_destructor_paths(name, ty);
+                a.record_minimum_binding(name, ty, body.expression(root).span);
+            }
         }
         // Parameters are caller-owned values, but reference-typed parameter
         // projections still name a stable external loan.  Seed those frozen

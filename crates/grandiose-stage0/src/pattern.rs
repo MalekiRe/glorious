@@ -273,6 +273,9 @@ impl Elaborator<'_> {
                 if let ResolutionState::Resolved(definition) = self.index.resolve_path(
                     DefinitionNamespace::Value, self.module, &[name.clone()],
                 ) {
+                    if self.signatures.value_alias_enum_constructor(definition).is_some() {
+                        return self.enum_tuple(pattern.span, vec![name], vec![], vec![], subject);
+                    }
                     if let Some((ty, decision)) = self.signatures.pattern_values.get(&definition).cloned() {
                         if self.constant_pattern_matches(definition, &ty, &subject) {
                             return decision;
@@ -609,7 +612,16 @@ impl Elaborator<'_> {
             self.error(span, "G4211", "enum pattern requires a nominal subject");
             return PatternDecision::Error;
         };
-        if self.resolve_type(enum_path) != Some(definition) {
+        let selected_alias = match self.index.resolve_path(DefinitionNamespace::Value, self.module, &path) {
+            ResolutionState::Resolved(alias) => self.signatures.value_alias_enum_constructor(alias)
+                .map(|(target, variant)| (target, variant.to_owned())),
+            _ => None,
+        };
+        let (target, variant) = match selected_alias {
+            Some((target, variant)) => (Some(target), variant),
+            None => (self.resolve_type(enum_path), variant.clone()),
+        };
+        if target != Some(definition) {
             self.error(span, "G4212", "enum pattern type differs from its subject");
             return PatternDecision::Error;
         }
@@ -618,7 +630,7 @@ impl Elaborator<'_> {
         }
         let Some((variant_index, types)) = self
             .signatures
-            .instantiate_enum_variant_generic(definition, &arguments, variant)
+            .instantiate_enum_variant_generic(definition, &arguments, &variant)
             .ok()
         else {
             self.error(span, "G4213", "enum variant has no matching tuple payload");

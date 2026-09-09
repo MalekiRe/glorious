@@ -7,9 +7,9 @@ pub fn main() -> i64 {
     assert_true(handle u8::parse_radix("ff", 16) { Result::Ok(255) => true, _ => false });
     assert_true(handle u8::parse_radix("10", 1) { Result::Err(error) => handle error.kind { IntParseErrorKind::InvalidRadix => true, _ => false }, _ => false });
     let text = handle i128::format_radix(i128::min_value(), 10) { Result::Ok(text) => text, _ => owned("bad") };
-    assert_true(Eq::eq(&String::as_str(&text), &"-170141183460469231731687303715884105728"));
+    assert_true(PartialEq::eq(&String::as_str(&text), &"-170141183460469231731687303715884105728"));
     let text = handle u64::format_radix(65535, 16) { Result::Ok(text) => text, _ => owned("bad") };
-    assert_true(Eq::eq(&String::as_str(&text), &"ffff"));
+    assert_true(PartialEq::eq(&String::as_str(&text), &"ffff"));
     let too_large = as<i16>(256);
     let maximum = as<i16>(255);
     assert_true(handle TryAs<u8>::try_cast(too_large) { Result::Err(_) => true, _ => false });

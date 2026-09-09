@@ -18,11 +18,11 @@ fn sorting_sift<T>(items: &mut SliceMut<T>, count: usize, root: usize) where T: 
             let left = root * 2 + 1;
             let child = handle left + 1 < count {
                 false => left,
-                true => handle Ord::compare(sorting_get(& *items, left), sorting_get(& *items, left + 1)) {
+                true => handle Ord::cmp(sorting_get(& *items, left), sorting_get(& *items, left + 1)) {
                     Ordering::Less => left + 1, _ => left,
                 },
             };
-            handle Ord::compare(sorting_get(& *items, root), sorting_get(& *items, child)) {
+            handle Ord::cmp(sorting_get(& *items, root), sorting_get(& *items, child)) {
                 Ordering::Less => { sorting_swap(&mut *items, root, child); tail sorting_sift(items, count, child) },
                 _ => (),
             }
@@ -53,7 +53,7 @@ pub fn sort_unstable<T>(items: &mut SliceMut<T>) where T: Ord {
 fn sorting_insert<T>(items: &mut SliceMut<T>, index: usize) where T: Ord {
     handle index == 0 {
         true => (),
-        false => handle Ord::compare(sorting_get(& *items, index - 1), sorting_get(& *items, index)) {
+        false => handle Ord::cmp(sorting_get(& *items, index - 1), sorting_get(& *items, index)) {
             Ordering::Greater => { sorting_swap(&mut *items, index - 1, index); tail sorting_insert(items, index - 1) },
             _ => (),
         },

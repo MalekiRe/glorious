@@ -29,9 +29,10 @@ pub struct Memo<V> {
 }
 impl<V> Use<[0, 1]> for Memo<V> where V: Use<[0, 1]> {}
 
-pub impl Eq for ReadIdentity {
+pub impl PartialEq for ReadIdentity {
     eq(left: &ReadIdentity, right: &ReadIdentity) -> Bool { same(*left, *right) }
 }
+pub impl Eq for ReadIdentity {}
 pub impl Hash for ReadIdentity {
     hash(value: &ReadIdentity, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, as<usize>(value.family));

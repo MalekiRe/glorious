@@ -5,6 +5,40 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 82: IEEE floating comparisons and partial traits
+
+The floating policy now follows the requested IEEE semantics. `PartialEq` and
+`PartialOrd` are ordinary library traits; `Eq` is a reflexivity marker and `Ord`
+requires total equality and partial ordering. Ordinary comparison fixities name
+source wrappers that borrow their affine operands. Floats compare signed zeros
+as equal and NaN as unordered, with no float `Eq`, `Ord` or `Hash` instance.
+Explicit `total_cmp` remains available with its canonical-bit policy. Result,
+references, scalars and existing compiler-owned instances have migrated to the
+coherent trait families; equality-only helpers accept `PartialEq`.
+
+The migration exposed two frontend defects: plus-separated where predicates
+were silently truncated, and constructor aliases were not accepted in patterns.
+Both now use ordinary frozen source identities and all declared predicates.
+Lifted closure flow also distinguishes a borrowed capture from a transferred
+owner, without changing the capture ABI or dropping the caller's linear debt.
+
+The frontend recheck passes 359 tests: 268 Core, 50 header, 30 library-boundary
+and 11 minimum-use (`target/ieee-front-end-v10.log`). The library-boundary positive
+fixtures execute fresh and decoded artifacts at O0 and O2. The API suite passes
+all 175 tests (`target/ieee-stdlib-v8.log`); vector resize reserves once and UTF-8
+validation uses bounded chunks to preserve the unchanged large-input allocation
+and call-depth limits. A separate batch passes 111 destruction, 9 pattern and
+22 request/revision tests (`target/ieee-broad-v9.log`).
+The follow-up foundation source case and O0/O2 float-vector dedup regression
+also pass (`target/ieee-foundation-v11.log`, `target/ieee-dedup-v12.log`).
+
+The actual source-library matrix is still only 15 passing / 16 failing tests,
+none ignored (`target/ieee-broad-v9.log`). Quantified callable proof gaps, source
+ownership/annotation issues and float-parser allocation cost remain. This is
+not a completed library or self-hosted compiler, nor a semantic conformance
+certificate. The refreshed specification lock and 87 candidate links continue
+to describe planned acceptance coverage, not completed families.
+
 ## Cache 80: explicit operator targets and forwarded interface contracts
 
 The generated-native follow-up integrates `f66f86c4`. Native ABI 4 transports

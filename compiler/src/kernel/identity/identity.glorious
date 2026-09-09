@@ -31,12 +31,14 @@ pub fn same_revision(left: RevisionId, right: RevisionId) -> Bool {
     handle left.database == right.database { false => false, true => left.ordinal == right.ordinal }
 }
 
-pub impl Eq for Digest {
+pub impl PartialEq for Digest {
     eq(left: &Digest, right: &Digest) -> Bool { equal(*left, *right) }
 }
-pub impl Eq for FileKey {
+pub impl Eq for Digest {}
+pub impl PartialEq for FileKey {
     eq(left: &FileKey, right: &FileKey) -> Bool { equal(left.digest, right.digest) }
 }
+pub impl Eq for FileKey {}
 pub impl Hash for FileKey {
     hash(value: &FileKey, state: &mut Hasher) -> () { Hash::hash(&value.digest, state) }
 }
@@ -48,7 +50,7 @@ pub impl Hash for Digest {
         Hasher::write_usize(&mut *state, as<usize>(value.d))
     }
 }
-pub impl Eq for RevisionId {
+pub impl PartialEq for RevisionId {
     eq(left: &RevisionId, right: &RevisionId) -> Bool {
         handle left.database == right.database {
             true => left.ordinal == right.ordinal,
@@ -56,6 +58,7 @@ pub impl Eq for RevisionId {
         }
     }
 }
+pub impl Eq for RevisionId {}
 pub impl Hash for RevisionId {
     hash(value: &RevisionId, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, as<usize>(value.database));
@@ -82,7 +85,7 @@ fn compare_digest_from(left: Digest, right: Digest, index: usize) -> Ordering {
         false => {
             let a = digest_byte(left, index);
             let b = digest_byte(right, index);
-            handle Ord::compare(&a, &b) {
+            handle Ord::cmp(&a, &b) {
                 Ordering::Equal => compare_digest_from(left, right, index + 1),
                 order => order,
             }
@@ -96,11 +99,12 @@ pub fn compare_text(left: &String, right: &String) -> Ordering {
 pub fn compare_package(left: &PackageKey, right: &PackageKey) -> Ordering {
     compare_text(&left.value, &right.value)
 }
-pub impl Eq for PackageKey {
+pub impl PartialEq for PackageKey {
     eq(left: &PackageKey, right: &PackageKey) -> Bool {
         handle compare_package(left, right) { Ordering::Equal => true, _ => false }
     }
 }
+pub impl Eq for PackageKey {}
 pub impl Hash for PackageKey {
     hash(value: &PackageKey, state: &mut Hasher) -> () { hash_package(value, state) }
 }

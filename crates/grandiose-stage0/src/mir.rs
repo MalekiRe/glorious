@@ -4545,12 +4545,7 @@ impl MirLowering {
                 })?;
             let closure_flows = body.expressions.iter().filter_map(|expression| {
                 let CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { return None; };
-                let abi = environment.captures.iter().map(|capture| (capture.name.clone(), capture.ty.clone()))
-                    .chain(parameters.iter().cloned()).collect::<Vec<_>>();
-                let child = signatures.map_or_else(
-                    || PlaceFlow::analyze_lifted(body, *root, &abi),
-                    |signatures| PlaceFlow::analyze_lifted_with_interface_and_bounds(body, *root, &abi, signatures, &flow.lexical_bounds),
-                );
+                let child = PlaceFlow::analyze_closure(body, *root, parameters, environment, signatures, flow, None);
                 Some((lifted_callable_definition(environment.brand), child))
             }).collect();
             let ownership = crate::ownership_mir::OwnershipMir::lower_with_closure_flows(

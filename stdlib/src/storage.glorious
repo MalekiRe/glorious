@@ -3,8 +3,12 @@
 pub struct Id<Tag> { private index: u32 }
 pub struct IndexOverflow {}
 pub impl<Tag> Use<[0,*]> for Id<Tag> {}
-pub impl<Tag> Eq for Id<Tag> { fn eq(left: &Self, right: &Self) -> Bool { left.index == right.index } }
-pub impl<Tag> Ord for Id<Tag> { fn compare(left: &Self, right: &Self) -> Ordering { Ord::compare(&left.index, &right.index) } }
+pub impl<Tag> PartialEq for Id<Tag> { fn eq(left: &Self, right: &Self) -> Bool { left.index == right.index } }
+pub impl<Tag> Eq for Id<Tag> {}
+pub impl<Tag> Ord for Id<Tag> { fn cmp(left: &Self, right: &Self) -> Ordering { Ord::cmp(&left.index, &right.index) } }
+pub impl<Tag> PartialOrd for Id<Tag> {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
 pub impl<Tag> Hash for Id<Tag> { fn hash(value: &Self, state: &mut Hasher) { Hash::hash(&value.index, state) } }
 pub impl<Tag> Clone for Id<Tag> { fn clone(value: &Self) -> Self { Id { index: value.index } } }
 impl<Tag> Id<Tag> {
@@ -35,7 +39,7 @@ pub struct Interner<Tag,T> { private values: IndexVec<Tag,T> }
 fn interner_find_from<Tag,T>(values: &IndexVec<Tag,T>, item: &T, index: usize) -> Option<Id<Tag>> where T: Eq {
     handle index == IndexVec::len(values) {
         true => None,
-        false => handle Eq::eq(Vec::get_unchecked(&values.values, index), item) {
+        false => handle PartialEq::eq(Vec::get_unchecked(&values.values, index), item) {
             true => Some(Id { index: as<u32>(index) }),
             false => tail interner_find_from(values, item, index + 1),
         },

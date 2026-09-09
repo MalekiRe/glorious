@@ -118,6 +118,18 @@ fn each_scope_and_branch_retains_its_own_minimum_use_debt() {
 }
 
 #[test]
+fn borrowed_closure_captures_do_not_duplicate_the_referents_minimum_use_debt() {
+    accepts("fn observe(value: &Token) -> i64 { 42 }
+        pub fn main() -> i64 { let value = Token {}; let read = () -> i64 { observe(&value) }; read(); consume(value) }");
+    accepts("fn observe(value: &mut Token) -> i64 { 42 }
+        pub fn main() -> i64 { let mut value = Token {}; let read = () -> i64 { observe(&mut value) }; read(); consume(value) }");
+    rejects("fn observe(value: &Token) -> i64 { 42 }
+        pub fn main() -> i64 { let value = Token {}; let read = () -> i64 { observe(&value) }; read() }");
+    rejects("fn observe(value: &mut Token) -> i64 { 42 }
+        pub fn main() -> i64 { let mut value = Token {}; let read = () -> i64 { observe(&mut value) }; read() }");
+}
+
+#[test]
 fn reads_helpers_overwrites_and_wildcards_cannot_erase_linear_owners() {
     rejects("pub fn main() -> i64 { let value = Token {}; let borrowed = &value; 42 }");
     rejects("pub fn main() -> i64 { let mut value = Token {}; value = Token {}; consume(value) }");

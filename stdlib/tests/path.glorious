@@ -1,7 +1,7 @@
 use std::path::*;
 fn path<'a>(text: Str<'a>) -> Path<'a> { Path::from_os_str(OsStr::from_str(text)) }
 fn same_path(value: Path, expected: Str) {
-    assert_true(handle OsStr::to_str(Path::as_os_str(value)) { Result::Ok(text) => Eq::eq(&text, &expected), _ => false })
+    assert_true(handle OsStr::to_str(Path::as_os_str(value)) { Result::Ok(text) => PartialEq::eq(&text, &expected), _ => false })
 }
 pub fn main() -> i64 {
     let mut value = Path::to_owned(path("/a/b"));
@@ -17,7 +17,7 @@ pub fn main() -> i64 {
     handle Path::parent(path("one")) { Result::Ok(parent) => same_path(parent, ""), _ => return(0, @main) };
     assert_true(handle Path::extension(path("/a/.hidden")) { Result::Err(_) => true, _ => false });
     assert_true(handle Path::extension(path("/a/file.tar.gz")) {
-        Result::Ok(extension) => handle OsStr::to_str(extension) { Result::Ok(text) => Eq::eq(&text, &"gz"), _ => false }, _ => false,
+        Result::Ok(extension) => handle OsStr::to_str(extension) { Result::Ok(text) => PartialEq::eq(&text, &"gz"), _ => false }, _ => false,
     });
     let mut components = Path::components(path("//a/./../b//"));
     assert_true(handle Components::next(&mut components) { Result::Ok(PathComponent::Root) => true, _ => false });

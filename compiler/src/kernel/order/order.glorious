@@ -28,12 +28,12 @@ pub fn byte_order(left: Str, right: Str, cursor: usize) -> Option<Ordering> {
         true => {
             let a = *Slice::get_unchecked(Str::as_bytes(left), cursor);
             let b = *Slice::get_unchecked(Str::as_bytes(right), cursor);
-            handle Ord::compare(&a, &b) { Ordering::Equal => None, result => Result::Ok(result) }
+            handle Ord::cmp(&a, &b) { Ordering::Equal => None, result => Result::Ok(result) }
         },
         false => {
             let a = Str::len(left);
             let b = Str::len(right);
-            Result::Ok(Ord::compare(&a, &b))
+            Result::Ok(Ord::cmp(&a, &b))
         },
     }
 }

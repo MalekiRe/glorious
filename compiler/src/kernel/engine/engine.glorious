@@ -90,9 +90,10 @@ pub struct Engine {
     private memory_owners: Arena<MemoryOwner>, private memory_leases: Arena<MemoryLease>, private memory_closed: usize,
 }
 
-pub impl Eq for MemoKey {
+pub impl PartialEq for MemoKey {
     eq(left: &MemoKey, right: &MemoKey) -> Bool { same_key(*left, *right) }
 }
+pub impl Eq for MemoKey {}
 pub impl Hash for MemoKey {
     hash(value: &MemoKey, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, as<usize>(value.revision.database));

@@ -75,7 +75,7 @@ fn float_big_shift(value: &Vec<u32>, count: u128) -> Vec<u32> {
 fn float_big_compare_from(left: &Vec<u32>, right: &Vec<u32>, count: usize) -> Ordering {
     handle count == 0 {
         true => Ordering::Equal,
-        false => handle Ord::compare(Vec::get_unchecked(left, count - 1), Vec::get_unchecked(right, count - 1)) {
+        false => handle Ord::cmp(Vec::get_unchecked(left, count - 1), Vec::get_unchecked(right, count - 1)) {
             Ordering::Equal => tail float_big_compare_from(left, right, count - 1), order => order,
         },
     }
@@ -83,7 +83,7 @@ fn float_big_compare_from(left: &Vec<u32>, right: &Vec<u32>, count: usize) -> Or
 fn float_big_compare(left: &Vec<u32>, right: &Vec<u32>) -> Ordering {
     let a = Vec::len(left);
     let b = Vec::len(right);
-    handle Ord::compare(&a, &b) { Ordering::Equal => float_big_compare_from(left, right, a), order => order }
+    handle Ord::cmp(&a, &b) { Ordering::Equal => float_big_compare_from(left, right, a), order => order }
 }
 fn float_ratio_compare(value: &FloatRatio, mantissa: u64, exponent: i128) -> Ordering {
     handle mantissa == 0 { true => return(Ordering::Greater, @float_ratio_compare), false => () };

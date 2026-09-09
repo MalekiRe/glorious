@@ -27,11 +27,11 @@ impl<T,E> Result<T,E> {
     pub fn swap(value: Self) -> Result<E,T> {
         handle value { Result::Ok(item) => Result::Err(item), Result::Err(error) => Result::Ok(error) }
     }
-    pub fn contains(value: &Self, expected: &T) -> Bool where T: Eq {
-        handle *value { Result::Ok(_) => Eq::eq(&value.0, expected), Result::Err(_) => false }
+    pub fn contains(value: &Self, expected: &T) -> Bool where T: PartialEq {
+        handle *value { Result::Ok(_) => PartialEq::eq(&value.0, expected), Result::Err(_) => false }
     }
-    pub fn contains_err(value: &Self, expected: &E) -> Bool where E: Eq {
-        handle *value { Result::Ok(_) => false, Result::Err(_) => Eq::eq(&value.0, expected) }
+    pub fn contains_err(value: &Self, expected: &E) -> Bool where E: PartialEq {
+        handle *value { Result::Ok(_) => false, Result::Err(_) => PartialEq::eq(&value.0, expected) }
     }
     pub fn unwrap_or_default(value: Self) -> T where T: Default, E: Use<[0,1]> {
         handle value { Result::Ok(item) => item, Result::Err(_) => Default::default() }
@@ -164,10 +164,10 @@ impl Ordering {
     pub fn then(left: Self, right: Self) -> Self { handle left { Ordering::Equal => right, _ => left } }
 }
 pub fn min_ref<'a,T>(left: &'a T, right: &'a T) -> &'a T where T: Ord {
-    handle Ord::compare(left, right) { Ordering::Greater => right, _ => left }
+    handle Ord::cmp(left, right) { Ordering::Greater => right, _ => left }
 }
 pub fn max_ref<'a,T>(left: &'a T, right: &'a T) -> &'a T where T: Ord {
-    handle Ord::compare(left, right) { Ordering::Less => right, _ => left }
+    handle Ord::cmp(left, right) { Ordering::Less => right, _ => left }
 }
 impl Range<usize> {
     pub fn checked(value: Self, length: usize) -> Result<Self,RangeError> {

@@ -65,7 +65,7 @@ pub mod graph {
                 Result::Err(error) => Result::Err(error),
                 Result::Ok(_) => {
                     let current = Vec::get_unchecked(stack, index).node;
-                    let copying = handle copying { true => true, false => Eq::eq(&current, &node) };
+                    let copying = handle copying { true => true, false => PartialEq::eq(&current, &node) };
                     handle copying { true => Vec::push(&mut *output, current), false => () };
                     tail cycle_from(stack, node, index + 1, copying, output, budget)
                 },

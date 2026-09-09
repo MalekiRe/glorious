@@ -61,8 +61,8 @@ impl Instant {
     pub fn compare(left: Self, right: Self) -> Result<Ordering,TimeError> {
         handle left.clock == right.clock {
             false => Result::Err(TimeError::DifferentClock),
-            true => Result::Ok(handle Ord::compare(&left.elapsed.seconds, &right.elapsed.seconds) {
-                Ordering::Equal => Ord::compare(&left.elapsed.nanos, &right.elapsed.nanos), order => order,
+            true => Result::Ok(handle Ord::cmp(&left.elapsed.seconds, &right.elapsed.seconds) {
+                Ordering::Equal => Ord::cmp(&left.elapsed.nanos, &right.elapsed.nanos), order => order,
             }),
         }
     }

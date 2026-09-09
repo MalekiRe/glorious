@@ -3133,9 +3133,13 @@ fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
     let program = compile_source(&executable);
     assert_eq!(program.run_i64().unwrap(), 42);
     let image = grandiose_stage0::decode_program(&program.canonical_bytes()).unwrap();
-    assert!(image.functions.values().flat_map(|function| &function.instructions)
-        .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::IntIntrinsic {
-            primitive: grandiose_stage0::PrimitiveRole::IntGreater, scalar: ScalarType::U32, .. })));
+    // The ordinary PartialOrd wrapper obtains an Ordering from the source
+    // integer instance, whose implementation uses typed less/equal leaves.
+    for expected in [grandiose_stage0::PrimitiveRole::IntLess, grandiose_stage0::PrimitiveRole::IntEqual] {
+        assert!(image.functions.values().flat_map(|function| &function.instructions)
+            .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::IntIntrinsic {
+                primitive, scalar: ScalarType::U32, .. } if *primitive == expected)));
+    }
 }
 
 #[test]
@@ -4355,7 +4359,7 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
         matches!(
             expression.kind,
             CoreKind::Call { callee, ref arguments, .. }
-                if matches!(comparison.expression(callee).kind, CoreKind::TraitMethod { .. })
+                if matches!(comparison.expression(callee).kind, CoreKind::Function { .. })
                     && arguments.len() == 2
                     && comparison.expression(arguments[1]).ty == Type::Scalar(ScalarType::U32)
         )
@@ -4374,7 +4378,7 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
         matches!(
             expression.kind,
             CoreKind::Call { callee, ref arguments, .. }
-                if matches!(reversed_comparison.expression(callee).kind, CoreKind::TraitMethod { .. })
+                if matches!(reversed_comparison.expression(callee).kind, CoreKind::Function { .. })
                     && arguments.len() == 2
                     && reversed_comparison.expression(arguments[0]).ty == Type::Scalar(ScalarType::U32)
                     && reversed_comparison.expression(arguments[1]).ty == Type::Scalar(ScalarType::U32)

@@ -252,12 +252,7 @@ impl OwnershipMir {
         let control = ControlMir::lower(&evaluation).map_err(|error| OwnershipError(format!("invalid Control MIR: {error:?}")))?;
         let closure_flows = body.expressions.iter().filter_map(|expression| {
             let crate::CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { return None; };
-            let abi = environment.captures.iter().map(|capture| (capture.name.clone(), capture.ty.clone())).chain(parameters.iter().cloned()).collect::<Vec<_>>();
-            let flow = signatures.map_or_else(|| PlaceFlow::analyze_lifted(body, *root, &abi),
-                |signatures| match solver {
-                    Some(solver) => PlaceFlow::analyze_lifted_with_frozen_solver(body, *root, &abi, signatures, &flow.lexical_bounds, &flow.lexical_effect_bindings, solver, flow.abort_primitive),
-                    None => PlaceFlow::analyze_lifted_with_interface_and_bounds(body, *root, &abi, signatures, &flow.lexical_bounds),
-                });
+            let flow = PlaceFlow::analyze_closure(body, *root, parameters, environment, signatures, flow, solver);
             Some((crate::mir::lifted_callable_definition(environment.brand), flow))
         }).collect();
         let ownership = Self::lower_body(control, flow, &closure_flows, signatures, solver, &[])?;
@@ -329,7 +324,7 @@ impl OwnershipMir {
             .map_err(|error| OwnershipError(format!("invalid control: {error:?}")))?;
         if !flow.diagnostics.is_empty() {
             return Err(OwnershipError(
-                "ownership input has diagnosed obligations".into(),
+                format!("ownership input has diagnosed obligations: {:?}", flow.diagnostics),
             ));
         }
         let mut owners = control

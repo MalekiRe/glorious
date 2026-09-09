@@ -166,12 +166,12 @@ fn source_linear_collection_stack_costs() {
             assert!(profile.peak_call_depth < 64, "{name}: {profile:?}");
             assert_eq!(profile.native_memory.raw_live_bytes, 0, "{name}");
             assert_eq!(profile.native_memory.home_live_bytes, 0, "{name}");
-            eprintln!("{name} length={length} depth={}", profile.peak_call_depth);
+            eprintln!("{name} length={length} depth={} allocations={}", profile.peak_call_depth, profile.charged_allocation_elements);
             // SAFETY: the same trusted source, without authoring optimizations.
             let ordinary = unsafe { program.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits {
                 max_call_depth: 128, ..Default::default()
             }) };
-            assert_eq!(ordinary.unwrap(), length as i64, "ordinary {name}");
+            assert_eq!(ordinary.expect(&format!("ordinary {name} length={length}")), length as i64, "ordinary {name}");
         }
     }
 }
@@ -275,9 +275,9 @@ fn source_clones_create_independent_nested_collection_owners() {
             Vec::push(&mut copied, Str::to_string("c"));
             let expected_copy = Str::to_string("a");
             let expected_original = Str::to_string("ab");
-            handle Eq::eq(Vec::get_unchecked(&copied, 0), &expected_copy) {
+            handle PartialEq::eq(Vec::get_unchecked(&copied, 0), &expected_copy) {
                 false => 0,
-                true => handle Eq::eq(Vec::get_unchecked(&original, 0), &expected_original) {
+                true => handle PartialEq::eq(Vec::get_unchecked(&original, 0), &expected_original) {
                     false => 0,
                     true => handle Vec::len(&original) == 1 {
                         false => 0,
@@ -1114,8 +1114,8 @@ fn standard_string_traits_use_exact_bytes_and_resolve_hash_collisions() {
         fn is_equal(value: Bool) -> i64 {{ handle value {{ true => 1, false => 0 }} }}
         fn pair(a: Slice<u8>, b: Slice<u8>, expected: i64, a_hash: usize, b_hash: usize) -> i64 {{
             let left = text(a); let right = text(b);
-            equal(order(Ord::compare(&left, &right)), expected)
-                * equal(is_equal(Eq::eq(&left, &right)), is_equal(expected == 0))
+            equal(order(Ord::cmp(&left, &right)), expected)
+                * equal(is_equal(PartialEq::eq(&left, &right)), is_equal(expected == 0))
                 * equal(as<i64>(hash(&left)), as<i64>(a_hash)) * equal(as<i64>(hash(&right)), as<i64>(b_hash))
         }}
         fn lookup(map: &HashMap<String, usize>, key: Str, expected: usize) -> i64 {{
@@ -1124,7 +1124,7 @@ fn standard_string_traits_use_exact_bytes_and_resolve_hash_collisions() {
         }}
         fn maps() -> i64 {{
             let a = Str::to_string("Ab"); let b = Str::to_string("BA");
-            let mut score = equal(as<i64>(hash(&a)), as<i64>(hash(&b))) * equal(is_equal(Eq::eq(&a, &b)), 0);
+            let mut score = equal(as<i64>(hash(&a)), as<i64>(hash(&b))) * equal(is_equal(PartialEq::eq(&a, &b)), 0);
             let mut map = HashMap<String, usize>::new();
             HashMap::insert(&mut map, a, as<usize>(11)); HashMap::insert(&mut map, b, as<usize>(22));
             score = score + lookup(&map, "Ab", 11) + lookup(&map, "BA", 22);
@@ -1516,7 +1516,7 @@ fn bundled_stable_sort_keeps_equal_values_in_source_order() {
         use std::*;
         pub struct Entry { key: i64, tag: i64 }
         pub impl Ord for Entry {
-            compare(left: &Entry, right: &Entry) -> Ordering {
+            cmp(left: &Entry, right: &Entry) -> Ordering {
                 handle left.key < right.key {
                     true => Ordering::Less,
                     false => handle left.key == right.key {
@@ -1526,6 +1526,13 @@ fn bundled_stable_sort_keeps_equal_values_in_source_order() {
                 }
             }
         }
+        pub impl PartialOrd for Entry {
+            fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+        }
+        pub impl PartialEq for Entry {
+            fn eq(left: &Self, right: &Self) -> Bool { handle Ord::cmp(left, right) { Ordering::Equal => true, _ => false } }
+        }
+        pub impl Eq for Entry {}
         pub fn main() -> i64 {
             let mut values = Vec<Entry>::new();
             Vec::push(&mut values, Entry { key: 2, tag: 10 });
@@ -1623,8 +1630,8 @@ fn scalar_eq_and_ord_are_standard_library_trait_implementations() {
         pub fn main() -> i64 {
             let left = 20;
             let right = 22;
-            handle Eq::eq(&left, &left) {
-                true => handle Ord::compare(&left, &right) {
+            handle PartialEq::eq(&left, &left) {
+                true => handle Ord::cmp(&left, &right) {
                     Ordering::Less => 42,
                     _ => 0,
                 },
@@ -1638,18 +1645,37 @@ fn scalar_eq_and_ord_are_standard_library_trait_implementations() {
 }
 
 #[test]
+fn vector_dedup_uses_partial_equality_without_float_total_order_evidence() {
+    for optimization in ["0", "2"] {
+        let mut input = request("use std::*; pub fn main() -> i64 {
+            let mut values = Vec<f64>::new();
+            Vec::push(&mut values, 0.0 / 0.0); Vec::push(&mut values, 0.0 / 0.0);
+            Vec::push(&mut values, -0.0); Vec::push(&mut values, 0.0);
+            Vec::dedup(&mut values);
+            handle Vec::len(&values) == 3 and { *Vec::get_unchecked(&values, 2) == 0.0 } {
+                true => 42, false => 0,
+            }
+        }");
+        input.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+        let program = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(program.run_std_i64().unwrap(), 42, "O{optimization}");
+    }
+}
+
+#[test]
 fn scalar_ord_supports_byte_and_character_slice_algorithms() {
     let source = r#"
         use std::*;
         pub fn compare_bytes(left: u8, right: u8) -> i64 {
-            handle Ord::compare(&left, &right) {
+            handle Ord::cmp(&left, &right) {
                 Ordering::Less => 1,
                 Ordering::Equal => 2,
                 Ordering::Greater => 3,
             }
         }
         pub fn compare_chars(left: char, right: char) -> i64 {
-            handle Ord::compare(&left, &right) {
+            handle Ord::cmp(&left, &right) {
                 Ordering::Less => 10,
                 Ordering::Equal => 20,
                 Ordering::Greater => 30,
@@ -1798,13 +1824,13 @@ fn bundled_ord_covers_integer_widths_using_generic_vm_comparisons() {
     let source = r#"
         use std::*;
         pub fn u16_less(left: u16, right: u16) -> i64 {
-            handle Ord::compare(&left, &right) { Ordering::Less => 1, _ => 0 }
+            handle Ord::cmp(&left, &right) { Ordering::Less => 1, _ => 0 }
         }
         pub fn i32_greater(left: i32, right: i32) -> i64 {
-            handle Ord::compare(&left, &right) { Ordering::Greater => 1, _ => 0 }
+            handle Ord::cmp(&left, &right) { Ordering::Greater => 1, _ => 0 }
         }
         pub fn u128_equal(left: u128, right: u128) -> i64 {
-            handle Ord::compare(&left, &right) { Ordering::Equal => 1, _ => 0 }
+            handle Ord::cmp(&left, &right) { Ordering::Equal => 1, _ => 0 }
         }
         pub fn main() -> i64 {
             handle u16_less(2, 7) == 1 {
@@ -2265,7 +2291,7 @@ fn generic_hash_map_style_recursive_lookup_runs_on_an_empty_vec() {
                 false => Result::Err(()),
                 true => {
                     let entry = Vec::get_unchecked(&(*holder).entries, index);
-                    handle Eq::eq(&(*entry).key, key) {
+                    handle PartialEq::eq(&(*entry).key, key) {
                         true => Result::Ok(index),
                         false => find_from(holder, key, index + 1),
                     }
@@ -2301,7 +2327,7 @@ fn generic_hash_map_style_lookup_then_push_runs() {
                 false => Result::Err(()),
                 true => {
                     let entry = Vec::get_unchecked(&(*holder).entries, index);
-                    handle Eq::eq(&(*entry).key, key) {
+                    handle PartialEq::eq(&(*entry).key, key) {
                         true => Result::Ok(index),
                         false => find_from(holder, key, index + 1),
                     }
@@ -2410,9 +2436,10 @@ fn hash_tables_preserve_affine_values_across_growth_collisions_and_relocation() 
         use std::*;
         pub struct Key { code: i64 }
         pub impl Use<[0, 1]> for Key {}
-        pub impl Eq for Key {
+        pub impl PartialEq for Key {
             eq(left: &Key, right: &Key) -> Bool { left.code == right.code }
         }
+        pub impl Eq for Key {}
         pub impl Hash for Key {
             hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, @HASH@); }
         }
@@ -2506,9 +2533,10 @@ fn hash_tables_preserve_the_original_affine_set_resident_on_duplicate_insert() {
         use std::*;
         pub struct Key { code: i64, payload: i64 }
         pub impl Use<[0, 1]> for Key {}
-        pub impl Eq for Key {
+        pub impl PartialEq for Key {
             eq(left: &Key, right: &Key) -> Bool { left.code == right.code }
         }
+        pub impl Eq for Key {}
         pub impl Hash for Key {
             hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, 0); }
         }
@@ -2556,7 +2584,8 @@ fn hash_tables_probe_past_tombstones_and_reuse_empty_tables() {
     let source = r#"
         use std::*;
         pub struct Key { code: i64 }
-        pub impl Eq for Key { eq(left: &Key, right: &Key) -> Bool { left.code == right.code } }
+        pub impl PartialEq for Key { eq(left: &Key, right: &Key) -> Bool { left.code == right.code } }
+        pub impl Eq for Key {}
         pub impl Hash for Key {
             hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, 0); }
         }
@@ -2637,7 +2666,8 @@ fn hash_table_mutable_lookup_and_entry_removal_preserve_the_resident_key() {
         use std::*;
         pub struct Key { code: i64, stamp: i64 }
         pub impl Use<[0, 1]> for Key {}
-        pub impl Eq for Key { eq(left: &Key, right: &Key) -> Bool { left.code == right.code } }
+        pub impl PartialEq for Key { eq(left: &Key, right: &Key) -> Bool { left.code == right.code } }
+        pub impl Eq for Key {}
         pub impl Hash for Key {
             hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, as<usize>(value.code)); }
         }

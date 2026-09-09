@@ -1821,7 +1821,7 @@
       }
     },
     "glorious-standard-library-specification.md": {
-      "sha256": "b227cc55b29d4248e174ee9574ecbf8b2e931dcd1876d0b1e768b3f6d845fb84",
+      "sha256": "1fcee13f2e0fe65ad8d3dd2c257aceed1ef3563c82bd9b18f717eac2b02fd5d4",
       "sections": {
         "S1.1": {
           "title": "Library organization",
@@ -2089,12 +2089,12 @@
             {
               "id": "S3.1:01",
               "kind": "code",
-              "sha256": "ab191a3ae64561583498c1f23d2be4f4896455989aab1f4c87b44c8d4452add9"
+              "sha256": "5e5bb88633d5e1f40f426ab764601366b012609adddb74b77925beb7a94f8fc8"
             },
             {
               "id": "S3.1:02",
               "kind": "prose",
-              "sha256": "c13fc30765d9fbe026de68706c9123ba4910bde92e425c4010e3f52238f5a6f0"
+              "sha256": "672d69bbe2a1c9fd752374f617dbd6912991fec3a42b2aa644ebade7ef755584"
             },
             {
               "id": "S3.1:03",
@@ -2120,12 +2120,12 @@
         },
         "S3.2": {
           "title": "Alias-coherent defaults and formatting",
-          "line": 227,
+          "line": 228,
           "units": [
             {
               "id": "S3.2:01",
               "kind": "prose",
-              "sha256": "41e7579ee91661164edf727de0056e37f157f151dce9cd963adc0dc4e6d67391"
+              "sha256": "2215eb45df546d974be4d22279a6d97ec09a3be57ca8a2148521ac859b40ba1a"
             },
             {
               "id": "S3.2:02",
@@ -2136,7 +2136,7 @@
         },
         "S4": {
           "title": "Operator declarations and laws",
-          "line": 233,
+          "line": 234,
           "units": [
             {
               "id": "S4:01",
@@ -2156,12 +2156,12 @@
             {
               "id": "S4:04",
               "kind": "code",
-              "sha256": "075df391e4d7df67930ef5a6dd5ec660d2262fcdf552def2b80ad266e8c9542d"
+              "sha256": "372a54266f09760949bfb0840000985306e434c3cc0ef2a5e302957327b20bad"
             },
             {
               "id": "S4:05",
               "kind": "prose",
-              "sha256": "62ec91ed52b3f7e92a0289d671e0517940b29b6e3d8c9f3023f6751da22ba65f"
+              "sha256": "92829e86f60ed9788f20eb7c98b4415d012ec6d11fe6687cf4d7ab5375517756"
             },
             {
               "id": "S4:06",
@@ -2191,7 +2191,7 @@
             {
               "id": "S4:11",
               "kind": "table",
-              "sha256": "17ca0070a7cb183732f0c5edb82331256de729f891b478f28b6b3c84fb02ef62"
+              "sha256": "4739ddd8af3e881b54a45a17c7e608c272f5831ede0888c7b23381a9f6ff8120"
             },
             {
               "id": "S4:12",
@@ -2227,7 +2227,7 @@
         },
         "S5.1": {
           "title": "Ordinary Result algebra",
-          "line": 313,
+          "line": 314,
           "units": [
             {
               "id": "S5.1:01",
@@ -2273,7 +2273,7 @@
         },
         "S5.2": {
           "title": "One function name, ordinary trait dispatch",
-          "line": 327,
+          "line": 328,
           "units": [
             {
               "id": "S5.2:01",
@@ -2294,7 +2294,7 @@
         },
         "S5.3": {
           "title": "Full plain-Result implementation interfaces",
-          "line": 370,
+          "line": 371,
           "units": [
             {
               "id": "S5.3:01",
@@ -2325,7 +2325,7 @@
         },
         "S5.4": {
           "title": "Binding-context interfaces",
-          "line": 428,
+          "line": 429,
           "units": [
             {
               "id": "S5.4:01",
@@ -2361,7 +2361,7 @@
         },
         "S5.5": {
           "title": "Full refined if/else/not contracts",
-          "line": 451,
+          "line": 452,
           "units": [
             {
               "id": "S5.5:01",
@@ -2377,7 +2377,7 @@
         },
         "S5.6": {
           "title": "Refined and/or: context algebra and complete family expansion",
-          "line": 489,
+          "line": 490,
           "units": [
             {
               "id": "S5.6:01",
@@ -2448,7 +2448,7 @@
         },
         "S6": {
           "title": "Matching, labels, and result propagation",
-          "line": 536,
+          "line": 537,
           "units": [
             {
               "id": "S6:01",
@@ -2464,12 +2464,12 @@
         },
         "S6.1": {
           "title": "Terminal failure, recoverable reporting, and invariants",
-          "line": 578,
+          "line": 579,
           "units": [
             {
               "id": "S6.1:01",
               "kind": "code",
-              "sha256": "2c3b54127771161671d3111ea3dbb0829aa40d33c6eca519b3588d1effecef3d"
+              "sha256": "6bd381d541185269597cb5ba7dc28570f1e23a7123aa21aac642d1529e398814"
             },
             {
               "id": "S6.1:02",
@@ -2485,7 +2485,7 @@
         },
         "S7.1": {
           "title": "Generative loop identity",
-          "line": 600,
+          "line": 601,
           "units": [
             {
               "id": "S7.1:01",
@@ -2506,7 +2506,7 @@
         },
         "S7.2": {
           "title": "Public loop declarations",
-          "line": 614,
+          "line": 615,
           "units": [
             {
               "id": "S7.2:01",
@@ -2532,7 +2532,7 @@
         },
         "S7.3": {
           "title": "Tail and cleanup requirements",
-          "line": 650,
+          "line": 651,
           "units": [
             {
               "id": "S7.3:01",
@@ -2548,7 +2548,7 @@
         },
         "S7.4": {
           "title": "Additional traversal control",
-          "line": 656,
+          "line": 657,
           "units": [
             {
               "id": "S7.4:01",
@@ -2564,12 +2564,12 @@
         },
         "S8": {
           "title": "Result interfaces",
-          "line": 678,
+          "line": 679,
           "units": [
             {
               "id": "S8:01",
               "kind": "code",
-              "sha256": "6350aec0c0a446813d0cdba60c35be994872dbb75ce1ca2a4e239ca972d874d5"
+              "sha256": "e4d41aa7f53bb00c926fed5d260975bbf82cb4700b7ef8fc73b771c8b87475a5"
             },
             {
               "id": "S8:02",
@@ -2585,7 +2585,7 @@
         },
         "S9": {
           "title": "Option and Bool interfaces",
-          "line": 785,
+          "line": 786,
           "units": [
             {
               "id": "S9:01",
@@ -2611,7 +2611,7 @@
         },
         "S10": {
           "title": "Ordering, ranges, and bounded values",
-          "line": 848,
+          "line": 849,
           "units": [
             {
               "id": "S10:01",
@@ -2632,7 +2632,7 @@
         },
         "S11.1": {
           "title": "Family expansion and scalar traits",
-          "line": 892,
+          "line": 893,
           "units": [
             {
               "id": "S11.1:01",
@@ -2642,13 +2642,13 @@
             {
               "id": "S11.1:02",
               "kind": "prose",
-              "sha256": "09711631506744b751330f3b7d44726e07075574ca0f9299e42dd78158290348"
+              "sha256": "1ae893185ce0c08beb2f67b259fd7a1f54fa00bda35d13e1d36da48b01748dcd"
             }
           ]
         },
         "S11.2": {
           "title": "Integer namespace interface",
-          "line": 898,
+          "line": 899,
           "units": [
             {
               "id": "S11.2:01",
@@ -2674,7 +2674,7 @@
         },
         "S11.3": {
           "title": "Conversions",
-          "line": 963,
+          "line": 964,
           "units": [
             {
               "id": "S11.3:01",
@@ -2705,7 +2705,7 @@
         },
         "S11.4": {
           "title": "Floating namespace interface",
-          "line": 975,
+          "line": 976,
           "units": [
             {
               "id": "S11.4:01",
@@ -2715,7 +2715,7 @@
             {
               "id": "S11.4:02",
               "kind": "prose",
-              "sha256": "0096f6a5e1f64da2902b584c37a1f4e13c431765dca96eb3f87a382f4abaa80b"
+              "sha256": "56aad6cccc1ae755735150223b2173fb948a20bac6407895de72ce715f351525"
             },
             {
               "id": "S11.4:03",
@@ -2736,7 +2736,7 @@
         },
         "S12": {
           "title": "Characters, ASCII, and UTF-8",
-          "line": 1033,
+          "line": 1034,
           "units": [
             {
               "id": "S12:01",
@@ -2757,7 +2757,7 @@
         },
         "S13": {
           "title": "Borrowed text and owned String",
-          "line": 1082,
+          "line": 1083,
           "units": [
             {
               "id": "S13:01",
@@ -2783,12 +2783,12 @@
         },
         "S14": {
           "title": "Fixed arrays and borrowed slices",
-          "line": 1182,
+          "line": 1183,
           "units": [
             {
               "id": "S14:01",
               "kind": "code",
-              "sha256": "6c9d1b62ad034e1bda649b605160542160b772d7f25d436bfce8528dfe1cb89c"
+              "sha256": "ee1bbe5e65190701ba380bc075c213f4e78609cc1fc3dcd583d27885d5450af5"
             },
             {
               "id": "S14:02",
@@ -2804,7 +2804,7 @@
         },
         "S15": {
           "title": "Vec ownership and mutation",
-          "line": 1271,
+          "line": 1272,
           "units": [
             {
               "id": "S15:01",
@@ -2830,7 +2830,7 @@
         },
         "S16": {
           "title": "Queues, stacks, and heaps",
-          "line": 1362,
+          "line": 1363,
           "units": [
             {
               "id": "S16:01",
@@ -2846,7 +2846,7 @@
         },
         "S17": {
           "title": "Hash maps, sets, and entries",
-          "line": 1421,
+          "line": 1422,
           "units": [
             {
               "id": "S17:01",
@@ -2872,7 +2872,7 @@
         },
         "S17.1": {
           "title": "Borrowed heterogeneous lookup",
-          "line": 1547,
+          "line": 1548,
           "units": [
             {
               "id": "S17.1:01",
@@ -2888,7 +2888,7 @@
         },
         "S18.1": {
           "title": "Separate ownership shapes",
-          "line": 1573,
+          "line": 1574,
           "units": [
             {
               "id": "S18.1:01",
@@ -2909,7 +2909,7 @@
         },
         "S18.2": {
           "title": "Adapter types and full callback evidence",
-          "line": 1607,
+          "line": 1608,
           "units": [
             {
               "id": "S18.2:01",
@@ -2925,7 +2925,7 @@
         },
         "S18.3": {
           "title": "Remainders and buffered ownership",
-          "line": 1659,
+          "line": 1660,
           "units": [
             {
               "id": "S18.3:01",
@@ -2941,7 +2941,7 @@
         },
         "S18.4": {
           "title": "Consumers and partial progress",
-          "line": 1684,
+          "line": 1685,
           "units": [
             {
               "id": "S18.4:01",
@@ -2957,7 +2957,7 @@
         },
         "S19.1": {
           "title": "Borrowed traversals",
-          "line": 1718,
+          "line": 1719,
           "units": [
             {
               "id": "S19.1:01",
@@ -2973,7 +2973,7 @@
         },
         "S19.2": {
           "title": "Predicate family, fully quantified",
-          "line": 1748,
+          "line": 1749,
           "units": [
             {
               "id": "S19.2:01",
@@ -3044,12 +3044,12 @@
         },
         "S19.3": {
           "title": "Sorting and ordered search",
-          "line": 1775,
+          "line": 1776,
           "units": [
             {
               "id": "S19.3:01",
               "kind": "code",
-              "sha256": "12c739ffb63cbc430f630c4c3f3fe2c799651a59094397453ddbface05e7d748"
+              "sha256": "cbaf92d12b7f86cb7a1d8ecea132f0716a7d5659e245583edd673378afcef656"
             },
             {
               "id": "S19.3:02",
@@ -3065,7 +3065,7 @@
         },
         "S20": {
           "title": "Hashing and canonical fingerprints",
-          "line": 1812,
+          "line": 1813,
           "units": [
             {
               "id": "S20:01",
@@ -3086,7 +3086,7 @@
         },
         "S21": {
           "title": "Formatting and structured diagnostics",
-          "line": 1859,
+          "line": 1860,
           "units": [
             {
               "id": "S21:01",
@@ -3117,7 +3117,7 @@
         },
         "S22.1": {
           "title": "Layout and allocation",
-          "line": 1927,
+          "line": 1928,
           "units": [
             {
               "id": "S22.1:01",
@@ -3148,7 +3148,7 @@
         },
         "S22.2": {
           "title": "Pointer namespace",
-          "line": 1968,
+          "line": 1969,
           "units": [
             {
               "id": "S22.2:01",
@@ -3169,7 +3169,7 @@
         },
         "S22.3": {
           "title": "Single-owner allocation",
-          "line": 2009,
+          "line": 2010,
           "units": [
             {
               "id": "S22.3:01",
@@ -3185,7 +3185,7 @@
         },
         "S22.4": {
           "title": "C scalar and string types",
-          "line": 2027,
+          "line": 2028,
           "units": [
             {
               "id": "S22.4:01",
@@ -3206,7 +3206,7 @@
         },
         "S23": {
           "title": "Binary readers, buffers, and bounded codecs",
-          "line": 2059,
+          "line": 2060,
           "units": [
             {
               "id": "S23:01",
@@ -3237,7 +3237,7 @@
         },
         "S24": {
           "title": "Compiler-construction data structures",
-          "line": 2136,
+          "line": 2137,
           "units": [
             {
               "id": "S24:01",
@@ -3268,7 +3268,7 @@
         },
         "S25.1": {
           "title": "Source identity and coordinates",
-          "line": 2243,
+          "line": 2244,
           "units": [
             {
               "id": "S25.1:01",
@@ -3284,7 +3284,7 @@
         },
         "S25.2": {
           "title": "Logical budgets and resource tickets",
-          "line": 2268,
+          "line": 2269,
           "units": [
             {
               "id": "S25.2:01",
@@ -3305,7 +3305,7 @@
         },
         "S25.3": {
           "title": "Undo and scoped state",
-          "line": 2304,
+          "line": 2305,
           "units": [
             {
               "id": "S25.3:01",
@@ -3321,7 +3321,7 @@
         },
         "S26.1": {
           "title": "Cursor and parse outcomes",
-          "line": 2323,
+          "line": 2324,
           "units": [
             {
               "id": "S26.1:01",
@@ -3337,7 +3337,7 @@
         },
         "S26.2": {
           "title": "Generic graph/worklist boundary",
-          "line": 2357,
+          "line": 2358,
           "units": [
             {
               "id": "S26.2:01",
@@ -3353,7 +3353,7 @@
         },
         "S27.1": {
           "title": "Direct operation declarations",
-          "line": 2378,
+          "line": 2379,
           "units": [
             {
               "id": "S27.1:01",
@@ -3379,7 +3379,7 @@
         },
         "S27.2": {
           "title": "Handler installation and the closed executable boundary",
-          "line": 2413,
+          "line": 2414,
           "units": [
             {
               "id": "S27.2:01",
@@ -3405,7 +3405,7 @@
         },
         "S27.3": {
           "title": "Capability minimums",
-          "line": 2432,
+          "line": 2433,
           "units": [
             {
               "id": "S27.3:01",
@@ -3461,7 +3461,7 @@
         },
         "S28.1": {
           "title": "Stream traits",
-          "line": 2449,
+          "line": 2450,
           "units": [
             {
               "id": "S28.1:01",
@@ -3487,7 +3487,7 @@
         },
         "S28.2": {
           "title": "Buffering and memory streams",
-          "line": 2497,
+          "line": 2498,
           "units": [
             {
               "id": "S28.2:01",
@@ -3503,7 +3503,7 @@
         },
         "S29.1": {
           "title": "OS strings and paths",
-          "line": 2530,
+          "line": 2531,
           "units": [
             {
               "id": "S29.1:01",
@@ -3519,7 +3519,7 @@
         },
         "S29.2": {
           "title": "Files and process completion",
-          "line": 2576,
+          "line": 2577,
           "units": [
             {
               "id": "S29.2:01",
@@ -3540,7 +3540,7 @@
         },
         "S29.3": {
           "title": "Clocks and durations",
-          "line": 2620,
+          "line": 2621,
           "units": [
             {
               "id": "S29.3:01",
@@ -3556,7 +3556,7 @@
         },
         "S29.4": {
           "title": "Entropy and deterministic generators",
-          "line": 2649,
+          "line": 2650,
           "units": [
             {
               "id": "S29.4:01",
@@ -3572,7 +3572,7 @@
         },
         "S30.1": {
           "title": "Why these contracts do not require an executor implementation",
-          "line": 2677,
+          "line": 2678,
           "units": [
             {
               "id": "S30.1:01",
@@ -3588,7 +3588,7 @@
         },
         "S30.2": {
           "title": "Yield and owning generators",
-          "line": 2683,
+          "line": 2684,
           "units": [
             {
               "id": "S30.2:01",
@@ -3614,7 +3614,7 @@
         },
         "S30.3": {
           "title": "Owning futures and await",
-          "line": 2712,
+          "line": 2713,
           "units": [
             {
               "id": "S30.3:01",
@@ -3650,7 +3650,7 @@
         },
         "S30.4": {
           "title": "Task provider interfaces",
-          "line": 2744,
+          "line": 2745,
           "units": [
             {
               "id": "S30.4:01",
@@ -3681,7 +3681,7 @@
         },
         "S30.5": {
           "title": "Structured completion",
-          "line": 2782,
+          "line": 2783,
           "units": [
             {
               "id": "S30.5:01",
@@ -3697,7 +3697,7 @@
         },
         "S31.1": {
           "title": "Foundational instance families",
-          "line": 2790,
+          "line": 2791,
           "units": [
             {
               "id": "S31.1:01",
@@ -3707,7 +3707,7 @@
             {
               "id": "S31.1:02",
               "kind": "table",
-              "sha256": "5bd7ca806d7ff90b302d71003427b0e9656fe5fdf430a963b91f2852a3235b3c"
+              "sha256": "79cc3db773d7b852dbc6e6efe9c9645ab65bbd8ff29f9db9f6f3e6af1f0bc2fd"
             },
             {
               "id": "S31.1:03",
@@ -3717,7 +3717,7 @@
             {
               "id": "S31.1:04",
               "kind": "table",
-              "sha256": "0b1a771c4da754855df481fed4f9273a00ab9d49f788e41cb284a45c2789386d"
+              "sha256": "421b16003c03fb72159b69cbaf3b3f8f2743e0b0c9865d8e151772e3680c8248"
             },
             {
               "id": "S31.1:05",
@@ -3797,13 +3797,13 @@
             {
               "id": "S31.1:20",
               "kind": "prose",
-              "sha256": "cc99d857b54bfacfd0ffde0104d372064522e4931d4490fe89554f033953b943"
+              "sha256": "dbaca82beaee7d520579fa538f0e275fac428e3a978c1a2b4b302bf0afc11116"
             }
           ]
         },
         "S31.2": {
           "title": "Iterator adapter instances",
-          "line": 2817,
+          "line": 2818,
           "units": [
             {
               "id": "S31.2:01",
@@ -3864,7 +3864,7 @@
         },
         "S31.3": {
           "title": "Required completion vocabulary",
-          "line": 2833,
+          "line": 2834,
           "units": [
             {
               "id": "S31.3:01",
@@ -3880,7 +3880,7 @@
         },
         "S32.1": {
           "title": "Numeric, length, and text failures",
-          "line": 2841,
+          "line": 2842,
           "units": [
             {
               "id": "S32.1:01",
@@ -3901,7 +3901,7 @@
         },
         "S32.2": {
           "title": "I/O failures",
-          "line": 2866,
+          "line": 2867,
           "units": [
             {
               "id": "S32.2:01",
@@ -3922,7 +3922,7 @@
         },
         "S32.3": {
           "title": "Error trait and diagnostic conversion",
-          "line": 2884,
+          "line": 2885,
           "units": [
             {
               "id": "S32.3:01",

@@ -49,13 +49,17 @@ fn payload_order(left: &Node, right: &Node) -> Ordering {
 pub fn compare(left: &Node, right: &Node) -> Ordering {
     let a = kind(left);
     let b = kind(right);
-    handle Ord::compare(&a, &b) { Ordering::Equal => payload_order(left, right), order => order }
+    handle Ord::cmp(&a, &b) { Ordering::Equal => payload_order(left, right), order => order }
 }
 pub fn same(left: &Node, right: &Node) -> Bool {
     handle compare(left, right) { Ordering::Equal => true, _ => false }
 }
-pub impl Eq for Node { eq(left: &Node, right: &Node) -> Bool { same(left, right) } }
-pub impl Ord for Node { compare(left: &Node, right: &Node) -> Ordering { compare(left, right) } }
+pub impl PartialEq for Node { eq(left: &Node, right: &Node) -> Bool { same(left, right) } }
+pub impl Eq for Node {}
+pub impl Ord for Node { cmp(left: &Node, right: &Node) -> Ordering { compare(left, right) } }
+pub impl PartialOrd for Node {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
 pub impl Hash for Node {
     hash(value: &Node, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, kind(value));

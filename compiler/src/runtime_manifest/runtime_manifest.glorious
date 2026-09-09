@@ -273,18 +273,22 @@ pub fn compare(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering {
     // Comparing their payloads directly avoids constructing both wide outer
     // ordinal dispatch frames on every conversion comparison.
     handle (*left, *right) {
-        (PrimitiveRole::Float(a), PrimitiveRole::Float(b)) => { let a_key = float_order(a); let b_key = float_order(b); Ord::compare(&a_key, &b_key) },
-        (PrimitiveRole::Memory(a), PrimitiveRole::Memory(b)) => { let a_key = memory_ordinal(a); let b_key = memory_ordinal(b); Ord::compare(&a_key, &b_key) },
+        (PrimitiveRole::Float(a), PrimitiveRole::Float(b)) => { let a_key = float_order(a); let b_key = float_order(b); Ord::cmp(&a_key, &b_key) },
+        (PrimitiveRole::Memory(a), PrimitiveRole::Memory(b)) => { let a_key = memory_ordinal(a); let b_key = memory_ordinal(b); Ord::cmp(&a_key, &b_key) },
         _ => {
             let a = role_order(*left); let b = role_order(*right);
-            Ord::compare(&a, &b)
+            Ord::cmp(&a, &b)
         },
     }
 }
-pub impl Ord for PrimitiveRole { compare(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering { compare(left, right) } }
-pub impl Eq for PrimitiveRole {
+pub impl Ord for PrimitiveRole { cmp(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering { compare(left, right) } }
+pub impl PartialOrd for PrimitiveRole {
+    fn partial_cmp(left: &Self, right: &Self) -> Option<Ordering> { Some(Ord::cmp(left, right)) }
+}
+pub impl PartialEq for PrimitiveRole {
     eq(left: &PrimitiveRole, right: &PrimitiveRole) -> Bool { handle compare(left, right) { Ordering::Equal => true, _ => false } }
 }
+pub impl Eq for PrimitiveRole {}
 pub impl Hash for PrimitiveRole {
     hash(value: &PrimitiveRole, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, role_order(*value));
