@@ -68,6 +68,7 @@ module.exports = grammar({
       field('associativity', choice('infixl', 'infixr', 'infix', 'prefix')),
       field('precedence', $.integer_literal),
       field('operator', choice($.operator_sequence, $.identifier, $.word_operator)),
+      optional(seq('=', field('target', $.path_expression))),
       ';',
     ),
 

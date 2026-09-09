@@ -9144,146 +9144,7 @@ impl Elaborator<'_> {
             .index
             .resolve_path(DefinitionNamespace::Value, self.module, &path)
         {
-            ResolutionState::Resolved(definition) => {
-                let definition = self
-                    .signatures
-                    .value_alias_target(definition)
-                    .unwrap_or(definition);
-                match self
-                    .signatures
-                    .definitions
-                    .get(&definition)
-                    .and_then(callable)
-                {
-                    Some(signature) => {
-                        let generic_kinds = signature.generic_kinds.clone();
-                        // Every omitted generic receives a value in its native
-                        // semantic domain.  In particular, an `EffectRow` slot
-                        // gets a fresh row variable rather than `{}`: a nominal
-                        // parameter such as `Token<e>` can then constrain it to
-                        // the row carried by the call argument.  The old
-                        // type-only instantiator silently fixed those slots to
-                        // empty, rejecting valid implicit calls and losing the
-                        // caller-owned row identity in Core.
-                        let arguments = generic_kinds
-                            .iter()
-                            .enumerate()
-                            .map(|kind| match kind {
-                                (_, crate::GenericKind::Type) => {
-                                    GenericArgument::Type(self.inference.fresh())
-                                }
-                                (_, crate::GenericKind::EffectRow) => {
-                                    GenericArgument::EffectRow(self.inference.fresh_effects())
-                                }
-                                // Keep each omitted region distinct while
-                                // input/result constraints infer its value.
-                                // A rigid Generic here would be indistinguishable
-                                // from an explicit enclosing lifetime argument.
-                                (_, crate::GenericKind::Lifetime) => {
-                                    GenericArgument::Lifetime(self.inference.fresh_lifetime())
-                                }
-                                (_, crate::GenericKind::Const(kind)) => {
-                                    self.inference.fresh_const(*kind)
-                                }
-                            })
-                            .collect::<Vec<_>>();
-                        let signature = self
-                            .signatures
-                            .instantiate_callable_generic(definition, &arguments)
-                            .expect("fresh arguments match the callable generic contract");
-                        let parameters = signature
-                            .parameters
-                            .into_iter()
-                            .map(|parameter| self.normalize_concrete_type_projections(parameter))
-                            .collect();
-                        let result = self.normalize_concrete_type_projections(signature.result);
-                        // A concrete associated effect-row projection is a
-                        // selected callable contract, not deferred metadata.
-                        // Retain symbolic projections under declaration
-                        // binders, but normalize concrete rows before the
-                        // function value reaches `call` and MIR. Otherwise
-                        // source checking accepts a handler while VM-frame
-                        // lowering cannot see the operation identity it must
-                        // install.
-                        let effects = self.normalize_concrete_effect_row(signature.effects);
-                        self.alloc(
-                            CoreKind::Function {
-                                definition,
-                                arguments,
-                                host_import: self.signatures.host_imports.get(&definition).cloned(),
-                            },
-                            Type::Callable {
-                                safety: signature.safety,
-                                lifetime_binders: 0,
-                                parameters,
-                                result: Box::new(result),
-                                effects,
-                                // A named function value owns no lexical
-                                // capture environment. Its callable body may
-                                // run once per application, but the value
-                                // itself is a reusable function reference;
-                                // in particular it can satisfy an explicit
-                                // `F: Use<[0,*]>` callback requirement.
-                                invocation: crate::Quantity::UNRESTRICTED,
-                            },
-                            span,
-                        )
-                    }
-                    None => match self.signatures.definitions.get(&definition) {
-                        Some(ElaboratedHeader::Constant(Some(ty))) => self.alloc(
-                            CoreKind::Constant {
-                                definition,
-                                arguments: vec![],
-                            },
-                            ty.clone(),
-                            span,
-                        ),
-                        Some(ElaboratedHeader::Constant(None)) => {
-                            self.fail(span, "G4102", "constant value has no frozen type")
-                        }
-                        Some(ElaboratedHeader::ValueInitializer {
-                            generic_kinds,
-                            ty: Some(_),
-                        }) => {
-                            let arguments = generic_kinds
-                                .iter()
-                                .map(|kind| match kind {
-                                    crate::GenericKind::Type => {
-                                        GenericArgument::Type(self.inference.fresh())
-                                    }
-                                    crate::GenericKind::EffectRow => {
-                                        GenericArgument::EffectRow(self.inference.fresh_effects())
-                                    }
-                                    crate::GenericKind::Lifetime => {
-                                        GenericArgument::Lifetime(self.inference.fresh_lifetime())
-                                    }
-                                    crate::GenericKind::Const(kind) => {
-                                        self.inference.fresh_const(*kind)
-                                    }
-                                })
-                                .collect::<Vec<_>>();
-                            let ty = self
-                                .signatures
-                                .instantiate_value_initializer_generic(definition, &arguments)
-                                .expect("fresh arguments match the frozen initializer contract");
-                            self.alloc(
-                                CoreKind::Constant {
-                                    definition,
-                                    arguments,
-                                },
-                                ty,
-                                span,
-                            )
-                        }
-                        Some(ElaboratedHeader::ValueInitializer { ty: None, .. }) => self.fail(
-                            span,
-                            "G4102",
-                            "top-level value initializer has no frozen type",
-                        ),
-                        _ => self.fail(span, "G4102", "value does not have a callable signature"),
-                    },
-                }
-            }
+            ResolutionState::Resolved(definition) => self.resolved_value(definition, span),
             ResolutionState::Ambiguous(_) => self.fail(span, "G4103", "ambiguous value reference"),
             ResolutionState::Inaccessible(_) => self.fail(
                 span,
@@ -9291,6 +9152,149 @@ impl Elaborator<'_> {
                 "value reference is private to another module",
             ),
             _ => self.fail(span, "G4104", "unresolved value reference"),
+        }
+    }
+
+    /// Instantiate an already resolved value without re-resolving its spelling
+    /// in the caller's scope (notably for imported explicit operator targets).
+    fn resolved_value(&mut self, definition: DefKey, span: Span) -> CoreId {
+        let definition = self
+            .signatures
+            .value_alias_target(definition)
+            .unwrap_or(definition);
+        match self
+            .signatures
+            .definitions
+            .get(&definition)
+            .and_then(callable)
+        {
+            Some(signature) => {
+                let generic_kinds = signature.generic_kinds.clone();
+                // Every omitted generic receives a value in its native
+                // semantic domain.  In particular, an `EffectRow` slot
+                // gets a fresh row variable rather than `{}`: a nominal
+                // parameter such as `Token<e>` can then constrain it to
+                // the row carried by the call argument.  The old
+                // type-only instantiator silently fixed those slots to
+                // empty, rejecting valid implicit calls and losing the
+                // caller-owned row identity in Core.
+                let arguments = generic_kinds
+                    .iter()
+                    .enumerate()
+                    .map(|kind| match kind {
+                        (_, crate::GenericKind::Type) => {
+                            GenericArgument::Type(self.inference.fresh())
+                        }
+                        (_, crate::GenericKind::EffectRow) => {
+                            GenericArgument::EffectRow(self.inference.fresh_effects())
+                        }
+                        // Keep each omitted region distinct while
+                        // input/result constraints infer its value.
+                        // A rigid Generic here would be indistinguishable
+                        // from an explicit enclosing lifetime argument.
+                        (_, crate::GenericKind::Lifetime) => {
+                            GenericArgument::Lifetime(self.inference.fresh_lifetime())
+                        }
+                        (_, crate::GenericKind::Const(kind)) => {
+                            self.inference.fresh_const(*kind)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let signature = self
+                    .signatures
+                    .instantiate_callable_generic(definition, &arguments)
+                    .expect("fresh arguments match the callable generic contract");
+                let parameters = signature
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| self.normalize_concrete_type_projections(parameter))
+                    .collect();
+                let result = self.normalize_concrete_type_projections(signature.result);
+                // A concrete associated effect-row projection is a
+                // selected callable contract, not deferred metadata.
+                // Retain symbolic projections under declaration
+                // binders, but normalize concrete rows before the
+                // function value reaches `call` and MIR. Otherwise
+                // source checking accepts a handler while VM-frame
+                // lowering cannot see the operation identity it must
+                // install.
+                let effects = self.normalize_concrete_effect_row(signature.effects);
+                self.alloc(
+                    CoreKind::Function {
+                        definition,
+                        arguments,
+                        host_import: self.signatures.host_imports.get(&definition).cloned(),
+                    },
+                    Type::Callable {
+                        safety: signature.safety,
+                        lifetime_binders: 0,
+                        parameters,
+                        result: Box::new(result),
+                        effects,
+                        // A named function value owns no lexical
+                        // capture environment. Its callable body may
+                        // run once per application, but the value
+                        // itself is a reusable function reference;
+                        // in particular it can satisfy an explicit
+                        // `F: Use<[0,*]>` callback requirement.
+                        invocation: crate::Quantity::UNRESTRICTED,
+                    },
+                    span,
+                )
+            }
+            None => match self.signatures.definitions.get(&definition) {
+                Some(ElaboratedHeader::Constant(Some(ty))) => self.alloc(
+                    CoreKind::Constant {
+                        definition,
+                        arguments: vec![],
+                    },
+                    ty.clone(),
+                    span,
+                ),
+                Some(ElaboratedHeader::Constant(None)) => {
+                    self.fail(span, "G4102", "constant value has no frozen type")
+                }
+                Some(ElaboratedHeader::ValueInitializer {
+                    generic_kinds,
+                    ty: Some(_),
+                }) => {
+                    let arguments = generic_kinds
+                        .iter()
+                        .map(|kind| match kind {
+                            crate::GenericKind::Type => {
+                                GenericArgument::Type(self.inference.fresh())
+                            }
+                            crate::GenericKind::EffectRow => {
+                                GenericArgument::EffectRow(self.inference.fresh_effects())
+                            }
+                            crate::GenericKind::Lifetime => {
+                                GenericArgument::Lifetime(self.inference.fresh_lifetime())
+                            }
+                            crate::GenericKind::Const(kind) => {
+                                self.inference.fresh_const(*kind)
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let ty = self
+                        .signatures
+                        .instantiate_value_initializer_generic(definition, &arguments)
+                        .expect("fresh arguments match the frozen initializer contract");
+                    self.alloc(
+                        CoreKind::Constant {
+                            definition,
+                            arguments,
+                        },
+                        ty,
+                        span,
+                    )
+                }
+                Some(ElaboratedHeader::ValueInitializer { ty: None, .. }) => self.fail(
+                    span,
+                    "G4102",
+                    "top-level value initializer has no frozen type",
+                ),
+                _ => self.fail(span, "G4102", "value does not have a callable signature"),
+            },
         }
     }
 
@@ -15268,11 +15272,21 @@ impl Elaborator<'_> {
             let GroupedOperator::Operand(id) = tree else { unreachable!() };
             return self.expression_expected(id, expected);
         };
-        if let ResolutionState::Resolved(definition) = self.index.resolve_path(DefinitionNamespace::Value, self.module, &[name.clone()]) {
+        let fixity = if operands.len() == 1 { self.fixities.prefix(&name) } else { self.fixities.infix(&name) };
+        let explicit = fixity.is_some_and(|fixity| fixity.explicit_target);
+        let binding = if explicit {
+            match fixity.and_then(|fixity| fixity.target) {
+                Some(target) => ResolutionState::Resolved(target),
+                None => return self.fail(span, "G3214", "explicit operator target is unresolved or inaccessible"),
+            }
+        } else {
+            self.index.resolve_path(DefinitionNamespace::Value, self.module, &[name.clone()])
+        };
+        if let ResolutionState::Resolved(definition) = binding {
             let definition = self.signatures.value_alias_target(definition).unwrap_or(definition);
             if self.signatures.definitions.get(&definition).and_then(callable)
                 .is_some_and(|signature| signature.parameters.len() == operands.len()) {
-                let callee = self.path(vec![name], span);
+                let callee = if explicit { self.resolved_value(definition, span) } else { self.path(vec![name], span) };
                 let Type::Callable { parameters, result, .. } = self.expressions[callee.0 as usize].ty.clone() else {
                     return self.fail(span, "G4117", "operator binding is not callable");
                 };
@@ -15290,6 +15304,9 @@ impl Elaborator<'_> {
                     arguments.push(argument);
                 }
                 return self.call(callee, arguments, span);
+            }
+            if explicit {
+                return self.fail(span, "G3214", "explicit operator target must be a callable with the position's arity");
             }
         }
         // The numeric literal range rule admits the signed minimum only

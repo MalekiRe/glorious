@@ -23,6 +23,11 @@ pub struct Fixity {
     pub declaration: Option<DefKey>,
     pub form: FixityForm,
     pub precedence: u8,
+    pub explicit_target: bool,
+    pub target: Option<DefKey>,
+    /// Includes the selected declaration contract, including a private
+    /// target exposed only through an exported operator binding.
+    pub target_contract: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,11 +46,12 @@ impl FixityTable {
     }
     pub fn for_module(interface: &PackageInterface) -> Self {
         let mut table = Self::with_prelude();
+        let index = crate::DefinitionIndex::from_interface(interface);
         for definition in &interface.definitions {
             let ParsedHeader::Fixity(header) = &definition.syntax.header else {
                 continue;
             };
-            table.insert_declared(definition.key, header);
+            table.insert_declared(definition.key, header, &index);
         }
         table.freeze();
         table
@@ -63,7 +69,7 @@ impl FixityTable {
             let path = vec![header.operator.clone()];
             match index.resolve_path(crate::DefinitionNamespace::Operator, module, &path) {
                 crate::ResolutionState::Resolved(candidate) if candidate == *definition => {
-                    table.insert_declared(*definition, header);
+                    table.insert_declared(*definition, header, index);
                 }
                 crate::ResolutionState::Ambiguous(candidates) if candidates.contains(definition) => {
                     let same_position = candidates.iter().filter(|candidate| {
@@ -71,7 +77,7 @@ impl FixityTable {
                             candidate.form.is_prefix() == header.form.is_prefix())
                     }).count();
                     if same_position == 1 {
-                        table.insert_declared(*definition, header);
+                        table.insert_declared(*definition, header, index);
                     } else {
                         table.mark_ambiguous(header);
                     }
@@ -86,7 +92,14 @@ impl FixityTable {
     /// Extend a module table with a declaration already proven visible by the
     /// module resolver. Imports and globs are resolved before this point, so
     /// the caller supplies the source spelling that is in scope.
-    pub(crate) fn insert_declared(&mut self, declaration: DefKey, header: &crate::FixityHeader) {
+    pub(crate) fn insert_declared(&mut self, declaration: DefKey, header: &crate::FixityHeader, index: &crate::DefinitionIndex) {
+        let target = header.target.as_ref().and_then(|path| {
+            let owner = index.owner(declaration)?;
+            match index.resolve_path(crate::DefinitionNamespace::Value, owner, path) {
+                crate::ResolutionState::Resolved(target) => Some(target),
+                _ => None,
+            }
+        });
         let position = if header.form.is_prefix() {
             FixityPosition::Prefix
         } else {
@@ -98,6 +111,9 @@ impl FixityTable {
                 declaration: Some(declaration),
                 form: header.form,
                 precedence: header.precedence,
+                explicit_target: header.target.is_some(),
+                target,
+                target_contract: target.map(|target| index.definition_contract_fingerprint(target)),
             },
         );
     }
@@ -107,6 +123,16 @@ impl FixityTable {
     /// fixities, not merely the owning source file.
     pub(crate) fn freeze(&mut self) {
         self.refresh_fingerprint();
+    }
+
+    pub(crate) fn dependency_modules(&self, index: &crate::DefinitionIndex, module: &crate::ModuleKey) -> Vec<crate::ModuleKey> {
+        let mut modules = BTreeSet::from([module.clone()]);
+        for fixity in self.entries.values() {
+            if let Some(declaration) = fixity.declaration {
+                modules.extend(index.definition_contract_dependencies(declaration, module));
+            }
+        }
+        modules.into_iter().collect()
     }
 
     /// Retain an import-level ambiguity instead of degrading it into an
@@ -154,7 +180,7 @@ impl FixityTable {
     }
 
     fn refresh_fingerprint(&mut self) {
-        let mut bytes = b"grandiose-stage0-fixity-v1".to_vec();
+        let mut bytes = b"grandiose-stage0-fixity-v2".to_vec();
         for ((position, operator), fixity) in &self.entries {
             bytes.push(match position {
                 FixityPosition::Prefix => 0,
@@ -172,6 +198,15 @@ impl FixityTable {
             match fixity.declaration {
                 Some(key) => bytes.extend_from_slice(&key.0.as_bytes()),
                 None => bytes.extend_from_slice(&[0; 32]),
+            }
+            bytes.push(u8::from(fixity.explicit_target));
+            match fixity.target {
+                Some(key) => { bytes.push(1); bytes.extend_from_slice(key.0.as_bytes().as_slice()); }
+                None => bytes.push(0),
+            }
+            match fixity.target_contract {
+                Some(contract) => { bytes.push(1); bytes.extend_from_slice(contract.as_bytes().as_slice()); }
+                None => bytes.push(0),
             }
         }
         for (position, operator) in &self.ambiguous {

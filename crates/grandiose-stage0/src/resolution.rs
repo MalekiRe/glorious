@@ -223,10 +223,13 @@ struct IndexedInherentMethod {
     definition: IndexedDefinition,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct DefinitionContract {
     header_fingerprint: crate::identity::Digest,
     constant_value_fingerprint: Option<crate::identity::Digest>,
+    /// A forwarded value or explicit operator exports the selected callable
+    /// contract even when that declaration itself is private.
+    value_target: Option<Vec<String>>,
 }
 
 
@@ -284,6 +287,11 @@ impl DefinitionIndex {
                 .or_insert(DefinitionContract {
                     header_fingerprint: definition.header_fingerprint,
                     constant_value_fingerprint: definition.constant_value_fingerprint,
+                    value_target: match &definition.syntax.header {
+                        ParsedHeader::Fixity(fixity) => fixity.target.clone(),
+                        ParsedHeader::ValueAlias { target, .. } => Some(target.clone()),
+                        _ => None,
+                    },
                 });
             if definition.namespace == Some(DefinitionNamespace::Module)
                 && let Some(name) = &definition.name
@@ -748,10 +756,31 @@ impl DefinitionIndex {
         origin: &ModuleKey,
         dependencies: &mut BTreeSet<ModuleKey>,
     ) {
+        self.collect_definition_contract_dependencies(key, origin, dependencies, &mut BTreeSet::new());
+    }
+
+    fn collect_definition_contract_dependencies(
+        &self,
+        key: DefKey,
+        origin: &ModuleKey,
+        dependencies: &mut BTreeSet<ModuleKey>,
+        active: &mut BTreeSet<DefKey>,
+    ) {
+        if !active.insert(key) { return; }
         if let Some(owner) = self.owners.get(&key)
             && owner != origin
         {
             dependencies.insert(owner.clone());
+        }
+        match self.definition_value_target(key) {
+            Some(ResolutionState::Resolved(target)) =>
+                self.collect_definition_contract_dependencies(target, origin, dependencies, active),
+            Some(ResolutionState::Ambiguous(targets) | ResolutionState::Inaccessible(targets)) => {
+                for target in targets {
+                    self.collect_definition_contract_dependencies(target, origin, dependencies, active);
+                }
+            }
+            _ => {}
         }
         for ((owner, _), members) in &self.inherent_members {
             if *owner == key {
@@ -762,6 +791,7 @@ impl DefinitionIndex {
                 }
             }
         }
+        active.remove(&key);
     }
 
     fn public_module_surface(
@@ -831,7 +861,34 @@ impl DefinitionIndex {
         crate::identity::Digest::of_bytes(&bytes)
     }
 
+    pub(crate) fn definition_contract_fingerprint(&self, key: DefKey) -> crate::Digest {
+        let mut bytes = vec![];
+        self.append_definition_contract(&mut bytes, key);
+        crate::Digest::of_bytes(&bytes)
+    }
+
+    pub(crate) fn definition_contract_dependencies(&self, key: DefKey, origin: &ModuleKey) -> Vec<ModuleKey> {
+        let mut dependencies = BTreeSet::new();
+        self.collect_definition_owner_dependency(key, origin, &mut dependencies);
+        dependencies.into_iter().collect()
+    }
+
     fn append_definition_contract(&self, bytes: &mut Vec<u8>, key: DefKey) {
+        self.append_definition_contract_inner(bytes, key, &mut BTreeSet::new());
+    }
+
+    fn definition_value_target(&self, key: DefKey) -> Option<ResolutionState> {
+        let path = self.definition_contracts.get(&key)?.value_target.as_ref()?;
+        let owner = self.owner(key)?;
+        Some(self.resolve_path(DefinitionNamespace::Value, owner, path))
+    }
+
+    fn append_definition_contract_inner(&self, bytes: &mut Vec<u8>, key: DefKey, active: &mut BTreeSet<DefKey>) {
+        if !active.insert(key) {
+            append_surface(bytes, b"definition-contract-cycle");
+            append_surface(bytes, key.0.as_bytes().as_slice());
+            return;
+        }
         let Some(definition) = self.definition_contracts.get(&key) else {
             // A forged or internally inconsistent index cannot silently turn
             // into an empty contract. Keep the stable key as a fail-closed
@@ -839,6 +896,7 @@ impl DefinitionIndex {
             // corresponding declaration.
             append_surface(bytes, b"missing-definition-contract");
             append_surface(bytes, key.0.as_bytes().as_slice());
+            active.remove(&key);
             return;
         };
         append_surface(bytes, b"definition-contract");
@@ -851,15 +909,31 @@ impl DefinitionIndex {
             }
             None => append_surface(bytes, b"no-constant-value"),
         }
+        if let Some(target) = self.definition_value_target(key) {
+            append_surface(bytes, b"forwarded-value-contract");
+            match target {
+                ResolutionState::Resolved(target) => {
+                    append_surface(bytes, b"resolved");
+                    self.append_definition_contract_inner(bytes, target, active);
+                }
+                ResolutionState::Ambiguous(mut targets) | ResolutionState::Inaccessible(mut targets) => {
+                    append_surface(bytes, b"invalid-target-candidates");
+                    canonicalize_keys(&mut targets);
+                    for target in targets { self.append_definition_contract_inner(bytes, target, active); }
+                }
+                _ => append_surface(bytes, b"unresolved-target"),
+            }
+        }
         for ((owner, name), members) in &self.inherent_members {
             if *owner == key {
                 for member in members.iter().filter(|member| member.visibility.is_public()) {
                     append_surface(bytes, b"inherent-member");
                     append_surface(bytes, name.as_bytes());
-                    self.append_definition_contract(bytes, member.key);
+                    self.append_definition_contract_inner(bytes, member.key, active);
                 }
             }
         }
+        active.remove(&key);
     }
 
     /// Binder arity is an interface fact, not a property recovered from a

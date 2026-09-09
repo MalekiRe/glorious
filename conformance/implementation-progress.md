@@ -5,7 +5,36 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 80: explicit operator targets and forwarded interface contracts
+
+Prefix and infix declarations accept independent ordinary targets, resolved in
+the declaring module. Imported operators cannot be redirected by a same-named
+caller binding. Explicit targets are checked even when unused; missing targets,
+wrong arity, noncallable values and malformed paths remain errors. Normal call
+checking preserves generic arguments, explicit borrowing, effects, unsafe
+permissions and left-to-right evaluation.
+
+Interface generation 19 and fixity fingerprints seal the selected declaration
+contract through private value aliases. Target signature edits invalidate the
+exported interface; body-only and unrelated private edits do not. Dependency
+facts include the modules supplying those contracts, and alias cycles remain
+bounded during sealing. Bytecode 71/verifier 35/schema 115 are unchanged.
+
+All 12 fixity, 30 resolution, 49 header, 24 library-boundary, 22 request/revision
+and 268 Core tests pass in `target/fixity-targets-v6.log`; its broader service
+and unsafe checks were still running when this checkpoint was prepared. The
+regenerated editor parser passes all six corpus cases and 24 highlighting
+assertions. Canonical standard-library operator migration is not included.
+
 ## Cache 79: release disposal, reference arrays and shared native allocation
+
+The subsequent broad GAT integration recheck passes 1,701 tests, including all
+891 service tests and 38 semantic-conformance tests
+(`target/integration-gat-broad-v1.log`). The actual source-library matrix is
+14 passing / 17 failing tests, none ignored
+(`target/source-library-cache79-matrix-v1.log`). These failures include source
+and fixture issues as well as compiler gaps; they are not 17 distinct compiler
+defects. Neither result establishes complete generic API coverage.
 
 The lawful generic availability-release regression is fixed. Evaluation MIR
 retains `ReleaseAvailable`, then ownership lowering retains consuming disposal

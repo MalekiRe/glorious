@@ -142,6 +142,26 @@ map<T, E: EffectRow>(value: T) -> T / { Read<T> | E } { move value }
           (identifier))))))
 
 ==================
+Explicit fixity targets
+==================
+
+prefix 50 - = numeric::neg;
+pub infixl 30 - = numeric::sub;
+
+---
+
+(source_file
+  (fixity_declaration
+    precedence: (integer_literal)
+    operator: (operator_sequence (builtin_operator))
+    target: (path_expression (identifier) (identifier)))
+  (fixity_declaration
+    (visibility_modifier)
+    precedence: (integer_literal)
+    operator: (operator_sequence (builtin_operator))
+    target: (path_expression (identifier) (identifier))))
+
+==================
 Handlers and patterns
 ==================
 

@@ -45,6 +45,29 @@ fn concrete_gat_reference_elements_infer_call_lifetimes_before_array_matching() 
 }
 
 #[test]
+fn inferred_gat_shapes_preserve_unique_reborrows_and_reference_escape_checks() {
+    let declarations = "trait View { type Item<'a>; } impl View for i64 { type Item<'a> = &'a mut i64; } fn keep<'a>(items: [<i64 as View>::Item<'a>;2]) -> [<i64 as View>::Item<'a>;2] { items }";
+    let good = format!("{declarations} pub fn main() -> i64 {{ let mut a = 20; let mut b = 20; let [a,b] = keep([&mut a,&mut b]); *a = *a + 1; *b = *b + 1; *a + *b }}");
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(request(&good, optimization))
+            .unwrap_or_else(|error| panic!("{:#?}", error.diagnostics())).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        for bad in [
+            "pub fn main() -> i64 { let mut a = 20; let mut b = 22; let [first,second] = keep([&mut a,&mut b]); a = 0; *first + *second }",
+            "fn escape<'a>() -> [<i64 as View>::Item<'a>;2] { let mut a = 20; let mut b = 22; keep([&mut a,&mut b]) } pub fn main() -> i64 { let [a,b] = escape(); *a + *b }",
+        ] {
+            let error = StageZeroCompiler::new().compile(request(&format!("{declarations} {bad}"), optimization))
+                .expect_err("selecting a GAT shape cannot invent reference authority");
+            assert!(error.diagnostics().iter().any(|diagnostic|
+                diagnostic.class == grandiose_stage0::DiagnosticClass::Source
+                    && matches!(diagnostic.code, "G5006" | "G5007" | "G5011" | "G5013" | "G5017")),
+                "{bad}\n{:#?}", error.diagnostics());
+        }
+    }
+}
+
+#[test]
 fn implementation_associated_equalities_admit_matching_items() {
     let source = format!("{IMPLEMENTATIONS} pub fn main() -> i64 {{ let value = Wrapper {{ item: Number {{}} }}; Selected::answer(&value) }}");
     for optimization in ["0", "2"] {

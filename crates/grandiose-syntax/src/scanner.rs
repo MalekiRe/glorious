@@ -318,7 +318,7 @@ impl Scanner<'_> {
         ) {
             return None;
         }
-        // A fixity shell is `infixl|infixr|infix|prefix PRECEDENCE OPERATOR;`.
+        // A fixity shell is `FORM PRECEDENCE OPERATOR [= TARGET];`.
         // Its semantic name is the operator, rather than the form keyword or
         // precedence literal.  Keeping it on the shell gives interfaces the
         // same stable ownership/name treatment as every other declaration.

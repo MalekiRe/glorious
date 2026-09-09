@@ -1125,6 +1125,31 @@ impl StageZeroCompiler {
         // manual implementation may only restrict it.  Run this after the
         // initializer prepass so memoized globals are checked against their
         // actual frozen result types rather than a body-local inference term.
+        // An explicit position binding is a declaration contract, not a
+        // request to search for an alternative operator when it is used.
+        // Validate even unused bindings, after named aliases have frozen.
+        for definition in graphs.values().flat_map(|graph| graph.modules.values())
+            .flat_map(|node| &node.interface.interface.definitions) {
+            let ParsedHeader::Fixity(fixity) = &definition.syntax.header else { continue; };
+            let Some(path) = &fixity.target else { continue; };
+            let state = index.resolve_path(crate::DefinitionNamespace::Value, &definition.module, path);
+            let valid = match state {
+                crate::ResolutionState::Resolved(target) => {
+                    let target = signatures.value_alias_target(target).unwrap_or(target);
+                    match signatures.definitions.get(&target) {
+                        Some(ElaboratedHeader::Callable(signature) | ElaboratedHeader::ValueAlias { signature, .. }) =>
+                            signature.parameters.len() == if fixity.form.is_prefix() { 1 } else { 2 },
+                        _ => false,
+                    }
+                }
+                _ => false,
+            };
+            if !valid {
+                diagnostics.push(CompileDiagnostic::source("G3214",
+                    format!("explicit operator target `{}` must resolve to an accessible ordinary callable with {} parameter(s)",
+                        path.join("::"), if fixity.form.is_prefix() { 1 } else { 2 }), Some(definition.span)));
+            }
+        }
         diagnostics.extend(signatures.validate_principal_use_rules().into_iter().map(
             |diagnostic| CompileDiagnostic::source(diagnostic.code, diagnostic.message, None),
         ));
@@ -1367,7 +1392,8 @@ impl StageZeroCompiler {
             dependencies.record(
                 DependencyNode::Fixity(node.key.clone()),
                 fixities.fingerprint(),
-                vec![DependencyNode::Interface(node.key.clone())],
+                fixities.dependency_modules(&index, &node.key).into_iter()
+                    .map(DependencyNode::Interface).collect(),
             );
             for declaration in node
                 .interface

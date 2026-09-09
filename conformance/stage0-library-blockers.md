@@ -7,20 +7,23 @@ still mask later ones. The language and standard-library specifications remain
 authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
-The latest completed source matrix is **10 passing / 20 failing roots**, none
-ignored. Passing a root is not proof that every generic API in it was exercised.
+The latest completed source matrix is **14 passing / 17 failing tests**, none
+ignored (`target/source-library-cache79-matrix-v1.log`). This includes a source
+embedding check, so it is not a count of 31 execution roots. Passing a root is
+not proof that every generic API in it was exercised.
 The 175-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
 
 Cache 79 fixes the undemanded generic availability-release failure while keeping
 unsealed runtime witnesses inadmissible. The native-allocation/array integration
-batch passes 1,020 tests, including all 891 service tests; later GAT contextual
-inference passes its focused tests. General owning-container region preservation
+batch passes 1,020 tests; the subsequent GAT integration batch passes 1,701,
+including all 891 service and 38 semantic-conformance tests
+(`target/integration-gat-broad-v1.log`). General owning-container region preservation
 and native partial-owner metadata are newly confirmed open issues. The cache 78
 and earlier entries below are historical; see `implementation-progress.md`.
 
-The integrating tree is now cache 78. Its mixed LLVM/VM ordinary-call bridge
+The historical cache 78 checkpoint's mixed LLVM/VM ordinary-call bridge
 passes 63 native/bridge/request tests. The explicit availability-release Core
 operation still fails lawful generic semantic lowering with G6001 (37/38
 semantic-conformance tests pass). The last service diagnostic failure passes

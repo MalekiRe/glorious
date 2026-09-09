@@ -958,6 +958,16 @@
             "named": true
           }
         ]
+      },
+      "target": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "path_expression",
+            "named": true
+          }
+        ]
       }
     },
     "children": {

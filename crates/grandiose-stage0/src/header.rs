@@ -517,6 +517,9 @@ pub struct FixityHeader {
     pub form: FixityForm,
     pub precedence: u8,
     pub operator: String,
+    /// Explicit ordinary value path, resolved in the declaring module.
+    /// Absence retains the same-named binding shorthand.
+    pub target: Option<Vec<String>>,
 }
 
 /// A single explicit import binding.  Imports are declaration-header facts:
@@ -1897,6 +1900,18 @@ impl Parser<'_> {
                 "<error>".into()
             }
         };
+        let target = if self.operator("=") {
+            let mut path = vec![];
+            loop {
+                let Some(name) = self.identifier() else {
+                    self.error("G3214", "expected an ordinary declaration path after fixity `=`");
+                    break;
+                };
+                path.push(name);
+                if !self.path_separator() { break; }
+            }
+            Some(path)
+        } else { None };
         if !self.punctuation(';') {
             self.error("G3212", "expected `;` after fixity declaration");
         }
@@ -1907,6 +1922,7 @@ impl Parser<'_> {
             form,
             precedence,
             operator,
+            target,
         }
     }
     fn import(&mut self) -> ImportHeader {

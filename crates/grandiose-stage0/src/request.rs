@@ -183,7 +183,7 @@ pub struct CompilerBuildIdentity {
 /// in nominal identities and their independently checked layout descriptors.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
-pub const STAGE0_INTERFACE_GENERATION: u32 = 18;
+pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
 // Integer const values and expressions retain kind, sign, and full magnitude;
 // source range checks wait for the declared slot kind. Older identities and
 // artifacts cannot be reinterpreted using the new canonical representation.
@@ -238,7 +238,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 18;
 // verifier 35 rejects unsealed availability layouts at executable admission.
 // It also retains bounded fixed-array reference paths and normalizes selected
 // GAT item lifetime holes before contextual argument matching.
-pub const STAGE0_CACHE_GENERATION: u32 = 79;
+// Cache 80/interface 19 retain explicit position-specific operator targets,
+// their declaring-scope resolution and target contracts in fixity keys.
+pub const STAGE0_CACHE_GENERATION: u32 = 80;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

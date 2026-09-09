@@ -698,6 +698,35 @@ fn sealed_public_interfaces_include_transitive_module_alias_and_glob_surfaces() 
 }
 
 #[test]
+fn operator_target_contracts_follow_private_aliases_and_record_external_dependencies() {
+    let package = PackageKey("operator-contracts@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "mod backend; pub mod syntax;");
+    let syntax = collect("crate::syntax", "let chosen = crate::backend::choose; pub infixl 30 ** = chosen;");
+    let backend = collect("crate::backend", "pub fn choose(left: i64, right: i64) -> i64 { left } fn unrelated() -> i64 { 0 }");
+    let changed = collect("crate::backend", "pub fn choose(left: u32, right: u32) -> u32 { left } fn unrelated() -> i64 { 0 }");
+    let body_only = collect("crate::backend", "pub fn choose(left: i64, right: i64) -> i64 { right } fn unrelated() -> u32 { 0 }");
+    let before = DefinitionIndex::from_interfaces([&root, &syntax, &backend]);
+    let after = DefinitionIndex::from_interfaces([&root, &syntax, &changed]);
+    let bodies = DefinitionIndex::from_interfaces([&root, &syntax, &body_only]);
+    assert_ne!(before.sealed_public_fingerprint(&syntax), after.sealed_public_fingerprint(&syntax));
+    assert_eq!(before.sealed_public_fingerprint(&syntax), bodies.sealed_public_fingerprint(&syntax));
+    assert_eq!(before.sealed_public_dependencies(&syntax), vec![backend.module]);
+
+    // Invalid alias cycles remain bounded, deterministic interface facts;
+    // semantic checking is responsible for rejecting their use.
+    let cyclic = collect("crate::syntax", "let one = two; let two = one; pub infixl 30 ** = one;");
+    let index = DefinitionIndex::from_interfaces([&root, &cyclic]);
+    assert_eq!(index.sealed_public_fingerprint(&cyclic), index.sealed_public_fingerprint(&cyclic));
+    assert!(index.sealed_public_dependencies(&cyclic).is_empty());
+}
+
+#[test]
 fn reexported_type_interfaces_include_inherent_members_and_their_owner_dependencies() {
     let package = PackageKey("resolution-inherent-surface@0.1.0".into());
     let collect = |module: &str, source: &str| {
