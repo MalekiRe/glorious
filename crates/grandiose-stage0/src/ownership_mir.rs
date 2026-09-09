@@ -264,20 +264,8 @@ impl OwnershipMir {
         let evaluation = crate::evaluation_mir::EvaluationMir::lower_with_continuations(definition, body, facts)
             .map_err(|error| OwnershipError(format!("invalid Evaluation MIR: {error:?}")))?;
         let control = ControlMir::lower(&evaluation).map_err(|error| OwnershipError(format!("invalid Control MIR: {error:?}")))?;
-        let closure_flows = body.expressions.iter().filter_map(|expression| {
-            let crate::CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { return None; };
-            let lexical_solver = solver.map(|solver| {
-                let mut solver = solver.fresh_query();
-                solver.set_universal_assumptions(flow.lexical_universal_bounds.clone());
-                solver.set_lexical_assumptions(flow.lexical_bounds.iter().map(|(subject, relation)| crate::TraitGoal {
-                    subject: subject.clone(), relation: relation.clone(),
-                }).collect());
-                solver.set_associated_bindings(vec![], flow.lexical_effect_bindings.clone());
-                solver
-            });
-            let flow = PlaceFlow::analyze_closure(body, *root, parameters, environment, signatures, flow, lexical_solver.as_ref());
-            Some((crate::mir::lifted_callable_definition(environment.brand), flow))
-        }).collect();
+        let closure_flows = flow.closure_flows().iter().map(|(brand, child)|
+            (crate::mir::lifted_callable_definition(*brand), child.clone())).collect();
         let ownership = Self::lower_body(control, flow, &closure_flows, signatures, solver, &[])?;
         let result = if body.expression(body.root).ty == Type::Never {
             signatures.and_then(|signatures| signatures.definitions.get(&definition)).and_then(|header| match header {

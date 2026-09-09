@@ -363,3 +363,67 @@ forwarding at O0. It does not finish proof erasure: components with residual
 label invocations, label-bearing nominal/callable layouts, or operation payloads
 still retain the prior carrier. Correctness-required helper/outer-label fusion,
 and native resident captured-callable execution, remain open obligations.
+
+## Staged lexical closure fusion
+
+Ordinary function elaboration can publish pending lexical closure obligations
+inside the staged body batch. The lexical-dependency product admits them only
+under their enclosing destination binders. Standalone Core validation remains
+strict: pending code is not an independently executable closure. Constants and
+value initializers do not gain this staged permission. A control-dependent
+constructor must retain its own nominal environment or an explicitly erased
+callable view; unit or another constructor's environment is not that view.
+
+`core/control_fusion.rs` accepts only the dependency-bound callable-control
+batch. Source bodies, static declaration selections and closure constructor
+authority come from that sealed product. The transform carries each value's
+checked semantic contract together with its physical representation; explicit
+and captured inputs use the same binding form. Aliases and projections do not
+require a second analysis that reconstructs callable identity from the arena.
+
+Control environments are closed tagged products. Original capture formation
+creates their resident fields at the original evaluation point; invocation
+aliases those same fields, including through shared/unique receiver loans.
+Labels remain explicit proof fields until source escape checking and checked
+runtime erasure. A mutable erased callable dispatches on its current constructor
+tag, not an earlier observation. Compatible branch results share one checked
+layout join; incompatible layouts reject rather than reinterpret residents.
+Selected bodies are structurally expanded under fresh lexical identities, with
+strict receiver/argument order and source unsafe scopes preserved. Transfers
+use the ordinary Core label path, so ownership and cleanup are derived after
+fusion instead of modifying an existing ownership ledger.
+
+Before installing transformed Core, the service validates the original source
+resource and escape obligations using the same resource-checking entry point
+as ordinary bodies. The receiving Core is independently validated and receives
+fresh bound control and resource analysis. Fusion cannot make an invalid generic
+discard, double use or escaping label legal by removing the offending code.
+
+PlaceFlow now publishes the per-callable loan/resource products for the frozen
+arena once. Escape checking selects the closure's own loan journal while
+examining its body, then restores the enclosing journal at formation. Ownership
+and MIR lowering consume the same products; their separate closure-analysis
+loops have been removed. This fixes the former mismatch where borrowing an
+owned capture was checked against the enclosing function's loan events.
+
+The shared invocation values distinguish a value's origin from the storage of
+its current place. Binding, argument transfer, owned capture formation and
+pattern binding create new slots; projections retain structural subplaces and
+moving a reference handle preserves its referent. The payload relation can
+therefore express a reborrow of an explicit or captured input loan without
+equating a copied value with the storage it came from. Both ownership and escape
+instantiate this relation through their existing frozen input adapters. Missing
+storage identity remains unknown. Isolated closure inspection retains its
+captured destination inputs but does not publish hypothetical exits as effects
+of formation. The real invocation supplies the destination and payload snapshots.
+
+This is an integrated but incomplete fusion slice. The entry condition covers
+outer-label closures and captured label aliases, not every label-bearing helper
+family. Handler/resumption expansion and mandatory-tail activation fusion lack
+the required contracts and explicitly reject in transformed code. Heterogeneous
+environment layouts, projected ordinary nested captures and some nominal/result
+representations remain unsupported. Recursive expansion rejects without a
+finite proof. Output is bounded and charged to the request, but expansion still
+needs finer-grained request cancellation/work accounting. Full helper fusion,
+complete proof erasure and ordinary native captured-callable storage remain
+open; tagged lexical fusion is not an implementation of the latter ABI.

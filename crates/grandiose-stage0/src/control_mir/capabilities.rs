@@ -246,7 +246,7 @@ impl Builder<'_> {
         let actual = self.result.ty(value)?;
         if actual == expected { return Ok(value); }
         if !call_type_matches(expected, actual) {
-            return Err(ControlError::Invalid("result forwarding changes its runtime value shape".into()));
+            return Err(ControlError::Invalid(format!("result forwarding changes its runtime value shape: {actual:?} into {expected:?}")));
         }
         // Core checked the directional lifetime contract. Materialize its
         // representation-preserving forwarding before the CFG join, keeping

@@ -13,6 +13,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(source: &str) -> Self {
+        Self::control_input(source, false)
+    }
+
+    fn control_input(source: &str, pending: bool) -> Self {
         let package = PackageKey("bound-control@1".into());
         let lexed = LexedFile::lex(FileKey::new(&package, "src/main.glorious"), source);
         let scan = DeclarationScan::scan(&lexed, source);
@@ -38,15 +42,18 @@ impl Fixture {
                 continue;
             };
             let syntax = BodySyntax::parse_with_fixities(&lexed, source, range, &fixities);
-            let body = TypedBody::elaborate_with_fixities(
+            let body = TypedBody::elaborate_control_input(
                 definition,
                 &syntax,
                 &index,
                 &signatures,
                 &fixities,
+                crate::TraitSolver::new(&signatures),
+                pending,
             );
             assert!(body.diagnostics.is_empty(), "{:?}", body.diagnostics);
-            assert!(body.validate().is_empty(), "{:?}", body.validate());
+            let validation = if pending { body.validate_for_control_fusion() } else { body.validate() };
+            assert!(validation.is_empty(), "{validation:?}");
             result
                 .names
                 .insert(definition.name.clone().unwrap(), definition.key);
@@ -84,6 +91,62 @@ impl Fixture {
 const AFTER_UNKNOWN: &str = "#![no_std]
     fn relay<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
     fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); relay(42,@select) }";
+
+#[test]
+fn pending_control_is_sealed_and_discharged_before_ordinary_core() {
+    let mut fixture = Fixture::control_input("#![no_std]
+        pub fn main() -> i64 { @done: i64 { let task = () -> ! { @done(42) }; task() } }", true);
+    let owner = fixture.names["main"];
+    let inputs = fixture.inputs();
+    assert!(!fixture.bodies[&owner].validate().is_empty());
+    let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    let bound = summaries.bind(&inputs).unwrap();
+    let fused = crate::core::control_fusion::transform(owner, &bound).unwrap().unwrap();
+    assert!(fused.validate().is_empty());
+    assert!(crate::core::label_dependencies::LabelDependencies::derive(&fused.expressions)
+        .unwrap().pending_closures(fused.root).unwrap().is_empty());
+    // The transform accepts only the bound batch, never an independently
+    // supplied body that could be paired with stale constructor authority.
+    let body = fixture.bodies.get_mut(&owner).unwrap();
+    let closure = body.expressions.iter_mut().find(|expression|
+        matches!(expression.kind, CoreKind::Closure { .. })).unwrap();
+    let Type::Callable { contract, .. } = &mut closure.ty else { panic!("closure type"); };
+    contract.environment = Some(Box::new(Type::Unit));
+    assert!(!body.validate_for_control_fusion().is_empty(), "pending labels must not excuse a forged environment");
+    assert!(summaries.bind(&fixture.inputs()).is_err());
+}
+
+#[test]
+fn captured_payload_reborrows_require_storage_identity_not_equal_contents() {
+    for (payload, reborrow) in [
+        ("@done(&value)", true),
+        ("let reference = &value; let copied = *reference; @done(&copied)", false),
+    ] {
+        let fixture = Fixture::control_input(&format!("#![no_std]
+            pub fn main() -> i64 {{ let value = 42;
+                let result = @done: &i64 {{ let task = () -> ! {{ {payload} }}; task() }};
+                *result
+            }}"), true);
+        let owner = fixture.names["main"];
+        let inputs = fixture.inputs();
+        let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(), &mut |_, _| Ok::<_, ()>(())).unwrap();
+        let bound = summaries.bind(&inputs).unwrap();
+        let body = &fixture.bodies[&owner];
+        let call = body.expressions.iter().enumerate().find_map(|(index, expression)| {
+            let CoreKind::Call { callee, .. } = expression.kind else { return None; };
+            matches!(&body.expression(callee).kind, CoreKind::Local(name) if name == "task")
+                .then_some(CoreId(index as u32))
+        }).unwrap();
+        let control = bound.body(owner).unwrap();
+        let transfer = &control.get(call).unwrap().transfers[0];
+        if reborrow {
+            assert!(matches!(transfer.payload.source, payloads::PayloadSource::Reborrow { .. }), "{transfer:?}");
+        } else {
+            assert!(matches!(transfer.payload.source, payloads::PayloadSource::Unknown), "a copied scalar is not the captured loan: {transfer:?}");
+        }
+    }
+}
 
 #[test]
 fn observed_label_addresses_retain_input_identity_through_structural_callable_views() {
@@ -360,6 +423,11 @@ fn payload_projection_shares_explicit_and_captured_inputs_without_erasing_unknow
     type Value = (u32, Vec<u32>);
     struct Domain {
         unresolved: bool,
+    }
+    impl PayloadInputs for Domain {
+        fn reborrow(&self, value: &Value, fields: &[u32]) -> Option<Value> {
+            self.project(value, fields)
+        }
     }
     impl Inputs for Domain {
         type Value = Value;

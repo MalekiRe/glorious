@@ -5,6 +5,97 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 105: staged lexical closure fusion and shared callable loan products
+
+The active captured-outer-label ownership regression now executes. Staged Core
+admits lexical closure obligations only under their destination binders;
+ordinary Core remains strict. Fusion consumes the bound source/control batch,
+not a separately supplied body or a new alias analysis. Values carry their
+checked semantic contract alongside their physical representation, and explicit
+parameters and captured inputs share the transformation binding form.
+
+Closed tagged products retain resident capture fields, source formation order
+and lexical proof slots. Invocation aliases that storage through owned, shared
+or unique receivers. Erased mutable callable views dispatch on the current tag;
+they do not reuse the initial constructor's code identity. Result alternatives
+use one layout join. Hygienic expansion preserves strict operands, source unsafe
+scopes and direct lexical transfers. Original source resource/escape obligations
+are validated before transformed Core is installed; the receiving Core then
+gets independent validation and fresh control, ownership and cleanup analysis.
+
+Two further phase mismatches were exposed by composition tests. Escape checking
+used an enclosing callable's loan journal for a closure body, while lowering
+derived a different child product. PlaceFlow now publishes per-callable products
+once, consumed by both escape and lowering. A label payload that reborrows a
+captured place also needed a relation distinct from copying its contents.
+The shared invocation values now retain storage identities at binding, argument,
+capture and field boundaries. A typed reborrow projection connects explicit and
+captured input loans to both resource consumers. Equal copied contents do not
+grant that projection. Missing storage evidence remains unknown. These changes
+do not replace every per-consumer provenance/storage domain.
+
+Source tests cover aliases, aggregates, nested closures, generic and structural
+callable forwarding, unobserved branches, mutable dispatch, borrowed receivers,
+formation/argument order, destruction and reference payloads. Fresh and decoded
+VM execution is checked at O0/O2; an owned control capture also executes through
+native and genuinely mixed VM/native boundaries at both levels. The original
+lazy callback sources now have positive execution assertions, including branches
+that must not invoke the callback. Escaping-label and invalid generic-discard
+sources remain negative tests; the latter reaches its original G5024 ownership
+obligation instead of the old blanket unfused-closure rejection.
+
+The first broad service runs exposed fusion demanding executable invocation
+evidence even from unaffected HRTB bodies. Input inspection and expansion
+authority are now separate, and the preserved HRTB target passes. Those two
+already-failing superseded service processes were stopped; their logs are not
+completed gates. Receiving-phase validation also avoids re-reporting errors on
+already-invalid staged bodies. Existing negative HRTB tests retain their exact
+diagnostic contracts. The original non-invoked compact-label closure sources
+are preserved as positives, with actual exported-label sources kept negative.
+
+Final snapshot verification is split into bounded commands rather than treating
+the earlier interrupted combined runs as completed gates:
+
+- The core/resource gate passes all 901 tests: 337 library units, 25 borrowed
+  callable contracts, 38 callable-control cases, 13 fusion groups, 273 Core
+  cases, 111 destruction cases, 39 fixed-array cases, four mandatory-tail label
+  cases, 39 minimum-use cases and 22 request/revision cases
+  (`target/control-fusion-core-final-v2.log`). The fusion execution helper also
+  rejects any emitted `MakeLabel` instruction: its lexical destinations must
+  reach runtime as resolved control edges, not retained label carriers.
+- All 891 service tests pass (`target/control-fusion-service-final-v2.log`).
+- All 176 library API tests pass. The source-library matrix remains 16 passing
+  and 15 failing, with no ignores (`target/control-fusion-library-final-v2.log`).
+  The failing source tests are `budget`, `ffi`, `float_convert`, `float_parse`,
+  `float_shortest`, `format`, `full_composition`, `heap`, `io`, `iterator`,
+  `iterator_callbacks`, `random`, `sorting`, `traversal`, and `utf8`.
+- Mandatory-tail has 16 passes and the existing
+  `mandatory_tail_transfers_incoming_borrows_and_nested_carriers` failure at
+  G7041, activation-transfer ABI mismatch (the same library gate log).
+- The separate native/mixed label-product gate has one pass and the existing
+  `erased_label_products_preserve_captures_in_native_and_mixed_execution`
+  failure: native captured callable environments are not implemented
+  (`target/control-fusion-native-final-v2.log`). This ordinary resident callable
+  test is distinct from the passing fused owned-control-capture test.
+- The all-target compile check passes (`target/control-fusion-check-final-v2.log`)
+  with 26 existing unused-variable warnings in Core tests. The compiler source
+  closure audit passes; its 11,455 public contracts remain open, not certified
+  by this Stage0 checkpoint.
+
+Together these selected completed test gates contain 2,001 passes, 17 named
+failures and no ignores. They are not a complete repository acceptance run.
+
+This does not finish spec §11. Full label-bearing helper-family fusion is still
+open; unaffected plain-label families retain their existing lowering path.
+Handler/resumption and mandatory-tail activation expansion, heterogeneous
+environment representations and projected ordinary nested captures reject
+without the missing contracts. Some nominal/result layouts and finer-grained
+request work/cancellation accounting remain open. Ordinary native captured
+callable storage is a separate unsupported ABI, not implemented by lexical
+tagged fusion. Compiler/library conformance and self-hosting remain unfinished.
+Source cache generation is 105; executable format and native ABI generations
+are unchanged.
+
 ## Cache 104: checked runtime erasure of resolved label products
 
 The preceding checkpoint preserved a tuple-label execution regression, also

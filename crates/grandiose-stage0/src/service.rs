@@ -91,6 +91,34 @@ impl std::fmt::Debug for StagedTypedBody {
 }
 
 impl StagedTypedBody {
+    fn check_resources(
+        &self,
+        signatures: &ElaboratedInterface,
+        abort_primitive: Option<DefKey>,
+        continuations: Arc<crate::core_continuations::CoreContinuations>,
+        diagnostics: &mut Vec<CompileDiagnostic>,
+    ) -> (PlaceFlow, bool) {
+        let Self { core, lexical_bounds, lexical_effect_bindings, solver, .. } = self;
+        let flow = PlaceFlow::analyze_with_frozen_solver(
+            core, signatures, lexical_bounds, lexical_effect_bindings, solver, abort_primitive,
+            continuations,
+        );
+        diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
+            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
+        )));
+        let escapes = EscapeFlow::analyze_with_interface(core, &flow, signatures);
+        diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
+            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
+        )));
+        let uses = UseFlow::analyze_with_interface(core, &flow, signatures);
+        diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
+            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
+        )));
+        let valid = self.valid && flow.diagnostics.is_empty() && escapes.diagnostics.is_empty()
+            && uses.diagnostics.is_empty();
+        (flow, valid)
+    }
+
     fn analyze(
         self,
         signatures: &ElaboratedInterface,
@@ -98,25 +126,8 @@ impl StagedTypedBody {
         continuations: Arc<crate::core_continuations::CoreContinuations>,
         diagnostics: &mut Vec<CompileDiagnostic>,
     ) -> PublishedBody {
-        let Self { definition, is_constant, valid, core, lexical_bounds,
-            lexical_effect_bindings, solver, budget } = self;
-        let flow = PlaceFlow::analyze_with_frozen_solver(
-            &core, signatures, &lexical_bounds, &lexical_effect_bindings, &solver, abort_primitive,
-            continuations,
-        );
-        diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
-            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
-        )));
-        let escapes = EscapeFlow::analyze_with_interface(&core, &flow, signatures);
-        diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
-            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
-        )));
-        let uses = UseFlow::analyze_with_interface(&core, &flow, signatures);
-        diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
-            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
-        )));
-        let valid = valid && flow.diagnostics.is_empty() && escapes.diagnostics.is_empty()
-            && uses.diagnostics.is_empty();
+        let (flow, valid) = self.check_resources(signatures, abort_primitive, continuations, diagnostics);
+        let Self { definition, is_constant, core, budget, .. } = self;
         PublishedBody { definition, is_constant, valid, core, flow, budget }
     }
 }
@@ -1685,13 +1696,14 @@ impl StageZeroCompiler {
                         body_trait_solver.fresh_query(),
                     )
                 } else {
-                    TypedBody::elaborate_with_trait_solver(
+                    TypedBody::elaborate_control_input(
                         declaration,
                         &body,
                         &index,
                         &signatures,
                         &fixities,
                         body_trait_solver.fresh_query(),
+                        true,
                     )
                 };
                 diagnostics.extend(core.diagnostics.iter().map(|diagnostic| {
@@ -1711,7 +1723,7 @@ impl StageZeroCompiler {
                         Some(declaration.span),
                     ));
                 }
-                let mut core_validation = core.validate();
+                let mut core_validation = core.validate_for_control_fusion();
                 let ambient_projection_bounds = signatures
                     .definitions
                     .get(&declaration.key)
@@ -1841,6 +1853,7 @@ impl StageZeroCompiler {
                         &signatures,
                         &fixities,
                         body_trait_solver.fresh_query(),
+                        true,
                     );
                     diagnostics.extend(core.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
@@ -1871,7 +1884,7 @@ impl StageZeroCompiler {
                             Some(method.span),
                         ));
                     }
-                    let mut core_validation = core.validate();
+                    let mut core_validation = core.validate_for_control_fusion();
                     let mut ambient_projection_bounds =
                         implementation_signature.where_bounds.clone();
                     ambient_projection_bounds.push((
@@ -1923,7 +1936,7 @@ impl StageZeroCompiler {
                 }
             }
         }
-        let staged_bodies = package_sessions
+        let mut staged_bodies = package_sessions
             .into_values()
             .map(PackageSession::finish)
             .collect::<Result<Vec<_>, _>>()?
@@ -1938,16 +1951,66 @@ impl StageZeroCompiler {
         let control_signatures = staged_bodies.iter().filter_map(|staged|
             crate::callable_declarations::body_signature(&signatures, staged.definition)
                 .map(|signature| (staged.definition, signature))).collect::<BTreeMap<_, _>>();
+        // Resolve and discharge lexical control obligations before deriving
+        // the ownership representation. Source contracts are checked on the
+        // original program; no representation rewrite may repair invalid use
+        // or escape. The transformed program then receives fresh analyses.
+        let unchanged_control = {
+            let control_bodies = staged_bodies.iter().filter_map(|staged|
+                control_signatures.get(&staged.definition).map(|signature| (staged.definition,
+                    crate::callable_control::ControlBody { body: &staged.core, signature, interface: &signatures })))
+                .collect::<BTreeMap<_, _>>();
+            let budgets = staged_bodies.iter().map(|staged| (staged.definition, staged.budget.clone())).collect::<BTreeMap<_, _>>();
+            let summaries = crate::callable_control::derive_fusion_summaries_with_check(
+                &control_bodies, Default::default(), &mut |definition, cost|
+                    session.checkpoint_in(&budgets[&definition], cost))?;
+            let bound = summaries.bind(&control_bodies).map_err(|reason| ServiceError::Failed(vec![
+                CompileDiagnostic::invariant("G4180", format!("staged control batch failed validation: {reason:?}"))]))?;
+            let mut transformed = BTreeMap::new();
+            for staged in &staged_bodies {
+                if !staged.valid || !control_bodies.contains_key(&staged.definition) { continue; }
+                session.checkpoint_in(&staged.budget, 0)?;
+                match crate::core::control_fusion::transform(staged.definition, &bound) {
+                    Ok(Some(core)) => {
+                        session.checkpoint_in(&staged.budget, core.expressions.len() as u64 + 1)?;
+                        let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(
+                            &staged.core, bound.body(staged.definition))
+                            .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant(error.code, error.message)]))?;
+                        let (_, valid) = staged.check_resources(&signatures, abort_primitive, Arc::new(facts), &mut diagnostics);
+                        transformed.insert(staged.definition, (core, valid));
+                    }
+                    Ok(_) => {}
+                    Err(error) => diagnostics.push(CompileDiagnostic::source(error.code, error.message, Some(error.span))),
+                }
+            }
+            let unchanged = transformed.is_empty();
+            for staged in &mut staged_bodies {
+                if let Some((core, valid)) = transformed.remove(&staged.definition) {
+                    staged.core = core;
+                    staged.valid &= valid;
+                }
+                // Recovered/invalid staged inputs have already published
+                // their diagnostics and cannot enter ownership publication.
+                // The strict receiving-phase check is for admitted inputs,
+                // not a second report of their earlier validation failure.
+                if !staged.valid { continue; }
+                let errors = staged.core.validate();
+                staged.valid &= errors.is_empty();
+                diagnostics.extend(errors.into_iter().map(|error| CompileDiagnostic::source(error.code, error.message, Some(error.span))));
+            }
+            unchanged.then_some(summaries)
+        };
         let control_bodies = staged_bodies.iter().filter_map(|staged|
             control_signatures.get(&staged.definition).map(|signature| (staged.definition,
                 crate::callable_control::ControlBody { body: &staged.core, signature, interface: &signatures })))
             .collect::<BTreeMap<_, _>>();
         let control_budgets = staged_bodies.iter().map(|staged| (staged.definition, staged.budget.clone()))
             .collect::<BTreeMap<_, _>>();
-        let control_summaries = crate::callable_control::derive_control_summaries_with_check(
+        let control_summaries = if let Some(summaries) = unchanged_control { summaries } else {
+            crate::callable_control::derive_control_summaries_with_check(
             &control_bodies, Default::default(), &mut |definition, cost|
                 session.checkpoint_in(&control_budgets[&definition], cost),
-        )?;
+        )? };
         let bound_control = control_summaries.bind(&control_bodies)
             .map_err(|reason| ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180",
                 format!("callable control batch failed dependency validation: {reason:?}"))]))?;

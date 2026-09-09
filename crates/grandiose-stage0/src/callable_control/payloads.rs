@@ -21,6 +21,9 @@ pub(crate) enum PayloadSource {
         path: Vec<u32>,
     },
     Aggregate(Vec<InvocationPayload>),
+    /// Address-preserving projection of an existing input loan, distinct
+    /// from reading the reference's contents or borrowing an owned input.
+    Reborrow { input: Box<InvocationPayload>, fields: Vec<u32> },
     /// The value is not represented by an input relation. Consumers require
     /// an independent type/provenance proof; this is never an empty footprint.
     Unknown,
@@ -47,6 +50,9 @@ impl InvocationPayload {
                 field.instantiate_types(arguments);
             }
         }
+        if let PayloadSource::Reborrow { input, .. } = &mut self.source {
+            input.instantiate_types(arguments);
+        }
     }
 }
 
@@ -56,10 +62,16 @@ pub(crate) enum ResolvedPayload<V> {
     Unknown(Type),
 }
 
+pub(crate) trait PayloadInputs: crate::resident_invocations::Inputs {
+    /// Project the referent of a frozen reference snapshot without reading
+    /// that referent's contents or creating a new caller-owned storage slot.
+    fn reborrow(&self, reference: &Self::Value, fields: &[u32]) -> Option<Self::Value>;
+}
+
 /// Instantiate one payload relation over a consumer's evaluated snapshots.
 /// Explicit and captured inputs use the same readonly projection interface as
 /// invocation stores. Missing projections remain unknown, not empty values.
-pub(crate) fn resolve_payload<D: crate::resident_invocations::Inputs>(
+pub(crate) fn resolve_payload<D: PayloadInputs>(
     payload: &InvocationPayload,
     callable: &D::Value,
     arguments: &[D::Value],
@@ -101,6 +113,13 @@ pub(crate) fn resolve_payload<D: crate::resident_invocations::Inputs>(
                     .collect(),
             );
         }
+        PayloadSource::Reborrow { input, fields } => {
+            match resolve_payload(input, callable, arguments, domain) {
+                ResolvedPayload::Inputs { values, .. } => values.iter()
+                    .map(|value| domain.reborrow(value, fields)).collect::<Option<Vec<_>>>(),
+                _ => None,
+            }
+        }
         PayloadSource::Unknown => None,
     };
     match values {
@@ -128,6 +147,17 @@ fn origin_path(origin: &ControlOrigin, base: &ControlOrigin) -> Option<Vec<u32>>
     }
 }
 
+fn storage_path(target: &ControlValue, input: &ControlValue) -> Option<Vec<u32>> {
+    let mut target = target.storage.as_ref()?;
+    let input = input.storage.as_ref()?;
+    let mut fields = vec![];
+    loop {
+        if target == input { fields.reverse(); return Some(fields); }
+        let ControlStorage::Field { base, index } = target else { return None; };
+        fields.push(*index); target = base;
+    }
+}
+
 fn value_path(origin: &ControlOrigin, input: &ControlValue) -> Option<Vec<u32>> {
     let mut pending = vec![(input, vec![])];
     while let Some((value, prefix)) = pending.pop() {
@@ -149,6 +179,34 @@ fn value_path(origin: &ControlOrigin, input: &ControlValue) -> Option<Vec<u32>> 
                 let mut path = prefix;
                 path.push(crate::core::REFERENCE_PATH_DEREF);
                 pending.push((value, path));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Locate an existing reference whose referent structurally owns the new
+/// borrow's place. This traverses the shared abstract value, never Core.
+fn reborrow_path(value: &ControlValue, input: &ControlValue) -> Option<(Vec<u32>, Vec<u32>, Type)> {
+    let ControlValueShape::Borrow(target) = &value.shape else { return None; };
+    let mut pending = vec![(input, vec![])];
+    while let Some((input, path)) = pending.pop() {
+        match &input.shape {
+            ControlValueShape::Borrow(referent) => {
+                if let Some(fields) = storage_path(target, referent) {
+                    return Some((path, fields, input.ty.clone()));
+                }
+                let mut path = path;
+                path.push(crate::core::REFERENCE_PATH_DEREF);
+                pending.push((referent, path));
+            }
+            ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
+            | ControlValueShape::Record { fields, .. } | ControlValueShape::Enum { fields, .. } => {
+                for (index, field) in fields.iter().enumerate() {
+                    let mut path = path.clone(); path.push(index as u32);
+                    pending.push((field, path));
+                }
             }
             _ => {}
         }
@@ -227,6 +285,11 @@ impl BoundControlSummaries<'_> {
                         },
                     };
                 }
+                if let Some((path, fields, ty)) = reborrow_path(value, argument) {
+                    return InvocationPayload { ty: value.ty.clone(), source: PayloadSource::Reborrow {
+                        input: Box::new(InvocationPayload { ty, source: PayloadSource::Argument { index: index as u32, path } }), fields,
+                    } };
+                }
             }
             for capture in captures {
                 if let Some(fields) = value_path(&value.origin, &capture.value) {
@@ -241,6 +304,22 @@ impl BoundControlSummaries<'_> {
                         },
                     };
                 }
+                let borrowed_resident = if capture.contents.last() == Some(&crate::core::REFERENCE_PATH_DEREF) {
+                    if let ControlValueShape::Borrow(target) = &value.shape {
+                        storage_path(target, &capture.value).map(|fields|
+                            (capture.contents[..capture.contents.len() - 1].to_vec(), fields, capture.resident_ty.clone()))
+                    } else { None }
+                } else { None };
+                let relation = borrowed_resident.or_else(|| reborrow_path(value, &capture.value)
+                    .map(|(path, fields, ty)| (capture.contents.iter().chain(&path).copied().collect(), fields, ty)));
+                if let Some((path, fields, ty)) = relation {
+                    return InvocationPayload { ty: value.ty.clone(), source: PayloadSource::Reborrow {
+                        input: Box::new(InvocationPayload { ty, source: PayloadSource::Capture {
+                            receiver_path: receiver_path.to_vec(), callable_ty: callable_ty.clone(),
+                            resident_ty: capture.resident_ty.clone(), path,
+                        } }), fields,
+                    } };
+                }
             }
             construct(value, &|value| {
                 derive(value, arguments, captures, receiver_path, callable_ty)
@@ -254,6 +333,7 @@ impl BoundControlSummaries<'_> {
             brand: CallableBrand::Closure(brand),
             captures,
             generic_arguments,
+            ..
         } = &callable.shape
         else {
             return vec![];

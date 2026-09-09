@@ -271,22 +271,39 @@ fn higher_order_captured_outer_label_exits_preserve_ownership() {
 }
 
 #[test]
-fn unfused_closure_label_values_are_rejected_before_lowering() {
+fn label_bearing_closures_fuse_inside_their_active_scope() {
     for body in [
         "pub fn main() -> i64 { @done: i64 { let task = () -> ! { leave(42,@done) }; task() } }",
-        "fn ignore<T>(value:T) -> () {} pub fn main() -> i64 { @done: i64 { let task = () -> i64 { ignore(@done); 42 }; task() } }",
+    ] {
+        accepts(&format!("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }} {body}"));
+    }
+    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        pub fn main() -> i64 { let task = () -> i64 { @done: i64 { leave(42,@done) } }; task() }");
+}
+
+#[test]
+fn lexical_fusion_does_not_authorize_discarding_an_unconstrained_generic_owner() {
+    let source = format!("{TOKEN} fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+        fn ignore<T>(value:T) -> () {{}} pub fn main() -> i64 {{ @done: i64 {{ let task = () -> i64 {{ ignore(@done); 42 }}; task() }} }}");
+    for optimization in ["0", "2"] {
+        let failure = StageZeroCompiler::new().compile(request(&source, optimization)).unwrap_err();
+        assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5024"), "{failure:#?}");
+    }
+}
+
+#[test]
+fn lexical_closure_fusion_cannot_launder_an_escaping_label() {
+    for body in [
         "pub fn make() -> () -> i64 { () -> i64 { let label = @make; 42 } } pub fn main() -> i64 { 42 }",
     ] {
         let source = format!("{TOKEN} fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }} {body}");
         for optimization in ["0", "2"] {
             let failure = StageZeroCompiler::new().compile(request(&source, optimization))
-                .expect_err("an unfused callable cannot retain an outer label value");
+                .expect_err("fusion cannot authorize a callable that escapes its captured label scope");
             assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{source}\n{failure:#?}");
             assert!(!failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G6001"), "label lifetime must be checked before CFG lowering: {failure:#?}");
         }
     }
-    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
-        pub fn main() -> i64 { let task = () -> i64 { @done: i64 { leave(42,@done) } }; task() }");
 }
 
 #[test]

@@ -404,6 +404,10 @@ pub struct FlowDiagnostic {
 }
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
+    /// Frozen per-callable loan/resource products from this exact Core arena.
+    /// Escape and lowering share these; a closure body never borrows the
+    /// enclosing callable's NLL journal as evidence for its own operations.
+    closure_flows: BTreeMap<crate::core::EnvironmentBrand, PlaceFlow>,
     /// Shared local continuation facts, derived before resource analysis.
     /// Private construction prevents consumers from fabricating skip proofs.
     continuations: Option<std::sync::Arc<crate::core_continuations::CoreContinuations>>,
@@ -416,7 +420,6 @@ pub struct PlaceFlow {
     /// Associated rows are part of a generic Fn's checked lexical contract,
     /// not recoverable from its uninstantiated Core callee type alone.
     pub(crate) lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
-    pub(crate) lexical_universal_bounds: Vec<crate::QuantifiedWhereBound>,
     /// Frozen lexical storage identities referenced by `move_paths`.
     pub bindings: Vec<PlaceBinding>,
     /// Persistent lexical source-storage arena. `binding_scopes` is dense in
@@ -488,7 +491,7 @@ impl PlaceFlow {
         continuations: std::sync::Arc<crate::core_continuations::CoreContinuations>,
     ) -> Self {
         Self::analyze_root_with_captures(body, body.root, &body.parameters, &[], Some(signatures), bounds,
-            effect_bindings, Some(solver), abort_primitive, Some(continuations))
+            effect_bindings, Some(solver), abort_primitive, Some(continuations), true)
     }
 
     /// Analyze one lifted callable body as an independent storage owner.
@@ -535,13 +538,13 @@ impl PlaceFlow {
         abort_primitive: Option<crate::DefKey>,
     ) -> Self {
         Self::analyze_root_with_captures(body, root, parameters, &[], signatures, bounds,
-            effect_bindings, frozen_solver, abort_primitive, None)
+            effect_bindings, frozen_solver, abort_primitive, None, true)
     }
 
     /// A borrowed capture names its caller-owned referent in Core. Its source
     /// type is not a newly transferred owner and must not acquire a second
     /// destructor or positive-use obligation in the lifted body.
-    pub(crate) fn analyze_closure(
+    fn analyze_closure(
         body: &TypedBody,
         root: CoreId,
         parameters: &[(String, Type)],
@@ -556,7 +559,7 @@ impl PlaceFlow {
         let modes = environment.captures.iter().map(|capture| capture.mode).collect::<Vec<_>>();
         Self::analyze_root_with_captures(body, root, &abi, &modes, signatures,
             &parent.lexical_bounds, &parent.lexical_effect_bindings, solver, parent.abort_primitive,
-            parent.continuations.clone())
+            parent.continuations.clone(), false)
     }
 
     fn analyze_root_with_captures(
@@ -570,6 +573,7 @@ impl PlaceFlow {
         frozen_solver: Option<&crate::TraitSolver>,
         abort_primitive: Option<crate::DefKey>,
         continuations: Option<std::sync::Arc<crate::core_continuations::CoreContinuations>>,
+        include_closures: bool,
     ) -> Self {
         let continuations = match continuations {
             Some(facts) => facts.bind(body).map(|_| facts.clone()),
@@ -693,12 +697,12 @@ impl PlaceFlow {
                 fields: place.fields.clone(),
             })
             .collect();
-        Self {
+        let mut flow = Self {
+            closure_flows: BTreeMap::new(),
             continuations: Some(continuations.clone()),
             abort_primitive,
             lexical_bounds: bounds.to_vec(),
             lexical_effect_bindings: effect_bindings.to_vec(),
-            lexical_universal_bounds: frozen_solver.map_or_else(Vec::new, |solver| solver.universal_assumptions().to_vec()),
             bindings: a.bindings.into_entries(),
             storage_scopes: a.storage_scopes,
             binding_scopes: a.binding_scopes,
@@ -711,7 +715,22 @@ impl PlaceFlow {
             refinements: a.refinements,
             events: a.events,
             diagnostics: a.diagnostics,
+        };
+        if include_closures {
+            for expression in &body.expressions {
+                let CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { continue; };
+                let child = Self::analyze_closure(body, *root, parameters, environment, signatures, &flow, frozen_solver);
+                flow.diagnostics.extend(child.diagnostics.iter().cloned());
+                flow.closure_flows.insert(environment.brand, child);
+            }
+            flow.diagnostics.sort_by_key(|diagnostic| diagnostic.span.start);
+            flow.diagnostics.dedup();
         }
+        flow
+    }
+
+    pub(crate) fn closure_flows(&self) -> &BTreeMap<crate::core::EnvironmentBrand, PlaceFlow> {
+        &self.closure_flows
     }
 }
 pub(crate) mod regions;

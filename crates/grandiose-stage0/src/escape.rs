@@ -57,20 +57,12 @@ impl EscapeFlow {
             body,
             continuations,
             signatures,
+            closure_flows: flow.closure_flows(),
             // A direct borrow must already have entered the ownership flow.
             // Retaining these roots lets us fail closed if Core ever grows a
             // reference-producing operation without teaching PlaceFlow about
             // it first.
-            loan_roots: flow
-                .events
-                .iter()
-                .filter_map(|event| match &event.kind {
-                    crate::placeflow::FlowEventKind::BorrowShared(root)
-                    | crate::placeflow::FlowEventKind::BorrowUnique(root)
-                    | crate::placeflow::FlowEventKind::Reborrow(root) => Some(root.clone()),
-                    _ => None,
-                })
-                .collect(),
+            loan_roots: frozen_loan_roots(flow),
             values: ValueEnvironment::default(),
             labels: vec![],
             diagnostics: vec![],
@@ -239,6 +231,7 @@ enum Capture {
 }
 
 struct Analyzer<'a> {
+    closure_flows: &'a BTreeMap<EnvironmentBrand, PlaceFlow>,
     body: &'a TypedBody,
     continuations: &'a crate::core_continuations::CoreContinuations,
     signatures: &'a crate::ElaboratedInterface,
@@ -246,6 +239,15 @@ struct Analyzer<'a> {
     values: ValueEnvironment,
     labels: Vec<LabelBoundary>,
     diagnostics: Vec<EscapeDiagnostic>,
+}
+
+fn frozen_loan_roots(flow: &PlaceFlow) -> BTreeSet<String> {
+    flow.events.iter().filter_map(|event| match &event.kind {
+        crate::placeflow::FlowEventKind::BorrowShared(root)
+        | crate::placeflow::FlowEventKind::BorrowUnique(root)
+        | crate::placeflow::FlowEventKind::Reborrow(root) => Some(root.clone()),
+        _ => None,
+    }).collect()
 }
 
 impl Analyzer<'_> {
@@ -452,6 +454,27 @@ impl Analyzer<'_> {
                 // bindings or writes into the enclosing creation site.
                 let outer_values = self.values.clone();
                 let outer_labels = std::mem::take(&mut self.labels);
+                // Captured destinations remain lexical inputs while this
+                // isolated invocation is inspected. Its exits must not run
+                // at formation or masquerade as ordinary function returns.
+                let mut labels = self.continuations.lexical_label_inputs(body)
+                    .expect("bound closure dependencies cover every Core body").clone();
+                for capture in &environment.captures {
+                    for action in CaptureFormation::new(capture).actions() {
+                        if matches!(action, CaptureAction::RetainContents)
+                            && let Some(value) = self.values.get(&capture.name) {
+                            labels.extend(value_labels(&self.resolved_value(value)));
+                        }
+                    }
+                }
+                self.labels = outer_labels.iter().filter(|label| labels.contains(&label.brand))
+                    .map(|label| LabelBoundary { brand: label.brand, exits: vec![] }).collect();
+                let Some(flow) = self.closure_flows.get(&environment.brand) else {
+                    self.error(expression.span, "G5016", "closure body has no frozen callable loan product");
+                    self.labels = outer_labels;
+                    return Value::None;
+                };
+                let outer_loan_roots = std::mem::replace(&mut self.loan_roots, frozen_loan_roots(flow));
                 for (name, ty) in &parameters {
                     self.values.define(name.clone(), parameter_value(ty));
                 }
@@ -459,6 +482,7 @@ impl Analyzer<'_> {
                 let returned_snapshot = self.resolved_value(&returned);
                 self.values = outer_values;
                 self.labels = outer_labels;
+                self.loan_roots = outer_loan_roots;
 
                 // Formation does not execute the body or insert hypothetical
                 // external arguments into captured storage. Invocation applies
@@ -481,7 +505,6 @@ impl Analyzer<'_> {
                     };
                     crate::resident_invocations::Operand { ty: formation.resident_type(), value }
                 }).collect();
-                let mut labels = BTreeSet::new();
                 let mut captures = environment
                     .captures
                     .into_iter()
@@ -497,7 +520,6 @@ impl Analyzer<'_> {
                                 CaptureAction::RetainContents => {
                                     let value = self.resolved_value(&value);
                                     roots.extend(capture_dependency_roots(&value));
-                                    labels.extend(value_labels(&value));
                                 }
                                 CaptureAction::Source(CaptureSource::Borrow(_)) => { roots.insert(capture.name.clone()); }
                                 CaptureAction::Source(CaptureSource::Copy | CaptureSource::Move) => {}

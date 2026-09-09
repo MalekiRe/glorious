@@ -287,7 +287,9 @@ impl Elaborator<'_> {
                 // forced-move capture may be read through the environment;
                 // conversely a Copy capture can contain mutable local state.
                 let (shared_receiver, unique_receiver) = self.callable_capture_access(*body, parameters, environment);
-                let empty = environment.captures.is_empty();
+                let empty = environment.captures.is_empty()
+                    && label_dependencies::LabelDependencies::for_root(&self.expressions, *body)
+                        .is_ok_and(|facts| facts.independent(*body));
                 contract.captures = environment.captures.iter().map(|capture|
                     crate::capture_formation::CaptureFormation::new(capture).resident_type()).collect();
                 contract.environment = Some(Box::new(if empty { Type::Unit } else { generated_environment_type(environment.brand, false, &contract.captures) }));

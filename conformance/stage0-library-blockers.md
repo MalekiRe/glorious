@@ -1,19 +1,44 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-08 from three independent read-only compiler audits, current
-source, and `target/associated-bindings-focused-v5.log`. This is a prioritized
+Updated 2026-09-09 from the current source and cache 105 verification below,
+with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
 authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/proof-erasure-integration-v2.log`, cache 104). This includes a source
+ignored (`target/control-fusion-library-final-v2.log`, cache 105). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 105 integrates structural fusion for lexical outer-label closures and
+captured label aliases. Tagged environment products preserve ordinary residents,
+borrowed receiver storage, strict inputs and destruction; mutable callable views
+select their current constructor. Source resource/escape checks precede installing
+transformed Core, which then receives independent validation and fresh analyses.
+Per-callable loan facts are shared by escape and lowering. Reborrow payloads use
+the shared invocation product's storage identity, not equality of copied contents.
+
+The formerly failing captured-outer-label ownership source and four original lazy
+callback sources now execute. Thirteen new integration groups cover fresh/decoded
+O0/O2 execution, invalid ownership and backing-storage escapes, and owned control
+capture execution through native/mixed boundaries. The separate ordinary native
+captured-callable fixture still fails at its existing unsupported environment ABI;
+the plain-label native/mixed forwarding fixture passes. Full helper-family fusion,
+handler/resumption and mandatory-tail activation expansion, heterogeneous layouts,
+complete proof erasure and unified guarded provenance remain open. This is not
+full §11 conformance or completion of the compiler, library or self-hosting goal.
+All 891 service and 176 library API tests and the all-target compile check pass.
+The source matrix retains the same 15 failures; mandatory-tail retains its
+activation-transfer ABI mismatch. See `implementation-progress.md` for exact
+final gate logs and named failures; the source-closure audit is not self-hosting
+acceptance evidence.
+
+The following cache 104 and earlier checkpoints are historical.
 
 Cache 104 erases resolved label proof values across checked runtime ABI
 components. Tuple/array products, generic forwarding and internal projection

@@ -3,7 +3,7 @@
 
 use crate::{
     core::{
-        CaptureMode, CoreId, CoreKind, CorePattern, EnvironmentBrand, TypedBody,
+        CaptureMode, CoreId, CorePattern, EnvironmentBrand, TypedBody,
     },
     identity::{DefKey, Digest},
     instance::InstanceKey,
@@ -4546,11 +4546,8 @@ impl MirLowering {
                 .map_err(|error| MirDiagnostic {
                     code: "G6000", message: format!("invalid Control MIR: {error:?}"),
                 })?;
-            let closure_flows = body.expressions.iter().filter_map(|expression| {
-                let CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { return None; };
-                let child = PlaceFlow::analyze_closure(body, *root, parameters, environment, signatures, flow, None);
-                Some((lifted_callable_definition(environment.brand), child))
-            }).collect();
+            let closure_flows = flow.closure_flows().iter().map(|(brand, child)|
+                (lifted_callable_definition(*brand), child.clone())).collect();
             let ownership = crate::ownership_mir::OwnershipMir::lower_with_closure_flows(
                 control, flow, &closure_flows, signatures,
             ).map_err(|error| MirDiagnostic {

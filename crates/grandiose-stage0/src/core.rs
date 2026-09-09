@@ -2,6 +2,7 @@
 
 mod fingerprint;
 mod callable_contracts;
+pub(crate) mod control_fusion;
 pub(crate) mod label_dependencies;
 pub(crate) mod tail;
 mod tuple_struct;
@@ -200,6 +201,13 @@ fn generated_environment_type(brand: EnvironmentBrand, after: bool, captures: &[
         ])),
         arguments,
     }
+}
+
+pub(crate) fn callable_environment_has_brand(ty: &Type, brand: EnvironmentBrand) -> bool {
+    let Type::Callable { contract, .. } = ty else { return false; };
+    let Some(Type::Nominal { definition, .. }) = contract.environment.as_deref() else { return false; };
+    let Type::Nominal { definition: expected, .. } = generated_environment_type(brand, false, &[]) else { unreachable!() };
+    *definition == expected
 }
 
 /// Decode the two type-valued arguments of an intrinsic RunsIn relation.
@@ -884,6 +892,17 @@ impl TypedBody {
     /// imported Core product must fail closed rather than relying on that
     /// producer's implementation details.
     pub fn validate(&self) -> Vec<CoreDiagnostic> {
+        self.validate_control_phase(false)
+    }
+
+    /// The staged control batch may carry lexical closure obligations, but
+    /// cannot cross the ownership/lowering boundary until fusion discharges
+    /// them and ordinary `validate` succeeds again.
+    pub(crate) fn validate_for_control_fusion(&self) -> Vec<CoreDiagnostic> {
+        self.validate_control_phase(true)
+    }
+
+    fn validate_control_phase(&self, pending_control: bool) -> Vec<CoreDiagnostic> {
         let mut diagnostics = Vec::new();
         let mut needs_unsafe_validation = !self.unsafe_scopes.is_empty();
         if !self.contains(self.root) {
@@ -902,6 +921,8 @@ impl TypedBody {
             .get(self.root.0 as usize)
             .map(|expression| expression.span);
         let label_dependencies = label_dependencies::LabelDependencies::derive(&self.expressions);
+        let pending_closures = pending_control.then(|| label_dependencies.as_ref().ok()
+            .and_then(|facts| facts.pending_closures(self.root).ok())).flatten();
         if let Err(reason) = &label_dependencies {
             diagnostics.push(CoreDiagnostic { code: "G4180",
                 span: parameter_span.unwrap_or_else(invalid_typed_core_span),
@@ -976,9 +997,18 @@ impl TypedBody {
             }
             if let CoreKind::Closure { body, .. } = expression.kind
                 && label_dependencies.as_ref().is_ok_and(|facts| !facts.independent(body))
+                && !pending_closures.as_ref().is_some_and(|pending| pending.contains_key(&owner))
             {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
                     message: "unfused Typed Core closure retains an outer lexical label dependency".into() });
+            }
+            if let CoreKind::Closure { environment, body, .. } = &expression.kind
+                && label_dependencies.as_ref().is_ok_and(|facts| !facts.independent(*body))
+                && !callable_environment_has_brand(&expression.ty, environment.brand)
+                && !matches!(&expression.ty, Type::Callable { contract, .. } if contract.environment.is_none())
+            {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "label-dependent closure has neither its nominal environment nor an erased callable view".into() });
             }
             if let CoreKind::Field { base, index, field_count } = &expression.kind
                 && let Some(CoreExpr { ty: Type::Tuple(fields), .. }) = self.expressions.get(base.0 as usize)
@@ -3116,6 +3146,18 @@ impl TypedBody {
         fixities: &FixityTable,
         trait_solver: TraitSolver,
     ) -> Self {
+        Self::elaborate_control_input(definition, body, index, signatures, fixities, trait_solver, false)
+    }
+
+    pub(crate) fn elaborate_control_input(
+        definition: &Definition,
+        body: &BodySyntax,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
+        fixities: &FixityTable,
+        trait_solver: TraitSolver,
+        pending_control: bool,
+    ) -> Self {
         let scoped_body = index
             .inherent_method(definition.key)
             .map(|method| bind_inherent_self_paths(body, &method.self_ty));
@@ -3137,6 +3179,7 @@ impl TypedBody {
             })
             .unwrap_or_default();
         let mut elaborator = Elaborator {
+            pending_control,
             unsafe_context: false,
             unsafe_scopes: Default::default(),
             body,
@@ -3356,6 +3399,7 @@ impl TypedBody {
         signatures: &ElaboratedInterface,
         fixities: &FixityTable,
         trait_solver: TraitSolver,
+        pending_control: bool,
     ) -> Self {
         let mut generic_parameters = std::collections::BTreeMap::new();
         for (index, name) in context.implementation_header.generics.iter().enumerate() {
@@ -3380,6 +3424,7 @@ impl TypedBody {
             }
         }
         let mut elaborator = Elaborator {
+            pending_control,
             unsafe_context: false,
             unsafe_scopes: Default::default(),
             body,
@@ -3580,6 +3625,7 @@ impl TypedBody {
         trait_solver: TraitSolver,
     ) -> Self {
         let mut elaborator = Elaborator {
+            pending_control: false,
             unsafe_context: false,
             unsafe_scopes: Default::default(),
             body,
@@ -3710,6 +3756,7 @@ impl TypedBody {
         trait_solver: TraitSolver,
     ) -> Self {
         let mut elaborator = Elaborator {
+            pending_control: false,
             unsafe_context: false,
             unsafe_scopes: Default::default(),
             body,
@@ -4050,6 +4097,7 @@ struct PendingIntegerDefault {
 }
 
 struct Elaborator<'a> {
+    pending_control: bool,
     unsafe_context: bool,
     unsafe_scopes: std::collections::BTreeSet<CoreId>,
     body: &'a BodySyntax,
@@ -8164,6 +8212,7 @@ impl Elaborator<'_> {
     /// dependency. No escaping callable gains permission merely because it
     /// forwards its target through a helper instead of invoking it directly.
     fn check_label_transfer_escape(&mut self, body: CoreId, span: Span) {
+        if self.pending_control { return; }
         let active = self
             .active_labels
             .iter()

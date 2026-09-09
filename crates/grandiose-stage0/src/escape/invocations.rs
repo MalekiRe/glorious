@@ -55,6 +55,24 @@ impl Inputs for Analyzer<'_> {
     }
 }
 
+impl crate::callable_control::PayloadInputs for Analyzer<'_> {
+    fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
+        fn project(value: Value, fields: &[u32]) -> Value {
+            match value {
+                Value::Borrowed { root, storage, fields: mut prefix } => {
+                    prefix.extend_from_slice(fields);
+                    Value::Borrowed { root, storage, fields: prefix }
+                }
+                Value::Joined(values) => join(values.into_iter().map(|value| project(value, fields)).collect()),
+                Value::Alternatives(values) => Value::Alternatives(values.into_iter().map(|value| project(value, fields)).collect()),
+                Value::Logical { physical, .. } => project(*physical, fields),
+                value => value,
+            }
+        }
+        Some(project(self.resolved_value(reference), fields))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

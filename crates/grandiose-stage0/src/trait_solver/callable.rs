@@ -173,9 +173,6 @@ impl TraitSolver {
         Some(())
     }
 
-    pub(crate) fn universal_assumptions(&self) -> &[crate::QuantifiedWhereBound] {
-        &self.lexical_universal
-    }
 
     /// Recover the already checked lexical Fn row for a call's exact input
     /// types. This is effect accounting, not new callable/access evidence.

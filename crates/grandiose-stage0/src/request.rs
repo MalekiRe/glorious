@@ -287,7 +287,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // and lowers proven direct local-label callees after strict operand evaluation.
 // Cache 104 erases resolved label proof carriers across checked runtime ABI
 // components without rewriting nominal or effect-family identities.
-pub const STAGE0_CACHE_GENERATION: u32 = 104;
+// Cache 105 discharges staged lexical closure obligations by checked Core
+// fusion and shares per-callable source loan products with escape/lowering.
+pub const STAGE0_CACHE_GENERATION: u32 = 105;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

@@ -14,6 +14,7 @@ struct Rule {
     children: Vec<CoreId>,
     reference: Option<LabelBrand>,
     binder: Option<LabelBrand>,
+    closure: Option<CoreId>,
 }
 
 impl Rule {
@@ -28,6 +29,10 @@ impl Rule {
                 CoreKind::Label { brand, .. } => Some(brand),
                 _ => None,
             },
+            closure: match expression.kind {
+                CoreKind::Closure { body, .. } => Some(body),
+                _ => None,
+            },
         }
     }
 }
@@ -36,6 +41,7 @@ impl Rule {
 pub(crate) enum InvalidInput {
     Missing(CoreId),
     Cycle,
+    UnboundLabel(CoreId),
 }
 
 #[derive(Clone, Debug)]
@@ -141,6 +147,35 @@ impl LabelDependencies {
 
     pub(crate) fn independent(&self, root: CoreId) -> bool {
         self.free(root).is_some_and(BTreeSet::is_empty)
+    }
+
+    /// Pending code dependencies are admitted only while their destination is
+    /// lexically in scope at formation. This is not permission to let the
+    /// resulting value escape or to materialize an independent closure frame.
+    /// A later structural transformation must discharge every pending entry.
+    pub(crate) fn pending_closures(
+        &self,
+        root: CoreId,
+    ) -> Result<std::collections::BTreeMap<CoreId, BTreeSet<LabelBrand>>, InvalidInput> {
+        let mut pending = vec![(root, BTreeSet::new())];
+        let mut seen = BTreeSet::new();
+        let mut obligations = std::collections::BTreeMap::new();
+        while let Some((id, mut active)) = pending.pop() {
+            if !seen.insert((id, active.clone())) { continue; }
+            let rule = self.rules.get(id.0 as usize).and_then(Option::as_ref)
+                .ok_or(InvalidInput::Missing(id))?;
+            if rule.reference.is_some_and(|brand| !active.contains(&brand)) {
+                return Err(InvalidInput::UnboundLabel(id));
+            }
+            if let Some(body) = rule.closure {
+                let labels = self.free(body).ok_or(InvalidInput::Missing(body))?;
+                if !labels.is_subset(&active) { return Err(InvalidInput::UnboundLabel(id)); }
+                if !labels.is_empty() { obligations.insert(id, labels.clone()); }
+            }
+            active.extend(rule.binder);
+            pending.extend(rule.children.iter().map(|child| (*child, active.clone())));
+        }
+        Ok(obligations)
     }
 
     pub(crate) fn reference(&self, id: CoreId) -> Option<LabelBrand> {

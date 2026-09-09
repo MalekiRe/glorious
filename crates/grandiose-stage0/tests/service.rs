@@ -2658,19 +2658,15 @@ fn service_compact_label_transfer_is_terminal_but_preserves_its_typed_result() {
 }
 
 #[test]
-fn service_compact_label_cannot_escape_through_a_closure() {
+fn service_compact_label_closure_can_be_discarded_within_its_scope() {
     let source = "pub fn main() -> i64 { @done: i64 { let delayed = (value: i64) -> i64 { @done(value) }; 0 } }";
-    let error = StageZeroCompiler::new()
-        .compile(request(source))
-        .expect_err("a compact label brand must not escape its lexical scope");
-    assert!(
-        error
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4179"),
-        "compact label escape was accepted: {:#?}",
-        error.diagnostics()
-    );
+    for optimization in ["0", "2"] {
+        let mut request = request(source);
+        request.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(request).unwrap().artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 0);
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 0);
+    }
 }
 
 #[test]
@@ -2763,8 +2759,11 @@ fn service_preserves_distinct_generic_label_brands_through_public_facades_and_cl
     let crossed = format!(
         "{provider} pub effect Route<L> where L: Label<i64> {{ exit(value: i64) -> !; }} pub fn cross<L, M>(left: L, right: M) -> i64 where L: Label<i64>, M: Label<i64> {{ handle Route<L>::exit(41) {{ Route<M>::exit(value) => value }} }}"
     );
-    let escaped = format!(
+    let unfired = format!(
         "{provider} pub fn leaked() -> i64 {{ @done: i64 {{ let delayed = (value: i64) -> i64 {{ @done(value) }}; 0 }} }}"
+    );
+    let escaped = format!(
+        "{provider} pub fn leaked() -> (i64) -> i64 {{ (value: i64) -> i64 {{ let target = @leaked; value }} }}"
     );
     for (name, invalid, expected) in [
         ("cross-brand", crossed.as_str(), "G4155"),
@@ -2793,6 +2792,13 @@ fn service_preserves_distinct_generic_label_brands_through_public_facades_and_cl
             "{name} diagnostics must stay canonical"
         );
     }
+    // Preserve the former unfused-rejection source: this closure is discarded
+    // inside its label, not exported. Its valid child revision may publish.
+    let child = compiler.import_revision(world(&unfired), Some(parent)).unwrap();
+    let artifact = compiler.compile_revision(child).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 84);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 84);
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(parent_trace));
 }
 
 #[test]
@@ -11691,17 +11697,21 @@ fn service_lazy_label_transfer_rejoins_a_bound_continuation() {
 }
 
 #[test]
-fn service_rejects_unfused_outer_labels_in_lazy_callbacks() {
-    for source in [
-        "pub fn main() -> Bool { label done { false and (() -> Bool { transfer done true }) } }",
-        "pub fn main() -> Bool { label done { true and (() -> Bool { transfer done true }) } }",
-        "pub fn main() -> Bool { label done { true or (() -> Bool { transfer done false }) } }",
-        "pub fn main() -> Bool { let result = label done { false or (() -> Bool { transfer done true }) }; result }",
+fn service_fuses_outer_labels_in_lazy_callbacks_without_forcing_them() {
+    for (source, expected) in [
+        ("pub fn main() -> Bool { label done { false and (() -> Bool { transfer done true }) } }", 0),
+        ("pub fn main() -> Bool { label done { true and (() -> Bool { transfer done true }) } }", 1),
+        ("pub fn main() -> Bool { label done { true or (() -> Bool { transfer done false }) } }", 1),
+        ("pub fn main() -> Bool { let result = label done { false or (() -> Bool { transfer done true }) }; result }", 1),
     ] {
-        let error = StageZeroCompiler::new().compile(request_bool(source))
-            .expect_err("an unfused callback cannot retain an enclosing label destination");
-        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{error:?}");
-        assert!(!error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G7042"), "{error:?}");
+        for optimization in ["0", "2"] {
+            let mut request = request_bool(source);
+            request.codegen_options.insert("optimization-level".into(), optimization.into());
+            let artifact = StageZeroCompiler::new().compile(request)
+                .unwrap_or_else(|error| panic!("O{optimization}: {source}\n{error:#?}")).artifact.unwrap();
+            assert_eq!(artifact.run_i64().unwrap(), expected, "{source}");
+            assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), expected, "{source}");
+        }
     }
 }
 

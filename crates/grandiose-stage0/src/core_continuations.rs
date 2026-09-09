@@ -353,6 +353,10 @@ impl CoreContinuations {
         self.label_dependencies.independent(id)
     }
 
+    pub(crate) fn lexical_label_inputs(&self, id: CoreId) -> Option<&std::collections::BTreeSet<LabelBrand>> {
+        self.label_dependencies.free(id)
+    }
+
     pub(crate) fn label_reference(&self, id: CoreId) -> Option<LabelBrand> {
         self.label_dependencies.reference(id)
     }

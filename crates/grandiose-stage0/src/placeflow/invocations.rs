@@ -103,6 +103,18 @@ impl Inputs for Analyzer<'_> {
     }
 }
 
+impl crate::callable_control::PayloadInputs for Analyzer<'_> {
+    fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
+        let (regions, loans) = self.invocation_origins(reference);
+        Some(Value { core: None, owners: BTreeSet::new(), path: vec![],
+            fallback_regions: regions,
+            fallback_loans: loans.into_iter().map(|mut loan| {
+                loan.place.fields.extend_from_slice(fields); loan
+            }).collect(),
+        })
+    }
+}
+
 impl Analyzer<'_> {
     pub(super) fn record_invocation_stores(
         &mut self,

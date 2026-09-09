@@ -11,13 +11,14 @@
 
 use crate::{
     CallableBrand, CallableSignature, CoreId, CoreKind, CorePattern, DefKey, Digest,
-    EffectInstance, ElaboratedInterface, GenericArgument, LabelBrand, Type, TypedBody,
+    EffectInstance, ElaboratedInterface, EnvironmentBrand, GenericArgument, LabelBrand, Type, TypedBody,
 };
 use std::{collections::BTreeMap, sync::Arc};
 
 #[cfg(test)]
 mod tests;
 mod payloads;
+pub(crate) use payloads::PayloadInputs;
 pub(crate) use payloads::{InvocationPayload, ResolvedPayload, resolve_payload};
 
 #[derive(Clone, Copy)]
@@ -62,6 +63,8 @@ pub struct ControlSite {
 pub enum ControlOrigin {
     Parameter(u32),
     Capture(u32),
+    /// An implicit lexical proof input, never a resident environment field.
+    LabelCapture(LabelBrand),
     Produced(ControlSite),
     Field {
         base: Box<ControlOrigin>,
@@ -81,8 +84,32 @@ pub enum ControlLabelTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlValue {
     pub origin: ControlOrigin,
+    /// Storage reached by this place expression, distinct from its copied
+    /// contents' origin. Reborrow relations require this identity.
+    pub storage: Option<ControlStorage>,
     pub ty: Type,
     pub shape: ControlValueShape,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ControlStorage {
+    Slot { site: ControlSite, name: String },
+    Field { base: Box<ControlStorage>, index: u32 },
+}
+
+fn resident(mut value: ControlValue, storage: ControlStorage) -> ControlValue {
+    value.storage = Some(storage.clone());
+    match &mut value.shape {
+        ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
+        | ControlValueShape::Record { fields, .. } | ControlValueShape::Enum { fields, .. } => {
+            for (index, field) in fields.iter_mut().enumerate() {
+                *field = resident(field.clone(), ControlStorage::Field { base: Box::new(storage.clone()), index: index as u32 });
+            }
+        }
+        // Moving a reference handle never relocates its referent.
+        _ => {}
+    }
+    value
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlValueShape {
@@ -105,6 +132,7 @@ pub enum ControlValueShape {
         /// retains that namespace when summarizing an embedded closure alone.
         generic_arguments: Option<Vec<GenericArgument>>,
         captures: Vec<ControlValue>,
+        labels: BTreeMap<LabelBrand, ControlLabelTarget>,
     },
     /// Taking a reference to an unavailable implementation is still a pure
     /// value operation. Its unknown control behavior matters only if invoked.
@@ -246,6 +274,7 @@ struct Seal {
     body: Arc<TypedBody>,
     interface: Arc<ElaboratedInterface>,
     valid: Result<(), ControlUnknown>,
+    labels: Option<crate::core::label_dependencies::LabelDependencies>,
 }
 impl std::fmt::Debug for Seal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -407,6 +436,35 @@ pub(crate) struct InvocationTransfer {
     pub payload: InvocationPayload,
 }
 
+/// Exact callee selection, separate from outcome completeness. A known body
+/// may contain an unsupported operation without making its identity opaque.
+/// Transformations still execute that body and preserve all its outcomes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FusionTarget {
+    Callable {
+        brand: CallableBrand,
+        generic_arguments: Option<Vec<GenericArgument>>,
+        labels: BTreeMap<LabelBrand, ControlLabelTarget>,
+    },
+    Label(ControlLabelTarget),
+}
+
+/// A closure constructor's checked code identity and implicit lexical inputs.
+/// This authority comes from the sealed Core declaration, not from observing
+/// one execution path. Its branded callable type may therefore select the
+/// same body in a well-typed but unobserved branch.
+#[derive(Clone)]
+pub(crate) struct ClosureControl {
+    brand: EnvironmentBrand,
+    labels: std::collections::BTreeSet<LabelBrand>,
+    nominal_type: bool,
+}
+impl ClosureControl {
+    pub(crate) fn brand(&self) -> EnvironmentBrand { self.brand }
+    pub(crate) fn labels(&self) -> &std::collections::BTreeSet<LabelBrand> { &self.labels }
+    pub(crate) fn nominal_type(&self) -> bool { self.nominal_type }
+}
+
 impl InvocationControl {
     pub(crate) fn direct_label(&self) -> Option<LabelBrand> {
         (!self.unknown && !self.other_callee && self.direct_labels.len() == 1)
@@ -470,6 +528,97 @@ impl BodyInvocationControl {
 }
 
 impl BoundControlSummaries<'_> {
+    /// The exact sealed input is available even when abstract invocation
+    /// coverage is unsupported. Inspecting it grants no expansion authority.
+    pub(crate) fn staged_body(&self, owner: DefKey) -> Option<&TypedBody> {
+        let summary = self.summaries.get(CallableBrand::Named(owner))?;
+        Some(&summary.dependencies.get(&owner)?.body)
+    }
+    pub(crate) fn fusion_body(&self, owner: DefKey) -> Result<&TypedBody, ControlUnknown> {
+        let summary = self.summaries.get(CallableBrand::Named(owner))
+            .ok_or(ControlUnknown::MissingBody(CallableBrand::Named(owner)))?;
+        let seal = summary.dependencies.get(&owner).ok_or(ControlUnknown::InvalidCore(owner))?;
+        seal.valid.clone()?;
+        Ok(&seal.body)
+    }
+
+    pub(crate) fn closure_constructor(&self, owner: DefKey, expression: CoreId) -> Option<ClosureControl> {
+        let summary = self.summaries.get(CallableBrand::Named(owner))?;
+        let seal = summary.dependencies.get(&owner)?;
+        seal.valid.as_ref().ok()?;
+        let expression = seal.body.expressions.get(expression.0 as usize)?;
+        let CoreKind::Closure { environment, body, .. } = &expression.kind else { return None; };
+        let labels = seal.labels.as_ref()?.free(*body)?.clone();
+        let nominal_type = crate::core::callable_environment_has_brand(&expression.ty, environment.brand);
+        let erased_type = matches!(&expression.ty, Type::Callable { contract, .. } if contract.environment.is_none());
+        if (!environment.captures.is_empty() || !labels.is_empty()) && !nominal_type && !erased_type { return None; }
+        Some(ClosureControl { brand: environment.brand, labels, nominal_type })
+    }
+
+    pub(crate) fn lexical_dependencies(&self, owner: DefKey) -> Option<&crate::core::label_dependencies::LabelDependencies> {
+        let summary = self.summaries.get(CallableBrand::Named(owner))?;
+        let seal = summary.dependencies.get(&owner)?;
+        seal.labels.as_ref()
+    }
+
+    pub(crate) fn fusion_target(
+        &self,
+        root: CallableBrand,
+        calls: &[(CallableBrand, CoreId)],
+        callable: CallableBrand,
+        expression: CoreId,
+    ) -> Option<FusionTarget> {
+        let summary = self.summaries.get(root)?;
+        if summary.dependencies.values().any(|seal| seal.valid.is_err()) { return None; }
+        let matches = |actual_callable, actual_expression, actual_calls: &[ControlLocation]| {
+            actual_callable == callable && actual_expression == expression
+                && actual_calls.iter().map(|site| (site.callable, site.expression)).eq(calls.iter().copied())
+        };
+        if summary.call_gaps.keys().any(|site| matches(site.callable, site.expression, &site.calls)) {
+            return None;
+        }
+        let mut selected = None;
+        for (site, evidence) in summary.invocation_evidence().filter(|(site, _)|
+            matches(site.location.callable, site.location.expression, &site.calls)) {
+            let ControlCallCoverage::Alternatives(paths) = evidence.coverage else { return None; };
+            if paths.is_empty() { return None; }
+            for path in paths {
+                let callee = path.events.iter().find_map(|event| match event {
+                    ControlEvent::Invoke { site: actual, callee, .. } if actual == site => Some(callee),
+                    _ => None,
+                })?;
+                let target = match &callee.shape {
+                    ControlValueShape::Callable { brand, generic_arguments, labels, .. } => FusionTarget::Callable {
+                        brand: *brand, generic_arguments: generic_arguments.clone(), labels: labels.clone(),
+                    },
+                    ControlValueShape::Label(target) => FusionTarget::Label(target.clone()),
+                    _ => return None,
+                };
+                if selected.as_ref().is_some_and(|old| *old != target) { return None; }
+                selected = Some(target);
+            }
+        }
+        selected
+    }
+
+    /// Static declaration identity is independent of whether an earlier
+    /// computation was observable. This grants no identity to an alias.
+    pub(crate) fn declared_fusion_target(
+        &self, owner: DefKey, expression: &crate::CoreExpr,
+    ) -> Option<FusionTarget> {
+        let summary = self.summaries.get(CallableBrand::Named(owner))?;
+        let seal = summary.dependencies.get(&owner)?;
+        if seal.valid.is_err() { return None; }
+        let template = crate::callable_declarations::selected_template(&seal.interface, expression)?;
+        let brand = match expression.kind {
+            CoreKind::Function { definition, host_import: None, .. } => CallableBrand::Named(definition),
+            CoreKind::TraitMethod { method, deferred: None, .. } => CallableBrand::Named(method),
+            _ => return None,
+        };
+        Some(FusionTarget::Callable { brand,
+            generic_arguments: Some(template.arguments), labels: BTreeMap::new() })
+    }
+
     /// Positive address observations survive incomplete coverage. This is not
     /// an absence proof: specialization still checks concrete frozen loans.
     pub(crate) fn label_address_obligations(&self) -> Vec<LabelAddressObligation> {
@@ -752,6 +901,23 @@ pub(crate) fn derive_control_summaries_with_check<E>(
     limits: ControlSummaryLimits,
     check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
 ) -> Result<ControlSummarySet, E> {
+    derive_control_phase(bodies, limits, check, false)
+}
+
+pub(crate) fn derive_fusion_summaries_with_check<E>(
+    bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    limits: ControlSummaryLimits,
+    check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
+) -> Result<ControlSummarySet, E> {
+    derive_control_phase(bodies, limits, check, true)
+}
+
+fn derive_control_phase<E>(
+    bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    limits: ControlSummaryLimits,
+    check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
+    pending_control: bool,
+) -> Result<ControlSummarySet, E> {
     let mut interfaces = BTreeMap::new();
     let mut seals = BTreeMap::new();
     for (key, input) in bodies {
@@ -764,7 +930,8 @@ pub(crate) fn derive_control_summaries_with_check<E>(
             input.signature.where_associated_effect_bindings.clone());
         let result_valid = input.body.expressions.get(input.body.root.0 as usize).is_some_and(|expr|
             solver.fresh_query().callable_abi_erasure_proven(&input.signature.result, &expr.ty));
-        let valid = if input.body.recovered || !input.body.diagnostics.is_empty() || !input.body.validate().is_empty()
+        let validation = if pending_control { input.body.validate_for_control_fusion() } else { input.body.validate() };
+        let valid = if input.body.recovered || !input.body.diagnostics.is_empty() || !validation.is_empty()
             || !input.interface.diagnostics.is_empty()
             || !input.body.validate_projection_obligations_in_environment(input.interface, &input.signature.where_bounds,
                 &input.signature.where_outlives, solver).is_empty() {
@@ -780,6 +947,7 @@ pub(crate) fn derive_control_summaries_with_check<E>(
             identity: ControlBodyIdentity { definition: *key, body: input.body.semantic_fingerprint(),
                 contract: crate::signature::host_contract_fingerprint(*key, input.signature) },
             body: Arc::new(input.body.clone()), interface, valid,
+            labels: crate::core::label_dependencies::LabelDependencies::derive(&input.body.expressions).ok(),
         }));
     }
     let mut output = ControlSummarySet::default();
@@ -818,27 +986,29 @@ pub(crate) fn derive_control_summaries_with_check<E>(
                 calls: vec![],
                 generic_arguments: None,
                 occurrence: 0,
-                labels: BTreeMap::new(),
+                labels: seals[owner].labels.as_ref().and_then(|facts| facts.free(root))
+                    .into_iter().flatten().map(|brand| (*brand,
+                        ControlLabelTarget::Symbolic(ControlOrigin::LabelCapture(*brand)))).collect(),
             };
             let mut locals = BTreeMap::new();
             for (index, (name, ty)) in captures.iter().enumerate() {
                 locals.insert(
                     name.clone(),
-                    input_value(
+                    resident(input_value(
                         ControlOrigin::Capture(index as u32),
                         ty.clone(),
                         input.signature,
-                    ),
+                    ), ControlStorage::Slot { site: frame.site(root), name: name.clone() }),
                 );
             }
             for (index, (name, ty)) in parameters.iter().enumerate() {
                 locals.insert(
                     name.clone(),
-                    input_value(
+                    resident(input_value(
                         ControlOrigin::Parameter(index as u32),
                         ty.clone(),
                         input.signature,
-                    ),
+                    ), ControlStorage::Slot { site: frame.site(root), name: name.clone() }),
                 );
             }
             let initial = State {
@@ -897,6 +1067,7 @@ fn input_value(origin: ControlOrigin, ty: Type, signature: &CallableSignature) -
             )
     });
     ControlValue {
+        storage: None,
         shape: if label {
             ControlValueShape::Label(ControlLabelTarget::Symbolic(origin.clone()))
         } else {
@@ -931,6 +1102,7 @@ fn same_body(left: &TypedBody, right: &TypedBody) -> bool {
 fn unknown(frame: &Frame, id: CoreId, ty: Type) -> ControlValue {
     ControlValue {
         origin: ControlOrigin::Produced(frame.site(id)),
+        storage: None,
         ty,
         shape: ControlValueShape::Unknown,
     }
@@ -1072,6 +1244,7 @@ impl Analyzer<'_, '_> {
                             .collect(),
                     ),
                     captures: vec![],
+                    labels: BTreeMap::new(),
                 }
             }
             CoreKind::TraitMethod {
@@ -1095,6 +1268,7 @@ impl Analyzer<'_, '_> {
                 ) {
                     Some(template) => ControlValueShape::Callable {
                         brand: CallableBrand::Named(method), generic_arguments: Some(template.arguments), captures: vec![],
+                        labels: BTreeMap::new(),
                     },
                     None => ControlValueShape::OpaqueCallable,
                 };
@@ -1105,11 +1279,18 @@ impl Analyzer<'_, '_> {
                 };
                 result.shape = ControlValueShape::Label(target.clone());
             }
-            CoreKind::Closure { environment, .. } => {
+            CoreKind::Closure { environment, body, .. } => {
                 let Some(captures) = environment
                     .captures
                     .iter()
-                    .map(|capture| state.locals.get(&capture.name).cloned())
+                    .enumerate()
+                    .map(|(index, capture)| state.locals.get(&capture.name).cloned().map(|value| {
+                        match crate::capture_formation::CaptureFormation::new(capture).source() {
+                            crate::capture_formation::CaptureSource::Borrow(_) => value,
+                            crate::capture_formation::CaptureSource::Copy | crate::capture_formation::CaptureSource::Move =>
+                                resident(value, ControlStorage::Slot { site: frame.site(id), name: format!("$capture.{index}") }),
+                        }
+                    }))
                     .collect::<Option<Vec<_>>>()
                 else {
                     return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
@@ -1118,6 +1299,15 @@ impl Analyzer<'_, '_> {
                     brand: CallableBrand::Closure(environment.brand),
                     generic_arguments: frame.generic_arguments.clone(),
                     captures,
+                    labels: match self.seals[&frame.owner].labels.as_ref().and_then(|facts| facts.free(body)) {
+                        Some(free) => {
+                            let Some(labels) = free.iter().map(|brand| frame.labels.get(brand)
+                                .map(|target| (*brand, target.clone()))).collect::<Option<BTreeMap<_, _>>>()
+                            else { return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))]; };
+                            labels
+                        }
+                        None => return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))],
+                    },
                 };
             }
             CoreKind::Tuple(ids) | CoreKind::Array(ids) => {
@@ -1189,7 +1379,9 @@ impl Analyzer<'_, '_> {
                     .into_iter()
                     .map(|mut state| {
                         if state.running() {
-                            state.locals.insert(name.clone(), state.value());
+                            state.locals.insert(name.clone(), resident(state.value(), ControlStorage::Slot {
+                                site: frame.site(id), name: name.clone(),
+                            }));
                             state.outcome = ControlOutcome::Return(result.clone());
                         }
                         state
@@ -1222,7 +1414,13 @@ impl Analyzer<'_, '_> {
                         if state.running() {
                             state.events.push(ControlEvent::Borrow { site: frame.site(id), value: state.value(), unique, span: expr.span });
                             let mut result = result.clone();
-                            result.shape = ControlValueShape::Borrow(Box::new(state.value()));
+                            let mut referent = state.value();
+                            if referent.storage.is_none() {
+                                referent = resident(referent, ControlStorage::Slot {
+                                    site: frame.site(id), name: "$temporary".into(),
+                                });
+                            }
+                            result.shape = ControlValueShape::Borrow(Box::new(referent));
                             state.outcome = ControlOutcome::Return(result);
                         }
                         state
@@ -1392,7 +1590,7 @@ impl Analyzer<'_, '_> {
                                     matches: true,
                                 })
                             {
-                                bind_pattern(&value, &instantiated, &mut branch.locals);
+                                bind_pattern(&value, &instantiated, &frame.site(id), &mut branch.locals);
                                 for mut branch in self.eval(frame, clause.body, branch) {
                                     branch.locals = old.clone();
                                     output.push(branch);
@@ -1477,6 +1675,7 @@ impl Analyzer<'_, '_> {
                                     .collect(),
                             ),
                             captures: vec![],
+                            labels: BTreeMap::new(),
                         },
                         ..result
                     },
@@ -1616,6 +1815,7 @@ impl Analyzer<'_, '_> {
                 brand,
                 generic_arguments,
                 captures,
+                labels,
             } => {
                 if self.stack.contains(brand) {
                     return vec![state.stop(ControlUnknown::RecursiveCall(*brand))];
@@ -1698,9 +1898,6 @@ impl Analyzer<'_, '_> {
                 for (name, value) in capture_names.iter().zip(captures) {
                     state.locals.insert(name.clone(), value.clone());
                 }
-                for ((name, _), value) in parameters.iter().zip(arguments) {
-                    state.locals.insert(name.clone(), value);
-                }
                 let mut calls = frame.calls.clone();
                 calls.push(site.location);
                 let child = Frame {
@@ -1709,8 +1906,13 @@ impl Analyzer<'_, '_> {
                     calls,
                     generic_arguments: generic_arguments.clone(),
                     occurrence: 0,
-                    labels: BTreeMap::new(),
+                    labels: labels.clone(),
                 };
+                for ((name, _), value) in parameters.iter().zip(arguments) {
+                    state.locals.insert(name.clone(), resident(value, ControlStorage::Slot {
+                        site: child.site(root), name: name.clone(),
+                    }));
+                }
                 self.stack.push(*brand);
                 let mut output = self.eval(&child, root, state);
                 self.stack.pop();
@@ -1811,17 +2013,20 @@ fn project(value: &ControlValue, index: u32, ty: &Type) -> ControlValue {
         | ControlValueShape::Enum { fields, .. } => Some(fields),
         _ => None,
     };
-    fields
+    let mut projected = fields
         .and_then(|fields| fields.get(index as usize))
         .cloned()
         .unwrap_or_else(|| ControlValue {
+            storage: None,
             origin: ControlOrigin::Field {
                 base: Box::new(value.origin.clone()),
                 index,
             },
             ty: ty.clone(),
             shape: ControlValueShape::Unknown,
-        })
+        });
+    projected.storage = value.storage.clone().map(|base| ControlStorage::Field { base: Box::new(base), index });
+    projected
 }
 fn erase_binders(pattern: &CorePattern) -> CorePattern {
     let mut pattern = pattern.clone();
@@ -1975,11 +2180,12 @@ fn literal_matches(ty: &Type, actual: &str, expected: &str) -> Option<bool> {
 fn bind_pattern(
     value: &ControlValue,
     pattern: &CorePattern,
+    site: &ControlSite,
     locals: &mut BTreeMap<String, ControlValue>,
 ) {
     match pattern {
         CorePattern::Bind { name } => {
-            locals.insert(name.clone(), value.clone());
+            locals.insert(name.clone(), resident(value.clone(), ControlStorage::Slot { site: site.clone(), name: name.clone() }));
         }
         CorePattern::Tuple(fields) => {
             for (index, field) in fields.iter().enumerate() {
@@ -1987,7 +2193,7 @@ fn bind_pattern(
                     Type::Tuple(types) => types.get(index).cloned().unwrap_or(Type::Error),
                     _ => Type::Error,
                 };
-                bind_pattern(&project(value, index as u32, &ty), field, locals);
+                bind_pattern(&project(value, index as u32, &ty), field, site, locals);
             }
         }
         CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
@@ -1995,6 +2201,7 @@ fn bind_pattern(
                 bind_pattern(
                     &project(value, field.index, &field.ty),
                     &field.pattern,
+                    site,
                     locals,
                 );
             }
@@ -2006,7 +2213,7 @@ fn bind_pattern(
         } => {
             for (index, field) in elements.iter().enumerate() {
                 let index = crate::pattern::ArrayPatternRest::index(*rest, index);
-                bind_pattern(&project(value, index as u32, element), field, locals);
+                bind_pattern(&project(value, index as u32, element), field, site, locals);
             }
         }
         _ => {}
