@@ -1391,7 +1391,7 @@ fn typed_core_rechecks_hrtb_effect_projection_evidence_in_function_metadata() {
         expressions: vec![CoreExpr {
             kind: CoreKind::Function {
                 definition: key("main"),
-                arguments: vec![GenericArgument::Type(Type::Callable {
+                arguments: vec![GenericArgument::Type(Type::Callable { contract: Default::default(),
                     safety: grandiose_stage0::Safety::Safe,
                     lifetime_binders: 1,
                     parameters: vec![Type::Reference {
@@ -1699,7 +1699,7 @@ fn typed_core_validation_rejects_inference_in_callable_effect_arguments() {
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
-            ty: Type::Callable {
+            ty: Type::Callable { contract: Default::default(),
                 safety: grandiose_stage0::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],
@@ -1807,7 +1807,7 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
                 }],
                 deferred: None,
             },
-            ty: Type::Callable {
+            ty: Type::Callable { contract: Default::default(),
                 safety: grandiose_stage0::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],
@@ -1922,7 +1922,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         item_generic_kinds: vec![],
         item_arguments: vec![],
     };
-    let callable = |projections| Type::Callable {
+    let callable = |projections| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -2013,7 +2013,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         "Core must validate canonical identity nested in enclosing mixed-kind trait arguments"
     );
 
-    let hrtb_gat_with_row = body(Type::Callable {
+    let hrtb_gat_with_row = body(Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![],
@@ -6049,7 +6049,7 @@ fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking(
         start: 0,
         end: 1,
     };
-    let callable_type = |invocation| Type::Callable {
+    let callable_type = |invocation| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
@@ -6999,7 +6999,7 @@ fn frozen_core_rejects_bound_lifetimes_that_escape_callable_binders() {
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
-            ty: Type::Callable {
+            ty: Type::Callable { contract: Default::default(),
                 safety: grandiose_stage0::Safety::Safe,
                 lifetime_binders: 1,
                 parameters: vec![Type::Reference {

@@ -653,7 +653,7 @@ mod tests {
     fn normal_return_value_is_unavailable_before_invocation() {
         let mut mir = fixture();
         mir.values.push(ControlValueDecl {
-            ty: Type::Callable {
+            ty: Type::Callable { contract: Default::default(),
                 safety: Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],

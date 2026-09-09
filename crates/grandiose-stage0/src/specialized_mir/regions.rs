@@ -75,7 +75,7 @@ fn ty(value: &Type, depth: u32) -> Type {
                 .map(|value| argument(value, depth))
                 .collect(),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -84,7 +84,7 @@ fn ty(value: &Type, depth: u32) -> Type {
             invocation,
         } => {
             let depth = depth + u32::from(*lifetime_binders != 0);
-            Type::Callable {
+            Type::Callable { contract: Box::new(contract.map_terms(|value, extra| argument(&value, depth + extra))),
                 safety: *safety,
                 lifetime_binders: *lifetime_binders,
                 parameters: parameters.iter().map(|value| ty(value, depth)).collect(),
@@ -127,7 +127,7 @@ mod tests {
             lifetime: crate::Lifetime::Bound { depth, index: 0 },
             referent: Box::new(Type::Scalar(crate::ScalarType::I64)),
         };
-        let detached = Type::Callable {
+        let detached = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe, lifetime_binders: 1,
             parameters: vec![reference(1)], result: Box::new(reference(0)),
             effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE,

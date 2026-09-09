@@ -325,12 +325,16 @@ impl<'a> Decoder<'a> {
                 alignment: self.u32()?,
             }),
             tag @ (6 | 30) => {
+                let shared_receiver = self.boolean()?;
+                let unique_receiver = self.boolean()?;
                 let count = self.count("callable parameters", MAX_DECODE_REGISTERS)?;
                 let mut parameters = Vec::with_capacity(count);
                 for _ in 0..count {
                     parameters.push(self.vm_type_at_depth(depth + 1)?);
                 }
                 Ok(VmType::Callable {
+                    shared_receiver,
+                    unique_receiver,
                     safety: if tag == 6 {
                         Safety::Safe
                     } else {

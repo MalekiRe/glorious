@@ -475,7 +475,7 @@ mod tests {
                         registers: RuntimeRegisters {
                             values: vec![Some(VmValue::Callable {
                                 callee: definition, captures: environment.clone(),
-                                signature: VmType::Callable {
+                                signature: VmType::Callable { shared_receiver: false, unique_receiver: false,
                                     safety: Safety::Safe, parameters: vec![], result: Box::new(VmType::I64),
                                     effects: Box::default(),
                                 },

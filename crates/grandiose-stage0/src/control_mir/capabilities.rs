@@ -597,7 +597,7 @@ impl Builder<'_> {
                     let saved_resumptions = self.active_resumptions.clone();
                     if let CoreHandlerResumption::Explicit { name, .. } = &arm.resumption {
                         let contract = arm.continuation.as_ref().ok_or_else(|| ControlError::Invalid("explicit resumption lacks contract".into()))?;
-                        let token = self.value(Type::Callable { safety: Safety::Safe, lifetime_binders: 0,
+                        let token = self.value(Type::Callable { contract: Default::default(), safety: Safety::Safe, lifetime_binders: 0,
                             parameters: vec![contract.parameter.clone()], result: Box::new(contract.result.clone()),
                             effects: contract.effects.clone(), invocation: contract.invocation }, instruction.source, arm.span)?;
                         self.emit(selected, arm_scope, token, ControlOperation::Capability(Op::Resumption { handler, clause: index as u32 }));

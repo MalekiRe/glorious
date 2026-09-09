@@ -1023,7 +1023,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             })
         }
         (
-            Type::Callable {
+            Type::Callable { contract: left_contract,
                 safety: left_safety,
                 lifetime_binders: left_binders,
                 parameters: left_parameters,
@@ -1031,7 +1031,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
                 effects: left_effects,
                 invocation: left_invocation,
             },
-            Type::Callable {
+            Type::Callable { contract: right_contract,
                 safety: right_safety,
                 lifetime_binders: right_binders,
                 parameters: right_parameters,
@@ -1050,7 +1050,9 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
                 .collect::<Option<Vec<_>>>()?;
             let result = unify_overlap_type(left_result, right_result, bindings)?;
             let effects = unify_overlap_effect_row(left_effects, right_effects, bindings)?;
-            Some(Type::Callable {
+            // Refinements cannot make otherwise identical executable shapes
+            // disjoint. Preserve either nonempty side for downstream checks.
+            Some(Type::Callable { contract: if left_contract.is_empty() { right_contract.clone() } else { left_contract.clone() },
                 safety: *left_safety,
                 lifetime_binders: *left_binders,
                 parameters,
@@ -1349,14 +1351,14 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
                 .map(|argument| resolve_overlap_argument(argument, bindings))
                 .collect(),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| resolve_overlap_argument(&value, bindings))),
             safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
@@ -1513,14 +1515,14 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
                 .map(|argument| rebase_overlap_argument(argument, offset))
                 .collect(),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| rebase_overlap_argument(&value, offset))),
             safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
@@ -1628,7 +1630,7 @@ mod frozen_overlap_tests {
     }
 
     fn higher_ranked(referent: Type, tail: u32) -> Type {
-        Type::Callable {
+        Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 1,
             parameters: vec![Type::Reference {

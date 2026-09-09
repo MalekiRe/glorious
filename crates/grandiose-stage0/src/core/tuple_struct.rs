@@ -38,7 +38,7 @@ impl Elaborator<'_> {
             && self.unify_rigid_lifetimes(nominal.clone(), expected, span).is_err() {
             return Some(self.fail(span, "G4411", "tuple struct constructor does not match its contextual expected type"));
         }
-        let nominal = self.inference.zonk(nominal.clone()).unwrap_or(nominal);
+        let nominal = self.inference.resolve_type_structure(nominal);
         let Type::Nominal { arguments, .. } = &nominal else { unreachable!() };
         let fields = self.signatures.instantiate_struct_fields_generic(definition, arguments).ok()?;
         if supplied.is_some_and(|supplied| fields.len() != supplied.len()) {
@@ -55,7 +55,7 @@ impl Elaborator<'_> {
             let parameters: Vec<_> = fields.into_iter().enumerate().map(|(index, field)| {
                 (format!("<tuple-constructor-{}-{index}>", callable.0), self.normalize_concrete_type_projections(field.ty))
             }).collect();
-            let callable_type = Type::Callable {
+            let callable_type = Type::Callable { contract: Default::default(),
                 safety: crate::Safety::Safe,
                 lifetime_binders: match &expected { Some(Type::Callable { lifetime_binders, .. }) => *lifetime_binders, _ => 0 },
                 parameters: parameters.iter().map(|(_, ty)| ty.clone()).collect(),

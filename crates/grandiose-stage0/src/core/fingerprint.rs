@@ -445,7 +445,7 @@ impl CoreFingerprintEncoder<'_> {
                             self.debug(continuation.brand);
                             self.ty(&continuation.parameter);
                             self.ty(&continuation.result);
-                            self.ty(&Type::Callable {
+                            self.ty(&Type::Callable { contract: Default::default(),
                                 safety: crate::Safety::Safe,
                                 lifetime_binders: 0,
                                 parameters: vec![],

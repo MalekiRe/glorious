@@ -1160,7 +1160,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         },
         PrimitiveRole::BranchBool => {
             let result = Type::Generic(0);
-            let thunk = Type::Callable {
+            let thunk = Type::Callable { contract: Default::default(),
                 safety: crate::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: vec![],

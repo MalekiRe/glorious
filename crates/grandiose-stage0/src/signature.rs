@@ -172,7 +172,7 @@ pub(crate) fn host_contract_fingerprint(
     kinds(&mut bytes, &signature.generic_kinds);
     part(
         &mut bytes,
-        &canonical_type_encoding(&Type::Callable {
+        &canonical_type_encoding(&Type::Callable { contract: Default::default(),
             safety: signature.safety,
             lifetime_binders: 0,
             parameters: signature.parameters.clone(),
@@ -888,7 +888,7 @@ mod generic_default_substitution_tests {
             lifetime,
             referent: Box::new(Type::Unit),
         };
-        let default = GenericArgument::Type(Type::Callable {
+        let default = GenericArgument::Type(Type::Callable { contract: Default::default(),
             safety: Safety::Safe,
             lifetime_binders: 1,
             parameters: vec![reference(bound), reference(Lifetime::Generic(0))],
@@ -1126,6 +1126,7 @@ fn type_contains_generic_argument(value: &Type, argument: &GenericArgument) -> b
         }
         Type::RawPointer { pointee: referent, .. } => type_contains_generic_argument(referent, argument),
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
@@ -1136,6 +1137,7 @@ fn type_contains_generic_argument(value: &Type, argument: &GenericArgument) -> b
                 .any(|current| type_contains_generic_argument(current, argument))
                 || type_contains_generic_argument(result, argument)
                 || effect_row_contains_generic_argument(effects, argument)
+                || contract.terms().iter().any(|(current, _)| generic_argument_contains(current, argument))
         }
         Type::Unit
         | Type::Never
@@ -2447,7 +2449,7 @@ impl ElaboratedInterface {
             if is_intrinsic_callable_trait(&bound.relation) {
                 self.validate_intrinsic_callable_bound(&bound.type_bindings, &bound.effect_bindings, &bound.subject, &bound.relation, false, diagnostics);
             } else if is_intrinsic_runs_in_trait(&bound.relation) {
-                diagnostics.push(SignatureDiagnostic { code: "G4198", message: "universal proof checking for this relation is not yet implemented".into() });
+                self.validate_intrinsic_runs_in_bound(&bound.type_bindings, &bound.effect_bindings, &bound.subject, &bound.relation, diagnostics);
             }
         }
     }
@@ -2592,6 +2594,29 @@ impl ElaboratedInterface {
         }
     }
 
+    fn validate_intrinsic_runs_in_bound(
+        &self,
+        types: &[ElaboratedAssociatedTypeBinding],
+        effects: &[ElaboratedAssociatedEffectBinding],
+        subject: &Type,
+        relation: &ElaboratedTraitReference,
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        if !matches!(relation.arguments.as_slice(),
+            [GenericArgument::Type(_), GenericArgument::Type(Type::Tuple(_) | Type::Unit)]) {
+            diagnostics.push(SignatureDiagnostic { code: "G4188", message: "intrinsic RunsIn requires an environment access and one tuple input".into() });
+        }
+        let types = types.iter().filter(|binding| binding.subject == *subject && binding.relation == *relation).collect::<Vec<_>>();
+        let effects = effects.iter().filter(|binding| binding.subject == *subject && binding.relation == *relation).collect::<Vec<_>>();
+        if types.iter().any(|binding| !matches!(binding.name.as_str(), "Output" | "After")
+                || !binding.item_arguments.is_empty() || !binding.item_generic_kinds.is_empty())
+            || effects.iter().any(|binding| binding.name != "Effects" || !binding.item_arguments.is_empty() || !binding.item_generic_kinds.is_empty())
+            || types.iter().map(|binding| &binding.name).collect::<BTreeSet<_>>().len() != types.len()
+            || effects.len() > 1 {
+            diagnostics.push(SignatureDiagnostic { code: "G4165", message: "intrinsic RunsIn contains an invalid or duplicate associated equality".into() });
+        }
+    }
+
     /// A label value is an escaping one-argument callable.  The concrete
     /// `Never` result prevents an ordinary returning callback from acquiring
     /// nonlocal-exit authority merely by matching the `Label` spelling.
@@ -2687,6 +2712,7 @@ impl ElaboratedInterface {
                 self.validate_type_projection_obligations(projection_solver, referent, ambient, diagnostics);
             }
             Type::Callable {
+                contract,
                 parameters,
                 result,
                 effects,
@@ -2697,6 +2723,9 @@ impl ElaboratedInterface {
                 }
                 self.validate_type_projection_obligations(projection_solver, result, ambient, diagnostics);
                 self.validate_effect_row_projection_obligations(projection_solver, effects, ambient, diagnostics);
+                for (argument, _) in contract.terms() {
+                    self.validate_generic_argument_projection_obligations(projection_solver, &argument, ambient, diagnostics);
+                }
             }
             Type::Unit
             | Type::Never
@@ -4002,14 +4031,14 @@ fn normalize_selected_contract_type(
             lifetime,
             referent: Box::new(normalize_selected_contract_type(*referent, solver, fuel - 1)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| normalize_selected_contract_generic_argument(value, solver, fuel - 1))),
             safety,
             lifetime_binders,
             parameters: parameters
@@ -4155,10 +4184,14 @@ fn normalize_selected_contract_effect_row(
             &projection.name,
             &item_arguments,
         ) {
-            crate::TraitEffectRowProjectionAnswer::Normalized { row, .. } if row.tails.is_empty() => {
+            crate::TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                 let row = normalize_selected_contract_effect_row(row, solver, fuel - 1);
                 result.effects.extend(row.effects);
-                projections.extend(row.projections);
+                result.tails.extend(row.tails);
+                // This recursive result has already spent its fuel. Keep
+                // symbolic/cyclic residuals; requeueing them here would
+                // restart expansion with the same outer budget forever.
+                result.projections.extend(row.projections);
             }
             _ => result.projections.push(original),
         }
@@ -4228,7 +4261,7 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
             lifetime,
             referent: Box::new(replace_trait_self_type(*referent, self_ty)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -4238,7 +4271,11 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
         } => {
             let Some(self_ty) = crate::types::regions::shift_type_argument(self_ty.clone(), 1)
                 else { return Type::Error; };
-            Type::Callable {
+            Type::Callable { contract: Box::new(contract.map_terms(|value, extra| {
+                let Some(self_ty) = crate::types::regions::shift_type_argument(self_ty.clone(), extra)
+                    else { return GenericArgument::Type(Type::Error); };
+                replace_trait_self_generic_argument(value, &self_ty)
+            })),
                 safety,
                 lifetime_binders,
                 parameters: parameters.into_iter()
@@ -4445,7 +4482,7 @@ fn instantiate_trait_method_associated_effect_binding(
     }
 }
 
-fn substitute_trait_generic_argument(
+pub(crate) fn substitute_trait_generic_argument(
     argument: GenericArgument,
     arguments: &[GenericArgument],
 ) -> GenericArgument {
@@ -5234,9 +5271,6 @@ impl Elaborator<'_> {
                 .cloned()
                 .collect::<Vec<_>>();
             let relation = self.trait_ref_parts(&header_relation.path, &positional);
-            if bound.universal.is_some() && is_intrinsic_runs_in_trait(&relation) {
-                self.error("G4198", "universal proof checking for this relation is not yet implemented".into());
-            }
             // Braces identify a row syntactically, but a bare row parameter
             // or associated projection has the same syntax as a type. Its
             // kind comes from the resolved item's declaration, not spelling
@@ -5898,7 +5932,7 @@ impl Elaborator<'_> {
                 let result = Box::new(self.ty(result));
                 let effects = self.effect_row(effects);
                 self.bound_lifetime_scopes.pop();
-                Type::Callable {
+                Type::Callable { contract: Default::default(),
                     safety: *safety,
                     lifetime_binders: lifetime_binders.len() as u32,
                     parameters,
@@ -6492,9 +6526,10 @@ fn type_contains_elided_lifetime(ty: &Type) -> bool {
             || argument_contains_elided_lifetime(length),
         Type::Array(value)
         | Type::RawPointer { pointee: value, .. } => type_contains_elided_lifetime(value),
-        Type::Callable { parameters, result, .. } => {
+        Type::Callable { contract, parameters, result, .. } => {
             parameters.iter().any(type_contains_elided_lifetime)
                 || type_contains_elided_lifetime(result)
+                || contract.terms().iter().any(|(value, _)| argument_contains_elided_lifetime(value))
         }
         Type::Projection { subject, trait_arguments, item_arguments, .. } => {
             type_contains_elided_lifetime(subject)
@@ -6745,14 +6780,14 @@ fn normalize_alias_type(
                 diagnostics,
             )),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| normalize_alias_generic_argument(value, definitions, stack, diagnostics))),
             safety,
             lifetime_binders,
             parameters: parameters
@@ -6891,7 +6926,7 @@ fn substitute_alias_generic_identity(value: Type, arguments: &[GenericArgument])
             lifetime: substitute_alias_lifetime(lifetime, arguments),
             referent: Box::new(substitute_alias_generic_identity(*referent, arguments)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -6902,10 +6937,11 @@ fn substitute_alias_generic_identity(value: Type, arguments: &[GenericArgument])
             // Inserted arguments belong to the caller, outside this callable
             // scope. Shift only their free bound regions before substitution;
             // bound regions already in the callee's body must stay untouched.
+            let contract = Box::new(contract.instantiate(arguments));
             let Some(arguments) = arguments.iter().cloned()
                 .map(|argument| crate::types::regions::shift_argument(argument, 1))
                 .collect::<Option<Vec<_>>>() else { return Type::Error; };
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters: parameters
@@ -6932,7 +6968,7 @@ mod capture_avoiding_substitution_tests {
             lifetime: Lifetime::Bound { depth, index: 0 },
             referent: Box::new(Type::Unit),
         };
-        let callable = |parameter, result| Type::Callable {
+        let callable = |parameter, result| Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe, lifetime_binders: 1,
             parameters: vec![parameter], result: Box::new(result),
             effects: EffectRow::empty(), invocation: Quantity::ONCE,
@@ -7152,7 +7188,7 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             lifetime,
             referent: Box::new(substitute_alias_generics(*referent, arguments)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -7160,10 +7196,11 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
             effects,
             invocation,
         } => {
+            let contract = Box::new(contract.instantiate(&arguments.iter().cloned().map(GenericArgument::Type).collect::<Vec<_>>()));
             let Some(arguments) = arguments.iter().cloned()
                 .map(|argument| crate::types::regions::shift_type_argument(argument, 1))
                 .collect::<Option<Vec<_>>>() else { return Type::Error; };
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters: parameters.into_iter()
@@ -7366,7 +7403,7 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
             },
             referent: Box::new(substitute_trait_type_generics(*referent, arguments)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -7374,10 +7411,11 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
             effects,
             invocation,
         } => {
+            let contract = Box::new(contract.instantiate(arguments));
             let Some(arguments) = arguments.iter().cloned()
                 .map(|argument| crate::types::regions::shift_argument(argument, 1))
                 .collect::<Option<Vec<_>>>() else { return Type::Error; };
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters: parameters.into_iter()

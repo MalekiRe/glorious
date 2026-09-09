@@ -349,20 +349,20 @@ fn semantic_capturing_callable_runs_in_its_compiler_generated_environment() {
 #[test]
 fn semantic_runs_in_borrowed_access_matches_sealed_capture_authority() {
     let source = r#"
-        observe<E, F>(body: F) -> i64
+        observe<'scope, E, F>(body: F) -> i64
         where
-            E: Environment<'static>,
+            E: Environment<'scope>,
             F: Fn<(), Output = i64>,
-            F: RunsIn<&'static E, (), Output = i64, After = E>
+            F: RunsIn<&'scope E, (), Output = i64, After = E>
         {
             body()
         }
 
-        update<E, F>(body: F) -> i64
+        update<'scope, E, F>(body: F) -> i64
         where
-            E: Environment<'static>,
+            E: Environment<'scope>,
             F: Fn<(), Output = i64>,
-            F: RunsIn<&'static mut E, (), Output = i64, After = E>
+            F: RunsIn<&'scope mut E, (), Output = i64, After = E>
         {
             body()
         }

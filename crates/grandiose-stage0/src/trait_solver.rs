@@ -21,6 +21,7 @@ use crate::{
 pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
 pub const DEFAULT_MAX_TRAIT_STEPS: u32 = 1_000_000;
 mod contracts;
+mod callable;
 
 // Structural performance regression accounting, not wall-clock assertions.
 // Thread-local state keeps concurrently running compiler tests independent.
@@ -362,6 +363,9 @@ pub struct TraitSolver {
     quantified_inference: crate::InferContext,
     quantified_depth: u32,
     active_domains: Vec<Digest>,
+    /// Compiler-issued environments reachable from this query's callable
+    /// values. These are query-local witnesses, never source impl rules.
+    callable_environments: Vec<Type>,
 }
 
 #[derive(Clone, Copy)]
@@ -508,6 +512,7 @@ impl TraitSolver {
             quantified_inference: crate::InferContext::default(),
             quantified_depth: 0,
             active_domains: vec![],
+            callable_environments: vec![],
         }
     }
 
@@ -536,6 +541,7 @@ impl TraitSolver {
             quantified_inference: self.quantified_inference.clone(),
             quantified_depth: self.quantified_depth,
             active_domains: vec![],
+            callable_environments: self.callable_environments.clone(),
         }
     }
 
@@ -717,6 +723,7 @@ impl TraitSolver {
         self.tables.clear();
         self.principal_active.clear();
         self.active_domains.clear();
+        self.callable_environments.clear();
         self.steps = 0;
     }
 
@@ -787,7 +794,7 @@ impl TraitSolver {
             // A forwarded quantity is determined by the widest capability
             // its bounds prove. Fixed intervals still select only themselves.
             for quantity in [Quantity::UNRESTRICTED, Quantity::AFFINE, Quantity::ONCE] {
-                let Some(substitution) = match_rule(implementation, &TraitGoal {
+                let Some(substitution) = self.match_rule_with_callable_bindings(implementation, &TraitGoal {
                     subject: ty.clone(), relation: relation(quantity),
                 }) else { continue; };
                 let mut viable = true;
@@ -1153,6 +1160,7 @@ impl TraitSolver {
         // can neither pre-populate nor perturb this solver's cache or budget.
         let answer = self.solve(goal.clone());
         let mut probe = Self {
+            callable_environments: self.callable_environments.clone(),
             rules: self.rules.clone(),
             manual_use_nominals: self.manual_use_nominals.clone(),
             traits: self.traits.clone(),
@@ -1264,7 +1272,7 @@ impl TraitSolver {
         let mut candidates: Vec<TraitCandidateExplanation> = rules
             .into_iter()
             .map(|rule| {
-                let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+                let Some(substitution) = self.match_rule_with_callable_bindings(&rule.implementation, &goal) else {
                     return TraitCandidateExplanation::Rejected {
                         implementation: rule.definition,
                         reason: TraitCandidateRejection::HeadMismatch,
@@ -1527,6 +1535,15 @@ impl TraitSolver {
         {
             return TraitProjectionAnswer::NoSolution;
         }
+        if arguments.is_empty() && (is_intrinsic_callable_trait(&goal.relation) || is_intrinsic_runs_in_trait(&goal.relation)) {
+            let Some(value) = self.callable_evidence(&goal) else { return TraitProjectionAnswer::NoSolution; };
+            let ty = match name {
+                "Output" => value.output,
+                "After" => match value.after { Some(after) => after, None => return TraitProjectionAnswer::NoSolution },
+                _ => return TraitProjectionAnswer::NoSolution,
+            };
+            return TraitProjectionAnswer::Normalized { evidence: assumption_evidence(&goal), ty };
+        }
         // An inherited item is still being requested through `goal`'s
         // trait.  Require that boundary before following a supertrait edge:
         // otherwise either `impl !Child for T`, or no Child evidence at all,
@@ -1564,10 +1581,11 @@ impl TraitSolver {
         let answer = self.solve_projection_implementation(goal.clone(), scoped_hrtb_item_arguments);
         match answer {
             TraitAnswer::Proven { evidence } => {
-                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                let rules = Arc::clone(&self.rules);
+                let Some(rule) = rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitProjectionAnswer::NoSolution;
                 };
-                let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+                let Some(substitution) = self.match_rule_with_callable_bindings(&rule.implementation, &goal) else {
                     return TraitProjectionAnswer::NoSolution;
                 };
                 match rule.implementation.associated_types.get(name) {
@@ -1808,7 +1826,7 @@ impl TraitSolver {
                     hrtb_binders,
                 )?),
             }),
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
@@ -1819,7 +1837,17 @@ impl TraitSolver {
                 let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
                 nested_binders.push(lifetime_binders);
                 nested_binders.extend_from_slice(hrtb_binders);
-                Ok(Type::Callable {
+                let mut error = None;
+                let contract = contract.map_scoped_terms(|value, scopes| {
+                    let mut scopes = scopes.to_vec();
+                    scopes.extend_from_slice(&nested_binders);
+                    match self.normalize_trait_argument_in_hrtb(value.clone(), active, &scopes) {
+                        Ok(value) => value,
+                        Err(failure) => { error = Some(failure); value },
+                    }
+                });
+                if let Some(error) = error { return Err(error); }
+                Ok(Type::Callable { contract: Box::new(contract),
                     safety,
                     lifetime_binders,
                     parameters: parameters
@@ -1878,10 +1906,11 @@ impl TraitSolver {
         };
         match self.solve_projection_implementation(goal.clone(), false) {
             TraitAnswer::Proven { evidence } => {
-                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                let rules = Arc::clone(&self.rules);
+                let Some(rule) = rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitConstProjectionAnswer::NoSolution;
                 };
-                let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+                let Some(substitution) = self.match_rule_with_callable_bindings(&rule.implementation, &goal) else {
                     return TraitConstProjectionAnswer::NoSolution;
                 };
                 let value = rule
@@ -2005,6 +2034,12 @@ impl TraitSolver {
         {
             return TraitEffectRowProjectionAnswer::NoSolution;
         }
+        if arguments.is_empty() && (is_intrinsic_callable_trait(&goal.relation) || is_intrinsic_runs_in_trait(&goal.relation)) {
+            let Some(value) = self.callable_evidence(&goal) else { return TraitEffectRowProjectionAnswer::NoSolution; };
+            return if name == "Effects" {
+                TraitEffectRowProjectionAnswer::Normalized { evidence: assumption_evidence(&goal), row: value.effects }
+            } else { TraitEffectRowProjectionAnswer::NoSolution };
+        }
         // As with associated types, a supertrait declaration neither erases
         // negative evidence nor supplies missing evidence for the trait
         // through which the row was named.
@@ -2039,10 +2074,11 @@ impl TraitSolver {
         let answer = self.solve_projection_implementation(goal.clone(), scoped_hrtb_item_arguments);
         match answer {
             TraitAnswer::Proven { evidence } => {
-                let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
+                let rules = Arc::clone(&self.rules);
+                let Some(rule) = rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitEffectRowProjectionAnswer::NoSolution;
                 };
-                let Some(mut substitution) = match_rule(&rule.implementation, &goal) else {
+                let Some(mut substitution) = self.match_rule_with_callable_bindings(&rule.implementation, &goal) else {
                     return TraitEffectRowProjectionAnswer::NoSolution;
                 };
                 match rule.implementation.associated_effect_rows.get(name) {
@@ -2410,7 +2446,7 @@ impl TraitSolver {
                 if !generic_arguments_match_kinds(arguments, &method.generic_kinds) {
                     return TraitMethodAnswer::NoSolution;
                 }
-                let Some(mut substitution) = match_rule(&rule.implementation, &goal) else {
+                let Some(mut substitution) = self.fresh_query().match_rule_with_callable_bindings(&rule.implementation, &goal) else {
                     return TraitMethodAnswer::NoSolution;
                 };
                 for (offset, argument) in arguments.iter().cloned().enumerate() {
@@ -2490,6 +2526,7 @@ impl TraitSolver {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
         }
+        self.remember_callable_environments(&goal.subject);
         // A trait relation may itself be headed by a concrete associated
         // projection: `Value: Consume<<Value as Source>::Item>`.  Projection
         // requests already normalize their own heads, but ordinary goals and
@@ -2550,7 +2587,18 @@ impl TraitSolver {
         // witness, so it must fail closed rather than treating a spelling or
         // forged interface implementation as authority.
         if is_intrinsic_runs_in_trait(&goal.relation) {
-            return TraitAnswerIndex::NoSolution;
+            return if self.callable_evidence(&goal).is_some() {
+                TraitAnswerIndex::Proven(assumption_evidence(&goal))
+            } else { TraitAnswerIndex::NoSolution };
+        }
+        if crate::is_intrinsic_environment_trait(&goal.relation) {
+            let [GenericArgument::Lifetime(lifetime)] = goal.relation.arguments.as_slice() else { return TraitAnswerIndex::NoSolution; };
+            return if (goal.subject == Type::Unit || self.callable_environments.contains(&goal.subject))
+                && (*lifetime == crate::Lifetime::Elided || self.outlives_proven(&crate::OutlivesPredicate::Type {
+                    subject: goal.subject.clone(), lifetime: *lifetime,
+                })) {
+                TraitAnswerIndex::Proven(assumption_evidence(&goal))
+            } else { TraitAnswerIndex::NoSolution };
         }
         self.steps += 1;
         let key = goal_key(&goal);
@@ -2578,7 +2626,7 @@ impl TraitSolver {
         let mut saw_cycle = false;
         let mut saw_overflow = false;
         for rule in rules {
-            let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+            let Some(substitution) = self.match_rule_with_callable_bindings(&rule.implementation, &goal) else {
                 continue;
             };
             let required_safety = if rule.implementation.negative {
@@ -2721,23 +2769,8 @@ impl TraitSolver {
     /// `Fn` is compiler-owned evidence, not a declaration that source code
     /// can shadow or implement.  Its sole proof rule is the frozen callable
     /// shape: the single positional relation argument is the input tuple.
-    fn solve_intrinsic_callable_goal(&self, goal: &TraitGoal) -> TraitAnswerIndex {
-        let Type::Callable {
-            safety: crate::Safety::Safe,
-            parameters,
-            ..
-        } = &goal.subject
-        else {
-            return TraitAnswerIndex::NoSolution;
-        };
-        let inputs = match goal.relation.arguments.as_slice() {
-            [GenericArgument::Type(Type::Tuple(inputs))] => inputs.as_slice(),
-            [GenericArgument::Type(Type::Unit)] => &[],
-            _ => return TraitAnswerIndex::NoSolution,
-        };
-        if inputs != parameters {
-            return TraitAnswerIndex::NoSolution;
-        }
+    fn solve_intrinsic_callable_goal(&mut self, goal: &TraitGoal) -> TraitAnswerIndex {
+        if self.callable_evidence(goal).is_none() { return TraitAnswerIndex::NoSolution; }
         let key = goal_key(goal);
         TraitAnswerIndex::Proven(DefKey(Digest::of_parts([
             b"grandiose-stage0-intrinsic-callable-evidence-v1".as_slice(),
@@ -3659,7 +3692,7 @@ fn match_type_at(
             }
             _ => None,
         },
-        Type::Callable {
+        Type::Callable { contract: template_contract,
             safety,
             lifetime_binders,
             parameters,
@@ -3667,7 +3700,7 @@ fn match_type_at(
             effects,
             invocation,
         } => match actual {
-            Type::Callable {
+            Type::Callable { contract: actual_contract,
                 safety: actual_safety,
                 lifetime_binders: actual_lifetime_binders,
                 parameters: actual_parameters,
@@ -3676,7 +3709,8 @@ fn match_type_at(
                 invocation: actual_invocation,
             } if safety == actual_safety && lifetime_binders == actual_lifetime_binders
                 && parameters.len() == actual_parameters.len()
-                && invocation == actual_invocation =>
+                && invocation == actual_invocation
+                && (template_contract.is_empty() || template_contract == actual_contract) =>
             {
                 parameters
                     .iter()
@@ -3768,6 +3802,7 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
             .iter()
             .any(|value| has_free_hrtb_placeholder(value, callable_nesting)),
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
@@ -3778,6 +3813,7 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
                 .any(|value| has_free_hrtb_placeholder(value, callable_nesting + 1))
                 || has_free_hrtb_placeholder(result, callable_nesting + 1)
                 || effect_row_contains_free_hrtb_placeholder(effects, callable_nesting + 1)
+                || contract.terms().iter().any(|(value, extra)| generic_argument_contains_free_hrtb_placeholder(value, callable_nesting + 1 + extra))
         }
         _ => false,
     }
@@ -4028,7 +4064,7 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             },
             referent: Box::new(substitute_type(referent, substitution)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -4037,7 +4073,12 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             invocation,
         } => {
             let Some(substitution) = substitution_under_region_binder(substitution) else { return Type::Error; };
-            Type::Callable {
+            Type::Callable { contract: Box::new(contract.map_terms(|value, extra| {
+                if extra == 0 { return substitute_generic_argument(&value, &substitution); }
+                let Some(substitution) = substitution_under_region_binder(&substitution)
+                    else { return GenericArgument::Type(Type::Error); };
+                substitute_generic_argument(&value, &substitution)
+            })),
                 safety: *safety,
                 lifetime_binders: *lifetime_binders,
                 parameters: parameters.iter().map(|value| substitute_type(value, &substitution)).collect(),
@@ -4235,7 +4276,7 @@ mod quantified_substitution_tests {
             lifetime: crate::Lifetime::Bound { depth, index: 7 },
             referent: Box::new(Type::Unit),
         };
-        let nested = Type::Callable {
+        let nested = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe, lifetime_binders: 1,
             parameters: vec![Type::Generic(0)], result: Box::new(Type::Unit),
             effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
@@ -4356,8 +4397,9 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Reference { referent, .. }
         | Type::RawPointer { pointee: referent, .. } => projection_is_concrete(referent),
         Type::Callable {
-            parameters, result, ..
-        } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result),
+            contract, parameters, result, ..
+        } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result)
+            && contract.terms().iter().all(|(value, _)| generic_argument_is_concrete(value)),
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
@@ -4403,6 +4445,7 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
             projection_is_concrete_in_hrtb_scope(referent, hrtb_binders)
         }
         Type::Callable {
+            contract,
             lifetime_binders,
             parameters,
             result,
@@ -4411,7 +4454,14 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
             let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
             nested_binders.push(*lifetime_binders);
             nested_binders.extend_from_slice(hrtb_binders);
-            parameters
+            let mut concrete = true;
+            contract.map_scoped_terms(|value, scopes| {
+                let mut scopes = scopes.to_vec();
+                scopes.extend_from_slice(&nested_binders);
+                concrete &= generic_argument_is_concrete_in_hrtb_scope(&value, &scopes);
+                value
+            });
+            concrete && parameters
                 .iter()
                 .all(|parameter| projection_is_concrete_in_hrtb_scope(parameter, &nested_binders))
                 && projection_is_concrete_in_hrtb_scope(result, &nested_binders)
@@ -4497,7 +4547,7 @@ mod tests {
         for leaf in leaves {
             let variants = [leaf.clone(), Type::Tuple(vec![leaf.clone()]), Type::Array(Box::new(leaf.clone())),
                 Type::Reference { mutability: crate::Mutability::Unique, lifetime: crate::Lifetime::Generic(0), referent: Box::new(leaf.clone()) },
-                Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 1, parameters: vec![leaf.clone()], result: Box::new(leaf.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE },
+                Type::Callable { contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 1, parameters: vec![leaf.clone()], result: Box::new(leaf.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE },
                 Type::StaticData { element: Box::new(leaf.clone()), tag: 7, alignment: 8 },
                 Type::Nominal { definition, arguments: vec![GenericArgument::Type(leaf), GenericArgument::Lifetime(crate::Lifetime::Static),
                     GenericArgument::ConstInteger(2u32.into()), GenericArgument::ConstQuantity(crate::Quantity::AFFINE), GenericArgument::EffectRow(EffectRow::empty()),
@@ -4523,8 +4573,8 @@ mod tests {
         for nested in [projection.clone(), constant] {
             let variants = [nested.clone(), Type::Tuple(vec![nested.clone()]), Type::Array(Box::new(nested.clone())),
                 Type::Reference { mutability: crate::Mutability::Shared, lifetime: crate::Lifetime::Static, referent: Box::new(nested.clone()) },
-                Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![nested.clone()], result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
-                Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(nested.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
+                Type::Callable { contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![nested.clone()], result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
+                Type::Callable { contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(nested.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
                 Type::Nominal { definition, arguments: vec![GenericArgument::Type(nested)] }];
             for value in variants {
                 assert!(!type_projection_normalization_is_identity(&value), "{value:?}");
@@ -4538,7 +4588,7 @@ mod tests {
             name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
         }], tails: Default::default() };
         let opaque = [Type::StaticData { element: Box::new(projection), tag: 1, alignment: 1 },
-            Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
+            Type::Callable { contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
             Type::Nominal { definition, arguments: vec![GenericArgument::EffectRow(row)] }];
         for value in opaque {
             assert!(type_projection_normalization_is_identity(&value));

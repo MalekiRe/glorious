@@ -24,7 +24,7 @@ pub(super) type HomeRegistry = Rc<RefCell<BTreeMap<usize, Weak<NativeHome>>>>;
 
 // One result slot per ordinary producing instruction. Handler payload tables
 // are installed explicitly by the control engine.
-fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
+pub(super) fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
     match instruction {
         VmInstruction::ConstUnit { dst, .. }
         | VmInstruction::ConstI64 { dst, .. }
@@ -182,7 +182,7 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
 
 /// Visit runtime operand and result locals, including deferred control payloads.
 /// Literal field indices, jump targets, and declaration metadata are not locals.
-fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
+pub(super) fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
     match instruction {
         VmInstruction::TailCallOwned { arguments, .. } => {
             for argument in arguments { visit(*argument); }

@@ -25,7 +25,7 @@ fn local(ty: Type) -> MirLocalDecl {
 }
 
 fn label_type() -> Type {
-    Type::Callable {
+    Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],

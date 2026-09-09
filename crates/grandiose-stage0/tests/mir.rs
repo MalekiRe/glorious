@@ -1352,7 +1352,7 @@ fn frozen_control_tables_build_nested_label_and_handler_scopes() {
     let owner = DefKey(Digest::of_bytes(b"scope-owner"));
     let effect = DefKey(Digest::of_bytes(b"scope-effect"));
     let i64_ty = Type::Scalar(ScalarType::I64);
-    let label_value = Type::Callable {
+    let label_value = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![i64_ty.clone()],
@@ -1545,7 +1545,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
     );
 
     let mut scoped_hrtb_gat = graph();
-    let scoped_hrtb_gat_type = Type::Callable {
+    let scoped_hrtb_gat_type = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![],
@@ -1855,7 +1855,7 @@ fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
         item_arguments: vec![],
     };
     let mut function = graph();
-    function.locals[1].ty = Type::Callable {
+    function.locals[1].ty = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -1902,7 +1902,7 @@ fn mir_validation_rejects_inference_in_enclosing_mixed_trait_heads() {
 #[test]
 fn mir_validation_rejects_inference_nested_in_callable_effect_arguments() {
     let mut function = graph();
-    function.locals.push(local(Type::Callable {
+    function.locals.push(local(Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -3724,7 +3724,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         parameters: vec![],
         locals: vec![
             local(Type::Scalar(ScalarType::I64)),
-            local(Type::Callable {
+            local(Type::Callable { contract: Default::default(),
                 safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(Type::Scalar(ScalarType::I64)),
@@ -3733,7 +3733,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
                 invocation: Quantity::ONCE,
             }),
         ],
-        result: Type::Callable {
+        result: Type::Callable { contract: Default::default(),
             safety: grandiose_stage0::Safety::Safe,
             parameters: vec![],
             result: Box::new(Type::Scalar(ScalarType::I64)),

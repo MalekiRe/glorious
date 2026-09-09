@@ -80,7 +80,7 @@ fn lir_rejects_open_effect_rows_inside_callable_metadata() {
         .get_mut(&program.entry)
         .unwrap()
         .registers
-        .push(VmType::Callable {
+        .push(VmType::Callable { shared_receiver: false, unique_receiver: false,
             safety: Safety::Safe,
             parameters: vec![],
             result: Box::new(VmType::I64),

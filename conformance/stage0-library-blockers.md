@@ -7,13 +7,26 @@ still mask later ones. The language and standard-library specifications remain
 authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
-The latest completed source matrix is **14 passing / 17 failing tests**, none
-ignored (`target/source-library-cache79-matrix-v1.log`). This includes a source
+The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
+ignored (`target/integration-callable-contracts-v4.log`, cache 88). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
-The 175-test bootstrap library API suite is a different, narrower test target.
+The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 88 integrates lifetime-quantified borrowed `Fn`/`RunsIn`, stored callback
+implementation bounds and exact associated output/effect equalities. The
+isolated array and iterator probes no longer report G4198/G4147/G4169, but still
+reject unrestricted callback cancellation over generic linear owners (G5024).
+They are guard-negative regressions, not new passing source roots. Stored
+capture lifetimes and independently verified receiver permissions are retained;
+written callable ABIs cannot erase unproved invocation prerequisites. The
+combined main-tree run passes 2,322 tests, with only the five known generic-helper
+exit cases and 16 source-library cases failing. All 891 service and 176 library
+API tests pass. See `implementation-progress.md`.
+
+The following cache 79 and earlier checkpoints are historical.
 
 Cache 79 fixes the undemanded generic availability-release failure while keeping
 unsealed runtime witnesses inadmissible. The native-allocation/array integration

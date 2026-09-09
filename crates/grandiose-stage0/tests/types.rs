@@ -34,7 +34,7 @@ fn associated_row_subset_candidate_trials_do_not_leak_or_guess_bindings() {
 }
 
 fn row_callable(effects: EffectRow) -> Type {
-    Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 0,
+    Type::Callable { contract: Default::default(), safety: grandiose_stage0::Safety::Safe, lifetime_binders: 0,
         parameters: vec![], result: Box::new(Type::Unit), effects, invocation: Quantity::ONCE }
 }
 
@@ -242,7 +242,7 @@ fn occurs_checks_cover_callable_effect_and_nominal_generic_edges() {
     let Type::Infer(callable_variable) = recursive_callable.clone() else {
         unreachable!()
     };
-    let callable = Type::Callable {
+    let callable = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -290,7 +290,7 @@ fn effect_occurs_checks_follow_nested_callable_effect_rows() {
     let effect = DefKey(Digest::of_bytes(b"recursive-effect-row"));
     let mut inference = InferContext::default();
     let open_effects = inference.fresh_effects();
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -325,7 +325,7 @@ fn type_occurs_checks_follow_previously_bound_effect_tail_chains() {
         unreachable!()
     };
     let open_effects = inference.fresh_effects();
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -360,7 +360,7 @@ fn type_occurs_checks_follow_previously_bound_effect_tail_chains() {
 
 #[test]
 fn callable_unification_requires_effect_and_invocation_agreement() {
-    let callable = Type::Callable {
+    let callable = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
@@ -373,7 +373,7 @@ fn callable_unification_requires_effect_and_invocation_agreement() {
         inference.unify(callable.clone(), callable.clone()).unwrap(),
         callable
     );
-    let incompatible = Type::Callable {
+    let incompatible = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
@@ -436,7 +436,7 @@ fn open_effect_rows_unify_without_becoming_type_holes() {
         arguments: vec![],
     });
 
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -523,7 +523,7 @@ fn effect_rows_distinguish_instances_of_the_same_protocol_declaration() {
         definition: state,
         arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
     }]);
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -542,7 +542,7 @@ fn effect_rows_distinguish_instances_of_the_same_protocol_declaration() {
 fn callable_fingerprints_include_associated_effect_row_projections() {
     let capability = DefKey(Digest::of_bytes(b"Capability"));
     let subject = Type::Scalar(ScalarType::I64);
-    let callable = |name: &str| Type::Callable {
+    let callable = |name: &str| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -584,7 +584,7 @@ fn symbolic_effect_row_projections_are_sorted_deduplicated_and_fingerprinted_can
         projections,
         tails: Default::default(),
     };
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -638,7 +638,7 @@ fn matching_associated_effect_row_projections_unify_without_erasure() {
         }],
         tails: Default::default(),
     };
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -680,7 +680,7 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
         }],
         tails: Default::default(),
     };
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -717,7 +717,7 @@ fn associated_effect_row_projection_sets_unify_independently_of_source_order() {
         projections: vec![projection(second, "Second"), projection(first, "First")],
         tails: Default::default(),
     };
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -749,7 +749,7 @@ fn distinct_associated_effect_row_projections_do_not_unify() {
         }],
         tails: Default::default(),
     };
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -776,7 +776,7 @@ fn effect_row_unification_solves_protocol_argument_inference() {
         definition: state,
         arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
     }]);
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -876,7 +876,7 @@ fn effect_instance_row_arguments_participate_in_protocol_matching() {
             arguments: vec![GenericArgument::EffectRow(argument)],
         }])
     };
-    let callable = |effects| Type::Callable {
+    let callable = |effects| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],

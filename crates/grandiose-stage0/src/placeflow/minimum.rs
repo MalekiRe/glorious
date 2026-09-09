@@ -213,14 +213,24 @@ impl Analyzer<'_> {
             })
     }
 
-    pub(super) fn check_minimum_call_suspensions(&mut self, callee: CoreId, span: Span) {
+    pub(super) fn check_minimum_call_suspensions(&mut self, callee: CoreId, arguments: &[CoreId], span: Span) {
         let ty = &self.body.expression(callee).ty;
-        let effects = match ty {
+        let mut callable = ty;
+        while let Type::Reference { referent, .. } = callable { callable = referent; }
+        let effects = match callable {
             Type::Callable { effects, .. } => effects.clone(),
             _ => {
+                let inputs = arguments.iter().map(|argument| self.body.expression(*argument).ty.clone()).collect::<Vec<_>>();
+                if let Some(effects) = self.frozen_solver.and_then(|solver| solver.lexical_call_effects(ty, &inputs)) {
+                    effects
+                } else {
                 let Some((_, relation)) = self.lexical_bounds.iter().find(|(subject, relation)| {
                     subject == ty && crate::is_intrinsic_callable_trait(relation)
                 }) else {
+                    // A checked indirect call whose row cannot be recovered
+                    // is not proof of purity. In particular, quantified
+                    // borrowed Fn predicates must not bypass cancellation.
+                    self.check_minimum_scope(&self.minimum_bindings.keys().cloned().collect(), span);
                     return;
                 };
                 // The optional Effects equality defaults to the empty row
@@ -234,6 +244,7 @@ impl Analyzer<'_> {
                             && binding.item_arguments.is_empty()
                     })
                     .map_or_else(crate::EffectRow::empty, |binding| binding.value.clone())
+                }
             }
         };
         if !effects.tails.is_empty() || !effects.projections.is_empty() {

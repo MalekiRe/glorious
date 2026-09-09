@@ -424,6 +424,7 @@ pub struct PlaceFlow {
     /// Associated rows are part of a generic Fn's checked lexical contract,
     /// not recoverable from its uninstantiated Core callee type alone.
     pub(crate) lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+    pub(crate) lexical_universal_bounds: Vec<crate::QuantifiedWhereBound>,
     /// Frozen lexical storage identities referenced by `move_paths`.
     pub bindings: Vec<PlaceBinding>,
     /// Persistent lexical source-storage arena. `binding_scopes` is dense in
@@ -679,6 +680,7 @@ impl PlaceFlow {
             abort_primitive,
             lexical_bounds: bounds.to_vec(),
             lexical_effect_bindings: effect_bindings.to_vec(),
+            lexical_universal_bounds: frozen_solver.map_or_else(Vec::new, |solver| solver.universal_assumptions().to_vec()),
             bindings: a.bindings.into_entries(),
             storage_scopes: a.storage_scopes,
             binding_scopes: a.binding_scopes,
@@ -1565,8 +1567,6 @@ impl Analyzer<'_> {
                     self.visit_sequence(&arguments, &during_call);
                     self.release_owner_loans(&owner, e.span);
                 } else {
-                    let mut values = vec![callee];
-                    values.extend(arguments);
                     if matches!(reference_shape, CallReferenceShape::None) {
                         // The sealed call result proves it cannot retain an
                         // operand reference.  This covers manifest-bound
@@ -1580,18 +1580,18 @@ impl Analyzer<'_> {
                         }
                         let mut during_call = live_after.clone();
                         during_call.insert(owner.clone());
-                        self.visit_sequence(&values, &during_call);
+                        self.visit_call_operands(callee, &arguments, &during_call);
                         self.release_owner_loans(&owner, e.span);
                         self.ephemeral_borrow_owner = previous;
                         self.nonretaining_call_owner = previous_capture;
                     } else {
-                        self.visit_sequence(&values, live_after);
+                        self.visit_call_operands(callee, &arguments, live_after);
                     }
                 }
                 if operands_complete {
                     self.record_logical_call_stores(callee, &logical_arguments, id);
                     if self.minimum_definitely_aborts(id) { self.minimum_states.clear(); }
-                    else { self.check_minimum_call_suspensions(callee, e.span); }
+                    else { self.check_minimum_call_suspensions(callee, &arguments, e.span); }
                 }
             }
             CoreKind::Perform {
@@ -1844,6 +1844,26 @@ impl Analyzer<'_> {
             CoreKind::Block(values) => self.visit_scoped_sequence(id, &values, live_after),
         }
         self.release_dead_loans(live_after, e.span);
+    }
+
+    fn visit_call_operands(&mut self, callee: CoreId, arguments: &[CoreId], live_after: &BTreeSet<String>) {
+        if matches!(self.body.expression(callee).ty, Type::Reference { .. }) {
+            let mut during_arguments = live_after.clone();
+            for argument in arguments { self.collect_local_uses(*argument, &mut during_arguments); }
+            self.visit_reference_handle(callee, &during_arguments);
+            let mut receiver_live = live_after.clone();
+            self.collect_local_uses(callee, &mut receiver_live);
+            self.visit_sequence(arguments, &receiver_live);
+            // A strict argument can transfer to an enclosing label. The
+            // receiver is not invoked on that edge, even though its handle
+            // was evaluated before the argument.
+            if !self.normal_continuation { return; }
+            self.use_deref_reference(callee, self.body.expression(callee).span,
+                matches!(self.body.expression(callee).ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
+        } else {
+            let values = std::iter::once(callee).chain(arguments.iter().copied()).collect::<Vec<_>>();
+            self.visit_sequence(&values, live_after);
+        }
     }
 
     fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {

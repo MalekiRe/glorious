@@ -2344,7 +2344,7 @@ mod tests {
     }
 
     fn callable(invocation: Quantity) -> Type {
-        Type::Callable {
+        Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![Type::Scalar(crate::types::ScalarType::I64)],
@@ -2357,7 +2357,7 @@ mod tests {
     #[test]
     fn forged_move_capture_retains_its_obligation_through_unrestricted_replay() {
         let function = callable(Quantity::ONCE);
-        let closure = Type::Callable {
+        let closure = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![],
@@ -2463,7 +2463,7 @@ mod tests {
     #[test]
     fn frozen_core_cannot_split_one_exact_callable_obligation_across_two_escapes() {
         let callback = callable(Quantity::ONCE);
-        let apply = Type::Callable {
+        let apply = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![
@@ -2567,7 +2567,7 @@ mod tests {
     #[test]
     fn frozen_core_joins_alternative_callable_transfers_without_sequencing_them() {
         let callback = callable(Quantity::ONCE);
-        let apply = Type::Callable {
+        let apply = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![
@@ -2692,7 +2692,7 @@ mod tests {
     #[test]
     fn frozen_core_cannot_add_direct_use_to_an_outgoing_callable_transfer() {
         let callback = callable(Quantity::ONCE);
-        let apply = Type::Callable {
+        let apply = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![

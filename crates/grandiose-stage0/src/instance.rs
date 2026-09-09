@@ -239,6 +239,7 @@ fn type_depth(value: &Type) -> usize {
         Type::Reference { referent, .. }
         | Type::RawPointer { pointee: referent, .. } => nested_depth([type_depth(referent)]),
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
@@ -248,7 +249,8 @@ fn type_depth(value: &Type) -> usize {
                 .iter()
                 .map(type_depth)
                 .chain(std::iter::once(type_depth(result)))
-                .chain(std::iter::once(effect_row_depth(effects))),
+                .chain(std::iter::once(effect_row_depth(effects)))
+                .chain(contract.terms().iter().map(|(value, _)| instance_argument_depth(value))),
         ),
         Type::Unit
         | Type::Never
@@ -319,7 +321,7 @@ fn closed_effect_row_fingerprint(
     if !value.tails.is_empty() || !value.projections.is_empty() {
         return Err(InstanceKeyError::OpenEffectRow { slot });
     }
-    let wrapper = Type::Callable {
+    let wrapper = Type::Callable { contract: Default::default(),
         safety: crate::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -350,12 +352,14 @@ fn is_concrete_type(value: &Type) -> bool {
                 && is_concrete_type(referent)
         }
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
             ..
         } => {
             parameters.iter().all(is_concrete_type)
+                && contract.terms().iter().all(|(value, _)| is_concrete_generic_argument(value))
                 && is_concrete_type(result)
                 && effects.tails.is_empty()
                 && effects.projections.is_empty()

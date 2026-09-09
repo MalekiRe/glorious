@@ -2526,6 +2526,15 @@ pub(crate) fn materialization_body_arguments(
                 }
                 pending = next;
             }
+            if implementation.generic_kinds.iter().enumerate().any(|(index, _)| !bindings.contains_key(&(index as u32)))
+                && !implementation.universal_bounds.is_empty() {
+                // The solver-selected Fn equalities may functionally
+                // determine Output/Effects binders absent from the Self
+                // head. Recover those exact frozen terms, not new body
+                // inference or a default for an unconstrained binder.
+                TraitSolver::new(signatures).complete_callable_implementation_arguments(implementation, &mut bindings)
+                    .ok_or_else(|| "selected trait implementation has invalid quantified callable arguments".to_owned())?;
+            }
             // Static trait methods have no receiver slot in their executable
             // identity. Their implementation generics may nevertheless be
             // fully determined by the selected trait relation (for example
@@ -3328,14 +3337,14 @@ pub(crate) fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Ty
                 .map(|field| specialize_generic_argument(field, arguments))
                 .collect(),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.instantiate(arguments)),
             safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
@@ -3686,14 +3695,14 @@ pub(crate) fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver
                 .map(|argument| normalize_materialized_generic_argument(argument, solver))
                 .collect::<Result<_, _>>()?,
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.try_map_terms(|value, _| normalize_materialized_generic_argument(&value, solver))?),
             safety: *safety,
             lifetime_binders: *lifetime_binders,
             parameters: parameters
@@ -4190,7 +4199,7 @@ mod tests {
             projections: vec![],
             tails: Default::default(),
         };
-        let original = Type::Callable {
+        let original = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![Type::Reference {
@@ -4277,7 +4286,7 @@ mod tests {
     #[test]
     fn materialization_specializes_every_frozen_mir_type_witness() {
         let generic = Type::Generic(0);
-        let callable = Type::Callable {
+        let callable = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![generic.clone()],

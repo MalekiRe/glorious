@@ -163,7 +163,7 @@ fn terminal(explanation: &TraitSelectionExplanation) -> Option<&TraitExplanation
 fn intrinsic_fn_evidence_is_tied_to_callable_shape_not_the_source_spelling() {
     let (interface, signatures) = signatures("trait Fn {}");
     let declared_fn = key(&interface, "Fn");
-    let callable = Type::Callable {
+    let callable = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
@@ -200,7 +200,7 @@ fn intrinsic_fn_evidence_is_tied_to_callable_shape_not_the_source_spelling() {
 fn intrinsic_label_evidence_requires_an_escaping_callable_not_a_spelled_trait() {
     let (interface, signatures) = signatures("trait Label {}");
     let declared_label = key(&interface, "Label");
-    let escape = Type::Callable {
+    let escape = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![Type::Scalar(ScalarType::I64)],
@@ -235,7 +235,7 @@ fn intrinsic_label_evidence_requires_an_escaping_callable_not_a_spelled_trait() 
 fn intrinsic_runs_in_requires_core_environment_evidence_not_a_source_trait_spelling() {
     let (interface, signatures) = signatures("trait RunsIn {}");
     let declared_runs_in = key(&interface, "RunsIn");
-    let callable = Type::Callable {
+    let callable = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -713,7 +713,7 @@ fn solver_matches_alpha_equivalent_hrtb_heads_but_rejects_outer_lifetime_leaks()
         "trait CallableMarker {} impl CallableMarker for for<'a> (&'a i64) -> &'a i64 {}",
     );
     let marker = key(&interface, "CallableMarker");
-    let hrtb = Type::Callable {
+    let hrtb = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![Type::Reference {
@@ -738,7 +738,7 @@ fn solver_matches_alpha_equivalent_hrtb_heads_but_rejects_outer_lifetime_leaks()
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
 
-    let leaked_outer = Type::Callable {
+    let leaked_outer = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![Type::Reference {
@@ -770,7 +770,7 @@ fn solver_instantiates_hrtb_heads_without_capturing_fresh_placeholders() {
         "trait CallableMarker {} impl<T> CallableMarker for for<'a> (&'a T) -> &'a T {}",
     );
     let marker = key(&interface, "CallableMarker");
-    let callable = |referent: Type| Type::Callable {
+    let callable = |referent: Type| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![Type::Reference {
@@ -812,7 +812,7 @@ fn solver_rejects_hrtb_capture_hidden_in_nominal_and_associated_arguments() {
     );
     let marker = key(&interface, "CallableMarker");
     let wrap = key(&interface, "Wrap");
-    let callable = |argument: Type| Type::Callable {
+    let callable = |argument: Type| Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 1,
         parameters: vec![Type::Reference {
@@ -2301,7 +2301,7 @@ fn auto_traits_structurally_traverse_source_nominals_and_type_forms() {
             lifetime: Lifetime::Static,
             referent: Box::new(Type::Scalar(ScalarType::I64)),
         },
-        Type::Callable {
+        Type::Callable { contract: Default::default(),
             safety: grandiose_stage0::Safety::Safe,
             lifetime_binders: 0,
             parameters: vec![Type::Scalar(ScalarType::I64)],

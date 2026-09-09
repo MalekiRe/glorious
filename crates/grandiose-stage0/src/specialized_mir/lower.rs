@@ -534,6 +534,7 @@ impl SpecializedMir {
                 }
                 None
             }).ok_or_else(|| SpecializedError("closure lacks a callable result contract".into()))?;
+            let result = closure.body.refined_result_type(result);
             let definition = if instance.arguments().is_empty() {
                 closure.body.definition
             } else {

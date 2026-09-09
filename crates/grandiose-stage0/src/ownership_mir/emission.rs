@@ -661,7 +661,7 @@ impl OwnershipMir {
                             lifted.entry(callee)
                         {
                             let (function, nested) = closure.body.emit_legacy_values(
-                                (**result).clone(),
+                                closure.body.refined_result_type(result).clone(),
                                 u32::try_from(captures.len()).ok()?,
                                 primitives,
                                 retain_destruction,

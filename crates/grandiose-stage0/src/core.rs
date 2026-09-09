@@ -1,6 +1,7 @@
 //! Typed Core, the semantic boundary before ownership facts and MIR.
 
 mod fingerprint;
+mod callable_contracts;
 pub(crate) mod tail;
 mod tuple_struct;
 
@@ -147,7 +148,42 @@ enum RunsInAccess {
 /// An opaque, deterministic nominal identity for one sealed environment
 /// state.  `after` distinguishes an owned call's normal successor ledger
 /// from its incoming ledger without exposing either as a source declaration.
-fn generated_environment_type(brand: EnvironmentBrand, after: bool) -> Type {
+fn generated_environment_type(brand: EnvironmentBrand, after: bool, captures: &[Type]) -> Type {
+    // Store the lifetime dependencies, not another recursive copy of the
+    // whole capture layout. Nested captured callables already retain their
+    // layouts; duplicating those trees in both environment states would
+    // multiply metadata size at every nested closure.
+    fn dependencies(ty: &Type, output: &mut Vec<GenericArgument>) {
+        let push = |value, output: &mut Vec<_>| { if !output.contains(&value) { output.push(value); } };
+        match ty {
+            Type::Reference { lifetime, referent, .. } => {
+                push(GenericArgument::Lifetime(*lifetime), output);
+                dependencies(referent, output);
+            }
+            Type::Tuple(values) => for value in values { dependencies(value, output); },
+            Type::Array(value) | Type::FixedArray { element: value, .. }
+                | Type::RawPointer { pointee: value, .. } => dependencies(value, output),
+            Type::Nominal { arguments, .. } => for argument in arguments {
+                match argument {
+                    GenericArgument::Type(value) => dependencies(value, output),
+                    GenericArgument::Lifetime(_) => push(argument.clone(), output),
+                    _ => {},
+                }
+            },
+            Type::Callable { contract, .. } if contract.environment.is_some() => {
+                for capture in &contract.captures {
+                    match crate::types::regions::open_argument(GenericArgument::Type(capture.clone()), |_| None) {
+                        Some(GenericArgument::Type(value)) => dependencies(&value, output),
+                        _ => push(GenericArgument::Type(ty.clone()), output),
+                    }
+                }
+            }
+            Type::Unit | Type::Never | Type::Scalar(_) | Type::StaticData { .. } => {},
+            value => push(GenericArgument::Type(value.clone()), output),
+        }
+    }
+    let mut arguments = vec![];
+    for capture in captures { dependencies(capture, &mut arguments); }
     let callable = brand.callable.0.to_le_bytes();
     let phase = if after {
         b"after".as_slice()
@@ -161,7 +197,7 @@ fn generated_environment_type(brand: EnvironmentBrand, after: bool) -> Type {
             callable.as_slice(),
             phase,
         ])),
-        arguments: vec![],
+        arguments,
     }
 }
 
@@ -2259,12 +2295,14 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
             matches!(lifetime, Lifetime::Infer(_)) || type_contains_inference(referent)
         }
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
             ..
         } => {
             parameters.iter().any(type_contains_inference)
+                || contract.terms().iter().any(|(value, _)| generic_argument_contains_inference(value))
                 || type_contains_inference(result)
                 || effects.effects.iter().any(|effect| {
                     effect
@@ -2341,6 +2379,7 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
                 || type_contains_out_of_scope_bound_lifetime_in(referent, binders)
         }
         Type::Callable {
+            contract,
             lifetime_binders,
             parameters,
             result,
@@ -2350,7 +2389,14 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
             let mut nested_binders = Vec::with_capacity(binders.len() + 1);
             nested_binders.push(*lifetime_binders);
             nested_binders.extend_from_slice(binders);
-            parameters.iter().any(|parameter| {
+            let mut invalid = false;
+            contract.map_scoped_terms(|value, scopes| {
+                let mut scopes = scopes.to_vec();
+                scopes.extend_from_slice(&nested_binders);
+                invalid |= generic_argument_contains_out_of_scope_bound_lifetime(&value, &scopes);
+                value
+            });
+            invalid || parameters.iter().any(|parameter| {
                 type_contains_out_of_scope_bound_lifetime_in(parameter, &nested_binders)
             }) || type_contains_out_of_scope_bound_lifetime_in(result, &nested_binders)
                 || effect_row_contains_out_of_scope_bound_lifetime(effects, &nested_binders)
@@ -3161,9 +3207,12 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            callable_value_joins: vec![],
             pending_callable_bounds: vec![],
             pending_where_bounds: vec![],
             pending_outlives: vec![],
+            pending_environment_bounds: vec![],
+            pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
             pending_associated_checks: vec![],
@@ -3410,9 +3459,12 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            callable_value_joins: vec![],
             pending_callable_bounds: vec![],
             pending_where_bounds: vec![],
             pending_outlives: vec![],
+            pending_environment_bounds: vec![],
+            pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
             pending_associated_checks: vec![],
@@ -3539,9 +3591,12 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            callable_value_joins: vec![],
             pending_callable_bounds: vec![],
             pending_where_bounds: vec![],
             pending_outlives: vec![],
+            pending_environment_bounds: vec![],
+            pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
             pending_associated_checks: vec![],
@@ -3666,9 +3721,12 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            callable_value_joins: vec![],
             pending_callable_bounds: vec![],
             pending_where_bounds: vec![],
             pending_outlives: vec![],
+            pending_environment_bounds: vec![],
+            pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
             pending_associated_checks: vec![],
@@ -3830,7 +3888,7 @@ fn unsafe_implementation_definitions(
 /// subtyping engine by this narrow call-boundary rule.
 fn callable_argument_accepts(required: &Type, provided: &Type) -> bool {
     let (
-        Type::Callable {
+        Type::Callable { contract: required_contract,
             safety: required_safety,
             lifetime_binders: required_binders,
             parameters: required_parameters,
@@ -3838,7 +3896,7 @@ fn callable_argument_accepts(required: &Type, provided: &Type) -> bool {
             effects: required_effects,
             invocation: required_invocation,
         },
-        Type::Callable {
+        Type::Callable { contract: provided_contract,
             safety: provided_safety,
             lifetime_binders: provided_binders,
             parameters: provided_parameters,
@@ -3851,6 +3909,7 @@ fn callable_argument_accepts(required: &Type, provided: &Type) -> bool {
         return false;
     };
     required_safety == provided_safety && required_binders == provided_binders
+        && (required_contract.is_empty() || required_contract == provided_contract)
         && provided_invocation.contains(*required_invocation)
         && required_effects == provided_effects
         && required_result == provided_result
@@ -4058,11 +4117,14 @@ struct Elaborator<'a> {
     /// tracked separately from source nominal definitions: a source path can
     /// never resolve to one of these identities.
     generated_environment_types: std::collections::BTreeSet<DefKey>,
+    callable_value_joins: Vec<(Type, Type)>,
     /// Obligations whose subject has no shape yet remain live until the
     /// enclosing inference island is closed. Zonk alone proves no Fn bound.
     pending_callable_bounds: Vec<PendingCallableBound>,
     pending_where_bounds: Vec<PendingWhereBound>,
     pending_outlives: Vec<(crate::OutlivesPredicate, Span)>,
+    pending_environment_bounds: Vec<(Type, Lifetime, Span)>,
+    pending_callable_erasures: Vec<(Type, Type, Span)>,
     pending_universal: Vec<(crate::QuantifiedWhereBound, TraitSolver, Span)>,
     pending_effect_checks: Vec<PendingEffectCheck>,
     pending_associated_checks: Vec<PendingAssociatedCheck>,
@@ -4250,7 +4312,7 @@ impl Elaborator<'_> {
                 };
                 self.alloc(
                     CoreKind::LabelValue { brand: label.brand },
-                    Type::Callable {
+                    Type::Callable { contract: Default::default(),
                         safety: crate::Safety::Safe,
                         lifetime_binders: 0,
                         parameters: vec![label.result],
@@ -4311,7 +4373,7 @@ impl Elaborator<'_> {
                 let place = self.assignment_place(place, expression.span);
                 if !matches!(&place, CorePlace::Error)
                     && self
-                        .unify_rigid_lifetimes(place.ty(), value_ty, expression.span)
+                        .unify_rigid_lifetimes(place.ty(), value_ty.clone(), expression.span)
                         .is_err()
                 {
                     self.error(
@@ -4320,6 +4382,15 @@ impl Elaborator<'_> {
                         "assignment value does not match destination type",
                     );
                     self.recovered = true;
+                } else if let Ok(joined) = self.inference.unify(place.ty(), value_ty.clone()) {
+                    let previous = self.inference.resolve_type_structure(place.ty());
+                    if previous != joined {
+                        self.callable_value_joins.push((previous, joined.clone()));
+                        let actual = self.inference.resolve_type_structure(value_ty);
+                        if actual != joined && !matches!(actual, Type::Never | Type::Infer(_) | Type::Error) {
+                            self.callable_value_joins.push((actual, joined));
+                        }
+                    }
                 }
                 let assignment = self.alloc(
                     CoreKind::Assign { place, value },
@@ -4759,7 +4830,7 @@ impl Elaborator<'_> {
             // those independently known shapes (including hidden Bindings)
             // instead of requiring the whole callable to be frozen first.
             match ty {
-                Type::Callable { safety, lifetime_binders, parameters, result, effects, invocation } => Type::Callable {
+                Type::Callable { contract, safety, lifetime_binders, parameters, result, effects, invocation } => Type::Callable { contract,
                     safety, lifetime_binders,
                     parameters: parameters.into_iter().map(|parameter|
                         self.inference.zonk(parameter.clone()).unwrap_or(parameter)).collect(),
@@ -5011,7 +5082,7 @@ impl Elaborator<'_> {
                 self.expression(id)
             }
             ExprKind::ContextualBlock(values) => match expected {
-                Some(Type::Callable {
+                Some(Type::Callable { contract: _,
                     safety,
                     parameters,
                     result,
@@ -5028,7 +5099,7 @@ impl Elaborator<'_> {
                     None,
                     expression.span,
                 ),
-                Some(Type::Callable { safety, parameters, result, effects, invocation, lifetime_binders }) => {
+                Some(Type::Callable { contract: _, safety, parameters, result, effects, invocation, lifetime_binders }) => {
                     let context = parameters.first().filter(|_| parameters.len() == 1)
                         .and_then(|parameter| self.refinement_context_bindings(parameter)
                             .map(|bindings| (parameter.clone(), bindings)));
@@ -5069,7 +5140,7 @@ impl Elaborator<'_> {
             return value;
         };
         let actual = self.expressions[value.0 as usize].ty.clone();
-        let Type::Callable {
+        let Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
@@ -5081,7 +5152,7 @@ impl Elaborator<'_> {
             return value;
         };
         if provided.contains(required) {
-            self.expressions[value.0 as usize].ty = Type::Callable {
+            self.expressions[value.0 as usize].ty = Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
@@ -5104,7 +5175,7 @@ impl Elaborator<'_> {
                     invocation: required,
                     ..
                 },
-                Type::Callable {
+                Type::Callable { contract,
                     safety,
                     lifetime_binders,
                     parameters,
@@ -5112,7 +5183,7 @@ impl Elaborator<'_> {
                     effects,
                     invocation: provided,
                 },
-            ) if provided.contains(*required) => Type::Callable {
+            ) if provided.contains(*required) => Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
@@ -5359,7 +5430,7 @@ impl Elaborator<'_> {
                 arguments: vec![],
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters,
@@ -5413,7 +5484,7 @@ impl Elaborator<'_> {
                 arguments: vec![],
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters,
@@ -5502,7 +5573,7 @@ impl Elaborator<'_> {
                 arguments,
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters,
@@ -5627,7 +5698,7 @@ impl Elaborator<'_> {
             Some(Type::Array(element) | Type::FixedArray { element, .. }) => Some(*element),
             _ => None,
         };
-        let element = expected_element
+        let mut element = expected_element
             .clone()
             .unwrap_or_else(|| self.inference.fresh());
         let values = values
@@ -5635,13 +5706,27 @@ impl Elaborator<'_> {
             .map(|value| {
                 let value = self.expression_expected(value, expected_element.clone());
                 let actual = self.expressions[value.0 as usize].ty.clone();
-                if self.inference.unify(element.clone(), actual).is_err() {
-                    self.error(span, "G4119", "array elements have incompatible types");
-                    self.recovered = true;
+                self.queue_callable_abi_erasure(element.clone(), actual.clone(), span);
+                match self.inference.unify(element.clone(), actual) {
+                    Ok(joined) => element = joined,
+                    Err(_) => {
+                        self.error(span, "G4119", "array elements have incompatible types");
+                        self.recovered = true;
+                    }
                 }
                 value
             })
             .collect::<Vec<_>>();
+        // Array elements share one value type, including the common
+        // callable authority and the union of capture/predicate dependencies.
+        // Never replace the empty contextual ABI with authority globally;
+        // only actual element value refinements participate in this join.
+        for value in &values {
+            let actual = self.inference.resolve_type_structure(self.expressions[value.0 as usize].ty.clone());
+            if actual != element && !matches!(actual, Type::Never | Type::Infer(_) | Type::Error) {
+                self.callable_value_joins.push((actual, element.clone()));
+            }
+        }
         let ty = if fixed { Type::fixed_array(element, values.len() as u64) } else { Type::Array(Box::new(element)) };
         let ty = self.strict_result(&values, ty);
         self.alloc(CoreKind::Array(values), ty, span)
@@ -5696,7 +5781,7 @@ impl Elaborator<'_> {
         refinement_context: Option<(Type, Vec<(String, Type)>)>,
         span: Span,
     ) -> CoreId {
-        let contract = Type::Callable {
+        let contract = Type::Callable { contract: Default::default(),
             safety, lifetime_binders,
             parameters: refinement_context.as_ref().map(|(ty, _)| vec![ty.clone()]).unwrap_or_default(),
             result: Box::new(result.clone()), effects: effects.clone(), invocation,
@@ -5799,7 +5884,7 @@ impl Elaborator<'_> {
         });
         let hidden_parameters = usize::from(refinement_context.is_some());
         let expected_callable = expected.as_ref().and_then(|expected| {
-            let Type::Callable {
+            let Type::Callable { contract: _,
                 safety: _,
                 lifetime_binders,
                 parameters,
@@ -5936,7 +6021,7 @@ impl Elaborator<'_> {
         let callable_type = expected_callable
             .as_ref()
             .map(|(contract, _, _, _, _)| contract.clone())
-            .unwrap_or_else(|| Type::Callable {
+            .unwrap_or_else(|| Type::Callable { contract: Default::default(),
                 safety: crate::Safety::Safe,
                 lifetime_binders: 0,
                 parameters: parameters.iter().map(|(_, ty)| ty.clone()).collect(),
@@ -6001,7 +6086,7 @@ impl Elaborator<'_> {
                 let effects =
                     self.closure_effects(effects, self.body.expression(self.body.root).span);
                 self.bound_lifetime_scopes.pop();
-                Type::Callable {
+                Type::Callable { contract: Default::default(),
                     safety: *safety,
                     lifetime_binders: lifetime_binders.len() as u32,
                     parameters,
@@ -6226,7 +6311,7 @@ impl Elaborator<'_> {
                     self.normalize_selectable_type_projections_inner(*referent, active, hrtb_binders),
                 ),
             },
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
@@ -6237,7 +6322,12 @@ impl Elaborator<'_> {
                 let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
                 nested_binders.push(lifetime_binders);
                 nested_binders.extend_from_slice(hrtb_binders);
-                Type::Callable {
+                let contract = contract.map_scoped_terms(|value, scopes| {
+                    let mut scopes = scopes.to_vec();
+                    scopes.extend_from_slice(&nested_binders);
+                    self.normalize_selectable_type_argument(value, active, &scopes)
+                });
+                Type::Callable { contract: Box::new(contract),
                     safety,
                     lifetime_binders,
                     parameters: parameters
@@ -6363,14 +6453,14 @@ impl Elaborator<'_> {
                 lifetime,
                 referent: Box::new(self.normalize_nested_callable_effect_rows(*referent)),
             },
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
                 result,
                 effects,
                 invocation,
-            } => Type::Callable {
+            } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| self.normalize_nested_callable_effect_argument(value))),
                 safety,
                 lifetime_binders,
                 parameters: parameters
@@ -6557,8 +6647,16 @@ impl Elaborator<'_> {
         self.trait_solver.reset_query();
         self.trait_solver.set_outlives_assumptions(self.ambient_outlives.clone());
         self.trait_solver.set_universal_assumptions(self.ambient_universal_bounds.clone());
-        self.trait_solver.set_lexical_assumptions(self.ambient_where_bounds.iter().map(|(subject, relation)| TraitGoal {
-            subject: subject.clone(), relation: relation.clone() }).collect());
+        let mut assumptions = self.ambient_where_bounds.iter().map(|(subject, relation)| TraitGoal {
+            subject: subject.clone(), relation: relation.clone() }).collect::<Vec<_>>();
+        // A constructor can leave its environment scope unconstrained until
+        // later context (or body elision) determines it. Its exact pending
+        // obligation is available to dependent selections in this body, but
+        // is independently discharged before Core can freeze. In particular,
+        // sealing removes the entire pending set before checking any member,
+        // so these conditional facts cannot prove themselves or one another.
+        assumptions.extend(self.pending_environment_assumptions());
+        self.trait_solver.set_lexical_assumptions(assumptions);
         self.trait_solver.set_associated_bindings(
             self.ambient_callable_type_bindings.clone(),
             self.ambient_callable_effect_bindings.clone(),
@@ -7701,7 +7799,10 @@ impl Elaborator<'_> {
             Type::Callable { .. }
                 | Type::Reference { .. }
                 | Type::Infer(_)
-        ) || self.callable_contract_from_ambient_fn_bound(&ty).is_some() {
+        ) || self.ambient_where_bounds.iter().any(|(subject, relation)|
+            *subject == ty && crate::is_intrinsic_callable_trait(relation))
+            || self.ambient_universal_bounds.iter().any(|bound|
+                bound.subject == ty && crate::is_intrinsic_callable_trait(&bound.relation)) {
             CaptureMode::SharedBorrow
         } else {
             self.owned_capture_mode(&ty)
@@ -8116,7 +8217,10 @@ impl Elaborator<'_> {
             }
             CoreKind::Deref(value) => self.collect_captures(*value, locals, captures),
             CoreKind::Borrow { unique, value } => {
-                if let CoreKind::Local(name) = &self.expressions[value.0 as usize].kind {
+                let mut root = *value;
+                while let CoreKind::Deref(base) | CoreKind::Field { base, .. } = self.expressions[root.0 as usize].kind { root = base; }
+                if let CoreKind::Local(name) = &self.expressions[root.0 as usize].kind {
+                    if locals.contains(name) { return; }
                     record_capture(
                         captures,
                         name,
@@ -8125,7 +8229,7 @@ impl Elaborator<'_> {
                         } else {
                             CaptureMode::SharedBorrow
                         },
-                        self.expressions[value.0 as usize].ty.clone(),
+                        self.expressions[root.0 as usize].ty.clone(),
                     );
                 } else {
                     self.collect_captures(*value, locals, captures);
@@ -8320,32 +8424,8 @@ impl Elaborator<'_> {
     /// Typed Core is a frozen semantic boundary: body-local inference holes
     /// can help elaboration but cannot escape to PlaceFlow, MIR, or caches.
     fn seal_types(&mut self) {
-        // A plain first-class callable type currently has no place to retain
-        // a quantified where contract. Do not let storing/passing a named
-        // function erase that contract before an indirect invocation.
-        let quantified = self.expressions.iter().enumerate().filter_map(|(index, expression)| {
-            let CoreKind::Function { definition, .. } = &expression.kind else { return None; };
-            self.signatures.definitions.get(definition).and_then(callable)
-                .is_some_and(|signature| !signature.universal_bounds.is_empty() || !signature.where_outlives.is_empty())
-                .then_some((CoreId(index as u32), expression.span))
-        }).collect::<Vec<_>>();
-        let mut uses = quantified.iter().map(|(id, _)| (*id, (false, false))).collect::<std::collections::BTreeMap<_, _>>();
-        for expression in &self.expressions {
-            for child in core_children(&expression.kind) {
-                if let Some((seen, escapes)) = uses.get_mut(&child) {
-                    *seen = true;
-                    *escapes |= !matches!(&expression.kind, CoreKind::Call { callee, arguments, .. }
-                        if *callee == child && !arguments.contains(&child));
-                }
-            }
-        }
-        for (id, span) in quantified {
-            let (seen, escapes) = uses[&id];
-            if !seen || escapes {
-                self.error(span, "G4198", "a first-class function value cannot yet retain a universally quantified where contract");
-                self.recovered = true;
-            }
-        }
+        // Value types retain residual contracts across storage. Their uses
+        // discharge those predicates; freezing must preserve their terms.
         self.inference.finish_body_lifetimes();
         self.propagate_pending_inference();
         let pending = std::mem::take(&mut self.pending_callable_bounds);
@@ -8377,6 +8457,26 @@ impl Elaborator<'_> {
             );
         }
         for (bound, span) in std::mem::take(&mut self.pending_outlives) { self.check_outlives_bound(bound, span, false); }
+        for (subject, lifetime, span) in std::mem::take(&mut self.pending_environment_bounds) {
+            let subject = self.inference.zonk(subject).unwrap_or(Type::Error);
+            let lifetime = self.inference.resolve_lifetime(lifetime).ok();
+            let valid = self.is_compiler_environment_type(&subject) && lifetime.is_some_and(|lifetime|
+                lifetime == Lifetime::Elided || self.trait_query().outlives_proven(&crate::OutlivesPredicate::Type { subject: subject.clone(), lifetime }));
+            if !valid {
+                self.error(span, "G4188", "sealed callable environment does not outlive the required environment scope");
+                self.recovered = true;
+            }
+        }
+        for (expected, actual, span) in std::mem::take(&mut self.pending_callable_erasures) {
+            let (Ok(expected), Ok(actual)) = (self.inference.zonk(expected), self.inference.zonk(actual)) else { continue; };
+            if expected == actual { continue; }
+            let expected = self.normalize_selectable_type_projections(expected);
+            let actual = self.normalize_selectable_type_projections(actual);
+            if !self.trait_query().callable_abi_erasure_proven(&expected, &actual) {
+                self.error(span, "G4143", "callable ABI would erase invocation predicates not established by this boundary");
+                self.recovered = true;
+            }
+        }
         for (bound, mut solver, span) in std::mem::take(&mut self.pending_universal) {
             let mut invalid = false;
             let bound = bound.map_terms(|argument| {
@@ -8722,6 +8822,7 @@ impl Elaborator<'_> {
         }
     }
     fn zonk_type(&mut self, ty: Type, span: Span) -> Type {
+        let ty = self.joined_callable_value_type(ty);
         match self.inference.zonk(ty) {
             Ok(ty) => self.normalize_concrete_type_projections(ty),
             Err(_) => {
@@ -8733,6 +8834,7 @@ impl Elaborator<'_> {
     }
 
     fn zonk_generic_argument(&mut self, argument: GenericArgument, span: Span) -> GenericArgument {
+        let argument = crate::CallableContract::replace_value_types(argument, &self.callable_value_joins, 0);
         let fallback = argument.clone();
         match self.inference.zonk_generic_argument(argument) {
             Ok(argument) => argument,
@@ -8762,6 +8864,7 @@ impl Elaborator<'_> {
         actual: Type,
         span: Span,
     ) -> Result<(), ()> {
+        self.queue_callable_abi_erasure(expected.clone(), actual.clone(), span);
         self.unify_rigid_lifetimes_after_inference(expected, actual, span, true)
     }
 
@@ -9238,7 +9341,7 @@ impl Elaborator<'_> {
                         arguments,
                         host_import: self.signatures.host_imports.get(&definition).cloned(),
                     },
-                    Type::Callable {
+                    Type::Callable { contract: Default::default(),
                         safety: signature.safety,
                         lifetime_binders: 0,
                         parameters,
@@ -9325,7 +9428,7 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
     ) -> Option<CoreId> {
-        let Type::Callable {
+        let Type::Callable { contract: _,
             safety,
             lifetime_binders,
             parameters: expected_parameters,
@@ -9377,7 +9480,7 @@ impl Elaborator<'_> {
             self.normalize_concrete_hrtb_effect_row(bound_signature.effects, lifetime_binders);
         let expected_effects =
             self.normalize_concrete_hrtb_effect_row(expected_effects, lifetime_binders);
-        let bound_callable = self.normalize_selectable_type_projections(Type::Callable {
+        let bound_callable = self.normalize_selectable_type_projections(Type::Callable { contract: Default::default(),
             safety: bound_signature.safety,
             lifetime_binders,
             parameters: bound_signature.parameters,
@@ -9385,7 +9488,7 @@ impl Elaborator<'_> {
             effects: bound_effects,
             invocation: bound_signature.invocation,
         });
-        let expected = self.normalize_selectable_type_projections(Type::Callable {
+        let expected = self.normalize_selectable_type_projections(Type::Callable { contract: Default::default(),
             safety,
             lifetime_binders,
             parameters: expected_parameters,
@@ -9535,7 +9638,7 @@ impl Elaborator<'_> {
                 arguments,
                 host_import: None,
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters,
@@ -9664,7 +9767,7 @@ impl Elaborator<'_> {
                 arguments,
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters,
@@ -10080,6 +10183,12 @@ impl Elaborator<'_> {
             && self.unify_rigid_lifetimes(expected, Type::Nominal { definition, arguments: arguments.clone() }, span).is_err() {
             return self.fail(span, "G4126", "record constructor does not match its contextual expected type");
         }
+        // Context fixes nominal identity before fields are initialized. A
+        // richer field value must not rebind a solved generic Fn annotation
+        // to a different nominal argument; its own metadata remains on the
+        // field producer and the constructor's checked field witness.
+        let Type::Nominal { arguments, .. } = self.inference.resolve_type_structure(
+            Type::Nominal { definition, arguments }) else { unreachable!() };
         let Some(layout) = self
             .signatures
             .instantiate_struct_fields_generic(definition, &arguments)
@@ -10233,6 +10342,8 @@ impl Elaborator<'_> {
             && self.unify_rigid_lifetimes(expected, Type::Nominal { definition, arguments: arguments.clone() }, span).is_err() {
             return Some(self.fail(span, "G4134", "enum record constructor does not match its contextual expected type"));
         }
+        let Type::Nominal { arguments, .. } = self.inference.resolve_type_structure(
+            Type::Nominal { definition, arguments }) else { unreachable!() };
         let (variant, layout) = self
             .signatures
             .instantiate_enum_record_variant_generic(definition, &arguments, variant_name)
@@ -10726,7 +10837,7 @@ impl Elaborator<'_> {
         // Reify that substitution before elaborating payloads, otherwise the
         // literal only sees the stale inference variable and falls back to
         // the default integer type.
-        let nominal = self.inference.zonk(nominal.clone()).unwrap_or(nominal);
+        let nominal = self.inference.resolve_type_structure(nominal);
         let Type::Nominal { arguments, .. } = &nominal else {
             return Some(self.fail(
                 span,
@@ -10813,7 +10924,7 @@ impl Elaborator<'_> {
                     let callee = self.alloc(CoreKind::TraitMethod {
                         evidence: placeholder, method: placeholder, trait_arguments,
                         method_arguments, deferred: Some(deferred),
-                    }, Type::Callable {
+                    }, Type::Callable { contract: Default::default(),
                         safety: signature.safety, lifetime_binders: 0,
                         parameters: signature.parameters.clone(), result: Box::new(signature.result.clone()),
                         effects: signature.effects.clone(), invocation: signature.invocation,
@@ -10944,7 +11055,7 @@ impl Elaborator<'_> {
                             method_arguments,
                             deferred: Some(deferred),
                         },
-                        Type::Callable {
+                        Type::Callable { contract: Default::default(),
                             safety: signature.safety,
                             lifetime_binders: 0,
                             parameters: signature.parameters.clone(),
@@ -10999,7 +11110,7 @@ impl Elaborator<'_> {
                 method_arguments,
                 deferred: None,
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: signature.parameters.clone(),
@@ -11095,7 +11206,7 @@ impl Elaborator<'_> {
                 .flatten()
             })
             .unwrap_or(crate::Quantity::ONCE);
-        Some(Type::Callable {
+        Some(Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe,
             lifetime_binders: 0,
             parameters,
@@ -11113,7 +11224,7 @@ impl Elaborator<'_> {
         let arguments = arguments.into_iter().map(|argument| self.expression(argument)).collect::<Vec<_>>();
         let parameters = arguments.iter().map(|argument| self.expressions[argument.0 as usize].ty.clone()).collect();
         let result = result.unwrap_or_else(|| self.inference.fresh());
-        let contract = Type::Callable {
+        let contract = Type::Callable { contract: Default::default(),
             safety: crate::Safety::Safe, lifetime_binders: 0, parameters,
             result: Box::new(result), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
         };
@@ -11137,12 +11248,25 @@ impl Elaborator<'_> {
         }
         let (callable, lifetime_mode) = match callable {
             callable @ Type::Callable { .. } => (callable, LifetimeMode::InstantiateBound),
+            Type::Reference { mutability, referent, .. }
+                if matches!(referent.as_ref(), Type::Callable { .. }) => {
+                let Type::Callable { contract, .. } = referent.as_ref() else { unreachable!() };
+                let allowed = match mutability {
+                    Mutability::Shared => contract.shared_receiver,
+                    Mutability::Unique => contract.unique_receiver,
+                };
+                if !allowed {
+                    return self.fail(span, "G4180", "callable capture access does not permit this borrowed receiver");
+                }
+                (*referent, LifetimeMode::InstantiateBound)
+            }
             value => match self.callable_contract_from_ambient_fn_bound(&value) {
                 Some(callable) => (callable, LifetimeMode::InstantiateBound),
                 None => return self.fail(span, "G4105", "called expression is not callable"),
             },
         };
         let Type::Callable {
+            contract,
             safety,
             parameters,
             result,
@@ -11186,6 +11310,11 @@ impl Elaborator<'_> {
                 Some(match expected { Some(Type::Reference { lifetime, .. }) => *lifetime, _ => Lifetime::Elided })
             } else { None }
         } else { None };
+        // Preserve the destination ABI before lifetime alignment enriches a
+        // structural callable parameter with its actual value refinement.
+        for (parameter, argument) in parameters.iter().zip(&arguments) {
+            self.queue_callable_abi_erasure(parameter.clone(), self.expressions[argument.0 as usize].ty.clone(), span);
+        }
         let Ok((parameters, result, effects, lifetime_substitution)) =
             self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span, unsafe_reference_result, lifetime_mode)
         else {
@@ -11226,6 +11355,7 @@ impl Elaborator<'_> {
                 }
             }
         }
+        let resident_parameters = parameters.clone();
         for (parameter, argument) in parameters.into_iter().zip(&arguments) {
             let raw_actual = self.expressions[argument.0 as usize].ty.clone();
             let actual = Self::weaken_nested_callable_invocations(
@@ -11243,7 +11373,7 @@ impl Elaborator<'_> {
             let actual = match (&parameter, actual) {
                 (
                     Type::Callable { invocation: required, .. },
-                    Type::Callable {
+                    Type::Callable { contract,
                         safety,
                         lifetime_binders,
                         parameters,
@@ -11251,7 +11381,7 @@ impl Elaborator<'_> {
                         effects,
                         invocation: provided,
                     },
-                ) if provided.contains(*required) => Type::Callable {
+                ) if provided.contains(*required) => Type::Callable { contract,
                     safety,
                     lifetime_binders,
                     parameters,
@@ -11319,6 +11449,9 @@ impl Elaborator<'_> {
             // actual callback. Do not minimize an unconstrained outward row
             // against permissions before those ordinary constraints exist.
             self.check_call_where_bounds(callee, &arguments, span);
+            if !matches!(self.expressions[callee.0 as usize].kind, CoreKind::Function { .. }) {
+                self.check_resident_callable_contract(&contract, resident_parameters, Some(&arguments), &lifetime_substitution, span);
+            }
             self.check_effects(&effects, span);
         }
         let reference_shape = call_reference_shape(self.signatures, &result, &reference_contract);
@@ -11432,7 +11565,7 @@ impl Elaborator<'_> {
     /// currently being elaborated.  This is lexical contract use, not an
     /// inference fallback: a same-spelled user trait has a different frozen
     /// identity and therefore cannot make an arbitrary value callable.
-    fn callable_contract_from_ambient_fn_bound(&self, value: &Type) -> Option<Type> {
+    fn callable_contract_from_ambient_fn_bound(&mut self, value: &Type) -> Option<Type> {
         for (subject, relation) in &self.ambient_where_bounds {
             if subject != value {
                 continue;
@@ -11441,7 +11574,7 @@ impl Elaborator<'_> {
                 let [crate::GenericArgument::Type(payload)] = relation.arguments.as_slice() else {
                     continue;
                 };
-                return Some(Type::Callable {
+                return Some(Type::Callable { contract: Default::default(),
                     safety: crate::Safety::Safe,
                     lifetime_binders: 0,
                     parameters: vec![payload.clone()],
@@ -11486,7 +11619,7 @@ impl Elaborator<'_> {
                 [effects] => effects.value.clone(),
                 _ => continue,
             };
-            return Some(Type::Callable {
+            return Some(Type::Callable { contract: Default::default(),
                 safety: crate::Safety::Safe,
                 lifetime_binders: 0,
                 parameters,
@@ -11495,10 +11628,37 @@ impl Elaborator<'_> {
                 invocation: crate::Quantity::ONCE,
             });
         }
-        for bound in &self.ambient_universal_bounds {
-            if !crate::is_intrinsic_callable_trait(&bound.relation) || bound.subject != *value {
+        for bound in self.ambient_universal_bounds.clone() {
+            if !crate::is_intrinsic_callable_trait(&bound.relation) {
                 continue;
             }
+            if let (Type::Reference { mutability: required, referent: subject, .. },
+                Type::Reference { mutability: actual, referent: value_referent, .. }) = (&bound.subject, value)
+                && required == actual
+                && self.inference.resolve_type_structure((**subject).clone()) == self.inference.resolve_type_structure((**value_referent).clone())
+            {
+                let mut inference = self.inference.clone();
+                let lifetimes = (0..bound.lifetime_binders).map(|_| inference.fresh_lifetime()).collect::<Vec<_>>();
+                let mut valid = true;
+                let opened = bound.map_terms(|argument| crate::types::regions::open_argument(argument.clone(),
+                    |index| lifetimes.get(index as usize).copied()).unwrap_or_else(|| { valid = false; argument }));
+                if !valid || inference.unify(opened.subject.clone(), value.clone()).is_err() { continue; }
+                let parameters = match opened.relation.arguments.as_slice() {
+                    [GenericArgument::Type(Type::Tuple(parameters))] => parameters.clone(),
+                    [GenericArgument::Type(Type::Unit)] => vec![],
+                    _ => continue,
+                };
+                let [output] = opened.type_bindings.as_slice() else { continue; };
+                let effects = match opened.effect_bindings.as_slice() {
+                    [] => EffectRow::empty(), [binding] => binding.value.clone(), _ => continue,
+                };
+                self.inference = inference;
+                return Some(Type::Callable { contract: Default::default(),
+                    safety: crate::Safety::Safe, lifetime_binders: 0, parameters,
+                    result: Box::new(output.value.clone()), effects, invocation: crate::Quantity::ONCE,
+                });
+            }
+            if bound.subject != *value { continue; }
             // When the receiver is independent of the quantified regions,
             // universal Fn evidence is a higher-ranked callable contract.
             // Keep the binder on that contract: each invocation opens it
@@ -11517,7 +11677,7 @@ impl Elaborator<'_> {
                 [binding] => binding.value.clone(),
                 _ => continue,
             };
-            return Some(Type::Callable {
+            return Some(Type::Callable { contract: Default::default(),
                 safety: crate::Safety::Safe, lifetime_binders: bound.lifetime_binders,
                 parameters, result: Box::new(output.value.clone()), effects, invocation: crate::Quantity::ONCE,
             });
@@ -11788,7 +11948,7 @@ impl Elaborator<'_> {
         } else {
             self.normalize_concrete_effect_row(signature.effects.clone())
         };
-        let callable = self.normalize_selectable_type_projections(Type::Callable {
+        let callable = self.normalize_selectable_type_projections(Type::Callable { contract: Default::default(),
             safety: signature.safety,
             lifetime_binders: if hrtb_method_value {
                 expected_lifetime_binders
@@ -11804,7 +11964,7 @@ impl Elaborator<'_> {
             unreachable!("the contextual callable was checked above");
         };
         let expected = if hrtb_method_value {
-            let Type::Callable {
+            let Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
@@ -11815,7 +11975,7 @@ impl Elaborator<'_> {
             else {
                 unreachable!("the contextual callable was checked above");
             };
-            Type::Callable {
+            Type::Callable { contract,
                 safety,
                 lifetime_binders,
                 parameters,
@@ -12076,7 +12236,7 @@ impl Elaborator<'_> {
                         method_arguments,
                         deferred: Some(deferred),
                     },
-                    Type::Callable {
+                    Type::Callable { contract: Default::default(),
                         safety: signature.safety,
                         lifetime_binders: 0,
                         parameters: signature.parameters.clone(),
@@ -12183,7 +12343,7 @@ impl Elaborator<'_> {
                 method_arguments,
                 deferred: None,
             },
-            Type::Callable {
+            Type::Callable { contract: Default::default(),
                 safety: signature.safety,
                 lifetime_binders: 0,
                 parameters: parameters.clone(),
@@ -12355,11 +12515,19 @@ impl Elaborator<'_> {
         );
         let reference_shape =
             call_reference_shape(self.signatures, &result, &reference_contract);
+        // Quantity, shape and invocation prerequisites were checked against
+        // the selected operation parameters above. Freeze the actual resident
+        // refinements as the payload witness, just as aggregate constructors
+        // do; otherwise a plain Fn annotation loses its producer metadata.
+        let payload_types = values.iter().zip(&parameters).map(|(value, expected)| {
+            let actual = self.expressions[value.0 as usize].ty.clone();
+            if actual == Type::Never { expected.clone() } else { actual }
+        }).collect();
         Some(self.alloc(
             CoreKind::Perform {
                 effect: instance,
                 operation: operation_index,
-                payload_types: parameters,
+                payload_types,
                 arguments: values,
                 terminal: operation.terminal,
                 reference_origin: reference_contract.clone(),
@@ -12600,7 +12768,7 @@ impl Elaborator<'_> {
             } else if let Some(name) = &clause.source.resumption {
                 self.locals.define(
                     name.clone(),
-                    Type::Callable {
+                    Type::Callable { contract: Default::default(),
                         safety: crate::Safety::Safe,
                         lifetime_binders: 0,
                         parameters: vec![operation_result.clone()],
@@ -14230,7 +14398,7 @@ impl Elaborator<'_> {
     fn check_universal_callable_bounds(
         &mut self,
         signature: &CallableSignature,
-        arguments: Option<&[CoreId]>,
+        _arguments: Option<&[CoreId]>,
         span: Span,
     ) {
         for bound in &signature.universal_bounds {
@@ -14246,65 +14414,7 @@ impl Elaborator<'_> {
             };
             let proof = (|| -> Result<(), (&'static str, &'static str)> {
                 let opened = bound.open(&scope).ok_or(("G5017", "universal predicate contains an out-of-scope region"))?;
-                if !crate::is_intrinsic_callable_trait(&opened.relation) {
-                    return Err(("G4198", "universal checking for this relation is not yet implemented"));
-                }
-                let subject = self.inference.resolve(opened.subject.clone());
-                let callable = match subject {
-                    Type::Reference { referent, .. } => {
-                        let referent = self.inference.resolve(*referent);
-                        // A named function has no captured receiver state.
-                        // Other borrowed receiver forms need their exact
-                        // closure Fn/RunsIn access evidence, not just a
-                        // structurally equal parameter/result type.
-                        let Some(arguments) = arguments else {
-                            return Err(("G4198", "borrowed universal Fn evidence needs a known receiver"));
-                        };
-                        let candidates = signature.parameters.iter().zip(arguments).filter_map(|(parameter, argument)| {
-                            (self.inference.resolve(parameter.clone()) == referent).then_some(*argument)
-                        }).collect::<Vec<_>>();
-                        if candidates.is_empty() || candidates.iter().any(|argument| !matches!(
-                            self.expressions[argument.0 as usize].kind, CoreKind::Function { .. }
-                        )) {
-                            return Err(("G4198", "universal borrowed Fn checking for this receiver is not yet implemented"));
-                        }
-                        referent
-                    }
-                    value => value,
-                };
-                let Type::Callable { safety, lifetime_binders, parameters, result, effects, .. } = callable else {
-                    return Err(("G4166", "universal Fn bound requires callable evidence"));
-                };
-                if safety != crate::Safety::Safe {
-                    return Err(("G4200", "unsafe callable cannot supply safe universal Fn evidence"));
-                }
-                // A higher-ranked actual callable can be instantiated anew
-                // for each rigid region chosen by the universal predicate.
-                let lifetimes = (0..lifetime_binders).map(|_| self.inference.fresh_lifetime()).collect::<Vec<_>>();
-                let open = |value| crate::types::regions::open_argument(value, |index| lifetimes.get(index as usize).copied())
-                    .ok_or(("G5017", "callable evidence has an invalid lifetime binder"));
-                let parameters = parameters.into_iter().map(|parameter| {
-                    let GenericArgument::Type(parameter) = open(GenericArgument::Type(parameter))? else { unreachable!() };
-                    Ok(parameter)
-                }).collect::<Result<Vec<_>, (&'static str, &'static str)>>()?;
-                let GenericArgument::Type(result) = open(GenericArgument::Type(*result))? else { unreachable!() };
-                let GenericArgument::EffectRow(effects) = open(GenericArgument::EffectRow(effects))? else { unreachable!() };
-                let inputs = match opened.relation.arguments.as_slice() {
-                    [GenericArgument::Type(Type::Tuple(inputs))] => inputs.clone(),
-                    [GenericArgument::Type(Type::Unit)] => vec![],
-                    _ => return Err(("G4164", "universal Fn requires exactly one tuple input argument")),
-                };
-                self.inference.unify(Type::Tuple(inputs), Type::Tuple(parameters))
-                    .map_err(|_| ("G4166", "callable inputs do not satisfy Fn for every quantified lifetime"))?;
-                for binding in opened.type_bindings {
-                    self.inference.unify(binding.value, result.clone())
-                        .map_err(|_| ("G4167", "callable output does not satisfy the universal Fn equality"))?;
-                }
-                for binding in opened.effect_bindings {
-                    self.inference.unify_effect_rows(binding.value, effects.clone())
-                        .map_err(|_| ("G4168", "callable effects do not satisfy the universal Fn equality"))?;
-                }
-                Ok(())
+                self.prove_intrinsic_callable_predicate(opened.subject, opened.relation, opened.type_bindings, opened.effect_bindings, span)
             })();
             if let Err((code, message)) = proof {
                 self.inference.abort_universal_scope(scope);
@@ -14790,342 +14900,46 @@ impl Elaborator<'_> {
         defer_unresolved: bool,
     ) {
         for (subject, relation) in bounds {
-            if !crate::is_intrinsic_callable_trait(&relation) {
+            if !crate::is_intrinsic_callable_trait(&relation) { continue; }
+            let resolved = self.inference.resolve_type_structure(subject.clone());
+            let unresolved = matches!(&resolved, Type::Infer(_))
+                || matches!(&resolved, Type::Reference { referent, .. } if matches!(referent.as_ref(), Type::Infer(_)));
+            if unresolved && defer_unresolved {
+                self.pending_callable_bounds.push(PendingCallableBound {
+                    subject, relation, type_bindings: type_bindings.clone(), effect_bindings: effect_bindings.clone(), span,
+                });
                 continue;
             }
-            let resolved = self.inference.resolve(subject.clone());
-            if matches!(resolved, Type::Infer(_)) {
-                if defer_unresolved {
-                    self.pending_callable_bounds.push(PendingCallableBound {
-                        subject,
-                        relation,
-                        type_bindings: type_bindings.clone(),
-                        effect_bindings: effect_bindings.clone(),
-                        span,
-                    });
-                } else {
-                    self.error(span, "G4141", "cannot prove `Fn` evidence for an unresolved argument type");
-                    self.recovered = true;
-                }
-                continue;
-            }
-            let Type::Callable {
-                safety,
-                parameters,
-                result,
-                effects,
-                ..
-            } = resolved
-            else {
-                // A terminal/recovered argument never supplies a runtime value.
-                // Every other non-structural callable needs exact lexical
-                // evidence; skipping it admits scalars as generic callbacks.
-                if !matches!(resolved, Type::Error | Type::Never)
-                    && !self.ambient_intrinsic_callable_bound_proves(
-                        &resolved, &relation, &type_bindings, &effect_bindings,
-                    )
-                {
-                    self.error(span, "G4105", "argument does not supply the required `Fn` evidence");
-                    self.recovered = true;
-                }
-                continue;
-            };
-            if safety != crate::Safety::Safe {
-                self.error(span, "G4200", "unsafe callable cannot supply safe `Fn` evidence");
-                self.recovered = true;
-                continue;
-            }
-            let inputs = match relation.arguments.as_slice() {
-                [crate::GenericArgument::Type(Type::Tuple(inputs))] => inputs.clone(),
-                [crate::GenericArgument::Type(Type::Unit)] => vec![],
-                _ => {
-                    self.error(
-                        span,
-                        "G4164",
-                        "intrinsic `Fn` requires a tuple input argument",
-                    );
-                    self.recovered = true;
-                    continue;
-                }
-            };
-            if self.inference.unify(Type::Tuple(inputs), Type::Tuple(parameters)).is_err() {
-                self.error(
-                    span,
-                    "G4166",
-                    "intrinsic `Fn` input tuple does not match callable parameters",
-                );
-                self.recovered = true;
-            }
-            let outputs = type_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.subject == subject
-                        && binding.relation == relation
-                        && binding.name == "Output"
-                        && binding.item_arguments.is_empty()
-                })
-                .collect::<Vec<_>>();
-            if let [binding] = outputs.as_slice()
-                && self
-                    .inference
-                    .unify(binding.value.clone(), *result.clone())
-                    .is_err()
-            {
-                self.error(
-                    span,
-                    "G4167",
-                    "intrinsic `Fn` Output equality does not match callable result",
-                );
-                self.recovered = true;
-            }
-            let rows = effect_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.subject == subject
-                        && binding.relation == relation
-                        && binding.name == "Effects"
-                        && binding.item_arguments.is_empty()
-                })
-                .collect::<Vec<_>>();
-            // This is equality, not two independently solved permissions.
-            // Solving `?e <= concrete` first can choose the empty row and
-            // then spuriously reject `concrete <= ?e` for an effectful body.
-            if let [binding] = rows.as_slice()
-                && self
-                    .inference
-                    .unify_effect_rows(binding.value.clone(), effects.clone())
-                    .is_err()
-            {
-                self.error(
-                    span,
-                    "G4168",
-                    "intrinsic `Fn` Effects equality does not match callable effects",
-                );
+            if matches!(resolved, Type::Error | Type::Never) { continue; }
+            let types = type_bindings.iter().filter(|binding| binding.subject == subject && binding.relation == relation).cloned().collect();
+            let effects = effect_bindings.iter().filter(|binding| binding.subject == subject && binding.relation == relation).cloned().collect();
+            if let Err((code, message)) = self.prove_intrinsic_callable_predicate(subject, relation, types, effects, span) {
+                self.error(span, code, message);
                 self.recovered = true;
             }
         }
     }
 
-    fn ambient_intrinsic_callable_bound_proves(
-        &mut self,
-        subject: &Type,
-        relation: &crate::ElaboratedTraitReference,
-        type_bindings: &[crate::ElaboratedAssociatedTypeBinding],
-        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
-    ) -> bool {
-        let Ok(arguments) = relation.arguments.iter().cloned()
-            .map(|argument| self.inference.zonk_generic_argument(argument))
-            .collect::<Result<Vec<_>, _>>() else { return false; };
-        let required = crate::ElaboratedTraitReference {
-            definition: relation.definition,
-            arguments,
-        };
-        if !self.ambient_trait_solver_assumptions().iter()
-            .any(|goal| goal.subject == *subject && goal.relation == required)
-        {
-            return false;
-        }
-        for binding in type_bindings.iter().filter(|binding| binding.relation == *relation) {
-            let binding_subject = self.inference.resolve(binding.subject.clone());
-            if binding_subject != *subject { continue; }
-            let Some((subject, relation, arguments, value)) = self.zonk_associated_type_binding(binding) else { return false; };
-            if !self.ambient_associated_type_binding_proves(binding, &subject, &relation, &arguments, &value) {
-                return false;
-            }
-        }
-        for binding in effect_bindings.iter().filter(|binding| binding.relation == *relation) {
-            let binding_subject = self.inference.resolve(binding.subject.clone());
-            if binding_subject != *subject { continue; }
-            let Some((subject, relation, arguments, value)) = self.zonk_associated_effect_binding(binding) else { return false; };
-            if !self.ambient_associated_effect_binding_proves(binding, &subject, &relation, &arguments, &value) {
-                return false;
-            }
-        }
-        true
-    }
+
     fn check_intrinsic_runs_in_bindings(
         &mut self,
         signature: &CallableSignature,
-        arguments: Option<&[CoreId]>,
+        _arguments: Option<&[CoreId]>,
         span: Span,
     ) {
-        let Some(arguments) = arguments else {
-            return;
-        };
         for (subject, relation) in &signature.where_bounds {
-            if !crate::is_intrinsic_runs_in_trait(relation) {
-                continue;
-            }
-            let Ok(subject) = self.inference.zonk(subject.clone()) else {
-                continue;
-            };
-            let argument =
-                signature
-                    .parameters
-                    .iter()
-                    .enumerate()
-                    .find_map(|(index, parameter)| {
-                        self.inference
-                            .zonk(parameter.clone())
-                            .ok()
-                            .filter(|parameter| *parameter == subject)
-                            .and_then(|_| arguments.get(index).copied())
-                    });
-            let Some(argument) = argument else {
-                continue;
-            };
-            let environment = match &self.expressions[argument.0 as usize].kind {
-                CoreKind::Closure { environment, .. } => Some(environment.clone()),
-                // A named function item is a compiler-created callable with
-                // the canonical empty physical environment. It therefore
-                // carries the same unit RunsIn relation as a noncapturing
-                // closure, even though its nominal callable identity lives in
-                // the frozen declaration table rather than a Core closure.
-                CoreKind::Function { .. } => None,
-                _ => {
-                    self.error(
-                        span,
-                        "G4188",
-                        "intrinsic `RunsIn` requires compiler-generated callable environment evidence",
-                    );
-                    self.recovered = true;
-                    continue;
-                }
-            };
-            let callable = self.expressions[argument.0 as usize].ty.clone();
-            let Ok(Type::Callable {
-                parameters, result, ..
-            }) = self.inference.zonk(callable)
-            else {
-                self.error(
-                    span,
-                    "G4188",
-                    "compiler-generated `RunsIn` evidence is attached to a non-callable value",
-                );
-                self.recovered = true;
-                continue;
-            };
-            let Some((access, inputs)) = intrinsic_runs_in_arguments(relation) else {
-                self.error(
-                    span,
-                    "G4188",
-                    "intrinsic `RunsIn` requires an environment access and tuple input argument",
-                );
-                self.recovered = true;
-                continue;
-            };
-            // The unit type is the sole public spelling for the canonical
-            // empty environment. Every nonempty layout receives an opaque
-            // nominal input and post-state identity.
-            let is_empty_environment = environment
-                .as_ref()
-                .is_none_or(|value| value.captures.is_empty());
-            let environment_type = if is_empty_environment {
-                Type::Unit
-            } else {
-                generated_environment_type(
-                    environment
-                        .as_ref()
-                        .expect("nonempty closure must retain its environment")
-                        .brand,
-                    false,
-                )
-            };
-            let after_type = if is_empty_environment {
-                Type::Unit
-            } else {
-                generated_environment_type(
-                    environment
-                        .as_ref()
-                        .expect("nonempty closure must retain its environment")
-                        .brand,
-                    true,
-                )
-            };
-            self.remember_generated_environment_type(&environment_type);
-            self.remember_generated_environment_type(&after_type);
-            let access = self.match_runs_in_access(access, &environment_type, span);
-            let inputs_match = self.match_runs_in_inputs(inputs, &parameters);
-            let output_bindings = signature
-                .where_associated_type_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.relation == *relation
-                        && binding.name == "Output"
-                        && binding.item_arguments.is_empty()
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut output_matches = true;
-            for binding in output_bindings {
-                if self
-                    .inference
-                    .zonk(binding.subject)
-                    .is_ok_and(|value| value == subject)
-                {
-                    output_matches &= self.inference.unify(binding.value, *result.clone()).is_ok();
-                }
-            }
-            let expected_after = match access {
-                Some(RunsInAccess::Owned) => after_type,
-                Some(RunsInAccess::Shared | RunsInAccess::Unique) => environment_type,
-                None => Type::Error,
-            };
-            let access_matches_captures = match (access, environment.as_ref()) {
-                (Some(RunsInAccess::Owned), _) | (_, None) => true,
-                (Some(RunsInAccess::Shared), Some(environment)) => environment
-                    .captures
-                    .iter()
-                    .all(|capture| {
-                        matches!(
-                            capture.mode,
-                            CaptureMode::SharedBorrow | CaptureMode::Copy
-                        )
-                    }),
-                (Some(RunsInAccess::Unique), Some(environment)) => environment
-                    .captures
-                    .iter()
-                    .all(|capture| capture.mode != CaptureMode::Move),
-                (None, _) => false,
-            };
-            let after_bindings = signature
-                .where_associated_type_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.relation == *relation
-                        && binding.name == "After"
-                        && binding.item_arguments.is_empty()
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut after_matches = true;
-            for binding in after_bindings {
-                if self
-                    .inference
-                    .zonk(binding.subject)
-                    .is_ok_and(|value| value == subject)
-                {
-                    after_matches &= self
-                        .inference
-                        .unify(binding.value, expected_after.clone())
-                        .is_ok();
-                }
-            }
-            if access.is_none()
-                || !access_matches_captures
-                || !inputs_match
-                || !output_matches
-                || !after_matches
-            {
-                self.error(
-                    span,
-                    "G4188",
-                    "intrinsic `RunsIn` evidence does not match the callable's sealed environment",
-                );
+            if !crate::is_intrinsic_runs_in_trait(relation) { continue; }
+            let types = signature.where_associated_type_bindings.iter()
+                .filter(|binding| binding.subject == *subject && binding.relation == *relation).cloned().collect();
+            let effects = signature.where_associated_effect_bindings.iter()
+                .filter(|binding| binding.subject == *subject && binding.relation == *relation).cloned().collect();
+            if let Err((code, message)) = self.prove_intrinsic_callable_predicate(subject.clone(), relation.clone(), types, effects, span) {
+                self.error(span, code, message);
                 self.recovered = true;
             }
         }
     }
+
 
     /// Validate intrinsic `Environment` declarations after RunsIn has bound
     /// their otherwise-unnameable type variables to the sealed closure
@@ -15140,20 +14954,19 @@ impl Elaborator<'_> {
             if !crate::is_intrinsic_environment_trait(&relation) {
                 continue;
             }
-            let Ok(subject) = self.inference.zonk(subject) else {
-                // A generic environment not used by this direct call remains
-                // a declaration-level promise; its caller is responsible for
-                // supplying concrete RunsIn evidence.
-                continue;
-            };
-            if !self.is_compiler_environment_type(&subject) {
+            if self.lexical_callable_predicate(&subject, &relation, &[], &[]) { continue; }
+            let [GenericArgument::Lifetime(lifetime)] = relation.arguments.as_slice() else {
                 self.error(
                     span,
                     "G4188",
-                    "intrinsic `Environment` evidence is only created for sealed compiler environments",
+                    "intrinsic `Environment` requires one exact lifetime argument",
                 );
                 self.recovered = true;
-            }
+                continue;
+            };
+            // Run after ordinary body-region inference so an unresolved
+            // caller scope cannot be mistaken for permission to live forever.
+            self.pending_environment_bounds.push((subject, *lifetime, span));
         }
     }
 
@@ -15184,16 +14997,6 @@ impl Elaborator<'_> {
         }
     }
 
-    fn match_runs_in_inputs(&mut self, inputs: Type, parameters: &[Type]) -> bool {
-        match inputs {
-            Type::Unit => parameters.is_empty(),
-            Type::Tuple(inputs) if inputs.len() == parameters.len() => inputs
-                .into_iter()
-                .zip(parameters.iter().cloned())
-                .all(|(input, parameter)| self.inference.unify(input, parameter).is_ok()),
-            _ => false,
-        }
-    }
 
     fn remember_generated_environment_type(&mut self, ty: &Type) {
         if let Type::Nominal { definition, .. } = ty {
@@ -15203,14 +15006,14 @@ impl Elaborator<'_> {
 
     fn is_compiler_environment_type(&self, ty: &Type) -> bool {
         matches!(ty, Type::Unit)
-            || matches!(ty, Type::Nominal { definition, arguments } if arguments.is_empty()
-                && self.generated_environment_types.contains(definition))
+            || matches!(ty, Type::Nominal { definition, .. }
+                if self.generated_environment_types.contains(definition))
     }
     /// Freeze the declaration-owned trait contracts into scoped solver
     /// assumptions.  The solver expands their supertrait closure, while this
     /// elaborator keeps them local to the body that declared the bounds.
     fn ambient_trait_solver_assumptions(&mut self) -> Vec<TraitGoal> {
-        self.ambient_where_bounds
+        let mut assumptions = self.ambient_where_bounds
             .clone()
             .into_iter()
             .filter_map(|(subject, relation)| {
@@ -15234,7 +15037,20 @@ impl Elaborator<'_> {
                     subject,
                 })
             })
-            .collect()
+            .collect::<Vec<_>>();
+        assumptions.extend(self.pending_environment_assumptions());
+        assumptions
+    }
+
+    fn pending_environment_assumptions(&mut self) -> Vec<TraitGoal> {
+        self.pending_environment_bounds.iter().filter_map(|(subject, lifetime, _)| {
+            let subject = self.inference.zonk(subject.clone()).ok()?;
+            let lifetime = self.inference.resolve_lifetime(*lifetime).ok()?;
+            Some(TraitGoal { subject, relation: crate::ElaboratedTraitReference {
+                definition: crate::intrinsic_environment_trait_definition(),
+                arguments: vec![GenericArgument::Lifetime(lifetime)],
+            } })
+        }).collect()
     }
     fn operators(&mut self, operands: Vec<ExprId>, operators: Vec<String>, span: Span) -> CoreId {
         self.operators_expected(operands, operators, span, None)
@@ -15418,7 +15234,9 @@ impl Elaborator<'_> {
         // may have just solved its result cell to a reference or callable.
         // This is not zonking/defaulting: unresolved cells, regions and rows
         // remain open, and ordinary lifetime/ownership checks still apply.
-        let ty = self.inference.resolve_type_structure(ty);
+        let mut ty = self.inference.resolve_type_structure(ty);
+        ty = self.joined_callable_value_type(ty);
+        self.mint_callable_contract(&kind, &mut ty);
         let id = CoreId(self.expressions.len() as u32);
         self.expressions.push(CoreExpr { kind, ty, span });
         id
@@ -15490,6 +15308,7 @@ fn type_generic_arity(value: &Type) -> u32 {
         Type::Reference { referent, .. }
         | Type::RawPointer { pointee: referent, .. } => type_generic_arity(referent),
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
@@ -15501,6 +15320,7 @@ fn type_generic_arity(value: &Type) -> u32 {
             .chain(std::iter::once(argument_arity(
                 &GenericArgument::EffectRow(effects.clone()),
             )))
+            .chain(contract.terms().iter().map(|(value, _)| argument_arity(value)))
             .max()
             .unwrap_or(0),
         _ => 0,
@@ -15719,7 +15539,7 @@ fn align_lifetime_types(
             })
         }
         (
-            Type::Callable {
+            Type::Callable { contract: expected_contract,
                 safety: expected_safety,
                 lifetime_binders: expected_binders,
                 parameters: expected_parameters,
@@ -15727,7 +15547,7 @@ fn align_lifetime_types(
                 effects: expected_effects,
                 invocation: expected_invocation,
             },
-            Type::Callable {
+            Type::Callable { contract: actual_contract,
                 safety: actual_safety,
                 lifetime_binders: actual_binders,
                 parameters: actual_parameters,
@@ -15749,7 +15569,7 @@ fn align_lifetime_types(
             for (expected, actual) in expected_parameters.iter().zip(actual_parameters) {
                 align_lifetime_types(actual, expected, substitution, mode, depth + 1)?;
             }
-            Ok(Type::Callable {
+            Ok(Type::Callable { contract: if expected_contract.is_empty() { actual_contract.clone() } else { expected_contract.clone() },
                 safety: *expected_safety,
                 lifetime_binders: *expected_binders,
                 parameters: actual_parameters.clone(),
@@ -15841,14 +15661,14 @@ pub(crate) fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Ty
             mutability,
             pointee: Box::new(open_hrtb_callable_body_type(*pointee, binder_depth)),
         },
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.map_terms(|value, extra| open_hrtb_callable_body_generic_argument(value, binder_depth + 1 + extra))),
             safety,
             lifetime_binders,
             parameters: parameters
@@ -16233,14 +16053,14 @@ fn substitute_call_lifetimes(
             lifetime: substitute_call_lifetime(lifetime, substitution, depth)?,
             referent: Box::new(substitute_call_lifetimes(*referent, substitution, depth)?),
         }),
-        Type::Callable {
+        Type::Callable { contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Ok(Type::Callable {
+        } => Ok(Type::Callable { contract: Box::new(contract.try_map_terms(|value, extra| substitute_call_generic_argument(value, substitution, depth + 1 + extra))?),
             safety,
             lifetime_binders,
             parameters: parameters
@@ -17481,6 +17301,19 @@ fn reference_leaf_paths_active(
             }
             for (index, argument) in arguments.iter().enumerate() {
                 let GenericArgument::Type(argument) = argument else { continue; };
+                // A compiler-issued Environment names proof-level access,
+                // not another resident in the owner's raw storage. Its
+                // capture dependencies live on the associated callable.
+                // This exemption is exact value evidence from this same
+                // nominal application, not a spelling or an unknown-type
+                // fallback. Physical fields were checked above and cannot
+                // use it to hide an unprojectable resident.
+                if matches!(argument, Type::Nominal { definition, .. }
+                    if !signatures.definitions.contains_key(definition))
+                    && arguments.iter().any(|value| matches!(value,
+                        GenericArgument::Type(value) if carries_callable_environment(value, argument))) {
+                    continue;
+                }
                 let mut logical = vec![];
                 let prefix = path.len();
                 path.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
@@ -17525,6 +17358,20 @@ fn reference_leaf_paths_active(
     if let Some(previous) = previous { active.insert(*definition, previous); }
     else { active.remove(definition); }
     result
+}
+
+fn carries_callable_environment(value: &Type, environment: &Type) -> bool {
+    match value {
+        Type::Callable { contract, .. } => contract.environment.as_deref() == Some(environment)
+            || contract.after_environment.as_deref() == Some(environment)
+            || contract.captures.iter().any(|capture| carries_callable_environment(capture, environment)),
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| matches!(argument,
+            GenericArgument::Type(value) if carries_callable_environment(value, environment))),
+        Type::Tuple(values) => values.iter().any(|value| carries_callable_environment(value, environment)),
+        Type::Reference { referent: value, .. } | Type::Array(value)
+            | Type::FixedArray { element: value, .. } => carries_callable_environment(value, environment),
+        _ => false,
+    }
 }
 
 fn reference_layout_weight(ty: &Type) -> usize {

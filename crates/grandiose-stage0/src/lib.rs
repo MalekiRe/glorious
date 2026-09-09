@@ -184,6 +184,7 @@ pub use trait_solver::{
     TraitSolverLimits, TraitWhereBoundExplanation,
 };
 pub use types::{
+    CallableContract,
     ConstInferVar, ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
     EffectVar, GenericArgument, GenericKind, InferContext, InferVar, Lifetime, Mutability,
     PointerMutability, Safety, ScalarType, StructuralConstError, IntegerConst, IntegerConstExpr, Type,

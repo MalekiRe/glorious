@@ -26,8 +26,9 @@ pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Exact schema of this implementation-local envelope. Earlier schemas are
 /// rejected, never interpreted using the current instruction or type layout.
-// Schema 115 adds fixed arrays and explicit sparse array-pattern remainders.
-pub const STAGE0_VM_SCHEMA: u32 = 115;
+// Schema 116 retains independently verified shared/unique callable receiver
+// authority alongside the schema-115 fixed-array representation.
+pub const STAGE0_VM_SCHEMA: u32 = 116;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -266,11 +267,15 @@ pub(super) fn encode_type(value: &VmType, output: &mut Vec<u8>) {
     });
     match value {
         VmType::Callable {
+            shared_receiver,
+            unique_receiver,
             parameters,
             result,
             effects,
             ..
         } => {
+            output.push(u8::from(*shared_receiver));
+            output.push(u8::from(*unique_receiver));
             output.extend_from_slice(&(parameters.len() as u64).to_le_bytes());
             for parameter in parameters {
                 encode_type(parameter, output);

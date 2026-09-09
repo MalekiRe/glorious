@@ -14,6 +14,8 @@ use crate::{
 pub mod integer_const;
 pub(crate) mod regions;
 mod universes;
+mod callable;
+pub use callable::CallableContract;
 pub(crate) use universes::UniversalScope;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -515,6 +517,7 @@ pub enum Type {
         pointee: Box<Type>,
     },
     Callable {
+        contract: Box<callable::CallableContract>,
         safety: Safety,
         /// The number of higher-ranked lifetime binders that scope this
         /// callable's parameter/result tree. Bound lifetimes use their
@@ -843,6 +846,7 @@ impl InferContext {
                 self.collect_unresolved_type_variables(*referent, variables)
             }
             Type::Callable {
+                contract,
                 parameters,
                 result,
                 effects,
@@ -852,7 +856,8 @@ impl InferContext {
                     self.collect_unresolved_type_variables(parameter, variables)
                 })?;
                 self.collect_unresolved_type_variables(*result, variables)?;
-                self.collect_effect_variables(effects, variables)
+                self.collect_effect_variables(effects, variables)?;
+                contract.terms().into_iter().try_for_each(|(argument, _)| self.collect_generic_argument_variables(argument, variables))
             }
             _ => Ok(()),
         }
@@ -910,6 +915,17 @@ impl InferContext {
     }
 
     pub fn unify(&mut self, left: Type, right: Type) -> Result<Type, TypeError> {
+        let variables = [match left { Type::Infer(variable) => Some(variable), _ => None },
+            match right { Type::Infer(variable) => Some(variable), _ => None }];
+        let value = self.unify_resolved(left, right)?;
+        // A previously solved cell can acquire a weaker value refinement
+        // from another compatible alternative. Keep users of that cell tied
+        // to the join, not to whichever callable happened to arrive first.
+        for variable in variables.into_iter().flatten() { self.bind(variable, value.clone())?; }
+        Ok(value)
+    }
+
+    fn unify_resolved(&mut self, left: Type, right: Type) -> Result<Type, TypeError> {
         let left = self.resolve(left);
         let right = self.resolve(right);
         match (left, right) {
@@ -1043,6 +1059,7 @@ impl InferContext {
             }
             (
                 Type::Callable {
+                    contract: left_contract,
                     safety: left_safety,
                     lifetime_binders: left_binders,
                     parameters: left_parameters,
@@ -1051,6 +1068,7 @@ impl InferContext {
                     invocation: left_invocation,
                 },
                 Type::Callable {
+                    contract: right_contract,
                     safety: right_safety,
                     lifetime_binders: right_binders,
                     parameters: right_parameters,
@@ -1060,7 +1078,10 @@ impl InferContext {
                 },
             ) if left_safety == right_safety && left_binders == right_binders && left_invocation == right_invocation => {
                 let effects = self.unify_effect_rows(left_effects, right_effects)?;
-                Ok(Type::Callable {
+                let left_contract = left_contract.map_terms(|argument, _| self.resolve_argument_structure(argument));
+                let right_contract = right_contract.map_terms(|argument, _| self.resolve_argument_structure(argument));
+                let contract = left_contract.join(&right_contract);
+                Ok(Type::Callable { contract: Box::new(contract),
                     safety: left_safety,
                     lifetime_binders: left_binders,
                     parameters: self.unify_many(left_parameters, right_parameters)?,
@@ -1144,13 +1165,14 @@ impl InferContext {
                 referent: Box::new(self.zonk(*referent)?),
             }),
             Type::Callable {
+                contract,
                 safety,
                 lifetime_binders,
                 parameters,
                 result,
                 effects,
                 invocation,
-            } => Ok(Type::Callable {
+            } => Ok(Type::Callable { contract: Box::new(contract.try_map_terms(|value, _| self.zonk_generic_argument(value))?),
                 safety,
                 lifetime_binders,
                 parameters: parameters
@@ -1828,6 +1850,7 @@ impl InferContext {
                 referent: value, ..
             } => self.const_occurs_in_type(variable, &value),
             Type::Callable {
+                contract,
                 parameters,
                 result,
                 effects,
@@ -1838,6 +1861,7 @@ impl InferContext {
                     .any(|value| self.const_occurs_in_type(variable, value))
                     || self.const_occurs_in_type(variable, &result)
                     || self.const_argument_occurs(variable, &GenericArgument::EffectRow(effects))
+                    || contract.terms().iter().any(|(value, _)| self.const_argument_occurs(variable, value))
             }
             Type::Unit
             | Type::Never
@@ -2042,7 +2066,8 @@ impl InferContext {
             Type::StaticData { element, tag, alignment } => Type::StaticData {
                 element: Box::new(self.resolve_type_structure(*element)), tag, alignment,
             },
-            Type::Callable { safety, lifetime_binders, parameters, result, effects, invocation } => Type::Callable {
+            Type::Callable { contract, safety, lifetime_binders, parameters, result, effects, invocation } => Type::Callable {
+                contract: Box::new(contract.map_terms(|argument, _| self.resolve_argument_structure(argument))),
                 safety, lifetime_binders,
                 parameters: parameters.into_iter().map(|value| self.resolve_type_structure(value)).collect(),
                 result: Box::new(self.resolve_type_structure(*result)), effects, invocation,
@@ -2189,6 +2214,7 @@ impl InferContext {
                 referent: element, ..
             } => self.effect_occurs_in_type(variable, &element),
             Type::Callable {
+                contract,
                 parameters,
                 result,
                 effects,
@@ -2199,6 +2225,7 @@ impl InferContext {
                     .any(|parameter| self.effect_occurs_in_type(variable, parameter))
                     || self.effect_occurs_in_type(variable, &result)
                     || self.effect_occurs_in_row(variable, &effects)
+                    || contract.terms().iter().any(|(value, _)| self.effect_occurs_in_generic_argument(variable, value))
             }
             Type::Unit
             | Type::Never
@@ -2244,6 +2271,7 @@ impl InferContext {
                 referent: element, ..
             } => self.occurs(variable, &element),
             Type::Callable {
+                contract,
                 parameters,
                 result,
                 effects,
@@ -2254,6 +2282,7 @@ impl InferContext {
                     .any(|parameter| self.occurs(variable, parameter))
                     || self.occurs(variable, &result)
                     || self.effect_row_type_occurs(variable, &effects)
+                    || contract.terms().iter().any(|(value, _)| self.generic_argument_occurs(variable, value))
             }
             _ => false,
         }
@@ -2599,6 +2628,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             encode_type(referent, output);
         }
         Type::Callable {
+            contract,
             safety,
             lifetime_binders,
             parameters,
@@ -2609,6 +2639,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             // Keep existing safe callable identities stable; unsafe callable
             // contracts occupy a distinct tag, never an erasable effect bit.
             output.push(if *safety == Safety::Safe { 7 } else { 17 });
+            contract.encode(output);
             output.extend_from_slice(&lifetime_binders.to_le_bytes());
             encode_types(parameters, output);
             encode_type(result, output);
@@ -2781,13 +2812,14 @@ pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
             referent: Box::new(canonicalize_type_identity(*referent)),
         },
         Type::Callable {
+            contract,
             safety,
             lifetime_binders,
             parameters,
             result,
             effects,
             invocation,
-        } => Type::Callable {
+        } => Type::Callable { contract: Box::new(contract.map_terms(|argument, _| canonicalize_generic_argument_identity(argument))),
             safety,
             lifetime_binders,
             parameters: parameters
@@ -2848,6 +2880,7 @@ fn type_identity_is_well_formed(value: &Type) -> bool {
             referent: element, ..
         } => type_identity_is_well_formed(element),
         Type::Callable {
+            contract,
             parameters,
             result,
             effects,
@@ -2858,6 +2891,7 @@ fn type_identity_is_well_formed(value: &Type) -> bool {
                 && parameters.iter().all(type_identity_is_well_formed)
                 && type_identity_is_well_formed(result)
                 && effect_row_identity_is_well_formed(effects)
+                && contract.terms().iter().all(|(value, _)| generic_argument_identity_is_well_formed(value))
         }
         Type::ConstQuantity(value) => quantity_is_well_formed(*value),
         Type::Unit

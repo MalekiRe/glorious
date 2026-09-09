@@ -160,6 +160,11 @@ impl OutlivesPredicate {
                 value(referent),
             ],
             Type::Nominal { arguments, .. } => arguments.iter().filter_map(argument).collect(),
+            Type::Callable { contract, .. } if contract.environment.is_some() => {
+                // The callable ABI does not describe its stored residents.
+                // Only compiler-minted capture terms establish outlives.
+                contract.captures.iter().map(value).collect()
+            }
             _ => return None,
         })
     }

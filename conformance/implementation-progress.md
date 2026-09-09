@@ -5,6 +5,45 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 88: value-resident callable contracts
+
+Integrates the isolated `3257cae6..a7dff60b` callable-contract delta while
+preserving the later logical-region, direct-continuation and native changes.
+Callable values retain environment/capture dependencies, borrowed receiver
+permissions and ordinary or lifetime-quantified invocation prerequisites.
+Stored generic callbacks prove exact `Fn`/`RunsIn` inputs, output, effects and
+`After`. Non-head implementation binders are derived only from exact callable
+associated equalities, with checks against leaking quantified regions.
+
+Written argument, return, field, array and effect-payload ABIs cannot erase
+unproved invocation prerequisites. Environment scopes are checked independently
+after region inference. Borrowed calls invoke the original receiver and preserve
+its mutable capture state. Borrowed callback effects remain subject to the
+ordinary minimum-use cancellation checks.
+
+Interface 20, bytecode 72, verifier 36 and schema 116 retain receiver permissions
+and reconstruct their validity from executable capture accesses. Callable
+parameter permissions are contravariant; unique references, raw pointers and
+nominal arguments stay invariant. Every possible effect sender must satisfy
+every handler's payload contract, with the resume direction reversed.
+
+Main-tree integration also preserves fixed activation generics while weakening
+receiver permissions: tuple, dynamic/fixed-array, record and enum producers
+cannot reinterpret a concrete value or another generic parameter as the target
+generic. Fresh and decoded forged programs check this boundary. Proof-only
+environment arguments are distinguished from physical residents only through
+exact callable evidence in the same nominal application. A strict argument's
+label transfer does not invoke its previously evaluated borrowed receiver.
+
+The combined run passes 2,322 tests (`target/integration-callable-contracts-v4.log`),
+including all 19 borrowed-contract, 891 service, 176 library API, 269 Core and
+180 VM-backend tests. The all-target compile check also passes
+(`target/callable-all-targets-v4.log`). The only failing targets are the five
+known generic-helper exit cases and 16 actual source-library cases; the latter
+retains 15 passes. Embedded array and iterator probes remain cancellation-guard
+negatives, not passing library roots. Broader quantified domains, complete
+guarded control contracts and full source-library acceptance remain open.
+
 ## Cache 87: exact native float conversions
 
 Integrated `e840442e` and its separate conversion-fixture correction `dffdf6d9`.

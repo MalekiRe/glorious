@@ -933,7 +933,7 @@ impl Elaborator<'_> {
                 result,
                 effects,
                 ..
-            } => Some(Type::Callable {
+            } => Some(Type::Callable { contract: Default::default(),
                 safety: *safety,
                 lifetime_binders: 0,
                 parameters: parameters

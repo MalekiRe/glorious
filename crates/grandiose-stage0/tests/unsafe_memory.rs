@@ -163,7 +163,7 @@ fn unsafe_callable_cannot_be_relabelled_as_safe_by_aliases_or_fn_evidence() {
             "unsafe contract erased: {source}\n{core:#?}"
         );
     }
-    let mut safe = Type::Callable {
+    let mut safe = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],

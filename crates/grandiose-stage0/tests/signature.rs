@@ -582,7 +582,7 @@ fn bare_associated_row_projection_retains_its_exact_relation() {
 #[test]
 fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
     let intrinsic = intrinsic_callable_trait_definition();
-    let callable = Type::Callable {
+    let callable = Type::Callable { contract: Default::default(),
         safety: grandiose_stage0::Safety::Safe,
         lifetime_binders: 0,
         parameters: vec![],
@@ -749,7 +749,7 @@ fn frozen_interfaces_reject_forged_intrinsic_label_contracts() {
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
             where_bounds: vec![(
-                Type::Callable {
+                Type::Callable { contract: Default::default(),
                     safety: grandiose_stage0::Safety::Safe,
                     lifetime_binders: 0,
                     parameters: vec![Type::Scalar(ScalarType::I64)],
@@ -2729,7 +2729,7 @@ fn frozen_associated_effect_rows_are_canonical_sets() {
     );
     let mut inference = grandiose_stage0::InferContext::default();
     let first = inference
-        .type_fingerprint(grandiose_stage0::Type::Callable {
+        .type_fingerprint(grandiose_stage0::Type::Callable { contract: Default::default(),
             safety: grandiose_stage0::Safety::Safe,
             lifetime_binders: 0,
             parameters: signature.parameters.clone(),
@@ -2739,7 +2739,7 @@ fn frozen_associated_effect_rows_are_canonical_sets() {
         })
         .unwrap();
     let second = inference
-        .type_fingerprint(grandiose_stage0::Type::Callable {
+        .type_fingerprint(grandiose_stage0::Type::Callable { contract: Default::default(),
             safety: grandiose_stage0::Safety::Safe,
             lifetime_binders: 0,
             parameters: signature.parameters.clone(),

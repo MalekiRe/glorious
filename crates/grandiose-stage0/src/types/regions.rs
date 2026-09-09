@@ -117,8 +117,12 @@ fn map_type(value: &mut Type, cutoff: u32, map: &mut dyn FnMut(Lifetime, u32) ->
             *lifetime = map(*lifetime, cutoff)?;
             map_type(referent, cutoff, map)?;
         }
-        Type::Callable { parameters, result, effects, .. } => {
+        Type::Callable { contract, parameters, result, effects, .. } => {
             let cutoff = cutoff.checked_add(1)?;
+            **contract = contract.try_map_terms(|mut argument, extra| {
+                map_argument_at(&mut argument, cutoff.checked_add(extra).ok_or(())?, map).ok_or(())?;
+                Ok::<_, ()>(argument)
+            }).ok()?;
             for parameter in parameters {
                 map_type(parameter, cutoff, map)?;
             }
@@ -151,7 +155,7 @@ mod tests {
 
     #[test]
     fn opening_removes_only_its_own_scope_and_avoids_capturing_replacements() {
-        let argument = GenericArgument::Type(Type::Callable {
+        let argument = GenericArgument::Type(Type::Callable { contract: Default::default(),
             safety: Safety::Safe, lifetime_binders: 1,
             parameters: vec![reference(0), reference(1), reference(2)],
             result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: Quantity::ONCE,
@@ -166,7 +170,7 @@ mod tests {
     #[test]
     fn shifting_preserves_internal_binders_and_moves_only_free_regions() {
         for lifetime_binders in [0, 1] {
-            let argument = GenericArgument::Type(Type::Callable {
+            let argument = GenericArgument::Type(Type::Callable { contract: Default::default(),
                 safety: Safety::Safe, lifetime_binders,
                 parameters: vec![reference(0), reference(1)],
                 result: Box::new(reference(2)), effects: EffectRow::empty(), invocation: Quantity::ONCE,

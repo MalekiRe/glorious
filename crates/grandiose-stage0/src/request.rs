@@ -183,7 +183,7 @@ pub struct CompilerBuildIdentity {
 /// in nominal identities and their independently checked layout descriptors.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
-pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
+pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // Integer const values and expressions retain kind, sign, and full magnitude;
 // source range checks wait for the declared slot kind. Older identities and
 // artifacts cannot be reinterpreted using the new canonical representation.
@@ -240,7 +240,7 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
 // GAT item lifetime holes before contextual argument matching.
 // Cache 80/interface 19 retain explicit position-specific operator targets,
 // their declaring-scope resolution and target contracts in fixity keys.
-// Cache 81 is reserved for the callable-contract integration. Cache 82
+// Cache 81 reserved the callable-contract lane, integrated at 88. Cache 82
 // retains every conjunct in a `where T: A + B` bound rather than ignoring B.
 // Cache 83 preserves identity unique-reference tail results through joins
 // and introduces the private mixed LLVM/VM mandatory-tail dispatcher (ABI 5).
@@ -249,8 +249,13 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
 // Cache 85 retains logical resident regions in generic source-managed owners.
 // Cache 86 separates branded ownership continuations; cache 87 adds exact
 // native floating conversions with an explicitly guarded machine profile.
-pub const STAGE0_CACHE_GENERATION: u32 = 87;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
+// Cache 88/interface 20 retain callable environment/access/residual contracts,
+// prove borrowed quantified Fn/RunsIn predicates and their exact associated
+// equalities, and account for borrowed-call cancellation. Bytecode 72/schema
+// 116 encode receiver authority; verifier 36 reconstructs it from executable
+// capture accesses and invokes borrowed receivers through their original loan.
+pub const STAGE0_CACHE_GENERATION: u32 = 88;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
 // Verifier 28 independently reconstructs frame-independence must facts and
@@ -258,7 +263,7 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 29 checks the exact safe signatures of address-only pointer leaves.
 // Verifier 31 distinguishes independent reference contents from the local
 // address of their carrier; overwrites invalidate retained referent proofs.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 35;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 36;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

@@ -230,6 +230,19 @@ pub struct OwnershipClosure {
 pub struct OwnershipError(pub String);
 
 impl OwnershipMir {
+    /// A lifted body returns its checked value refinement, which may retain
+    /// captures and residual predicates absent from a written callable ABI.
+    /// Keep the declared result for a bottom body or inconsistent exits; the
+    /// latter must still fail the ordinary exact MIR return validation.
+    pub(crate) fn refined_result_type<'a>(&'a self, declared: &'a Type) -> &'a Type {
+        let mut results = self.blocks.iter().filter_map(|block| match block.terminator.control {
+            ControlTerminator::Return(value) => self.values.get(value.0 as usize).map(|value| &value.ty),
+            _ => None,
+        });
+        let Some(result) = results.next() else { return declared; };
+        if results.all(|other| other == result) { result } else { declared }
+    }
+
     /// Common executable frontend boundary. It never selects concrete
     /// instances or emits runtime instructions.
     pub fn from_typed(definition: DefKey, body: &crate::TypedBody, flow: &PlaceFlow,
@@ -252,7 +265,16 @@ impl OwnershipMir {
         let control = ControlMir::lower(&evaluation).map_err(|error| OwnershipError(format!("invalid Control MIR: {error:?}")))?;
         let closure_flows = body.expressions.iter().filter_map(|expression| {
             let crate::CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { return None; };
-            let flow = PlaceFlow::analyze_closure(body, *root, parameters, environment, signatures, flow, solver);
+            let lexical_solver = solver.map(|solver| {
+                let mut solver = solver.fresh_query();
+                solver.set_universal_assumptions(flow.lexical_universal_bounds.clone());
+                solver.set_lexical_assumptions(flow.lexical_bounds.iter().map(|(subject, relation)| crate::TraitGoal {
+                    subject: subject.clone(), relation: relation.clone(),
+                }).collect());
+                solver.set_associated_bindings(vec![], flow.lexical_effect_bindings.clone());
+                solver
+            });
+            let flow = PlaceFlow::analyze_closure(body, *root, parameters, environment, signatures, flow, lexical_solver.as_ref());
             Some((crate::mir::lifted_callable_definition(environment.brand), flow))
         }).collect();
         let ownership = Self::lower_body(control, flow, &closure_flows, signatures, solver, &[])?;

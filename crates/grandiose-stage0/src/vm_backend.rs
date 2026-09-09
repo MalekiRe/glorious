@@ -50,6 +50,7 @@ mod replay;
 mod coverage;
 mod tail_provenance;
 mod label_dispatch;
+mod callable_access;
 pub mod llvm;
 mod reference_origins;
 use reference_origins::ReferenceOriginSet;
@@ -117,6 +118,10 @@ pub enum VmType {
         arguments: Vec<VmGenericArgument>,
     },
     Callable {
+        /// Receiver authority reconstructed from the executable capture body
+        /// at every producer; these bits are not a trusted source annotation.
+        shared_receiver: bool,
+        unique_receiver: bool,
         safety: Safety,
         parameters: Vec<VmType>,
         result: Box<VmType>,
@@ -137,6 +142,18 @@ pub enum VmType {
 }
 
 impl VmType {
+    fn callable_receiver(&self) -> Option<&Self> {
+        match self {
+            Self::Callable { .. } => Some(self),
+            Self::Reference { unique, referent } => match referent.as_ref() {
+                Self::Callable { shared_receiver, unique_receiver, .. }
+                    if if *unique { *unique_receiver } else { *shared_receiver } => Some(referent),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn array_element(&self) -> Option<&VmType> {
         match self {
             Self::Array(element) | Self::FixedArray { element, .. } => Some(element),
@@ -3472,6 +3489,7 @@ pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         Type::Callable {
+            contract,
             lifetime_binders,
             parameters,
             result,
@@ -3490,6 +3508,8 @@ pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
                 crate::core::open_hrtb_callable_body_effect_row(effects.clone(), 0)
             };
             Ok(VmType::Callable {
+                shared_receiver: contract.shared_receiver,
+                unique_receiver: contract.unique_receiver,
                 safety: *safety,
                 parameters: parameters
                     .iter()
@@ -3888,8 +3908,10 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
     }
     let transfer_proofs = tail_provenance::summaries(
         &native_semantics.map_or(program, |source| &source.program).functions)?;
+    let mut intact_captures = BTreeMap::new();
     for function in program.functions.values() {
-        verify_function_control(function, true, false, &transfer_proofs)?;
+        let control = verify_function_control(function, true, false, &transfer_proofs)?;
+        intact_captures.insert(function.definition, control.captures_intact_at_boundaries);
         for action in declared_frame_cleanup(function)? {
             let target = program.functions.get(&action.destructor)
                 .ok_or(VmArtifactError::MissingFunction { definition: action.destructor })?;
@@ -3978,7 +4000,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                 // also rejects an artifact whose arguments and destination
                 // demand incompatible specializations of the same binder.
                 if target_returns
-                    && !unify_call_type(&declared_return, &found, &mut generic_bindings)
+                    && !unify_call_type_variance(&declared_return, &found, &mut generic_bindings, ReceiverVariance::Contravariant)
                 {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
@@ -3988,7 +4010,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                 }
                 verify_effect_operation_specialization(target, &generic_bindings)?;
                 let expected = instantiate_vm_type(&declared_return, &generic_bindings);
-                if target_returns && expected != found {
+                if target_returns && !vm_type_matches(&expected, &found) {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected,
@@ -4058,7 +4080,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                     None => {}
                 }
                 let VmType::Callable {
-                    safety, parameters, result, ..
+                    shared_receiver, unique_receiver, safety, parameters, result, ..
                 } = register_type(function, *dst)?
                 else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
@@ -4068,6 +4090,8 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                         message: "callable value safety does not match its target",
                     });
                 }
+                callable_access::verify_claim(target, shared_receiver, unique_receiver,
+                    intact_captures.get(callee) == Some(&true))?;
                 if target.parameters != target.captures + parameters.len() as u32 {
                     return Err(VmArtifactError::CallArity {
                         expected: target.parameters.saturating_sub(target.captures),
@@ -4108,7 +4132,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                 // A first-class zero-argument generic constructor likewise
                 // receives its specialization from the callable result.
                 if target_returns
-                    && !unify_call_type(&declared_return, result.as_ref(), &mut generic_bindings)
+                    && !unify_call_type_variance(&declared_return, result.as_ref(), &mut generic_bindings, ReceiverVariance::Contravariant)
                 {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
@@ -4118,7 +4142,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                 }
                 verify_effect_operation_specialization(target, &generic_bindings)?;
                 let expected = instantiate_vm_type(&declared_return, &generic_bindings);
-                if target_returns && expected != *result {
+                if target_returns && !vm_type_matches(&expected, result.as_ref()) {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected,
@@ -4228,7 +4252,7 @@ fn verify_effect_operation_specialization(
 fn verify_program_effect_operation_abis(
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Result<(), VmArtifactError> {
-    let mut operations = Vec::<(DefKey, Vec<VmGenericArgument>, u32, Vec<VmType>, VmType, bool)>::new();
+    let mut operations = Vec::<(DefKey, Vec<VmGenericArgument>, u32, Vec<VmType>, VmType, bool, bool)>::new();
     for function in functions.values() {
         for instruction in &function.instructions {
             let (effect, effect_arguments, operation, payloads, resume_type) = match instruction {
@@ -4283,22 +4307,40 @@ fn verify_program_effect_operation_abis(
                 _ => continue,
             };
             let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
-            if let Some((_, _, _, expected_payloads, expected_resume_type, expected_owned_payloads)) = operations
+            let producer = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::Perform { .. });
+            for (_, _, _, expected_payloads, expected_resume_type, expected_owned_payloads, previous_producer) in operations
                 .iter()
-                .find(|(known_effect, known_arguments, known_operation, _, _, _)| {
+                .filter(|(known_effect, known_arguments, known_operation, _, _, _, _)| {
                     *known_effect == effect
                         && *known_arguments == effect_arguments
                         && *known_operation == operation
                 })
             {
-                if *expected_payloads != payloads || *expected_resume_type != resume_type || *expected_owned_payloads != owned_payloads {
+                let same_shape = expected_payloads.len() == payloads.len()
+                    && expected_payloads.iter().zip(&payloads).all(|(expected, actual)|
+                        receiver_types_match(expected, actual, ReceiverVariance::Shape))
+                    && receiver_types_match(expected_resume_type, &resume_type, ReceiverVariance::Shape);
+                // Every potential dynamic handler must accept every sender.
+                // Its resume argument travels in the opposite direction.
+                // Comparing only the first sighting is insufficient when two
+                // senders provide different callable receiver permissions.
+                let transfers = producer == *previous_producer || if producer {
+                    expected_payloads.iter().zip(&payloads).all(|(expected, actual)|
+                        receiver_types_match(expected, actual, ReceiverVariance::Covariant))
+                        && receiver_types_match(&resume_type, expected_resume_type, ReceiverVariance::Covariant)
+                } else {
+                    payloads.iter().zip(expected_payloads).all(|(expected, actual)|
+                        receiver_types_match(expected, actual, ReceiverVariance::Covariant))
+                        && receiver_types_match(expected_resume_type, &resume_type, ReceiverVariance::Covariant)
+                };
+                if !same_shape || !transfers || *expected_owned_payloads != owned_payloads {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "program effect operation ABI declarations disagree",
                     });
                 }
-            } else {
-                operations.push((effect, effect_arguments, operation, payloads, resume_type, owned_payloads));
             }
+            let contract = (effect, effect_arguments, operation, payloads, resume_type, owned_payloads, producer);
+            if !operations.contains(&contract) { operations.push(contract); }
         }
     }
     Ok(())
@@ -4370,14 +4412,45 @@ pub(crate) fn reachable_host_capabilities(
     capabilities.into_iter().collect()
 }
 
+/// Receiver permissions follow callable variance, not structural covariance:
+/// inputs reverse it, mutable storage fixes it, and results preserve it.
+#[derive(Clone, Copy)]
+enum ReceiverVariance { Covariant, Contravariant, Invariant, Shape }
+
+impl ReceiverVariance {
+    fn reversed(self) -> Self {
+        match self { Self::Covariant => Self::Contravariant, Self::Contravariant => Self::Covariant, Self::Invariant => Self::Invariant, Self::Shape => Self::Shape }
+    }
+
+    fn permits(self, expected: bool, actual: bool) -> bool {
+        match self { Self::Covariant => !expected || actual, Self::Contravariant => !actual || expected, Self::Invariant => expected == actual, Self::Shape => true }
+    }
+}
+
+/// Compare types in one already-scoped activation. Unlike call inference,
+/// this operation cannot instantiate a generic register with another type.
+fn receiver_types_match(expected: &VmType, actual: &VmType, variance: ReceiverVariance) -> bool {
+    let mut bindings = BTreeMap::new();
+    unify_call_type_variance(expected, actual, &mut bindings, variance)
+        && bindings.iter().all(|(index, value)| *value == VmType::Generic(*index))
+}
+
 /// Match a callee-side type against one caller-side type while collecting the
 /// callee's binder-local generic arguments. These binders are scoped to the
-/// target function, so identical numeric indices in two functions never
-/// accidentally alias.
+/// target function, so identical numeric indices in two functions never alias.
 fn unify_call_type(
     expected: &VmType,
     found: &VmType,
     bindings: &mut BTreeMap<u32, VmType>,
+) -> bool {
+    unify_call_type_variance(expected, found, bindings, ReceiverVariance::Covariant)
+}
+
+fn unify_call_type_variance(
+    expected: &VmType,
+    found: &VmType,
+    bindings: &mut BTreeMap<u32, VmType>,
+    variance: ReceiverVariance,
 ) -> bool {
     match expected {
         VmType::Generic(index) => match bindings.get(index) {
@@ -4391,15 +4464,15 @@ fn unify_call_type(
             VmType::Tuple(found) if expected.len() == found.len() => expected
                 .iter()
                 .zip(found)
-                .all(|(expected, found)| unify_call_type(expected, found, bindings)),
+                .all(|(expected, found)| unify_call_type_variance(expected, found, bindings, variance)),
             _ => false,
         },
         VmType::FixedArray { element, length } => match found {
-            VmType::FixedArray { element: found, length: count } if length == count => unify_call_type(element, found, bindings),
+            VmType::FixedArray { element: found, length: count } if length == count => unify_call_type_variance(element, found, bindings, variance),
             _ => false,
         },
         VmType::Array(expected) => match found {
-            VmType::Array(found) => unify_call_type(expected, found, bindings),
+            VmType::Array(found) => unify_call_type_variance(expected, found, bindings, variance),
             _ => false,
         },
         VmType::StaticData {
@@ -4412,7 +4485,7 @@ fn unify_call_type(
                 tag: found_tag,
                 alignment: found_alignment,
             } if expected_tag == found_tag && expected_alignment == found_alignment => {
-                unify_call_type(expected_element, found_element, bindings)
+                unify_call_type_variance(expected_element, found_element, bindings, variance)
             }
             _ => false,
         },
@@ -4424,7 +4497,8 @@ fn unify_call_type(
                 unique: found_unique,
                 referent: found_referent,
             } if expected_unique == found_unique => {
-                unify_call_type(expected_referent, found_referent, bindings)
+                unify_call_type_variance(expected_referent, found_referent, bindings,
+                    if *expected_unique { ReceiverVariance::Invariant } else { variance })
             }
             _ => false,
         },
@@ -4446,29 +4520,34 @@ fn unify_call_type(
             _ => false,
         },
         VmType::Callable {
+            shared_receiver: expected_shared,
+            unique_receiver: expected_unique,
             safety: expected_safety,
             parameters: expected_parameters,
             result: expected_result,
             effects: expected_effects,
         } => match found {
             VmType::Callable {
+                shared_receiver: found_shared,
+                unique_receiver: found_unique,
                 safety: found_safety,
                 parameters: found_parameters,
                 result: found_result,
                 effects: found_effects,
-            } if expected_safety == found_safety && expected_parameters.len() == found_parameters.len() => {
+            } if variance.permits(*expected_shared, *found_shared) && variance.permits(*expected_unique, *found_unique)
+                && expected_safety == found_safety && expected_parameters.len() == found_parameters.len() => {
                 expected_parameters
                     .iter()
                     .zip(found_parameters)
-                    .all(|(expected, found)| unify_call_type(expected, found, bindings))
-                    && unify_call_type(expected_result, found_result, bindings)
+                    .all(|(expected, found)| unify_call_type_variance(expected, found, bindings, variance.reversed()))
+                    && unify_call_type_variance(expected_result, found_result, bindings, variance)
                     && unify_vm_effect_row(expected_effects, found_effects, bindings)
             }
             _ => false,
         },
         VmType::RawPointer { mutability, pointee } => match found {
             VmType::RawPointer { mutability: found_mutability, pointee: found_pointee }
-                if mutability == found_mutability => unify_call_type(pointee, found_pointee, bindings),
+                if mutability == found_mutability => unify_call_type_variance(pointee, found_pointee, bindings, ReceiverVariance::Invariant),
             _ => false,
         },
         _ => expected == found,
@@ -4511,11 +4590,15 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
                 .collect(),
         },
         VmType::Callable {
+            shared_receiver,
+            unique_receiver,
             safety,
             parameters,
             result,
             effects,
         } => VmType::Callable {
+            shared_receiver: *shared_receiver,
+            unique_receiver: *unique_receiver,
             safety: *safety,
             parameters: parameters
                 .iter()
@@ -4564,7 +4647,7 @@ fn unify_vm_effect_row(
             .iter()
             .zip(&found.projections)
             .all(|(expected, found)| {
-                unify_call_type(&expected.subject, &found.subject, bindings)
+                unify_call_type_variance(&expected.subject, &found.subject, bindings, ReceiverVariance::Invariant)
                     && expected.trait_definition == found.trait_definition
                     && expected.name == found.name
                     && expected.trait_arguments.len() == found.trait_arguments.len()
@@ -4593,7 +4676,7 @@ fn unify_vm_generic_argument(
 ) -> bool {
     match (expected, found) {
         (VmGenericArgument::Type(expected), VmGenericArgument::Type(found)) => {
-            unify_call_type(expected, found, bindings)
+            unify_call_type_variance(expected, found, bindings, ReceiverVariance::Invariant)
         }
         (VmGenericArgument::EffectRow(expected), VmGenericArgument::EffectRow(found)) => {
             unify_vm_effect_row(expected, found, bindings)
@@ -6259,6 +6342,7 @@ struct VerifiedFunctionControl {
     result_destruction_preserving: bool,
     preserves_frame_memory: bool,
     preserves_independent_frame_memory: bool,
+    captures_intact_at_boundaries: bool,
 }
 
 fn verify_function_control(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
@@ -6387,6 +6471,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
     };
     let mut returned: Option<VmType> = None;
     let mut result_independent = true;
+    let mut captures_intact_at_boundaries = true;
     let mut result_destruction_preserving = true;
     let mut preserves_frame_memory = true;
     let mut preserves_independent_frame_memory = true;
@@ -6449,6 +6534,9 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
         let resumption_index = captured_call.as_ref().map(|(_, index)| *index);
         let resumption_consumes = instruction.consumed_arguments().is_some();
         let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
+        if function.captures != 0 && callable_access::is_execution_boundary(instruction) {
+            captures_intact_at_boundaries &= states.registers.iter().take(function.captures as usize).all(|state| *state == Some(true));
+        }
         if let VmInstruction::Call { dst, arguments, .. } | VmInstruction::CallOwned { dst, arguments, .. }
             | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. } = instruction {
             seed_terminal_call_handlers(function, pc, *dst, arguments, resumption_consumes, &states, &mut incoming, &mut worklist)?;
@@ -7042,7 +7130,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 for (field, expected) in fields.iter().zip(expected) {
                     read(&states, *field)?;
                     let found = register_type(function, *field)?;
-                    if found != expected {
+                    if !receiver_types_match(&expected, &found, ReceiverVariance::Covariant) {
                         return Err(VmArtifactError::TypeMismatch {
                             register: *field,
                             expected,
@@ -7075,7 +7163,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 for field in fields {
                     read(&states, *field)?;
                     let found = register_type(function, *field)?;
-                    if found != *element_type {
+                    if !receiver_types_match(element_type, &found, ReceiverVariance::Covariant) {
                         return Err(VmArtifactError::TypeMismatch {
                             register: *field,
                             expected: element_type.clone(),
@@ -7114,7 +7202,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     }
                 }
                 let layout = nominal_record_layout(function, &destination_type)?;
-                if field_types != layout {
+                if field_types.len() != layout.len() || !field_types.iter().zip(layout).all(|(actual, expected)|
+                    receiver_types_match(expected, actual, ReceiverVariance::Covariant)) {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "record field layout does not match nominal descriptor",
                     });
@@ -7168,7 +7257,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     }
                 }
                 let layout = nominal_variant_layout(function, &destination_type, *variant)?;
-                if field_types != layout {
+                if field_types.len() != layout.len() || !field_types.iter().zip(layout).all(|(actual, expected)|
+                    receiver_types_match(expected, actual, ReceiverVariance::Covariant)) {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "enum field layout does not match nominal descriptor",
                     });
@@ -7811,6 +7901,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 };
                 let frame_id = frame.id;
                 let expected = VmType::Callable {
+                    shared_receiver: false,
+                    unique_receiver: false,
                     safety: Safety::Safe,
                     parameters: vec![frame.resume_type.clone()],
                     // A resumption returns to its suspended computation, so
@@ -8684,12 +8776,13 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 if states.resumptions[*callee as usize] {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let VmType::Callable {
-                    parameters, result, ..
-                } = register_type(function, *callee)?
-                else {
+                let receiver = register_type(function, *callee)?;
+                let Some(VmType::Callable { parameters, result, safety, .. }) = receiver.callable_receiver() else {
                     return Err(VmArtifactError::NotCallable { register: *callee });
                 };
+                if *safety == Safety::Unsafe && !function.unsafe_execution {
+                    return Err(VmArtifactError::MalformedEncoding { message: "unsafe indirect invocation lacks execution authority" });
+                }
                 if parameters.len() != arguments.len() {
                     return Err(VmArtifactError::CallArity {
                         expected: parameters.len() as u32,
@@ -8709,10 +8802,10 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     }
                 }
                 let found = register_type(function, *dst)?;
-                if *result != found {
+                if **result != found {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
-                        expected: *result,
+                        expected: (**result).clone(),
                         found,
                     });
                 }
@@ -8752,7 +8845,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 let mut written = BTreeSet::new();
                 for (&argument, &destination) in arguments.iter().zip(destinations) {
                     read(&states, argument)?;
-                    same_type(function, argument, destination)?;
+                    same_type(function, destination, argument)?;
                     if !written.insert(destination) {
                         return Err(VmArtifactError::InvalidRegister {
                             register: destination,
@@ -8917,7 +9010,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
     if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
         Ok(VerifiedFunctionControl { returns: returned.is_some(), result_independent,
-            result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory })
+            result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
+            captures_intact_at_boundaries })
     } else {
         Err(VmArtifactError::NoReturn)
     }
@@ -9026,11 +9120,16 @@ fn validate_vm_type_with_layouts(value: &VmType, layouts: &[VmNominalCopyDescrip
             Ok(())
         }
         VmType::Callable {
+            shared_receiver,
+            unique_receiver,
             parameters,
             result,
             effects,
             ..
         } => {
+            if *shared_receiver && !*unique_receiver {
+                return Err(VmArtifactError::InvalidCallableEnvironment { message: "shared callable authority requires unique receiver authority" });
+            }
             parameters.iter().try_for_each(validate)?;
             validate(result)?;
             validate_vm_effect_row(effects)
@@ -9736,7 +9835,10 @@ fn expect_type(
 fn same_type(function: &VmFunction, destination: u32, source: u32) -> Result<(), VmArtifactError> {
     let expected = register_type(function, destination)?;
     let found = register_type(function, source)?;
-    if expected == found {
+    // A transfer may forget borrowed receiver permission, but it cannot
+    // specialize one of this activation's already scoped generic registers.
+    // Other ABI structure, mutable carriers and nominal arguments stay exact.
+    if receiver_types_match(&expected, &found, ReceiverVariance::Covariant) {
         Ok(())
     } else {
         Err(VmArtifactError::TypeMismatch {
@@ -12404,14 +12506,7 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         } => {
             matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_generic_argument_matches(actual, expected)))
         }
-        VmType::Callable {
-            safety,
-            parameters,
-            result,
-            effects,
-        } => {
-            matches!(value, VmValue::Callable { signature: VmType::Callable { safety: actual_safety, parameters: actual_parameters, result: actual_result, effects: actual_effects }, .. } if actual_safety == safety && actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
-        }
+        VmType::Callable { .. } => matches!(value, VmValue::Callable { signature, .. } if vm_type_matches(signature, expected)),
         VmType::RawPointer { .. } => matches!(value, VmValue::RawPointer { signature, .. } if vm_type_matches(signature, expected)),
         VmType::Reference { unique, referent } => {
             matches!(value, VmValue::Reference { unique: actual_unique, referent: actual_referent, .. } if actual_unique == unique && vm_type_matches(actual_referent, referent))
@@ -12420,12 +12515,16 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
 }
 
 fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
+    vm_type_matches_variance(actual, expected, ReceiverVariance::Covariant)
+}
+
+fn vm_type_matches_variance(actual: &VmType, expected: &VmType, variance: ReceiverVariance) -> bool {
     match expected {
         VmType::FixedArray { element, length } => matches!(actual, VmType::FixedArray { element: actual, length: count }
-            if length == count && vm_type_matches(actual, element)),
+            if length == count && vm_type_matches_variance(actual, element, variance)),
         VmType::Generic(_) => true,
         VmType::Array(expected) => {
-            matches!(actual, VmType::Array(actual) if vm_type_matches(actual, expected))
+            matches!(actual, VmType::Array(actual) if vm_type_matches_variance(actual, expected, variance))
         }
         VmType::StaticData {
             element: expected_element,
@@ -12437,9 +12536,9 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
             alignment: actual_alignment,
         } if actual_tag == expected_tag
             && actual_alignment == expected_alignment
-            && vm_type_matches(actual_element, expected_element)),
+            && vm_type_matches_variance(actual_element, expected_element, variance)),
         VmType::Tuple(expected) => {
-            matches!(actual, VmType::Tuple(actual) if actual.len() == expected.len() && actual.iter().zip(expected).all(|(actual, expected)| vm_type_matches(actual, expected)))
+            matches!(actual, VmType::Tuple(actual) if actual.len() == expected.len() && actual.iter().zip(expected).all(|(actual, expected)| vm_type_matches_variance(actual, expected, variance)))
         }
         VmType::Nominal {
             definition,
@@ -12448,18 +12547,25 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
             matches!(actual, VmType::Nominal { definition: actual_definition, arguments: actual_arguments } if actual_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_generic_argument_matches(actual, expected)))
         }
         VmType::Callable {
+            shared_receiver,
+            unique_receiver,
             safety,
             parameters,
             result,
             effects,
         } => {
-            matches!(actual, VmType::Callable { safety: actual_safety, parameters: actual_parameters, result: actual_result, effects: actual_effects } if actual_safety == safety && actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
+            matches!(actual, VmType::Callable { shared_receiver: actual_shared, unique_receiver: actual_unique, safety: actual_safety, parameters: actual_parameters, result: actual_result, effects: actual_effects }
+                if variance.permits(*shared_receiver, *actual_shared) && variance.permits(*unique_receiver, *actual_unique)
+                    && actual_safety == safety && actual_parameters.len() == parameters.len()
+                    && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches_variance(actual, expected, variance.reversed()))
+                    && vm_type_matches_variance(actual_result, result, variance) && vm_effect_row_matches(actual_effects, effects))
         }
         VmType::RawPointer { mutability, pointee } => matches!(actual,
             VmType::RawPointer { mutability: actual_mutability, pointee: actual_pointee }
-                if actual_mutability == mutability && vm_type_matches(actual_pointee, pointee)),
+                if actual_mutability == mutability && vm_type_matches_variance(actual_pointee, pointee, ReceiverVariance::Invariant)),
         VmType::Reference { unique, referent } => {
-            matches!(actual, VmType::Reference { unique: actual_unique, referent: actual_referent } if actual_unique == unique && vm_type_matches(actual_referent, referent))
+            matches!(actual, VmType::Reference { unique: actual_unique, referent: actual_referent } if actual_unique == unique
+                && vm_type_matches_variance(actual_referent, referent, if *unique { ReceiverVariance::Invariant } else { variance }))
         }
         _ => actual == expected,
     }
@@ -12487,7 +12593,7 @@ fn vm_effect_row_matches(actual: &VmEffectRow, expected: &VmEffectRow) -> bool {
             .iter()
             .zip(&expected.projections)
             .all(|(actual, expected)| {
-                vm_type_matches(&actual.subject, &expected.subject)
+                vm_type_matches_variance(&actual.subject, &expected.subject, ReceiverVariance::Invariant)
                     && actual.trait_definition == expected.trait_definition
                     && actual.name == expected.name
                     && actual.trait_arguments.len() == expected.trait_arguments.len()
@@ -12508,7 +12614,7 @@ fn vm_effect_row_matches(actual: &VmEffectRow, expected: &VmEffectRow) -> bool {
 fn vm_generic_argument_matches(actual: &VmGenericArgument, expected: &VmGenericArgument) -> bool {
     match (actual, expected) {
         (VmGenericArgument::Type(actual), VmGenericArgument::Type(expected)) => {
-            vm_type_matches(actual, expected)
+            vm_type_matches_variance(actual, expected, ReceiverVariance::Invariant)
         }
         (VmGenericArgument::EffectRow(actual), VmGenericArgument::EffectRow(expected)) => {
             vm_effect_row_matches(actual, expected)
@@ -17488,6 +17594,19 @@ fn execute_program_with_tail_boundary(
                     .as_ref()
                     .expect("verified register")
                     .clone();
+                // This is a receiver loan, not a source-level Copy. Loading
+                // it must preserve the exact Arc-backed capture environment
+                // so unique invocations observe prior capture mutations.
+                let callee_value = match callee_value {
+                    VmValue::Reference { target, fields, .. } => {
+                        let value = load_reference_target(&registers, &callers, &target, &fields, budget)?;
+                        if !matches!(value, VmValue::Callable { .. }) {
+                            return Err(VmArtifactError::NotCallable { register: *callee });
+                        }
+                        value
+                    }
+                    value => value,
+                };
                 if let VmValue::Label {
                     owner,
                     target,
@@ -18303,7 +18422,7 @@ mod tests {
     #[test]
     fn authoring_tail_cleanup_never_erases_registered_capture_destruction() {
         let callee = DefKey(Digest::of_bytes(b"tail-callable-cleanup"));
-        let signature = VmType::Callable {
+        let signature = VmType::Callable { shared_receiver: false, unique_receiver: false,
             safety: Safety::Safe, parameters: vec![], result: Box::new(VmType::I64),
             effects: Box::default(),
         };

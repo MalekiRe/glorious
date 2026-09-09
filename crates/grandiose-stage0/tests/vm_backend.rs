@@ -56,7 +56,7 @@ fn tail_reference_program(relay_instructions: Vec<VmInstruction>) -> CandidateVm
 fn mandatory_tail_vm_audits_the_destination_of_a_forwarded_local_label() {
     let relay = DefKey(Digest::of_bytes(b"tail-reference-relay"));
     let shim = DefKey(Digest::of_bytes(b"anonymous-label-forwarding-shim"));
-    let label_type = VmType::Callable { safety: grandiose_stage0::Safety::Safe,
+    let label_type = VmType::Callable { shared_receiver: false, unique_receiver: false, safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() };
     for (local_tail, opaque) in [(false, false), (true, false), (true, true)] {
         let mut program = tail_reference_program(vec![
@@ -104,7 +104,7 @@ fn mandatory_tail_vm_requires_exact_unexposed_label_identity_at_a_shim_call() {
     let relay = DefKey(Digest::of_bytes(b"tail-reference-relay"));
     let shim = DefKey(Digest::of_bytes(b"label-identity-shim"));
     let ordinary = DefKey(Digest::of_bytes(b"label-identity-ordinary"));
-    let label_type = VmType::Callable { safety: grandiose_stage0::Safety::Safe,
+    let label_type = VmType::Callable { shared_receiver: false, unique_receiver: false, safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() };
     for exposed in [false, true] {
         let mut program = tail_reference_program(vec![]);
@@ -167,7 +167,7 @@ fn mandatory_tail_vm_disposes_local_label_without_revoking_incoming_memory() {
         VmInstruction::Copy { dst: 3, src: 0 },
     ]);
     program.functions.get_mut(&relay).unwrap().registers.extend([
-        VmType::Callable { safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() },
+        VmType::Callable { shared_receiver: false, unique_receiver: false, safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() },
         VmType::Unit,
     ]);
     program.fingerprint = program.computed_fingerprint();
@@ -343,7 +343,7 @@ fn mandatory_tail_vm_revokes_incoming_proof_after_direct_or_transitive_reference
         closure.0.as_bytes().as_slice(),
     ]));
     let drop_helper = DefKey(Digest::of_bytes(b"tail-mutation-drop-helper"));
-    let callable = VmType::Callable {
+    let callable = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe, parameters: vec![],
         result: Box::new(VmType::I64), effects: Box::default(),
     };
@@ -574,7 +574,7 @@ fn array_storage_candidate() -> CandidateVmArtifact {
 fn owned_call_program(indirect: bool) -> CandidateVmProgram {
     let entry = DefKey(Digest::of_bytes(b"owned-call-entry"));
     let callee = DefKey(Digest::of_bytes(b"owned-call-callee"));
-    let callable = VmType::Callable {
+    let callable = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
         result: Box::new(VmType::I64), effects: Box::<VmEffectRow>::default(),
     };
@@ -832,7 +832,7 @@ fn captured_resumption_calls_restore_intervening_handlers_and_retire_arguments()
     let VmInstruction::PerformOwned { effect, .. } = candidate.function.instructions[2] else { panic!() };
     let inner = DefKey(Digest::of_bytes(b"intervening-handler"));
     candidate.function.registers = vec![VmType::I64, VmType::I64, VmType::I64, VmType::Bool,
-        VmType::Callable { safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
+        VmType::Callable { shared_receiver: false, unique_receiver: false, safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
             result: Box::new(VmType::I64), effects: Box::default() }, VmType::I64];
     candidate.function.instructions = vec![
         VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
@@ -1171,7 +1171,7 @@ fn authoring_reuses_only_empty_returned_register_buffers_within_one_execution() 
             VmInstruction::Call { dst: 2, callee: first, arguments: vec![0] },
         ];
         if indirect {
-            entry_registers.push(VmType::Callable {
+            entry_registers.push(VmType::Callable { shared_receiver: false, unique_receiver: false,
                 safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::Bool],
                 result: Box::new(VmType::I64), effects: Box::default(),
             });
@@ -3661,7 +3661,7 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
                     registers: vec![
                         VmType::I64,
                         VmType::I64,
-                        VmType::Callable {
+                        VmType::Callable { shared_receiver: false, unique_receiver: false,
                             safety: grandiose_stage0::Safety::Safe,
                             parameters: vec![],
                             result: Box::new(VmType::I64),
@@ -3878,7 +3878,7 @@ fn verifier_rejects_unspecialized_generic_effect_abis_at_direct_and_callable_bou
         parameters: 0,
         registers: vec![
             VmType::I64,
-            VmType::Callable {
+            VmType::Callable { shared_receiver: false, unique_receiver: false,
                 safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![VmType::I64],
                 result: Box::new(VmType::I64),
@@ -5125,13 +5125,13 @@ fn verifier_rejects_writes_that_resurrect_dead_source_storage() {
 #[test]
 fn verifier_rejects_labels_laundered_through_mutable_storage() {
     let owner = DefKey(Digest::of_bytes(b"label-mutable-storage-owner"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -6624,7 +6624,7 @@ fn handler_completion_is_delimited_and_checks_the_resumption_result_abi() {
 fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-ask"));
     let residual_effect = DefKey(Digest::of_bytes(b"snapshot-residual-log"));
-    let continuation = VmType::Callable {
+    let continuation = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -6695,7 +6695,7 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
 fn dynamic_label_call_abandons_replay_return_frames() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-replay-owner"));
     let effect = DefKey(Digest::of_bytes(b"dynamic-label-replay-effect"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
@@ -6780,7 +6780,7 @@ fn dynamic_label_call_abandons_replay_return_frames() {
 fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-facade-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-facade-effect"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
@@ -6846,13 +6846,13 @@ fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
 fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-unique-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-unique-capture-facade"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -6953,13 +6953,13 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
 fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_escape() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-capture-facade"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -6980,7 +6980,7 @@ fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_esca
                 label.clone(),
                 VmType::Tuple(vec![label.clone(), VmType::I64]),
                 VmType::Array(Box::new(VmType::Tuple(vec![
-                    VmType::Callable {
+                    VmType::Callable { shared_receiver: false, unique_receiver: false,
                         safety: grandiose_stage0::Safety::Safe,
                         parameters: vec![VmType::I64],
                         result: Box::new(VmType::Unit),
@@ -7057,7 +7057,7 @@ fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_esca
 fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callable_capture() {
     let owner = DefKey(Digest::of_bytes(b"projected-label-capture-owner"));
     let record = DefKey(Digest::of_bytes(b"projected-label-capture-record"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
@@ -7065,7 +7065,7 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
     };
     let tuple = VmType::Tuple(vec![label.clone()]);
     let array = VmType::Array(Box::new(tuple.clone()));
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -7184,19 +7184,19 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
     let owner = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-facade"));
     let effect = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-effect"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -7332,13 +7332,13 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
     };
     let tuple = VmType::Tuple(vec![shared.clone(), VmType::I64]);
     let array = VmType::Array(Box::new(tuple.clone()));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let callable = VmType::Callable {
+    let callable = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -7515,13 +7515,13 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
         unique: false,
         referent: Box::new(tuple.clone()),
     };
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -7634,7 +7634,7 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
             definition: DefKey(Digest::of_bytes(b"orphan-snapshot")),
             captures: 0,
             parameters: 0,
-            registers: vec![VmType::Callable {
+            registers: vec![VmType::Callable { shared_receiver: false, unique_receiver: false,
                 safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![VmType::I64],
                 result: Box::new(VmType::I64),
@@ -7655,7 +7655,7 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
 #[test]
 fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
     let effect = DefKey(Digest::of_bytes(b"terminal-capture"));
-    let continuation = VmType::Callable {
+    let continuation = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::Unit],
         result: Box::new(VmType::Unit),
@@ -7704,7 +7704,7 @@ fn verifier_rejects_resumption_tokens_crossing_direct_call_frames() {
     let entry = DefKey(Digest::of_bytes(b"snapshot-direct-call-entry"));
     let sink = DefKey(Digest::of_bytes(b"snapshot-direct-call-sink"));
     let effect = DefKey(Digest::of_bytes(b"snapshot-direct-call-effect"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -7790,7 +7790,7 @@ fn verifier_rejects_resumption_tokens_crossing_direct_call_frames() {
 fn verifier_rejects_resumption_tokens_masquerading_as_indirect_callees() {
     let entry = DefKey(Digest::of_bytes(b"snapshot-indirect-callee-entry"));
     let effect = DefKey(Digest::of_bytes(b"snapshot-indirect-callee-effect"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -7863,7 +7863,7 @@ fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
     let entry = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-entry"));
     let sink = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-sink"));
     let effect = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-effect"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -7980,7 +7980,7 @@ fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
 #[test]
 fn verifier_rejects_resumption_tokens_returned_after_handler_exit() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-return-after-cancel-effect"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -8041,7 +8041,7 @@ fn verifier_rejects_resumption_tokens_returned_after_handler_exit() {
 #[test]
 fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let effect = DefKey(Digest::of_bytes(b"forged-snapshot-effect"));
-    let continuation = VmType::Callable {
+    let continuation = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -8427,7 +8427,7 @@ fn verifier_rejects_a_forged_partial_handler_forward_without_an_outer_frame() {
 #[test]
 fn verifier_rejects_a_replay_snapshot_after_its_frame_is_cancelled() {
     let effect = DefKey(Digest::of_bytes(b"cancelled-replay-snapshot"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -8622,7 +8622,7 @@ fn cancelled_handler_continuation_abandons_its_snapshot_and_returns_clause_value
 fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
     let cancelled = DefKey(Digest::of_bytes(b"cancelled-snapshot-effect"));
     let later = DefKey(Digest::of_bytes(b"later-snapshot-effect"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -8938,13 +8938,13 @@ fn verifier_rejects_callable_signature_forged_through_a_nominal_record_projectio
     let entry = DefKey(Digest::of_bytes(b"forged-callable-record-entry"));
     let closure = DefKey(Digest::of_bytes(b"forged-callable-record-closure"));
     let record = DefKey(Digest::of_bytes(b"forged-callable-record-layout"));
-    let actual = VmType::Callable {
+    let actual = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
-    let forged = VmType::Callable {
+    let forged = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -9055,13 +9055,13 @@ fn runtime_rechecks_callable_signature_when_an_enum_projection_is_variant_depend
     let entry = DefKey(Digest::of_bytes(b"variant-callable-entry"));
     let closure = DefKey(Digest::of_bytes(b"variant-callable-closure"));
     let choice = DefKey(Digest::of_bytes(b"variant-callable-choice"));
-    let actual = VmType::Callable {
+    let actual = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
-    let other_variant = VmType::Callable {
+    let other_variant = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
@@ -9411,7 +9411,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
         captures: 0,
         parameters: 0,
         registers: vec![
-            VmType::Callable {
+            VmType::Callable { shared_receiver: false, unique_receiver: false,
                 safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(VmType::I64),
@@ -9458,13 +9458,13 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
 fn verifier_retains_resumption_provenance_across_handler_clause_joins() {
     let effect = DefKey(Digest::of_bytes(b"joined-resumption-effect"));
     let owner = DefKey(Digest::of_bytes(b"joined-resumption-owner"));
-    let snapshot = VmType::Callable {
+    let snapshot = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -9553,13 +9553,13 @@ fn verifier_retains_resumption_provenance_across_handler_clause_joins() {
 #[test]
 fn verifier_retains_label_provenance_across_callable_joins() {
     let owner = DefKey(Digest::of_bytes(b"joined-label-owner"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
-    let closure = VmType::Callable {
+    let closure = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::Unit),
@@ -9671,7 +9671,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         parameters: 0,
         registers: vec![
             VmType::I64,
-            VmType::Callable {
+            VmType::Callable { shared_receiver: false, unique_receiver: false,
                 safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(VmType::I64),
@@ -9971,7 +9971,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
 fn callable_type_decoder_limits_recursive_hostile_encodings() {
     let mut ty = VmType::I64;
     for _ in 0..98 {
-        ty = VmType::Callable {
+        ty = VmType::Callable { shared_receiver: false, unique_receiver: false,
             safety: grandiose_stage0::Safety::Safe,
             parameters: vec![],
             result: Box::new(ty),
@@ -10006,7 +10006,7 @@ fn callable_type_decoder_limits_recursive_hostile_encodings() {
 fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
     let effect_a = DefKey(Digest::of_bytes(b"callable-effect-row-a"));
     let effect_b = DefKey(Digest::of_bytes(b"callable-effect-row-b"));
-    let callable = |effect| VmType::Callable {
+    let callable = |effect| VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -10129,7 +10129,7 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
     } else {
         (second, first)
     };
-    let malformed = VmType::Callable {
+    let malformed = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
@@ -10806,7 +10806,7 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
 fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
     let owner = DefKey(Digest::of_bytes(b"label-into-handler-clause"));
     let effect = DefKey(Digest::of_bytes(b"label-into-handler-clause-effect"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
@@ -10867,7 +10867,7 @@ fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
 #[test]
 fn verifier_rejects_dynamic_labels_with_one_brand_and_contradictory_targets() {
     let owner = DefKey(Digest::of_bytes(b"contradictory-dynamic-label-owner"));
-    let label = VmType::Callable {
+    let label = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
@@ -11233,7 +11233,7 @@ fn unique_reference_writeback_survives_indirect_call_and_return() {
         unique: true,
         referent: Box::new(VmType::I64),
     };
-    let callable = VmType::Callable {
+    let callable = VmType::Callable { shared_receiver: false, unique_receiver: false,
         safety: grandiose_stage0::Safety::Safe,
         parameters: vec![unique_i64.clone()],
         result: Box::new(unique_i64.clone()),
@@ -12249,7 +12249,7 @@ fn declared_nonreturn_abi_preserves_bottom_coerced_direct_and_indirect_calls() {
         parameters: 0,
         registers: vec![
             VmType::I64,
-            VmType::Callable {
+            VmType::Callable { shared_receiver: false, unique_receiver: false,
                 safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(VmType::I64),

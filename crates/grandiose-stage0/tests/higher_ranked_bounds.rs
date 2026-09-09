@@ -172,7 +172,8 @@ fn storing_a_quantified_function_cannot_erase_its_where_contract() {
         }
     "#;
     let diagnostics = StageZeroCompiler::new().compile(request(source)).expect_err("first-class erasure is not evidence").diagnostics();
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4198" && diagnostic.message.contains("first-class")), "{diagnostics:#?}");
+    assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G4143" | "G4188")), "{diagnostics:#?}");
+    assert!(!diagnostics.iter().any(|diagnostic| diagnostic.code == "G4198"), "{diagnostics:#?}");
 }
 
 #[test]
