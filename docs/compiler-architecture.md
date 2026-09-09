@@ -326,7 +326,40 @@ The callee-producing helper is retained; skipping its body would erase effects
 or obligations before the transfer. Stale Core input is rejected at binding.
 
 This resolves local invocation edges, not full helper/closure fusion or
-proof-carrier erasure. In particular, tuple-pattern lowering still attempts to
-materialize a label as a callable resident. The source execution regression is
-active rather than weakening the non-addressability rule or widening native
-storage to make labels addressable.
+proof-carrier erasure. The invocation migration exposed tuple-pattern lowering
+trying to materialize a label as a callable resident. The following erasure
+boundary addresses that failure without widening native callable storage.
+
+## Checked runtime proof-value erasure
+
+`runtime_mir/proof_erasure.rs` derives an immutable representation plan from
+the validated closed executable batch. It does not discover label targets or
+replace helper bodies. A label carrier whose consumers are already resolved
+control edges can become unit; tuples, arrays, internal projection references,
+local layouts and matching direct-call signatures use the same physical map.
+The direct leaves retain their generative destination and cleanup. Ordinary
+resident fields and captured data remain present.
+
+Proof-bearing call and abandonment-cleanup edges connect callers and callees
+into ABI components; environment and host-resident cleanup signatures also
+participate in retention.
+An unresolved indirect consumer, incompatible structural callable boundary,
+foreign/effect payload or unsupported identity-bearing layout retains its
+whole component. Missing transformation evidence cannot authorize a unit value
+at a still-callable boundary. Nominal generic identities, effect-family
+arguments and specialization keys are not recursively rewritten into unit.
+This is a value representation map, not type equality or new source coercion.
+
+Applying the plan checks its exact input batch. Original executable validation
+runs before erasure, so malformed label construction cannot be laundered into
+a valid unit constant. Executable control tables are re-frozen after removed
+materializations, and frame/transfer layouts are derived again. The receiving
+runtime program independently validates local instructions, cleanup and every
+cross-function ABI before emission. Source/Core addressability checks remain
+in force; the native callable-storage rule has not been widened.
+
+This migration repairs stored resolved label products, including generic
+forwarding at O0. It does not finish proof erasure: components with residual
+label invocations, label-bearing nominal/callable layouts, or operation payloads
+still retain the prior carrier. Correctness-required helper/outer-label fusion,
+and native resident captured-callable execution, remain open obligations.

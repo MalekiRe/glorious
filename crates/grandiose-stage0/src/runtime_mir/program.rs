@@ -159,14 +159,25 @@ impl RuntimeProgram {
         for function in functions.values_mut() {
             function.frame = function.derive_frame().map_err(RuntimeError)?;
         }
-        let program = Self {
+        let mut program = Self {
             entry: source.entry(),
             functions,
             constants: source.constants().clone(),
             instances,
         };
-        program.validate()?;
+        program.erase_proofs()?;
         Ok(program)
+    }
+
+    fn erase_proofs(&mut self) -> Result<(), RuntimeError> {
+        // Erasure transforms a validated executable batch; it must not repair
+        // an invalid label construction or mismatched original call contract.
+        self.validate()?;
+        proof_erasure::ProofErasurePlan::derive(&self.functions).apply(&mut self.functions)?;
+        for function in self.functions.values_mut() {
+            function.frame = function.derive_frame().map_err(RuntimeError)?;
+        }
+        self.validate()
     }
 
     pub fn validate(&self) -> Result<(), RuntimeError> {
@@ -492,5 +503,29 @@ impl RuntimeMir {
             return Err("Runtime layout sealing unexpectedly emitted executable work".into());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod proof_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn proof_erasure_cannot_launder_an_invalid_label_construction() {
+        let mut body = super::super::tests::fixture("pub fn main() -> i64 { let destination = @main; 42 }");
+        let mut changed = false;
+        for operation in body.blocks.iter_mut().flat_map(|block| &mut block.instructions) {
+            if let RuntimeOperation::MakeLabel { brand, .. } = operation {
+                brand.label += 1;
+                changed = true;
+            }
+        }
+        assert!(changed);
+        let mut program = RuntimeProgram { entry: body.definition,
+            functions: BTreeMap::from([(body.definition, body)]),
+            constants: BTreeSet::new(), instances: BTreeMap::new() };
+        let original = program.functions.clone();
+        assert!(program.erase_proofs().is_err());
+        assert_eq!(program.functions, original);
     }
 }

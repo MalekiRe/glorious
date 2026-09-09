@@ -13,6 +13,7 @@ pub(crate) mod emission;
 mod lower;
 mod operation;
 mod program;
+mod proof_erasure;
 mod protocol;
 mod storage;
 #[cfg(test)]

@@ -513,10 +513,54 @@ fn resolved_local_label_aliases_execute_without_indirect_label_calls() {
             assert!(!candidate.functions.values().flat_map(|function| &function.instructions)
                 .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::CallIndirectOwned { .. })),
                 "a resolved local label invocation must use a direct transfer: {source}");
+            assert!(!candidate.functions.values().flat_map(|function| &function.instructions)
+                .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::MakeLabel { .. })),
+                "resolved label proof carriers must erase before emission: {source}");
             assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:?}\n{candidate:#?}")), 42);
             assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
         }
     }
+}
+
+#[test]
+fn erased_label_products_preserve_resident_values_and_forwarding_abis() {
+    for body in [
+        "let ((destination,), value) = keep(((@main,),42)); destination(value)",
+        "let destination = handle Flag::Yes { Flag::Yes => keep(@main), Flag::No => @main }; destination(42)",
+        "let value = 42; let reader = move (value) { value }; let (destination, callback) = keep((@main,reader)); destination(callback())",
+        "let (destination, token) = keep((@main,Token {})); destination(consume(token))",
+        "let [destination] = fixed([@main]); destination(42)",
+        "@outer:i64 { let value = @inner:i64 { let (outer,inner) = keep((@outer,@inner)); outer(42) }; 0 }",
+    ] {
+        let source = format!("{TOKEN} fn keep<T>(value:T) -> T {{ value }}
+            fn fixed<T>(value:[T;1]) -> [T;1] {{ value }}
+            pub fn main() -> i64 {{ {body} }}");
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(request(&source, optimization))
+                .unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+            let candidate = grandiose_stage0::decode_program(&artifact.canonical_bytes()).unwrap();
+            assert!(!candidate.functions.values().flat_map(|function| &function.instructions)
+                .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::MakeLabel { .. })), "{source}");
+            assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:#?}")), 42);
+            assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn erased_label_products_keep_resident_cleanup_before_rejoin() {
+    accepts("struct Probe<'a> { count: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = 1; } }
+        fn keep<T>(value:T) -> T { value }
+        pub fn main() -> i64 {
+            let mut count:i64 = 0;
+            let answer = @done:i64 {
+                let (destination, probe) = keep((@done,Probe { count: &mut count }));
+                destination(42)
+            };
+            handle count { 1 => answer, _ => 0 }
+        }");
 }
 
 #[test]

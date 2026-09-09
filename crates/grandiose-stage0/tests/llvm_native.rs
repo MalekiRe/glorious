@@ -34,6 +34,44 @@ fn compile(source: &str) -> LlvmIrProgram {
         .unwrap_or_else(|error| panic!("{source}: {error:?}"))
 }
 
+#[test]
+fn erased_label_products_cross_native_and_mixed_forwarding_abis() {
+    check_erased_label_product("let ((destination,), value) = native_keep(((@main,),42)); destination(value)");
+}
+
+#[test]
+fn erased_label_products_preserve_captures_in_native_and_mixed_execution() {
+    check_erased_label_product("let value = 42; let reader = move (value) { value }; let (destination, callback) = native_keep((@main,reader)); destination(callback())");
+}
+
+fn check_erased_label_product(body: &str) {
+        let source = format!("fn vm_keep<T>(value:T) -> T {{ let marker = 41001; value }}
+            fn native_keep<T>(value:T) -> T {{ vm_keep(value) }}
+            pub fn main() -> i64 {{ let marker = 41002; {body} }}");
+        for optimization in [0, 2] {
+            let mut input = request(&source);
+            input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+            for mixed in [false, true] {
+                let selected = std::cell::Cell::new(0);
+                let unselected = std::cell::Cell::new(0);
+                let ir = StageZeroCompiler::new().compile_llvm_partitioned(input.clone(), LlvmTarget::host().unwrap(), |function| {
+                    let use_vm = mixed && function.instructions.iter().any(|instruction| matches!(instruction,
+                        grandiose_stage0::VmInstruction::ConstI64 { value: 41001 | 41002, .. }));
+                    if use_vm { selected.set(selected.get() + 1); } else { unselected.set(unselected.get() + 1); }
+                    use_vm
+                })
+                    .unwrap_or_else(|error| panic!("{source}, mixed={mixed}: {error:#?}"));
+                assert!(unselected.get() >= 1);
+                if mixed { assert!(selected.get() >= 2, "the mixed fixture must retain both VM endpoints"); }
+                else { assert_eq!(selected.get(), 0); }
+                assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+                let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert_eq!(native.run_i64_with_limits(Default::default())
+                    .unwrap_or_else(|error| panic!("{source}, mixed={mixed}: {error:#?}")), 42);
+            }
+        }
+}
+
 fn with_hostile_float_mode<T>(body: impl FnOnce() -> T) -> T {
     #[cfg(target_arch = "x86_64")]
     {

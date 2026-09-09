@@ -285,7 +285,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // that identity through semantic validation and invocation evidence.
 // Cache 103 retains observed label-address obligations through callable inputs
 // and lowers proven direct local-label callees after strict operand evaluation.
-pub const STAGE0_CACHE_GENERATION: u32 = 103;
+// Cache 104 erases resolved label proof carriers across checked runtime ABI
+// components without rewriting nominal or effect-family identities.
+pub const STAGE0_CACHE_GENERATION: u32 = 104;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

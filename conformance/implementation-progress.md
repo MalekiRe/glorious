@@ -5,6 +5,63 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 104: checked runtime erasure of resolved label products
+
+The preceding checkpoint preserved a tuple-label execution regression, also
+reproduced on cache 102: native tuple storage could not write a label as a
+callable resident. Runtime lowering now derives and consumes a sealed physical
+erasure plan after validating the original closed executable batch. Resolved
+label carriers become unit across product fields, internal projection
+references, locals and matching direct-call signatures. Strict helper calls,
+direct destination brands, cleanup and resident capture data remain intact.
+Native callable storage has not been made permissive for labels.
+
+Proof-bearing call and abandonment-cleanup dependencies close over both caller
+and callee, including retained environment and host-resident cleanup signatures.
+Residual label invocation, incompatible structural callable views, unsupported
+nominal/callable layouts, foreign boundaries and effect payloads retain the
+whole affected ABI component. Nominal identity arguments, effect-family keys
+and concrete instance keys are not collapsed to unit. Plan application rejects
+stale input, re-freezes executable control tables and rebuilds frame contracts;
+the receiving program independently validates the transformed local and
+interprocedural ABI. Invalid original label constructions reject before erasure.
+
+The original tuple regression now executes fresh/decoded at O0/O2, and its
+emission check additionally requires no label-construction carrier. New source
+cases exercise nested tuples, fixed arrays, branch results, multi-brand exits,
+generic argument/result forwarding, exact-linear resident fields, ordinary
+captured callables and aggregate cleanup before rejoin
+(`target/proof-erasure-products-v4.log`). An initially uncontextualized array
+probe inferred a dynamic array and correctly rejected its refutable `let`
+pattern; the fixed-array case supplies `[T;1]` context. A separate annotated
+structural-function local probe rejected nominal type equality (G4221), not
+runtime erasure, and was not counted as an accepted label-product fixture.
+
+Nested products also execute through generated native and checked mixed
+VM/native forwarding at source/native O0 and O2; the mixed test verifies both
+VM endpoints remain selected. The companion captured-callable native positive
+remains active and fails at the pre-existing explicit backend rejection
+`native captured callable environments are not implemented`
+(`target/proof-erasure-native-v4.log`: one pass, one failure, no ignores).
+This is not a passing native-capture or full LLVM acceptance gate.
+
+Five new rule/boundary units cover identity positions, retained ABI components,
+stale inputs, effect-family preservation and invalid original construction.
+The final selected integration run has 1,982 passes, the exact same 17 named
+failures as cache 102, and no ignores (`target/proof-erasure-integration-v2.log`).
+Relative to cache 103, the tuple-label execution failure is fixed. All 335 unit,
+25 borrowed-callable, 38 callable-control, 273 Core, 111 destruction,
+39 array/container, 22 request/revision, 891 service and 176 library API tests
+pass. Minimum-use has 36 passes and its existing captured-outer-label failure;
+all four tail-label tests pass. Mandatory-tail retains 16 passes and its existing
+ABI failure. The source matrix is unchanged at 16 passes and 15 failures, with
+SourceMap executing. The all-target compile check passes
+(`target/proof-erasure-check-v3.log`). These final gates include abandonment,
+environment and host-resident cleanup dependency retention.
+Source cache generation is 104; native, bytecode and verifier generations are
+unchanged. Full control fusion, proof erasure, compiler/library conformance and
+self-hosting remain unfinished.
+
 ## Cache 103: resolved label callees and callable-input address obligations
 
 A structural callable parameter could erase label addressability: a helper

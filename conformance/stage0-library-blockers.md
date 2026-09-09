@@ -8,12 +8,36 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/resolved-label-integration-v2.log`, cache 103). This includes a source
+ignored (`target/proof-erasure-integration-v2.log`, cache 104). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 104 erases resolved label proof values across checked runtime ABI
+components. Tuple/array products, generic forwarding and internal projection
+references share the physical map; resident data and cleanup remain intact.
+Callers, callees and abandonment/environment/host-resident cleanup dependencies
+retain their old representation together when a consumer still needs it.
+Nominal identities and label-indexed effect families are not collapsed to unit.
+Original and transformed Runtime MIR are independently validated.
+
+The final selected run has 1,982 passes and the same 17 named failures as cache
+102, with no ignores. The additional tuple-label failure preserved by cache 103
+is fixed. All 891 service, 39 array/container and 176 library API tests and the
+all-target compile check pass. SourceMap executes; the source matrix remains
+16 passes and 15 failures. Separate native/mixed nested-product tests pass at
+O0/O2, while a new captured-callable positive remains active and fails at the
+backend's existing explicit unsupported-environment boundary.
+
+This does not finish label lowering. Correctness-required helper/outer-label
+closure fusion, full proof erasure through remaining callable/nominal/effect
+boundaries, and native captured-callable execution remain open. Full
+compiler/library conformance and self-hosting remain unfinished. See
+`implementation-progress.md` for the exact final and targeted gate evidence.
+
+The following cache 103 and earlier checkpoints are historical.
 
 Cache 103 retains observed label-address obligations across structural callable
 inputs, including aliases, captures and unknown prefixes. Exact local label
