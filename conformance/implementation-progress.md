@@ -7,6 +7,17 @@ execution and evidence contracts are implemented.
 
 ## Cache 80: explicit operator targets and forwarded interface contracts
 
+The generated-native follow-up integrates `f66f86c4`. Native ABI 4 transports
+logical initialization sidecars through direct calls, recycled native tail
+packets and compiler-sealed VM/native bindings. Moved-out leaves are not read or
+relabelled as live. Public native registrations cannot opt into this internal
+partial-owner contract, and ordinary returned values must be fully initialized.
+Native array/rest and borrowed-shell patterns and indexed cleanup also execute.
+The combined main-tree batch passes all 359 tests: 275 library-unit, 21 array,
+17 generated-native, 17 mandatory-tail and 29 native-bridge tests
+(`target/integration-native-sidecars-v1.log`). This does not include mixed-engine
+mandatory tails or the remaining native callable/effect frontier.
+
 Prefix and infix declarations accept independent ordinary targets, resolved in
 the declaring module. Imported operators cannot be redirected by a same-named
 caller binding. Explicit targets are checked even when unused; missing targets,
@@ -21,8 +32,8 @@ facts include the modules supplying those contracts, and alias cycles remain
 bounded during sealing. Bytecode 71/verifier 35/schema 115 are unchanged.
 
 All 12 fixity, 30 resolution, 49 header, 24 library-boundary, 22 request/revision
-and 268 Core tests pass in `target/fixity-targets-v6.log`; its broader service
-and unsafe checks were still running when this checkpoint was prepared. The
+and 268 Core tests pass in `target/fixity-targets-v6.log`. Its completed service
+and unsafe checks also pass all 891 and 23 tests respectively: 1,319 in total. The
 regenerated editor parser passes all six corpus cases and 24 highlighting
 assertions. Canonical standard-library operator migration is not included.
 

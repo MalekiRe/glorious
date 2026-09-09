@@ -25,6 +25,8 @@ comparisons and shifts, basic f32/f64 operations with canonical NaNs,
 constructors/projections, basic ownership/storage instructions, real reference
 loads and stores, direct calls, branches, final lexical transfers, source
 destructor glue expressed by admitted operations, and direct mandatory tails.
+Fixed-array patterns include nested elements and sparse remainders; native array
+cleanup loops track dynamically indexed move holes, including zero-sized elements.
 The exact admissible boundary is whole-graph instruction/layout admission, not
 a promise that every operation on the listed type families is supported.
 
@@ -76,10 +78,23 @@ referent backing address is preserved. Source Drop glue remains the exact checke
 source implementation bound by the full code identity; no same-shaped foreign
 destructor is selected by a symbol name.
 
+Generated argument slots contain two pointers: existing resident bytes and a
+canonical initialization sidecar. Native calls and recycled tail packets preserve
+the sidecar independently of the bytes, so moving one field does not reinitialize
+it at a cleanup callee. VM→native exports the source home's move holes; native→VM
+installs a partial external home without reading moved-out leaves. Sidecars are
+budgeted and validate root liveness, bit values, and dead-parent consistency.
+Only private compiler-sealed bindings enable this extension; public native
+registration still requires complete owned arguments, even if a user imitates a
+generated capability name. Ordinary native result slots require complete values.
+
 Source tests run actual LLVM↔VM chains at O0 and O2, including unique-reference
 mutation and return, raw observation of unchanged reference backing addresses,
 owned records/results, fixed-array results and VM patterns, linear zero-sized
-owners, and once-only source Drop on both sides. Instruction/depth/byte limits
+owners, and once-only source Drop on both sides. Tests also cover partially
+moved records and nested array/enum owners. They run the
+cleanup in either engine and prove each remaining source destructor executes once.
+Instruction/depth/byte limits
 are shared, including still-live native frames during a VM callback. The current
 synchronous mixed runner adds an explicit eight-crossing re-entry limit and
 starts its closed zero-argument graph on a 16 MiB worker stack. It does not
@@ -101,12 +116,6 @@ extent errors; and independent total-byte/single-allocation limits. Raw allocati
 owners release bytes on execution teardown, never implicitly execute source Drop.
 
 ## Explicit remaining frontier
-
-An additional ownership frontier is preserving partial-owner initialization
-metadata across generated native-to-native calls. Public VM/native owned imports
-reject partial owners, but internal generated cleanup calls still need checked
-initialization sidecars; the current checkpoint is not general partial-owner
-cleanup support.
 
 The generated backend does not yet execute cross-engine mandatory tails,
 first-class/captured/borrowed callable parameters,

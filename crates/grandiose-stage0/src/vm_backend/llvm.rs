@@ -20,11 +20,19 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 3;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:sync-v3";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 4;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:sync-v4";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
+
+pub(super) fn initialization_paths(
+    layout: &super::native_memory::NativeLayout,
+) -> Result<Vec<Vec<u32>>, LlvmError> {
+    let mut paths = BTreeSet::new();
+    emit::collect_paths(layout, &mut vec![], &mut paths)?;
+    Ok(paths.into_iter().collect())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmAbiDescriptor {
@@ -279,6 +287,7 @@ pub(super) struct NativeContext {
     pub(super) allocate: Option<
         unsafe extern "C" fn(*mut NativeContext, u32, *mut u8, u64, u64, u64, *mut *mut u8) -> u32,
     >,
+    pub(super) fault_register: u32,
 }
 
 impl NativeContext {
@@ -298,6 +307,7 @@ impl NativeContext {
             allocation_limit: limits.max_native_allocation_bytes,
             allocation_context: std::ptr::null_mut(),
             allocate: None,
+            fault_register: 0,
         }
     }
     pub(super) fn result(&self, status: u32) -> Result<(), LlvmError> {
@@ -319,6 +329,15 @@ impl NativeContext {
             },
             10 => VmArtifactError::NativeMemory {
                 message: "native reference requires a non-null aligned pointer",
+            },
+            11 => VmArtifactError::InvalidRegister {
+                register: self.fault_register,
+            },
+            12 => VmArtifactError::NativeMemory {
+                message: "native storage resident was moved out",
+            },
+            13 => VmArtifactError::NativeAbi {
+                message: "native result requires a fully initialized source resident",
             },
             6 => VmArtifactError::NativeAbi {
                 message: "native execution reached a verified terminal trap",

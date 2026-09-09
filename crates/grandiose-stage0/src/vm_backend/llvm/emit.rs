@@ -34,6 +34,7 @@ pub(super) struct Plan<'a> {
     pub(super) functions: Vec<DefKey>,
     plans: Vec<FunctionPlan>,
     packet_offsets: Vec<Vec<u64>>,
+    packet_init_offsets: Vec<Vec<u64>>,
     packet_bytes: u64,
     packet_alignment: u64,
     max_arguments: usize,
@@ -55,6 +56,7 @@ impl<'a> Plan<'a> {
             functions,
             plans: vec![],
             packet_offsets: vec![],
+            packet_init_offsets: vec![],
             packet_bytes: 1,
             packet_alignment: 1,
             max_arguments: 0,
@@ -75,7 +77,7 @@ impl<'a> Plan<'a> {
             }
             let descriptors = function.nominal_copy_descriptors.clone().into();
             let mut layouts = vec![];
-            let mut paths = vec![];
+            let mut paths: Vec<Vec<Vec<u32>>> = vec![];
             let mut frame_bytes = 0u64;
             let mut path_count = 0usize;
             for (register, ty) in function.registers.iter().enumerate() {
@@ -164,12 +166,23 @@ impl<'a> Plan<'a> {
                 packet = next;
                 offsets.push(offset as u64);
             }
+            let mut init_offsets = vec![];
+            for paths in paths.iter().take(function.parameters as usize) {
+                let flags = MemoryLayout::new(paths.len(), 1)
+                    .map_err(|_| unsupported(0, "invalid tail initialization sidecar"))?;
+                let (next, offset) = packet
+                    .extend(flags)
+                    .map_err(|_| unsupported(0, "tail initialization sidecar overflow"))?;
+                packet = next;
+                init_offsets.push(offset as u64);
+            }
             result.max_arguments = result.max_arguments.max(function.parameters as usize);
             result.packet_bytes = result
                 .packet_bytes
                 .max(packet.pad_to_alignment().size() as u64);
             result.packet_alignment = result.packet_alignment.max(packet.alignment() as u64);
             result.packet_offsets.push(offsets);
+            result.packet_init_offsets.push(init_offsets);
             result.frame_bytes = result.frame_bytes.max(frame_bytes);
             if frame_bytes > MAX_FRAME_BYTES {
                 return Err(unsupported(
@@ -285,7 +298,9 @@ impl<'a> Plan<'a> {
 
     fn dispatch(&self, ir: &mut String) {
         let packet_bytes = self.packet_bytes.max(1);
-        let argc = self.max_arguments.max(1);
+        // Every argument is one data pointer plus one logical-initialization
+        // sidecar pointer. Null sidecars mean completely initialized.
+        let argc = 2 * self.max_arguments.max(1);
         let charge = 2 * packet_bytes + 3 * argc as u64 * 8 + self.frame_bytes + 128;
         writeln!(ir, "define internal i32 @g1_dispatch(ptr %ctx, i32 %function, ptr %args, ptr %result) {{\nentry:\n  %admitted = call i1 @g1_enter(ptr %ctx, i64 {charge})\n  br i1 %admitted, label %allocate, label %rejected\nrejected:\n  ret i32 1\nallocate:\n  %packet0 = alloca [{packet_bytes} x i8], align {}\n  %packet1 = alloca [{packet_bytes} x i8], align {}\n  %args0 = alloca [{argc} x ptr], align 8\n  %args1 = alloca [{argc} x ptr], align 8\n  %next = alloca i32, align 4\n  br label %dispatch\ndispatch:\n  %selected = phi i32 [ %function, %allocate ], [ %next_function, %tail ]\n  %incoming = phi ptr [ %args, %allocate ], [ %outgoing, %tail ]\n  %outgoing = phi ptr [ %args0, %allocate ], [ %following_args, %tail ]\n  %storage = phi ptr [ %packet0, %allocate ], [ %following_storage, %tail ]\n  %second = phi i1 [ false, %allocate ], [ %next_second, %tail ]\n  switch i32 %selected, label %invalid [", self.packet_alignment, self.packet_alignment).unwrap();
         for (index, _) in self.functions.iter().enumerate() {
@@ -310,7 +325,7 @@ impl<'a> Plan<'a> {
     }
 }
 
-fn collect_paths(
+pub(super) fn collect_paths(
     layout: &NativeLayout,
     prefix: &mut Vec<u32>,
     paths: &mut BTreeSet<Vec<u32>>,
@@ -528,7 +543,7 @@ impl<'a, 'p> Body<'a, 'p> {
 
     fn emit(&mut self) -> Result<(), LlvmError> {
         writeln!(self.output, "define internal i32 @g1_body_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:", self.index).unwrap();
-        let maxargs = self.plan.max_arguments.max(1);
+        let maxargs = 2 * self.plan.max_arguments.max(1);
         self.line(format!("%callargs = alloca [{maxargs} x ptr], align 8"));
         for (pc, instruction) in self.function.instructions.iter().enumerate() {
             if let I::Leave { arguments, .. } = instruction {
@@ -549,7 +564,10 @@ impl<'a, 'p> Body<'a, 'p> {
                     VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. }
                 );
             if alias_argument {
-                let slot = self.value(format!("getelementptr ptr, ptr %args, i64 {register}"));
+                let slot = self.value(format!(
+                    "getelementptr ptr, ptr %args, i64 {}",
+                    2 * register
+                ));
                 self.line(format!("%r{register} = load ptr, ptr {slot}, align 8"));
             } else {
                 self.line(format!(
@@ -568,9 +586,27 @@ impl<'a, 'p> Body<'a, 'p> {
                 register < self.function.parameters as usize,
             );
             if register < self.function.parameters as usize && !alias_argument {
-                let slot = self.value(format!("getelementptr ptr, ptr %args, i64 {register}"));
+                let slot = self.value(format!(
+                    "getelementptr ptr, ptr %args, i64 {}",
+                    2 * register
+                ));
                 let pointer = self.value(format!("load ptr, ptr {slot}, align 8"));
                 self.copy_bytes(&format!("%r{register}"), &pointer, layout);
+            }
+            if register < self.function.parameters as usize {
+                let slot = self.value(format!(
+                    "getelementptr ptr, ptr %args, i64 {}",
+                    2 * register + 1
+                ));
+                let flags = self.value(format!("load ptr, ptr {slot}, align 8"));
+                let supplied = self.value(format!("icmp ne ptr {flags}, null"));
+                let copy = self.label();
+                let ready = self.label();
+                self.line(format!("br i1 {supplied}, label %{copy}, label %{ready}"));
+                self.block(&copy);
+                self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr %init{register}, ptr {flags}, i64 {}, i1 false)", self.data.paths[register].len()));
+                self.line(format!("br label %{ready}"));
+                self.block(&ready);
             }
         }
         self.line("br label %pc0");
@@ -651,6 +687,71 @@ impl<'a, 'p> Body<'a, 'p> {
                 self.copy_register(*dst, *src, true)
             }
             I::StoreUsize { dst, value } => self.copy_register(*dst, *value, false),
+            I::ArrayLen { dst, value } => {
+                let VmType::FixedArray { length, .. } = &self.function.registers[*value as usize]
+                else {
+                    return Err(
+                        self.unsupported("native array extent requires a fixed-array resident")
+                    );
+                };
+                self.store_scalar(*dst, &length.to_string())?;
+            }
+            I::ArrayElementIsInitialized { dst, value, index }
+            | I::TakeArrayElement { dst, value, index } => {
+                let VmType::FixedArray { element, length } =
+                    &self.function.registers[*value as usize]
+                else {
+                    return Err(
+                        self.unsupported("native indexed storage requires a fixed-array resident")
+                    );
+                };
+                let element = layout::concrete_layout(
+                    element,
+                    &self.function.nominal_copy_descriptors.clone().into(),
+                )?;
+                let length = *length;
+                let index = self.load(*index)?;
+                let in_bounds = self.value(format!("icmp ult i64 {index}, {length}"));
+                let fault_register =
+                    self.value("getelementptr %G1Context, ptr %ctx, i32 0, i32 14");
+                self.line(format!("store i32 {value}, ptr {fault_register}, align 4"));
+                self.guard(&in_bounds, 11);
+                let width = if length == 0 {
+                    1
+                } else {
+                    (self.data.paths[*value as usize].len() - 1) / length as usize
+                };
+                let offset = self.value(format!("mul i64 {index}, {width}"));
+                let first = self.value(format!("add i64 {offset}, 1"));
+                let flags = self.value(format!("getelementptr i8, ptr %init{value}, i64 {first}"));
+                if matches!(instruction, I::ArrayElementIsInitialized { .. }) {
+                    let initialized = self.value(format!("load i8, ptr {flags}, align 1"));
+                    self.store_scalar(*dst, &initialized)?;
+                } else {
+                    let initialized = self.value(format!("load i8, ptr {flags}, align 1"));
+                    let present = self.value(format!("icmp ne i8 {initialized}, 0"));
+                    self.guard(&present, 12);
+                    let byte_offset = self.value(format!(
+                        "mul i64 {index}, {}",
+                        element.memory.pad_to_alignment().size()
+                    ));
+                    let source = self.value(format!(
+                        "getelementptr i8, ptr %r{value}, i64 {byte_offset}"
+                    ));
+                    self.copy_bytes(&self.pointer(*dst), &source, &element);
+                    for flag in 0..width {
+                        let source =
+                            self.value(format!("getelementptr i8, ptr {flags}, i64 {flag}"));
+                        let initialized = self.value(format!("load i8, ptr {source}, align 1"));
+                        let destination =
+                            self.value(format!("getelementptr i8, ptr %init{dst}, i64 {flag}"));
+                        self.line(format!(
+                            "store i8 {initialized}, ptr {destination}, align 1"
+                        ));
+                        self.line(format!("store i8 0, ptr {source}, align 1"));
+                    }
+                }
+            }
             I::IsInitialized { dst, base, fields } => {
                 let flag = self.flag(*base, fields);
                 let value = self.value(format!("load i8, ptr {flag}, align 1"));
@@ -813,8 +914,16 @@ impl<'a, 'p> Body<'a, 'p> {
                     .position(|key| key == callee)
                     .ok_or_else(|| self.unsupported("native direct callee is absent"))?;
                 for (index, argument) in arguments.iter().enumerate() {
-                    let slot = self.value(format!("getelementptr ptr, ptr %callargs, i64 {index}"));
+                    let slot = self.value(format!(
+                        "getelementptr ptr, ptr %callargs, i64 {}",
+                        2 * index
+                    ));
                     self.line(format!("store ptr %r{argument}, ptr {slot}, align 8"));
+                    let slot = self.value(format!(
+                        "getelementptr ptr, ptr %callargs, i64 {}",
+                        2 * index + 1
+                    ));
+                    self.line(format!("store ptr %init{argument}, ptr {slot}, align 8"));
                 }
                 let status = self.value(format!(
                     "call i32 @g1_dispatch(ptr %ctx, i32 {index}, ptr %callargs, ptr %r{dst})"
@@ -850,9 +959,21 @@ impl<'a, 'p> Body<'a, 'p> {
                         &self.pointer(*argument),
                         &self.data.layouts[*argument as usize].clone(),
                     );
-                    let slot =
-                        self.value(format!("getelementptr ptr, ptr %tail_args, i64 {index}"));
+                    let slot = self.value(format!(
+                        "getelementptr ptr, ptr %tail_args, i64 {}",
+                        2 * index
+                    ));
                     self.line(format!("store ptr {pointer}, ptr {slot}, align 8"));
+                    let flags = self.value(format!(
+                        "getelementptr i8, ptr %tail_storage, i64 {}",
+                        self.plan.packet_init_offsets[target][index]
+                    ));
+                    self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr {flags}, ptr %init{argument}, i64 {}, i1 false)", self.data.paths[*argument as usize].len()));
+                    let slot = self.value(format!(
+                        "getelementptr ptr, ptr %tail_args, i64 {}",
+                        2 * index + 1
+                    ));
+                    self.line(format!("store ptr {flags}, ptr {slot}, align 8"));
                 }
                 self.line(format!("store i32 {target}, ptr %tail_next, align 4"));
                 self.line("ret i32 2");
@@ -899,6 +1020,18 @@ impl<'a, 'p> Body<'a, 'p> {
                 return Ok(true);
             }
             I::Return { value } => {
+                // The ordinary result slot is a complete source value. A
+                // partial owner belongs only to compiler cleanup arguments;
+                // never silently relabel its holes as an initialized result.
+                let mut initialized = "true".to_owned();
+                for index in 0..self.data.paths[*value as usize].len() {
+                    let flag =
+                        self.value(format!("getelementptr i8, ptr %init{value}, i64 {index}"));
+                    let flag = self.value(format!("load i8, ptr {flag}, align 1"));
+                    let present = self.value(format!("icmp eq i8 {flag}, 1"));
+                    initialized = self.value(format!("and i1 {initialized}, {present}"));
+                }
+                self.guard(&initialized, 13);
                 self.copy_bytes("%result", &self.pointer(*value), &self.data.result.clone());
                 self.line("ret i32 0");
                 return Ok(true);
@@ -923,6 +1056,17 @@ impl<'a, 'p> Body<'a, 'p> {
         layout: Arc<NativeLayout>,
         pattern: &VmPattern,
     ) -> Result<String, LlvmError> {
+        if !matches!(pattern, VmPattern::Any)
+            && let NativeShape::Reference {
+                referent,
+                descriptors,
+                ..
+            } = &layout.shape
+        {
+            let target = layout::concrete_layout(referent, descriptors)?;
+            let pointer = self.value(format!("load ptr, ptr {pointer}, align 8"));
+            return self.pattern(pointer, target, pattern);
+        }
         match pattern {
             VmPattern::Any => Ok("true".into()),
             VmPattern::Literal(value) => {
@@ -950,6 +1094,27 @@ impl<'a, 'p> Body<'a, 'p> {
             VmPattern::Tuple(patterns) => {
                 let mut matched = "true".to_owned();
                 for (index, pattern) in patterns.iter().enumerate() {
+                    let (field, layout) =
+                        self.projection(pointer.clone(), layout.clone(), &[index as u32])?;
+                    let item = self.pattern(field, layout, pattern)?;
+                    matched = self.value(format!("and i1 {matched}, {item}"));
+                }
+                Ok(matched)
+            }
+            VmPattern::Array { elements, rest, .. } => {
+                let NativeShape::Product(fields) = &layout.shape else {
+                    return Err(
+                        self.unsupported("native array pattern requires a fixed-array layout")
+                    );
+                };
+                if crate::pattern::ArrayPatternRest::length(*rest, elements.len())
+                    != Some(fields.len())
+                {
+                    return Ok("false".into());
+                }
+                let mut matched = "true".to_owned();
+                for (index, pattern) in elements.iter().enumerate() {
+                    let index = crate::pattern::ArrayPatternRest::index(*rest, index);
                     let (field, layout) =
                         self.projection(pointer.clone(), layout.clone(), &[index as u32])?;
                     let item = self.pattern(field, layout, pattern)?;
@@ -1009,7 +1174,6 @@ impl<'a, 'p> Body<'a, 'p> {
                     "phi i1 [ false, %{no} ], [ {matched}, %{matched_end} ]"
                 )))
             }
-            _ => Err(self.unsupported("native array-pattern ABI is not implemented")),
         }
     }
 }

@@ -420,6 +420,8 @@ type NativeFunction = dyn for<'a> Fn(&mut VmNativeCall<'a>) -> Result<(), VmArti
 struct Binding {
     contract: VmNativeImport,
     function: Arc<NativeFunction>,
+    /// Private compiler-owned slot extension. Public registration cannot opt in.
+    initialization_sidecars: bool,
 }
 
 /// Explicit native authority. Registration does not grant execution to any
@@ -457,6 +459,7 @@ impl VmNativeImports {
             Binding {
                 contract,
                 function: Arc::new(function),
+                initialization_sidecars: false,
             },
         );
         Ok(())
@@ -520,6 +523,7 @@ impl VmNativeImports {
                     parameters,
                     result,
                     destructors,
+                    initialization_sidecars: binding.initialization_sidecars,
                 }),
             );
         }
@@ -541,6 +545,7 @@ struct BoundImport {
     parameters: Vec<ArgumentPlan>,
     result: Arc<NativeLayout>,
     destructors: Vec<Option<(DefKey, Arc<CallbackPlan>)>>,
+    initialization_sidecars: bool,
 }
 pub(super) struct BoundNativeImports {
     imports: BTreeMap<String, BTreeMap<String, Arc<BoundImport>>>,
@@ -856,6 +861,7 @@ impl VmNativeCall<'_> {
             captures,
             plan,
             additional_depth: 0,
+            argument_holes: None,
         };
         let result = native(VmNativeCallback {
             context: (&mut context as *mut CallbackContext<'_, '_>).cast(),
@@ -875,6 +881,8 @@ struct CallbackContext<'call, 'vm> {
     plan: Arc<CallbackPlan>,
     /// Generated LLVM frames between the invoking VM and this callback.
     additional_depth: u32,
+    /// Only compiler-sealed generated callbacks may carry partial owners.
+    argument_holes: Option<&'call [BTreeSet<Vec<u32>>]>,
 }
 
 impl CallbackContext<'_, '_> {
@@ -930,11 +938,13 @@ impl CallbackContext<'_, '_> {
             let slot = unsafe { slots.add(index).read() };
             arguments.push(if owned_resident(&layout.ty) {
                 VmValue::Resident(unsafe {
-                    super::native_storage::NativeHome::external_argument(
-                        layout.clone(),
-                        slot.cast_mut(),
-                        self.call.budget,
-                    )?
+                    if let Some(holes) = self.argument_holes {
+                        super::native_storage::NativeHome::external_argument_with_holes(
+                            layout.clone(), slot.cast_mut(), self.call.budget, Some(&holes[index]))?
+                    } else {
+                        super::native_storage::NativeHome::external_argument(
+                            layout.clone(), slot.cast_mut(), self.call.budget)?
+                    }
                 })
             } else {
                 unsafe { layout.read(slot, self.call.budget)? }
@@ -1018,7 +1028,9 @@ pub(super) fn execute(
             .ok_or_else(|| error("native argument is not initialized"))?;
         match (plan, value) {
             (ArgumentPlan::Owned(layout), VmValue::Resident(home)) => {
-                if home.ty() != &layout.ty || !home.is_fully_initialized(&[]) {
+                let initialized = if binding.initialization_sidecars { home.is_initialized(&[]) }
+                    else { home.is_fully_initialized(&[]) };
+                if home.ty() != &layout.ty || !initialized {
                     return Err(error(
                         "owned native argument has an invalid resident layout or initialization",
                     ));

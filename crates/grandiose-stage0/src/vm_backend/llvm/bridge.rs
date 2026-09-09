@@ -168,27 +168,45 @@ fn vm_wrappers(module: &LlvmNativeModule) -> Result<VerifiedVmProgram, VmArtifac
 
 struct GeneratedPlans {
     callbacks: BTreeMap<DefKey, Arc<CallbackPlan>>,
+    initialization: BTreeMap<DefKey, Vec<Vec<Vec<u32>>>>,
 }
 
 impl GeneratedPlans {
     fn new(module: &LlvmNativeModule) -> Result<Self, VmArtifactError> {
         let mut callbacks = BTreeMap::new();
-        for definition in &module.plan().vm_functions {
+        let mut initialization = BTreeMap::new();
+        for definition in &module.plan().functions {
             let function = &module.plan().program.program.functions[definition];
             let descriptors = function.nominal_copy_descriptors.clone().into();
+            let parameters = function.registers[..function.parameters as usize]
+                .iter()
+                .map(|ty| value_plan(ty, &descriptors))
+                .collect::<Result<Vec<_>, _>>()?;
+            initialization.insert(
+                *definition,
+                parameters
+                    .iter()
+                    .map(|layout| {
+                        crate::vm_backend::llvm::initialization_paths(layout).map_err(runtime_error)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            if !module.plan().vm_functions.contains(definition) {
+                continue;
+            }
             let result = super::super::return_type(function)?;
             callbacks.insert(
                 *definition,
                 Arc::new(CallbackPlan {
-                    parameters: function.registers[..function.parameters as usize]
-                        .iter()
-                        .map(|ty| value_plan(ty, &descriptors))
-                        .collect::<Result<_, _>>()?,
+                    parameters,
                     result: value_plan(&result, &descriptors)?,
                 }),
             );
         }
-        Ok(Self { callbacks })
+        Ok(Self {
+            callbacks,
+            initialization,
+        })
     }
 }
 
@@ -240,6 +258,14 @@ unsafe fn run_local(module: LlvmNativeModule, limits: VmExecutionLimits) -> Resu
                 invoke_native(call, &selected, &selected_plans, index)
             })?;
         }
+        // Not serialized, not selected by capability spelling, and not
+        // exposed by public native registration. Only this exact generated
+        // implementation understands the sealed initialization sidecar ABI.
+        imports
+            .bindings
+            .get_mut(&(contract.capability.clone(), contract.symbol.clone()))
+            .expect("just installed compiler-owned binding")
+            .initialization_sidecars = true;
     }
     let linked = imports.link_contracts(contracts)?;
     let mut native_memory = NativeMemory::default();
@@ -271,8 +297,22 @@ fn invoke_native(
     index: usize,
 ) -> Result<(), VmArtifactError> {
     let count = call.binding.parameters.len();
+    let initialization = &plans.initialization[&module.plan().functions[index]];
+    let flag_bytes = call
+        .binding
+        .parameters
+        .iter()
+        .enumerate()
+        .filter(|(_, plan)| matches!(plan, ArgumentPlan::Owned(_)))
+        .map(|(index, _)| initialization[index].len())
+        .sum::<usize>();
     let transport_bytes = count
-        .checked_mul(std::mem::size_of::<ScalarSlot>() + std::mem::size_of::<*const u8>())
+        .checked_mul(
+            std::mem::size_of::<ScalarSlot>()
+                + 2 * std::mem::size_of::<*const u8>()
+                + std::mem::size_of::<Vec<u8>>(),
+        )
+        .and_then(|bytes| bytes.checked_add(flag_bytes))
         .and_then(|bytes| bytes.checked_add(std::mem::size_of::<ScalarSlot>()))
         .ok_or_else(|| super::error("generated native slot table size overflow"))?
         as u64;
@@ -283,6 +323,8 @@ fn invoke_native(
     }
     call.budget
         .reserve_value("generated native argument slots", count)?;
+    call.budget
+        .reserve_value("generated initialization sidecars", flag_bytes)?;
     let mut context = NativeContext::new(call.budget.limits);
     context.instructions = call.budget.instructions;
     context.byte_limit = call
@@ -303,10 +345,33 @@ fn invoke_native(
         .max_call_depth
         .saturating_sub(call.depth.saturating_add(1));
     let mut values = vec![ScalarSlot::new(); count];
-    let mut arguments = Vec::with_capacity(count);
+    let mut flags = vec![Vec::<u8>::new(); count];
+    let mut arguments = Vec::with_capacity(2 * count);
     for (index, slot) in values.iter_mut().enumerate() {
-        let pointer = match call.binding.parameters[index] {
-            ArgumentPlan::Owned(_) => unsafe { call.take_argument(index)? },
+        let pointer = match &call.binding.parameters[index] {
+            ArgumentPlan::Owned(layout) => {
+                let register = call.arguments[index];
+                let Some(VmValue::Resident(home)) = call.registers[register as usize].as_ref()
+                else {
+                    return Err(super::error(
+                        "generated owned argument has no resident home",
+                    ));
+                };
+                if home.ty() != &layout.ty || !home.is_initialized(&[]) {
+                    return Err(super::error(
+                        "generated owned argument has invalid root initialization",
+                    ));
+                }
+                flags[index].reserve(initialization[index].len());
+                for path in &initialization[index] {
+                    call.budget.tick()?;
+                    flags[index].push(u8::from(home.is_initialized(path)));
+                }
+                home.expose_address();
+                let pointer = home.project(&[])?.0;
+                call.registers[register as usize] = None;
+                pointer
+            }
             ArgumentPlan::Value(_) => {
                 let pointer = slot.pointer();
                 unsafe {
@@ -321,6 +386,11 @@ fn invoke_native(
             }
         };
         arguments.push(pointer.cast_const());
+        arguments.push(if flags[index].is_empty() {
+            std::ptr::null()
+        } else {
+            flags[index].as_ptr()
+        });
     }
     let owned_result = call.result_home.is_some();
     let mut scalar_result = ScalarSlot::new();
@@ -337,6 +407,7 @@ fn invoke_native(
     };
     context.mixed_context = (&mut invocation as *mut MixedInvocation<'_, '_>).cast();
     context.invoke_vm = Some(invoke_vm);
+    context.instructions = invocation.call.budget.instructions;
     let mut allocation = crate::vm_backend::llvm::memory::AllocationContext::new(
         &mut invocation.call.budget.native_memory,
         invocation.call.budget.limits.max_native_bytes,
@@ -388,10 +459,12 @@ unsafe extern "C" fn invoke_vm(
     if invocation.failure.is_some() {
         return 1;
     }
+    invocation.call.budget.instructions = context.instructions;
     let outcome = catch_unwind(AssertUnwindSafe(|| unsafe {
         invoke_vm_checked(invocation, context, index, slots, result)
     }))
     .unwrap_or_else(|_| Err(super::error("generated native VM callback panicked")));
+    context.instructions = invocation.call.budget.instructions;
     match outcome {
         Ok(()) => 0,
         Err(error) => {
@@ -420,10 +493,21 @@ unsafe fn invoke_vm_checked(
         .get(definition)
         .ok_or_else(|| super::error("generated callback target is not in the VM partition"))?
         .clone();
+    let paths = &invocation.plans.initialization[definition];
+    invocation
+        .call
+        .budget
+        .reserve_value("generated callback slot pairs", 2 * plan.parameters.len())?;
+    let mut arguments = Vec::with_capacity(plan.parameters.len());
+    let mut holes = Vec::with_capacity(plan.parameters.len());
+    for (index, paths) in paths.iter().enumerate() {
+        arguments.push(unsafe { slots.add(2 * index).read() });
+        let flags = unsafe { slots.add(2 * index + 1).read() };
+        holes.push(unsafe { read_initialization(flags, paths, invocation.call.budget)? });
+    }
     if invocation.call.budget.native_memory.callback_depth >= GENERATED_REENTRY_LIMIT {
         return Err(super::error("generated mixed-engine re-entry limit"));
     }
-    invocation.call.budget.instructions = context.instructions;
     let native_limit = invocation.call.budget.limits.max_native_bytes;
     // VM allocations and further native calls see the still-live generated
     // frames as unavailable bytes in this same allocation domain.
@@ -437,8 +521,9 @@ unsafe fn invoke_vm_checked(
         captures: RuntimeCaptureEnvironment::new(vec![]),
         plan: plan.clone(),
         additional_depth: context.depth,
+        argument_holes: Some(&holes),
     };
-    let outcome = unsafe { callback.invoke(slots, plan.parameters.len(), result) };
+    let outcome = unsafe { callback.invoke(arguments.as_ptr(), plan.parameters.len(), result) };
     invocation.call.budget.limits.max_native_bytes = native_limit;
     context.instructions = invocation.call.budget.instructions;
     context.byte_limit = native_limit
@@ -451,4 +536,94 @@ unsafe fn invoke_vm_checked(
         ));
     }
     Ok(())
+}
+
+unsafe fn read_initialization(
+    flags: *const u8,
+    paths: &[Vec<u32>],
+    budget: &mut ExecutionBudget,
+) -> Result<BTreeSet<Vec<u32>>, VmArtifactError> {
+    if flags.is_null() {
+        return Ok(BTreeSet::new());
+    }
+    budget.reserve_value("generated callback initialization", paths.len())?;
+    let flags = unsafe { std::slice::from_raw_parts(flags, paths.len()) };
+    let mut holes = BTreeSet::new();
+    for (path, flag) in paths.iter().zip(flags) {
+        budget.tick()?;
+        match *flag {
+            0 if !path.is_empty() => {
+                holes.insert(path.clone());
+            }
+            1 if !(0..path.len()).any(|length| holes.contains(&path[..length])) => {}
+            _ => {
+                return Err(super::error(
+                    "generated argument has invalid initialization sidecar",
+                ));
+            }
+        }
+    }
+    Ok(holes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn budget() -> ExecutionBudget {
+        ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
+            limits: Default::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        }
+    }
+
+    #[test]
+    fn generated_initialization_sidecars_validate_roots_bits_and_dead_parents() {
+        let paths = vec![vec![], vec![0], vec![0, 0], vec![1]];
+        for flags in [[0, 0, 0, 0], [1, 2, 1, 1], [1, 0, 1, 1]] {
+            assert!(
+                unsafe { read_initialization(flags.as_ptr(), &paths, &mut budget()) }.is_err(),
+                "{flags:?}"
+            );
+        }
+        assert_eq!(
+            unsafe { read_initialization([1, 0, 0, 1].as_ptr(), &paths, &mut budget()) }.unwrap(),
+            BTreeSet::from([vec![0], vec![0, 0]])
+        );
+        assert!(
+            unsafe { read_initialization(std::ptr::null(), &paths, &mut budget()) }
+                .unwrap()
+                .is_empty()
+        );
+        let mut limited = budget();
+        limited.limits.max_instructions = 0;
+        assert!(matches!(
+            unsafe { read_initialization([1, 1, 1, 1].as_ptr(), &paths, &mut limited) },
+            Err(VmArtifactError::InstructionLimit { limit: 0 })
+        ));
+    }
+
+    #[test]
+    fn public_native_registration_cannot_enable_partial_owner_transport_by_name() {
+        let contract = VmNativeImport {
+            abi: VmNativeAbi::current(),
+            capability: GENERATED_CAPABILITY.into(),
+            symbol: "spoofed-generated-entry".into(),
+            source_contract: Digest::of_bytes(b"unrelated source"),
+            parameters: vec![],
+            result: VmType::Unit,
+            nominals: vec![],
+            residents: vec![],
+        };
+        let mut imports = VmNativeImports::default();
+        unsafe { imports.insert(contract.clone(), |_| Ok(())) }.unwrap();
+        let linked = imports.link_contracts(vec![contract]).unwrap();
+        assert!(
+            !linked.imports[GENERATED_CAPABILITY]["spoofed-generated-entry"]
+                .initialization_sidecars
+        );
+    }
 }

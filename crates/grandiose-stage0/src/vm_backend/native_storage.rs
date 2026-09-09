@@ -890,6 +890,17 @@ impl NativeHome {
         pointer: *mut u8,
         budget: &mut ExecutionBudget,
     ) -> Result<Arc<Self>, VmArtifactError> {
+        unsafe { Self::external_argument_with_holes(layout, pointer, budget, None) }
+    }
+
+    /// Bind compiler-sealed partial initialization without ever reading a
+    /// moved-out leaf. The ordinary external ABI always passes `None`.
+    pub(super) unsafe fn external_argument_with_holes(
+        layout: Arc<NativeLayout>,
+        pointer: *mut u8,
+        budget: &mut ExecutionBudget,
+        holes: Option<&BTreeSet<Vec<u32>>>,
+    ) -> Result<Arc<Self>, VmArtifactError> {
         budget.reserve_value("native argument storage view", 1)?;
         let pointer = if layout.memory.size() == 0 {
             std::ptr::without_provenance_mut(layout.memory.alignment())
@@ -909,7 +920,7 @@ impl NativeHome {
             registry: budget.native_memory.homes.clone(),
         });
         unsafe {
-            home.initialize_native(budget)?;
+            home.initialize_native_with_holes(budget, holes)?;
         }
         Ok(home)
     }
@@ -925,14 +936,27 @@ impl NativeHome {
         &self,
         budget: &mut ExecutionBudget,
     ) -> Result<(), VmArtifactError> {
+        unsafe { self.initialize_native_with_holes(budget, None) }
+    }
+
+    unsafe fn initialize_native_with_holes(
+        &self,
+        budget: &mut ExecutionBudget,
+        holes: Option<&BTreeSet<Vec<u32>>>,
+    ) -> Result<(), VmArtifactError> {
         fn visit(
             home: &NativeHome,
             layout: &NativeLayout,
             pointer: *const u8,
             path: &mut Vec<u32>,
             budget: &mut ExecutionBudget,
+            holes: Option<&BTreeSet<Vec<u32>>>,
         ) -> Result<(), VmArtifactError> {
             budget.tick()?;
+            if holes.is_some_and(|holes| holes.contains(path)) {
+                home.state.borrow_mut().holes.insert(path.clone());
+                return Ok(());
+            }
             let (offset, fields) = match &layout.shape {
                 NativeShape::Product(fields) => (0, fields),
                 NativeShape::Enum {
@@ -986,6 +1010,7 @@ impl NativeHome {
                     unsafe { pointer.add(offset + field.offset) },
                     path,
                     budget,
+                    holes,
                 )?;
                 path.pop();
             }
@@ -995,11 +1020,11 @@ impl NativeHome {
             return Err(error("native storage lifetime has ended"));
         }
         self.clear(&[]);
-        if let Err(failure) = visit(self, &self.layout, self.pointer(), &mut vec![], budget) {
+        if let Err(failure) = visit(self, &self.layout, self.pointer(), &mut vec![], budget, holes) {
             self.clear(&[]);
             return Err(failure);
         }
-        self.state.borrow_mut().root = true;
+        self.state.borrow_mut().root = !holes.is_some_and(|holes| holes.contains(&vec![]));
         Ok(())
     }
     /// Lexical storage death releases bytes even when dead SSA reference
@@ -1725,6 +1750,28 @@ mod tests {
             instructions: 0,
             allocated_elements: 0,
         }
+    }
+
+    #[test]
+    fn partial_external_owner_never_reads_a_moved_reference_leaf() {
+        #[repr(C)]
+        struct Partial { moved: *mut i64, live: i64 }
+        let mut storage = Partial { moved: std::ptr::null_mut(), live: 42 };
+        let ty = VmType::Tuple(vec![VmType::Reference { unique: true, referent: Box::new(VmType::I64) }, VmType::I64]);
+        let layout = Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
+        let mut budget = budget(1024);
+        let pointer = (&mut storage as *mut Partial).cast();
+        let holes = BTreeSet::from([vec![0]]);
+        let home = unsafe { NativeHome::external_argument_with_holes(layout.clone(), pointer, &mut budget, Some(&holes)) }.unwrap();
+        assert_eq!(home.pointer(), pointer);
+        assert!(home.is_initialized(&[]));
+        assert!(!home.is_initialized(&[0]));
+        assert!(!home.is_fully_initialized(&[]));
+        assert!(matches!(home.load(&[0], &mut budget).unwrap(), VmValue::Uninitialized(_)));
+        assert!(matches!(home.load(&[1], &mut budget).unwrap(), VmValue::I64(42)));
+        // The ordinary complete-value ABI still refuses these bytes: the
+        // null moved field is not a resident reference without its sidecar.
+        assert!(unsafe { NativeHome::external_argument(layout, pointer, &mut budget) }.is_err());
     }
 
     #[test]

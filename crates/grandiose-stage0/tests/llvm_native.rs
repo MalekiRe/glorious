@@ -86,6 +86,75 @@ fn actual_native_source_destructors_and_zero_sized_residents() {
 }
 
 #[test]
+fn generated_native_fixed_array_patterns_preserve_borrowed_shells() {
+    for source in [
+        "fn keep<T,const N: usize>(value: [T;N]) -> [T;N] { value } pub fn main() -> i64 { let [a,b]: [i64;2] = keep([20,22]); a+b }",
+        "pub fn main() -> i64 { let [a,..,b]: [i64;4] = [20,1,2,22]; a+b }",
+        "pub fn main() -> i64 { let [[_,_],[a,b]]: [[i64;2];2] = [[1,2],[20,22]]; a+b }",
+        "fn empty(value: &[i64;0]) -> i64 { handle *value { [] => 42 } } pub fn main() -> i64 { empty(&[]) }",
+        "enum State { Full(i64), Empty } fn inspect(value: &[State;2]) -> i64 { handle *value { [State::Full(20),State::Empty] => 42, _ => 0 } } pub fn main() -> i64 { let value: [State;2] = [State::Full(20),State::Empty]; inspect(&value) }",
+        "enum State { Full(i64), Empty } fn inspect(value: &mut [State;2]) -> i64 { handle *value { [State::Full(20),State::Empty] => 42, _ => 0 } } pub fn main() -> i64 { let mut value: [State;2] = [State::Full(20),State::Empty]; inspect(&mut value) }",
+        "struct Probe<'a> { count: &'a mut i64 } impl<'a> Use<[0,1]> for Probe<'a> {}
+            impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } }
+            enum State<'a> { Full(Probe<'a>), Empty } struct Slot<'a> { states: [State<'a>;2] }
+            fn inspect<'a,'b>(slot: &'a Slot<'b>) -> i64 { handle slot.states { [State::Full(_),State::Empty] => 41, _ => 0 } }
+            pub fn main() -> i64 { let mut count = 0; let observed = { let slot = Slot { states: [State::Full(Probe { count: &mut count }),State::Empty] }; inspect(&slot) }; observed + count }",
+    ] {
+        let ir = compile(source);
+        assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+        for optimization in [0,2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default())
+                .unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
+        }
+    }
+}
+
+#[test]
+fn native_partial_owner_sidecars_preserve_exactly_once_source_drop_across_engines() {
+    let declarations =
+        "struct Probe<'a> { count: &'a mut i64 } impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } }";
+    for body in [
+        "struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
+            pub fn main() -> i64 { let mut a = 20; let mut b = 20; {
+                let pair = Pair { first: Probe { count: &mut a },second: Probe { count: &mut b } };
+                let first = pair.first; ()
+            }; a+b }",
+        "pub fn main() -> i64 { let mut a = 20; let mut b = 20; {
+            let [first,..]: [Probe<'_>;2] = [Probe { count: &mut a },Probe { count: &mut b }]; ()
+        }; a+b }",
+        "enum Group<'a> { Pair(Probe<'a>,Probe<'a>), Empty }
+            pub fn main() -> i64 { let mut a = 20; let mut b = 20; {
+                let values: [Group<'_>;2] = [Group::Pair(Probe { count: &mut a },Probe { count: &mut b }),Group::Empty];
+                handle values { [Group::Pair(first,_),Group::Empty] => (), _ => () }
+            }; a+b }",
+        "struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
+            pub fn main() -> i64 { let mut a = 20; let mut b = 20; {
+                let [Pair { first: first,second: _ },..]: [Pair<'_>;1] = [Pair { first: Probe { count: &mut a },second: Probe { count: &mut b } }]; ()
+            }; a+b }",
+    ] {
+        let source = format!("{declarations} {body}");
+        let ir = compile(&source);
+        assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+        let cleanup_keys = ir.function_keys().iter().copied().filter(|key| {
+            let function = ir.function(*key).unwrap();
+            function.parameters == 1 && matches!(function.registers[0], grandiose_stage0::VmType::Nominal { .. }
+                | grandiose_stage0::VmType::Tuple(_) | grandiose_stage0::VmType::FixedArray { .. })
+        }).collect::<Vec<_>>();
+        assert!(!cleanup_keys.is_empty());
+        let plans = [ir.clone(), ir.with_vm_functions([ir.entry_key()]).unwrap(), ir.with_vm_functions(cleanup_keys).unwrap()];
+        for plan in plans {
+            for optimization in [0,2] {
+                let native = unsafe { plan.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert_eq!(native.run_i64_with_limits(Default::default())
+                    .unwrap_or_else(|error| panic!("{source}: {error:?}")), 42, "{source}");
+            }
+        }
+    }
+}
+
+#[test]
 fn actual_native_mutual_tail_calls_have_bounded_storage_at_o0() {
     let ir = compile(
         "fn first(n: i64, sum: i64) -> i64 { handle n { 0 => sum, _ => tail second(n - 1, sum + 1) } } fn second(n: i64, sum: i64) -> i64 { handle n { 0 => sum, _ => tail first(n - 1, sum + 1) } } pub fn main() -> i64 { tail first(10000, 0) }",
