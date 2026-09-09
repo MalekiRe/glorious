@@ -4,6 +4,18 @@ These rules apply to Stage0, the self-hosted compiler, and their tests and tools
 Read [the compiler architecture contract](docs/compiler-architecture.md) before
 changing semantic analysis, intermediate representations, or lowering.
 
+## Highest-priority development constraint
+
+The user considers this the most important instruction to preserve across
+sessions for both Stage0 and the self-hosted compiler: **every fix must target
+an actual bug or make the compiler pipeline correct**. Do not substitute tiny
+one-off patches, side tracks, or parallel information-carrying mechanisms for
+repairing the authoritative semantic path. If a boundary is wrong, correct its
+contract and migrate its real consumers; remove the superseded path. An unused
+fact table, duplicated analysis, or isolated passing test is not that repair.
+Incremental work is appropriate only when it advances that same coherent
+pipeline correction, with the remaining integration stated explicitly.
+
 ## Shared semantics, explicit transformations
 
 - Prefer typed, inspectable data products and composable transformation or
