@@ -359,12 +359,23 @@ impl LlvmNativeModule {
             .position(|key| *key == entry)
             .expect("planned entry");
         let mut context = NativeContext::new(limits);
+        let mut memory = crate::vm_backend::native_memory::NativeMemory::default();
+        let mut allocation =
+            super::memory::AllocationContext::new(&mut memory, limits.max_native_bytes);
+        // SAFETY: these local domain/context addresses outlive this synchronous
+        // native invocation, including all nested native calls.
+        unsafe {
+            allocation.install(&mut context);
+        }
         let mut result = std::mem::MaybeUninit::<i64>::uninit();
         // SAFETY: the module owns its entry, no arguments are expected, and
         // the result points at correctly aligned uninitialized i64 storage.
         let status = unsafe {
             (self.entries[index])(&mut context, std::ptr::null(), result.as_mut_ptr().cast())
         };
+        if let Some(error) = allocation.failure {
+            return Err(LlvmError::Runtime(error));
+        }
         context.result(status)?;
         if context.depth != 0 || context.live_bytes != 0 {
             return Err(LlvmError::InvalidNativeGraph(

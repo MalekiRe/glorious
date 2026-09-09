@@ -1,6 +1,6 @@
 
 ; Shared C-layout execution limits. No per-instruction host or VM callbacks.
-%G1Context = type { i64, i64, i64, i64, i32, i32, i32, i32, i64, ptr, ptr, i64 }
+%G1Context = type { i64, i64, i64, i64, i32, i32, i32, i32, i64, ptr, ptr, i64, ptr, ptr }
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
 
 define internal i32 @g1_fault(ptr %ctx, i32 %code) {

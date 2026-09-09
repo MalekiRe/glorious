@@ -105,6 +105,13 @@ enum Value {
         fields: Vec<u32>,
     },
     Aggregate(Vec<Value>),
+    /// A call's homogeneous array result keeps one reference relation per
+    /// element shape, plus only the concretely overwritten resident slots.
+    Array {
+        length: Option<u64>,
+        element: Box<Value>,
+        fields: BTreeMap<u32, Value>,
+    },
     /// A known constructor may lack a resident path present in another
     /// variant. That absence is not unknown reference provenance.
     Variant(Vec<Value>),
@@ -240,29 +247,8 @@ impl Analyzer<'_> {
                 Value::Aggregate(self.strict_values(fields))
             }
             CoreKind::Enum { fields, .. } => Value::Variant(self.strict_values(fields)),
-            CoreKind::Field { base, index, .. } => match self.value(base) {
-                // Opaque parameter layouts may carry a static/caller-owned
-                // reference at any declaration-approved field path. Keep
-                // that external provenance while traversing the source-level
-                // projection; the concrete path is independently frozen on
-                // the call boundary.
-                Value::ExternalBorrowed => Value::ExternalBorrowed,
-                Value::Aggregate(fields) | Value::Variant(fields) => {
-                    fields.get(index as usize).cloned().unwrap_or(Value::None)
-                }
-                Value::Joined(values) => Value::Joined(
-                    values
-                        .into_iter()
-                        .map(|value| match value {
-                            Value::Aggregate(fields) | Value::Variant(fields) => {
-                                fields.get(index as usize).cloned().unwrap_or(Value::None)
-                            }
-                            _ => Value::None,
-                        })
-                        .collect(),
-                ),
-                _ => Value::None,
-            },
+            CoreKind::Field { base, index, .. } =>
+                value_at_path(&self.value(base), &[index]).unwrap_or(Value::None),
             CoreKind::Let { name, value } => {
                 let evaluated = self.value(value);
                 if strict_expression_abrupt(self.body, value) {
@@ -601,6 +587,7 @@ impl Analyzer<'_> {
                         );
                     }
                 }
+                seal_array_extents(self.signatures, result_ty, &mut result);
                 result
             }
             CallReferenceOrigin::Opaque => {
@@ -1043,6 +1030,14 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         if matches!(current, Value::ExternalBorrowed) {
             *current = Value::Aggregate(vec![Value::ExternalBorrowed; *field_count as usize]);
         }
+        if let Value::Array { length, element, fields } = current {
+            if length.is_some_and(|length| length != u64::from(*field_count)) { return false; }
+            *length = Some(u64::from(*field_count));
+            let field = fields.entry(*index).or_insert_with(|| (**element).clone());
+            if position + 1 == path.len() { *field = replacement; return true; }
+            current = field;
+            continue;
+        }
         let (Value::Aggregate(fields) | Value::Variant(fields)) = current else {
             return false;
         };
@@ -1068,6 +1063,11 @@ fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -
     if let Value::Joined(values) = target {
         return values.iter_mut().all(|value| replace_resident_path(value, path, replacement.clone()));
     }
+    if let Value::Array { length, element, fields } = target {
+        if length.is_some_and(|length| u64::from(*field) >= length) { return false; }
+        let target = fields.entry(*field).or_insert_with(|| (**element).clone());
+        return replace_resident_path(target, tail, replacement);
+    }
     let (Value::Aggregate(fields) | Value::Variant(fields)) = target else { return false; };
     let Some(target) = fields.get_mut(*field as usize) else { return false; };
     replace_resident_path(target, tail, replacement)
@@ -1089,11 +1089,24 @@ fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Op
         return Some(Value::ExternalBorrowed);
     }
     let Some((field, tail)) = path.split_first() else { return Some(value.clone()); };
+    if let Value::Array { length, element, fields } = value {
+        if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+            return array_values(*length, element, fields)
+                .map(|value| value_at_variant_path(value, tail, known_variant))
+                .collect::<Option<Vec<_>>>().map(join);
+        }
+        if length.is_some_and(|length| u64::from(*field) >= length) { return None; }
+        return value_at_variant_path(fields.get(field).unwrap_or(element), tail, known_variant);
+    }
     let (fields, known_variant) = match value {
         Value::Aggregate(fields) => (fields, known_variant),
         Value::Variant(fields) => (fields, true),
         _ => return None,
     };
+    if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+        return fields.iter().map(|value| value_at_variant_path(value, tail, known_variant))
+            .collect::<Option<Vec<_>>>().map(join);
+    }
     let Some(next) = fields.get(*field as usize) else {
         return known_variant.then_some(Value::None);
     };
@@ -1110,6 +1123,14 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
         }
         return true;
     }
+    if path[0] == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+        if matches!(target, Value::None) {
+            *target = Value::Array { length: None, element: Box::new(Value::None), fields: BTreeMap::new() };
+        }
+        let Value::Array { element, fields, .. } = target else { return false; };
+        return put_value_at_path(element, &path[1..], replacement.clone())
+            && fields.values_mut().all(|value| put_value_at_path(value, &path[1..], replacement.clone()));
+    }
     let required = path[0] as usize + 1;
     if matches!(target, Value::None) {
         *target = Value::Aggregate(vec![Value::None; required]);
@@ -1121,6 +1142,37 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
         fields.resize(required, Value::None);
     }
     put_value_at_path(&mut fields[path[0] as usize], &path[1..], replacement)
+}
+
+fn array_values<'a>(length: Option<u64>, element: &'a Value, fields: &'a BTreeMap<u32, Value>)
+    -> impl Iterator<Item = &'a Value>
+{
+    (!length.is_some_and(|length| length == fields.len() as u64)).then_some(element)
+        .into_iter().chain(fields.values())
+}
+
+fn seal_array_extents(signatures: &crate::ElaboratedInterface, ty: &Type, value: &mut Value) {
+    match (ty, value) {
+        (Type::FixedArray { element: ty, length }, Value::Array { length: extent, element, .. }) => {
+            *extent = Type::FixedArray { element: ty.clone(), length: length.clone() }.fixed_array_length();
+            seal_array_extents(signatures, ty, element);
+        }
+        (Type::Tuple(types), Value::Aggregate(fields)) => {
+            for (ty, value) in types.iter().zip(fields) { seal_array_extents(signatures, ty, value); }
+        }
+        (Type::Nominal { definition, arguments }, Value::Aggregate(fields)) => {
+            let Some(crate::ElaboratedHeader::Nominal {
+                layout: crate::signature::ElaboratedNominalLayout::Struct(types)
+                    | crate::signature::ElaboratedNominalLayout::TupleStruct(types), ..
+            }) = signatures.definitions.get(definition) else { return; };
+            for (ty, value) in types.iter().zip(fields) {
+                if let Ok(ty) = crate::core::instantiate_nominal_field_type(&ty.ty, arguments) {
+                    seal_array_extents(signatures, &ty, value);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn restore_bindings(
@@ -1193,6 +1245,8 @@ fn frame_independent_value(value: &Value) -> bool {
         Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
             values.iter().all(frame_independent_value)
         }
+        Value::Array { length, element, fields } =>
+            array_values(*length, element, fields).all(frame_independent_value),
         Value::Closure { frame_independent, .. } => *frame_independent,
         Value::None | Value::Borrowed { .. } => false,
     }
@@ -1213,6 +1267,9 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
             for value in values {
                 collect_borrowed_roots(value, roots);
             }
+        }
+        Value::Array { length, element, fields } => {
+            for value in array_values(*length, element, fields) { collect_borrowed_roots(value, roots); }
         }
         Value::Closure { .. } | Value::None | Value::FrameIndependent | Value::ExternalBorrowed => {}
     }
@@ -1321,6 +1378,8 @@ fn value_contains_external_reference(value: &Value) -> bool {
         Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
             values.iter().any(value_contains_external_reference)
         }
+        Value::Array { length, element, fields } =>
+            array_values(*length, element, fields).any(value_contains_external_reference),
         Value::None | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
@@ -1343,12 +1402,43 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
                 collect_closure_captures(value, captures);
             }
         }
+        Value::Array { length, element, fields } => {
+            for value in array_values(*length, element, fields) { collect_closure_captures(value, captures); }
+        }
         Value::None | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn symbolic_array_provenance_keeps_union_and_sparse_replacement_obligations() {
+        use super::*;
+        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![] };
+        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![] };
+        let wildcard = crate::core::REFERENCE_PATH_ARRAY_ELEMENT;
+        let source = Value::Aggregate(vec![a.clone(), b.clone()]);
+        let forwarded = value_at_path(&source, &[wildcard]).unwrap();
+        assert_eq!(borrowed_roots(&forwarded), BTreeSet::from(["a".into(), "b".into()]));
+        let mut result = Value::None;
+        assert!(put_value_at_path(&mut result, &[wildcard, 0], forwarded));
+        let reference = Type::Reference { mutability: crate::Mutability::Shared,
+            lifetime: crate::Lifetime::Elided, referent: Box::new(Type::Scalar(crate::ScalarType::I64)) };
+        seal_array_extents(&crate::ElaboratedInterface::default(),
+            &Type::fixed_array(Type::Tuple(vec![reference]), 2), &mut result);
+        assert_eq!(borrowed_roots(&value_at_path(&result, &[0, 0]).unwrap()), borrowed_roots(&source));
+        assert!(value_at_path(&result, &[2, 0]).is_none());
+        assert!(assign_field_path(&mut result, &[(0, 2), (0, 1)], Value::ExternalBorrowed));
+        assert!(borrowed_roots(&value_at_path(&result, &[0, 0]).unwrap()).is_empty());
+        assert_eq!(borrowed_roots(&result), borrowed_roots(&source));
+        assert!(assign_field_path(&mut result, &[(1, 2), (0, 1)], Value::ExternalBorrowed));
+        assert!(borrowed_roots(&result).is_empty(), "every initialized slot was replaced");
+        let Value::Array { fields, .. } = result else { panic!("symbolic array"); };
+        assert_eq!(fields.len(), 2);
+        let huge = Value::Array { length: Some(u64::MAX), element: Box::new(a), fields: BTreeMap::new() };
+        assert_eq!(borrowed_roots(&value_at_path(&huge, &[17]).unwrap()), BTreeSet::from(["a".into()]));
+    }
+
     #[test]
     fn provenance_joins_are_idempotent_and_keep_aggregate_choices_field_wise() {
         use super::*;

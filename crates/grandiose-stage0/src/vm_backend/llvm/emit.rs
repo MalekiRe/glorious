@@ -13,6 +13,8 @@ use std::{
     sync::Arc,
 };
 
+#[path = "memory_emit.rs"]
+mod memory;
 #[path = "scalar.rs"]
 mod scalar;
 
@@ -600,52 +602,7 @@ impl<'a, 'p> Body<'a, 'p> {
                 types,
                 arguments,
             } => {
-                use crate::MemoryPrimitive as M;
-                match primitive {
-                    M::SizeOf | M::AlignOf | M::Dangling => {
-                        let ty = layout::concrete_layout(
-                            &types[0],
-                            &self.function.nominal_copy_descriptors.clone().into(),
-                        )?;
-                        let value = if *primitive == M::SizeOf {
-                            ty.memory.size()
-                        } else {
-                            ty.memory.alignment()
-                        };
-                        let value = if *primitive == M::Dangling {
-                            self.value(format!("inttoptr i64 {value} to ptr"))
-                        } else {
-                            value.to_string()
-                        };
-                        self.store_scalar(*dst, &value)?;
-                    }
-                    M::Null => self.store_scalar(*dst, "null")?,
-                    M::Cast | M::CastConst | M::AsConst | M::AsRawShared | M::AsRawUnique => {
-                        let pointer = self.load(arguments[0])?;
-                        self.store_scalar(*dst, &pointer)?;
-                    }
-                    M::PointerAddress => {
-                        let pointer = self.load(arguments[0])?;
-                        let address = self.value(format!("ptrtoint ptr {pointer} to i64"));
-                        self.store_scalar(*dst, &address)?;
-                    }
-                    M::IsNull | M::PointerEq => {
-                        let left = self.load(arguments[0])?;
-                        let right = if *primitive == M::IsNull {
-                            "null".into()
-                        } else {
-                            self.load(arguments[1])?
-                        };
-                        let same = self.value(format!("icmp eq ptr {left}, {right}"));
-                        let result = self.value(format!("zext i1 {same} to i32"));
-                        self.store_scalar(*dst, &result)?;
-                    }
-                    _ => {
-                        return Err(
-                            self.unsupported("native raw-memory operation is not implemented")
-                        );
-                    }
-                }
+                self.memory(*dst, *primitive, types, arguments)?;
             }
             I::DeclareResult { .. } | I::DeclareFrameCleanup { .. } => {}
             I::ConstUnit { dst } => self.mark(*dst, &[], true),

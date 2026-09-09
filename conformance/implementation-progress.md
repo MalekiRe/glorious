@@ -5,7 +5,44 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
-## Cache 78 checkpoint: mixed execution and known release regression
+## Cache 79: release disposal, reference arrays and shared native allocation
+
+The lawful generic availability-release regression is fixed. Evaluation MIR
+retains `ReleaseAvailable`, then ownership lowering retains consuming disposal
+and a `Drop` of the witness. Four frozen/lowering/admission groups pass: missing
+lexical proof remains invalid, and direct/decoded executable VM types reject
+unsealed availability layouts. A sealed runtime witness producer and its capture
+owner binding remain unimplemented; this is not full availability execution.
+
+Integrated `2bd92cc3`, `efa6405d`, and `4c293344`: bounded homogeneous reference
+paths through fixed arrays, sparse resident replacement summaries, non-copying
+unique-reference constructors, and effect/label/partial-initialization tests.
+The first combined release/array/VM batch passes 264 tests
+(`target/integration-release-array-v1.log`). Verifier generation 35 rejects
+non-consuming constructors that copy affine carriers and unsealed availability
+value layouts. Bytecode 71/schema 115/interface 18 remain unchanged.
+
+Integrated `1b86648f`: native ABI 3 binds raw allocation/reallocation/release to
+the same memory domain as VM calls, and emits raw memory operations as LLVM.
+The follow-up integrating batch passes 1,020 tests, including 15 LLVM native,
+29 bridge, 21 fixed-array, 38 semantic-conformance and all 891 service tests
+(`target/integration-cache79-native-v1.log`). This service result precedes the
+GAT inference follow-up below; none of these counts proves whole conformance.
+
+Concrete GAT item lifetime holes can now be substituted into a solver-selected
+result without participating in implementation-head selection. Contextual
+argument elaboration exposes the resulting reference shape before array literal
+matching. All six associated-binding groups pass; a targeted solver regression
+also proves an unresolved region cannot satisfy a required static item domain
+(`target/gat-array-inference-v3.log`, `target/gat-domain-inference-v1.log`).
+
+Still open: general owning-container logical reference provenance (the array
+audit found a lost loan after the original binding leaves scope), native
+partial-owner initialization metadata across generated calls, complete callable
+contracts, and the remaining source-library/self-hosting work. These are active
+implementation gaps, not completed acceptance families.
+
+## Cache 78 checkpoint: mixed execution and known release regression (historical)
 
 Integrated `3938cdd9`: generated LLVM/VM ordinary-call partitions preserve
 arguments, results and reference addresses through ABI version 2. All 12 LLVM

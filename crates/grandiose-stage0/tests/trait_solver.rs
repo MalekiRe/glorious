@@ -73,6 +73,25 @@ fn imported_defaulted_gat_domains_require_exact_outlives_evidence() {
 }
 
 #[test]
+fn gat_item_lifetime_holes_are_substitutions_not_domain_evidence() {
+    let (interface, signatures) = signatures(
+        "trait View { type Item<'a>; type StaticItem<'a> where 'a: 'static; } impl View for i64 { type Item<'a> = &'a i64; type StaticItem<'a> = &'a i64 where 'a: 'static; }",
+    );
+    let goal = TraitGoal { subject: Type::Scalar(ScalarType::I64),
+        relation: ElaboratedTraitReference { definition: key(&interface, "View"), arguments: vec![] } };
+    let region = Lifetime::Infer(grandiose_stage0::types::LifetimeInferVar(0));
+    let mut solver = TraitSolver::new(&signatures);
+    assert!(matches!(solver.normalize_associated_type_application_in_hrtb(
+        goal.clone(), "Item", &[GenericArgument::Lifetime(region)], &[]),
+        TraitProjectionAnswer::Normalized { ty: Type::Reference { lifetime, .. }, .. } if lifetime == region));
+    assert_eq!(solver.normalize_associated_type_application_in_hrtb(
+        goal.clone(), "StaticItem", &[GenericArgument::Lifetime(region)], &[]), TraitProjectionAnswer::NoSolution);
+    assert!(matches!(solver.normalize_associated_type_application_in_hrtb(
+        goal, "StaticItem", &[GenericArgument::Lifetime(Lifetime::Static)], &[]),
+        TraitProjectionAnswer::Normalized { ty: Type::Reference { lifetime: Lifetime::Static, .. }, .. }));
+}
+
+#[test]
 fn outlives_predicates_are_directional_transitive_and_kind_distinct() {
     use grandiose_stage0::OutlivesPredicate as P;
     let region = |index| Lifetime::Generic(index);

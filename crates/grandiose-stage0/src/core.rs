@@ -413,6 +413,21 @@ pub struct CallReferencePath {
 }
 
 pub(crate) const REFERENCE_PATH_DEREF: u32 = u32::MAX;
+/// A homogeneous fixed-array element, not a particular runtime index.
+/// Keeping this component symbolic bounds reference metadata by type shape,
+/// independently of the array's length (including zero-sized residents).
+pub(crate) const REFERENCE_PATH_ARRAY_ELEMENT: u32 = u32::MAX - 1;
+
+pub(crate) fn reference_path_is_prefix(prefix: &[u32], path: &[u32]) -> bool {
+    prefix.len() <= path.len() && prefix.iter().zip(path).all(|(left, right)| {
+        left == right || (*left == REFERENCE_PATH_ARRAY_ELEMENT && *right != REFERENCE_PATH_DEREF)
+            || (*right == REFERENCE_PATH_ARRAY_ELEMENT && *left != REFERENCE_PATH_DEREF)
+    })
+}
+
+pub(crate) fn reference_path_matches(left: &[u32], right: &[u32]) -> bool {
+    left.len() == right.len() && reference_path_is_prefix(left, right)
+}
 /// One branch-local view of a source `is` test.  The boolean result selects
 /// the completion arm; this record supplies the corresponding structural
 /// subject and frozen projection plan only to a proven-positive arm.
@@ -1892,7 +1907,7 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
             "reference-valued {boundary} omitted its frozen caller-region provenance"
         )),
         CallReferenceOrigin::Paths(paths) => {
-            if !known_reference_bearing_type(result) && !matches!(result, Type::Nominal { .. }) {
+            if !permits_reference_leaf_paths(result) {
                 return Some(format!(
                     "{boundary}-reference paths require a reference-bearing result"
                 ));
@@ -1934,6 +1949,21 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
 fn known_reference_bearing_type(value: &Type) -> bool {
     matches!(value, Type::Reference { .. })
         || matches!(value, Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
+        || matches!(value, Type::FixedArray { element, .. }
+            if value.fixed_array_length() != Some(0) && known_reference_bearing_type(element))
+}
+
+fn permits_reference_leaf_paths(value: &Type) -> bool {
+    // The frozen interface validated each nominal layout while sealing the
+    // caller paths. Body-only validation cannot reopen that layout, whether
+    // its carrier is top-level or nested in another structural product.
+    match value {
+        Type::Reference { .. } | Type::Nominal { .. } => true,
+        Type::Tuple(values) => values.iter().any(permits_reference_leaf_paths),
+        Type::FixedArray { element, .. } =>
+            value.fixed_array_length() != Some(0) && permits_reference_leaf_paths(element),
+        _ => false,
+    }
 }
 
 pub(crate) fn refinement_environment_error(environment: &RefinementEnvironment) -> Option<String> {
@@ -4668,6 +4698,15 @@ impl Elaborator<'_> {
     }
 
     fn expression_expected_with_open_lifetimes(&mut self, id: ExprId, expected: Option<Type>, open_call_lifetimes: bool) -> CoreId {
+        // Expose a selected GAT's structural shape before contextual literal
+        // and reborrow elaboration. A still-open item lifetime is preserved,
+        // not solved by trait selection; the argument itself constrains it.
+        let expected = expected.map(|ty| {
+            let ty = self.inference.resolve_type_structure(ty);
+            if type_has_unresolved_projection(&ty) {
+                self.normalize_selectable_type_projections(ty)
+            } else { ty }
+        });
         let value = self.expression_expected_inner(id, expected.clone(), open_call_lifetimes);
         expected.as_ref().map_or(value, |expected| self.reference_reborrow_expected(value, expected))
     }
@@ -16418,7 +16457,14 @@ fn projection_is_selectable_type_projection(
         && item_arguments
             .iter()
             .all(|argument| {
-                generic_argument_is_selectable_type_projection(argument, hrtb_binders)
+                // The implementation is selected by the subject and trait
+                // arguments, not a GAT's lifetime argument. Preserve a
+                // caller-owned lifetime inference cell in the substituted
+                // result so its reference shape can constrain that cell.
+                // Selection still proves the item's instantiated domain;
+                // no unknown region is assumed to satisfy an outlives bound.
+                matches!(argument, GenericArgument::Lifetime(Lifetime::Infer(_)))
+                    || generic_argument_is_selectable_type_projection(argument, hrtb_binders)
             })
 }
 
@@ -17354,9 +17400,9 @@ pub(crate) fn input_reference_leaf_paths(
 
 /// Discover direct reference leaves through the sealed structural shapes that
 /// Typed Core can project. Nominal layouts are read from the frozen interface
-/// and instantiated with their canonical application arguments; an enum or
-/// opaque projection with a reference-bearing payload remains deliberately
-/// opaque because a path would depend on a runtime variant.
+/// and instantiated with their canonical application arguments. An enum
+/// remains opaque when a payload path would name different regions across
+/// variants; fixed-array elements use a bounded homogeneous projection.
 pub(crate) fn reference_leaf_paths(
     signatures: &ElaboratedInterface,
     ty: &Type,
@@ -17453,7 +17499,20 @@ pub(crate) fn reference_leaf_paths(
             | None => return Err(()),
             _ => return Err(()),
         },
-        Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => {
+        Type::FixedArray { element, .. } => {
+            if ty.fixed_array_length() == Some(0) || !type_may_contain_reference(signatures, element) {
+                return Ok(());
+            }
+            // An unresolved extent remains opaque until the ordinary call
+            // instantiation seals its shape. Concrete arrays use one symbolic
+            // element path rather than N leaves and N² caller relations.
+            let _ = ty.fixed_array_length().ok_or(())?;
+            path.push(REFERENCE_PATH_ARRAY_ELEMENT);
+            let result = reference_leaf_paths(signatures, element, path, leaves);
+            path.pop();
+            result?;
+        }
+        Type::Array(element) | Type::StaticData { element, .. } => {
             if type_may_contain_reference(signatures, element) {
                 return Err(());
             }
@@ -17476,8 +17535,9 @@ pub(crate) fn reference_leaf_paths(
 }
 
 fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bool {
-    // Array elements are not projection paths, but the array branch still
-    // needs to reject a potentially reference-bearing element. Do that with
+    // Dynamic-array elements cannot name direct projection paths. The fixed
+    // array branch also needs to detect opaque reference-bearing elements
+    // before constructing a homogeneous projection. Do that with
     // a cycle-aware structural walk instead of re-entering the path walker:
     // `enum Chain { Node(Array<Chain>) }` is heap-indirected and finite at
     // runtime, whereas recursively opening its element layout here used to
@@ -17747,6 +17807,31 @@ fn closure_scalar(name: &str) -> Option<ScalarType> {
 #[cfg(test)]
 mod invariant_call_lifetime_tests {
     use super::*;
+
+    #[test]
+    fn fixed_array_reference_paths_are_bounded_by_shape_not_extent() {
+        let signatures = ElaboratedInterface::default();
+        let reference = inner(Lifetime::Generic(0));
+        for length in [0, 1, 2, u64::MAX] {
+            let array = Type::fixed_array(reference.clone(), length);
+            let mut leaves = vec![];
+            reference_leaf_paths(&signatures, &array, &mut vec![], &mut leaves).unwrap();
+            if length == 0 {
+                assert!(leaves.is_empty());
+                assert_eq!(callable_reference_origin_from_contract(&signatures, &[], &array), CallReferenceOrigin::None);
+            } else {
+                assert_eq!(leaves, vec![(vec![REFERENCE_PATH_ARRAY_ELEMENT], reference.clone())]);
+                assert_eq!(callable_reference_origin_from_contract(&signatures, &[array.clone()], &array),
+                    CallReferenceOrigin::Paths(vec![CallReferencePath {
+                        argument: 0, argument_fields: vec![REFERENCE_PATH_ARRAY_ELEMENT],
+                        result_fields: vec![REFERENCE_PATH_ARRAY_ELEMENT],
+                    }]));
+            }
+        }
+        assert!(reference_path_matches(&[0, REFERENCE_PATH_ARRAY_ELEMENT, 1], &[0, 42, 1]));
+        assert!(!reference_path_matches(&[REFERENCE_PATH_ARRAY_ELEMENT], &[REFERENCE_PATH_DEREF]));
+        assert!(!reference_path_is_prefix(&[0, REFERENCE_PATH_ARRAY_ELEMENT], &[1, 0]));
+    }
 
     fn inner(lifetime: Lifetime) -> Type {
         Type::Reference { mutability: Mutability::Shared, lifetime, referent: Box::new(Type::Scalar(ScalarType::I64)) }

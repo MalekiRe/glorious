@@ -16,7 +16,7 @@ remain distinct from the generated-code tests in `tests/llvm_native.rs`.
 The initial selected profile is little-endian, 64-bit x86-64 Linux. Its explicit
 LLVM data layout is checked against the shared native storage layouts. Other
 profiles fail closed. Scalar integer widths include i128/u128; records, tuples,
-fixed arrays, enums, references, raw-pointer *representations*, and zero-sized
+fixed arrays, enums, references, raw pointers, and zero-sized
 residents use the same concrete offsets, alignment, stride, and enum tag rules
 as shared VM storage. Initialization metadata is separate from resident bytes.
 
@@ -86,20 +86,40 @@ starts its closed zero-argument graph on a 16 MiB worker stack. It does not
 transfer borrowed host state between threads. Native activation allocation is
 also checked against the requested single-allocation limit.
 
+Raw allocation/reallocation/release use a small allocator-runtime callback over
+that same allocation domain, not a VM instruction interpreter. Raw reads/writes,
+offsets, reference construction, and overlapping/nonoverlapping copies execute
+as LLVM operations. Offset/copy extent calculations preserve checked size and
+alignment bounds, and reference construction checks non-null alignment. As in
+the source unsafe contract, these checks do not establish pointer provenance,
+resident validity, extent, or absence of conflicting loans for the caller.
+
+Generated-source fixtures cover allocate in one engine and resize/release in the
+other, in both directions; overlapping and nonoverlapping raw copies; mutable
+references to raw allocation; zero-byte linear owners; malformed layout and
+extent errors; and independent total-byte/single-allocation limits. Raw allocation
+owners release bytes on execution teardown, never implicitly execute source Drop.
+
 ## Explicit remaining frontier
 
+An additional ownership frontier is preserving partial-owner initialization
+metadata across generated native-to-native calls. Public VM/native owned imports
+reject partial owners, but internal generated cleanup calls still need checked
+initialization sidecars; the current checkpoint is not general partial-owner
+cleanup support.
+
 The generated backend does not yet execute cross-engine mandatory tails,
-first-class/captured/borrowed callable parameters, raw allocation operations,
+first-class/captured/borrowed callable parameters,
 outward effects, resumptions, or captured lexical control. Float conversions,
 private dynamic-array/text layouts, and some pattern/projection forms are also
 rejected. Ordinary closed-graph VM calls from native bodies are supported;
 they are not yet a public callable-value ABI. Pointer address/cast/comparison and
-size/alignment intrinsics are supported, but native allocation-domain operations
-still need direct generated-code tests and lowering.
+size/alignment intrinsics are supported. Static-data machine leaves remain
+unavailable until the shared static-data slot layout is implemented.
 
 The public runner currently exposes only a zero-argument i64 entry. Expanding the boundary
 requires source-level differential tests and actual generated LLVM↔VM calls for
-callable values, allocation-domain operations, mandatory mixed tails, and
+callable values, static data, mandatory mixed tails, and
 supported outward control contracts.
 
 Run the targeted regression with:

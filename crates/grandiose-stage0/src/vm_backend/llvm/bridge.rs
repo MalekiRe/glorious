@@ -337,10 +337,22 @@ fn invoke_native(
     };
     context.mixed_context = (&mut invocation as *mut MixedInvocation<'_, '_>).cast();
     context.invoke_vm = Some(invoke_vm);
+    let mut allocation = crate::vm_backend::llvm::memory::AllocationContext::new(
+        &mut invocation.call.budget.native_memory,
+        invocation.call.budget.limits.max_native_bytes,
+    );
+    // SAFETY: the shared domain and this binding remain at stable addresses
+    // throughout this synchronous native call and all VM callbacks.
+    unsafe {
+        allocation.install(&mut context);
+    }
     // SAFETY: every argument/result has been prepared using the exact linked
     // slot plan, with owned arguments retaining their original backing address.
     let status = unsafe { module.invoke_native(index, &mut context, arguments.as_ptr(), result) };
     invocation.call.budget.instructions = context.instructions;
+    if let Some(error) = allocation.failure {
+        return Err(error);
+    }
     if let Some(failure) = invocation.failure {
         return Err(failure);
     }

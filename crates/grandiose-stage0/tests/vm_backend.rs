@@ -6897,7 +6897,7 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     unique: true,
                     reborrow: false,
                 },
-                VmInstruction::MakeTuple {
+                VmInstruction::MakeTupleOwned {
                     dst: 2,
                     fields: vec![1],
                 },
@@ -7558,7 +7558,7 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
                     unique: true,
                     reborrow: false,
                 },
-                VmInstruction::MakeTuple {
+                VmInstruction::MakeTupleOwned {
                     dst: 2,
                     fields: vec![1],
                 },
@@ -11360,7 +11360,7 @@ fn verifier_rejects_copying_a_nominal_carrier_of_a_unique_reference() {
                     unique: true,
                     reborrow: false,
                 },
-                VmInstruction::MakeRecord {
+                VmInstruction::MakeRecordOwned {
                     dst: 2,
                     definition,
                     fields: vec![1],

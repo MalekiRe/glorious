@@ -234,7 +234,11 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 18;
 // and normalizes rigid structural projections under exact lexical evidence.
 // Cache 78 retains an explicit checked availability-release operation rather
 // than erasing its lexical Environment/affine evidence into a discarded value.
-pub const STAGE0_CACHE_GENERATION: u32 = 78;
+// Cache 79 preserves lawful generic release through consuming disposal;
+// verifier 35 rejects unsealed availability layouts at executable admission.
+// It also retains bounded fixed-array reference paths and normalizes selected
+// GAT item lifetime holes before contextual argument matching.
+pub const STAGE0_CACHE_GENERATION: u32 = 79;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -243,7 +247,7 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 29 checks the exact safe signatures of address-only pointer leaves.
 // Verifier 31 distinguishes independent reference contents from the local
 // address of their carrier; overwrites invalidate retained referent proofs.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 34;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 35;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

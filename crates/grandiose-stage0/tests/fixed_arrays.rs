@@ -92,6 +92,13 @@ fn nested_array_products_and_contextual_element_widths_execute() {
 }
 
 #[test]
+fn nominal_boolean_and_enum_fixed_array_patterns_preserve_normalized_identity() {
+    accepts("trait Form { type Bit; } impl Form for i64 { type Bit = Bool; } fn choose(bits: [<i64 as Form>::Bit;2]) -> i64 { handle bits { [true,false] => 42, [..] => 0 } } pub fn main() -> i64 { choose([true,false]) }");
+    accepts("enum Flag { Off, On } struct Token {} impl Use<[1,1]> for Token {} fn consume(value: Token) -> i64 { let Token {} = value; 42 } fn choose(flags: [Flag;2], value: Token) -> i64 { handle flags { [Flag::On,Flag::On] => consume(value), [Flag::On,Flag::Off] => consume(value), [Flag::Off,..] => consume(value) } } pub fn main() -> i64 { choose([Flag::On,Flag::Off],Token {}) }");
+    accepts("enum Bool { False, True } pub fn main() -> i64 { let bits: [Bool;2] = [Bool::True,Bool::False]; handle bits { [Bool::True,Bool::False] => 42, [..] => 0 } }");
+}
+
+#[test]
 fn borrowed_fixed_array_patterns_observe_empty_variants_without_moving_shells() {
     let declarations = "struct Probe<'a> { count: &'a mut i64 } impl<'a> Use<[0,1]> for Probe<'a> {} impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } } enum State<'a> { Full(Probe<'a>), Empty } struct Slot<'a> { states: [State<'a>;2] } ";
     for reference in ["&'a Slot<'b>", "&'a mut Slot<'b>"] {
@@ -103,6 +110,57 @@ fn borrowed_fixed_array_patterns_observe_empty_variants_without_moving_shells() 
             assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.class == grandiose_stage0::DiagnosticClass::Source && matches!(diagnostic.code, "G5004" | "G4141")), "{source}\n{error:#?}");
         }
     }
+}
+
+#[test]
+fn shared_fixed_array_elements_preserve_stored_reference_regions() {
+    accepts("fn first<'a>(items: [&'a i64;2]) -> &'a i64 { let [first,..] = items; first } pub fn main() -> i64 { let a = 42; let b = 0; *first([&a,&b]) }");
+    accepts("fn first<'a>(items: &[&'a i64;2]) -> &'a i64 { let [first,..] = *items; first } pub fn main() -> i64 { let a = 42; let b = 0; let result = { let items: [&i64;2] = [&a,&b]; first(&items) }; *result }");
+    accepts("struct Window<'a> { items: [&'a i64;2], length: usize } fn first<'a>(window: &Window<'a>) -> &'a i64 { let [first,..] = window.items; first } pub fn main() -> i64 { let a = 42; let b = 0; let mut window = Window { items: [&a,&b], length: 2 }; let result = first(&window); window.length = 0; *result }");
+    accepts("struct Item<'a> { value: &'a i64 } fn pair<'a>(a: &'a i64, b: &'a i64) -> [Item<'a>;2] { [Item { value: a },Item { value: b }] } pub fn main() -> i64 { let a = 20; let b = 22; let [Item { value: a },Item { value: b }] = pair(&a,&b); *a + *b }");
+    accepts("trait View { type Item; } impl View for i64 { type Item = i64; } fn keep<'a>(items: [&'a <i64 as View>::Item;2]) -> [&'a <i64 as View>::Item;2] { items } pub fn main() -> i64 { let a = 20; let b = 22; let [a,b] = keep([&a,&b]); *a + *b }");
+}
+
+#[test]
+fn unique_fixed_array_elements_preserve_disjoint_mutation_and_reborrows() {
+    accepts("fn pair<'a>(a: &'a mut i64, b: &'a mut i64) -> [&'a mut i64;2] { [a,b] } fn bump(items: [&mut i64;2]) { let [a,b] = items; *a = *a + 1; *b = *b + 1; } pub fn main() -> i64 { let mut a = 20; let mut b = 20; bump(pair(&mut a,&mut b)); a+b }");
+    accepts("fn bump(value: &mut i64) { *value = *value + 1; } fn update<'a>(items: [&'a mut i64;2]) -> [&'a mut i64;2] { let [a,b] = items; bump(a); bump(b); [a,b] } pub fn main() -> i64 { let mut a = 19; let mut b = 19; let items: [&mut i64;2] = [&mut a,&mut b]; let items = update(update(items)); let [a,b] = items; *a + *b }");
+    accepts("fn nested<'a>(a: &'a mut i64, b: &'a mut i64) -> [[&'a mut i64;1];2] { [[a],[b]] } pub fn main() -> i64 { let mut a = 20; let mut b = 20; let [[a],[b]] = nested(&mut a,&mut b); *a = *a + 1; *b = *b + 1; *a + *b }");
+    accepts("struct Item<'a> { value: &'a mut i64 } fn keep<T,const N: usize>(items: [T;N]) -> [T;N] { items } pub fn main() -> i64 { let mut a = 20; let mut b = 20; let [Item { value: a },Item { value: b }] = keep([Item { value: &mut a },Item { value: &mut b }]); *a = *a + 1; *b = *b + 1; *a + *b }");
+}
+
+#[test]
+fn fixed_array_reference_paths_survive_effect_payload_and_resumed_result_boundaries() {
+    accepts("effect Relay<'a> { [1,1] relay(items: [&'a i64;2]) -> [&'a i64;2]; } fn relay<'a>(items: [&'a i64;2]) -> [&'a i64;2] { handle Relay<'a>::relay(items) { Relay<'a>::relay(items) => items } } pub fn main() -> i64 { let a = 20; let b = 22; let [a,b] = relay([&a,&b]); *a + *b }");
+    accepts("effect Relay<'a> { [1,1] relay(items: [&'a mut i64;2]) -> [&'a mut i64;2]; } fn relay<'a>(items: [&'a mut i64;2]) -> [&'a mut i64;2] { handle Relay<'a>::relay(items) { Relay<'a>::relay(items) => items } } pub fn main() -> i64 { let mut a = 20; let mut b = 20; let [a,b] = relay([&mut a,&mut b]); *a = *a + 1; *b = *b + 1; *a + *b }");
+    accepts("fn relay<'a>(items: [&'a mut i64;2]) -> [&'a mut i64;2] { label done { transfer done items } } pub fn main() -> i64 { let mut a = 20; let mut b = 20; let [a,b] = relay([&mut a,&mut b]); *a = *a + 1; *b = *b + 1; *a + *b }");
+}
+
+#[test]
+fn fixed_array_reference_contracts_preserve_all_possible_inputs_and_reject_escapes() {
+    for source in [
+        "fn first<'a>(items: [&'a i64;2]) -> &'a i64 { let [first,..] = items; first } pub fn main() -> i64 { let mut a = 41; let b = 0; let result = first([&a,&b]); a = 42; *result }",
+        "fn first<'a>(items: [&'a i64;2]) -> &'a i64 { let [first,..] = items; first } pub fn main() -> i64 { let a = 41; let mut b = 0; let result = first([&a,&b]); b = 42; *result }",
+        "fn pair<'a>(a: &'a mut i64, b: &'a mut i64) -> [&'a mut i64;2] { [a,b] } pub fn main() -> i64 { let mut a = 42; let unique = &mut a; let items = pair(unique,unique); let [a,b] = items; *a + *b }",
+        "fn keep<'a>(items: [&'a i64;2]) -> [&'a i64;2] { items } fn escape<'a>() -> [&'a i64;2] { let local = 42; keep([&local,&local]) } pub fn main() -> i64 { let [a,..] = escape(); *a }",
+        "effect Relay<'a> { [1,1] relay(items: [&'a i64;2]) -> [&'a i64;2]; } fn relay<'a>(items: [&'a i64;2]) -> [&'a i64;2] { handle Relay<'a>::relay(items) { Relay<'a>::relay(_) => { let local = 42; [&local,&local] } } } pub fn main() -> i64 { let a = 20; let b = 22; let [a,b] = relay([&a,&b]); *a + *b }",
+    ] {
+        for optimization in ["0", "2"] {
+            let error = StageZeroCompiler::new().compile(request(source, optimization))
+                .expect_err("array reference metadata must not grant missing loan authority");
+            assert!(error.diagnostics().iter().any(|diagnostic|
+                diagnostic.class == grandiose_stage0::DiagnosticClass::Source
+                && matches!(diagnostic.code, "G5004" | "G5006" | "G5007" | "G5017" | "G5011" | "G5013")),
+                "{source}\n{error:#?}");
+        }
+    }
+}
+
+#[test]
+fn const_generic_and_empty_fixed_arrays_keep_bounded_reference_contracts() {
+    accepts("fn keep<'a,const N: usize>(items: [&'a i64;N]) -> [&'a i64;N] { items } pub fn main() -> i64 { let a = 20; let b = 22; let [a,b] = keep([&a,&b]); *a + *b }");
+    accepts("fn empty<'a>() -> [&'a i64;0] { [] } pub fn main() -> i64 { let [] = empty(); 42 }");
+    accepts("fn keep<'a,const N: usize>(items: [&'a i64;N]) -> [&'a i64;N] { items } pub fn main() -> i64 { let items: [&i64;0] = keep([]); let [] = items; 42 }");
 }
 
 #[test]
@@ -133,6 +191,48 @@ fn fixed_arrays_preserve_zero_sized_linear_obligations_and_partial_cleanup() {
     accepts(
         "struct Probe<'a> { count: &'a mut i64 } impl<'a> Use<[0,1]> for Probe<'a> {} impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } } pub fn main() -> i64 { let mut a = 20; let mut b = 20; { let [first,..]: [Probe<'_>;2] = [Probe { count: &mut a },Probe { count: &mut b }]; () }; a+b }",
     );
+}
+
+#[test]
+fn partially_initialized_fixed_arrays_cleanup_only_constructed_elements_on_label_exit() {
+    let declarations = "struct Probe<'a> { count: &'a mut i64 } impl<'a> Use<[0,1]> for Probe<'a> {} impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } }";
+    for construction in [
+        "let items: [Probe<'_>;2] = [Probe { count: &mut count }, transfer done 41];",
+        "let items: [[Probe<'_>;1];2] = [[Probe { count: &mut count }], transfer done 41];",
+        "let items: [[Probe<'_>;2];1] = [[Probe { count: &mut count }, transfer done 41]];",
+    ] {
+        accepts(&format!("{declarations} pub fn main() -> i64 {{ let mut count = 0; let result = label done {{ {construction} 0 }}; result + count }}"));
+    }
+}
+
+#[test]
+fn partially_initialized_fixed_arrays_preserve_cleanup_on_effect_resume_and_cancellation() {
+    let declarations = "struct Probe<'a> { count: &'a mut i64 } impl<'a> Use<[0,1]> for Probe<'a> {} impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } } effect Stop { [0,1] stop() -> i64; }";
+    for (producer, handler) in [
+        ("Stop::stop(); Probe { count: count }", "Stop::stop() with _ => 41"),
+        ("let item = Probe { count: count }; Stop::stop(); item", "Stop::stop() with _ => 40"),
+        ("Stop::stop(); Probe { count: count }", "Stop::stop() => 0"),
+    ] {
+        accepts(&format!("{declarations} fn next<'a>(count: &'a mut i64) -> Probe<'a> / Stop {{ {producer} }} fn finish(first: &mut i64, second: &mut i64) -> i64 {{ handle {{ let items: [Probe<'_>;2] = [Probe {{ count: first }}, next(second)]; 40 }} {{ {handler} }} }} pub fn main() -> i64 {{ let mut first = 0; let mut second = 0; let result = finish(&mut first, &mut second); result + first + second }}"));
+    }
+}
+
+#[test]
+fn partial_fixed_array_construction_cannot_abandon_initialized_linear_residents() {
+    let declarations = "struct Token {} impl Use<[1,1]> for Token {}";
+    for body in [
+        "pub fn main() -> i64 { label done { let items: [Token;2] = [Token {}, transfer done 42]; let [Token {},Token {}] = items; 42 } }",
+        "effect Stop { [0,1] stop() -> i64; } fn next() -> Token / Stop { Stop::stop(); Token {} } pub fn main() -> i64 { handle { let items: [Token;2] = [Token {}, next()]; let [Token {},Token {}] = items; 42 } { Stop::stop() with _ => 42 } }",
+    ] {
+        for optimization in ["0", "2"] {
+            let error = StageZeroCompiler::new().compile(request(&format!("{declarations} {body}"), optimization))
+                .expect_err("an initialized linear array element needs an explicit positive use");
+            assert!(error.diagnostics().iter().any(|diagnostic|
+                diagnostic.class == grandiose_stage0::DiagnosticClass::Source
+                    && matches!(diagnostic.code, "G5024" | "G5019")), "{body}\n{error:#?}");
+        }
+    }
+    accepts(&format!("{declarations} pub fn main() -> i64 {{ label done {{ let items: [[Token;0];2] = [[], transfer done 42]; 0 }} }}"));
 }
 
 #[test]
@@ -255,6 +355,43 @@ fn library_array_storage_and_conversion_preserve_owners() {
 }
 
 #[test]
+fn library_fixed_array_reference_slots_reborrow_native_residents_without_copying_authority() {
+    let source = r#"use std::*;
+        pub fn main() -> i64 {
+            let mut first = 20;
+            let mut second = 20;
+            {
+                let mut items: [&mut i64;2] = [&mut first,&mut second];
+                {
+                    let view = array_as_mut_slice(&mut items);
+                    handle SliceMut::get(view, 0) {
+                        Result::Ok(value) => { *(*value) = *(*value) + 1; },
+                        Result::Err(_) => (),
+                    };
+                };
+                {
+                    let view = array_as_mut_slice(&mut items);
+                    handle SliceMut::get(view, 1) {
+                        Result::Ok(value) => { *(*value) = *(*value) + 1; },
+                        Result::Err(_) => (),
+                    };
+                };
+            };
+            first + second
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(library_request(source, optimization))
+            .unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: trusted array/slice source projects two live reference slots
+        // at checked indices and ends the first view before reborrowing.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
 fn library_array_conversion_steps() {
     for (name, source) in [
         (
@@ -288,6 +425,32 @@ fn rejects_candidate(mut candidate: grandiose_stage0::CandidateVmProgram) {
     let bytes = grandiose_stage0::encode_program(&candidate);
     assert!(grandiose_stage0::verify_vm_program(candidate).is_err());
     assert!(decode_and_verify_program(&bytes).is_err());
+}
+
+#[test]
+fn independent_verifier_rejects_duplicating_a_unique_fixed_array_element() {
+    use grandiose_stage0::{VmInstruction, VmType};
+    let artifact = StageZeroCompiler::new().compile(request(
+        "fn pair<'a>(a: &'a mut i64, b: &'a mut i64) -> [&'a mut i64;2] { [a,b] } pub fn main() -> i64 { let mut a = 20; let mut b = 22; let [a,b] = pair(&mut a,&mut b); *a + *b }", "0",
+    )).unwrap().artifact.unwrap();
+    let candidate = grandiose_stage0::decode_program(&artifact.canonical_bytes()).unwrap();
+    let mut duplicate = candidate.clone();
+    let fields = duplicate.functions.values_mut().find_map(|function|
+        function.instructions.iter_mut().find_map(|instruction| match instruction {
+            VmInstruction::MakeArrayOwned { fields, element_type: VmType::Reference { unique: true, .. }, .. }
+                if fields.len() == 2 => Some(fields),
+            _ => None,
+        })).expect("owned unique-reference array constructor");
+    fields[1] = fields[0];
+    rejects_candidate(duplicate);
+    let mut copied = candidate;
+    let constructor = copied.functions.values_mut().find_map(|function|
+        function.instructions.iter_mut().find(|instruction| matches!(instruction,
+            VmInstruction::MakeArrayOwned { element_type: VmType::Reference { unique: true, .. }, .. })))
+        .expect("owned unique-reference array constructor");
+    let VmInstruction::MakeArrayOwned { dst, fields, element_type } = constructor.clone() else { unreachable!() };
+    *constructor = VmInstruction::MakeArray { dst, fields, element_type };
+    rejects_candidate(copied);
 }
 
 #[test]

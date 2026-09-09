@@ -28,6 +28,23 @@ const IMPLEMENTATIONS: &str = r#"
 "#;
 
 #[test]
+fn concrete_gat_reference_elements_infer_call_lifetimes_before_array_matching() {
+    let declarations = "trait View { type Item<'a>; } impl View for i64 { type Item<'a> = &'a i64; } fn keep<'a>(items: [<i64 as View>::Item<'a>;2]) -> [<i64 as View>::Item<'a>;2] { items }";
+    for body in [
+        "let a:i64=20; let b:i64=22; let items:[&i64;2]=[&a,&b]; let [a,b]=keep(items); *a + *b",
+        "let a:i64=20; let b:i64=22; let [a,b]=keep([&a,&b]); *a + *b",
+    ] {
+        let source = format!("{declarations} pub fn main() -> i64 {{ {body} }}");
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(request(&source, optimization))
+                .unwrap_or_else(|error| panic!("{source}\n{:#?}", error.diagnostics())).artifact.unwrap();
+            assert_eq!(artifact.run_i64().unwrap(), 42);
+            assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        }
+    }
+}
+
+#[test]
 fn implementation_associated_equalities_admit_matching_items() {
     let source = format!("{IMPLEMENTATIONS} pub fn main() -> i64 {{ let value = Wrapper {{ item: Number {{}} }}; Selected::answer(&value) }}");
     for optimization in ["0", "2"] {

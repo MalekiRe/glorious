@@ -7,6 +7,7 @@
 mod emit;
 mod layout;
 mod load;
+pub(super) mod memory;
 
 use super::{
     CandidateVmProgram, DefKey, Digest, VerifiedVmProgram, VmArtifactError, VmExecutionLimits,
@@ -19,8 +20,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 2;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:sync-v2";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 3;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:sync-v3";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
@@ -274,6 +275,10 @@ pub(super) struct NativeContext {
     pub(super) invoke_vm:
         Option<unsafe extern "C" fn(*mut NativeContext, u32, *const *const u8, *mut u8) -> u32>,
     pub(super) allocation_limit: u64,
+    pub(super) allocation_context: *mut std::ffi::c_void,
+    pub(super) allocate: Option<
+        unsafe extern "C" fn(*mut NativeContext, u32, *mut u8, u64, u64, u64, *mut *mut u8) -> u32,
+    >,
 }
 
 impl NativeContext {
@@ -291,6 +296,8 @@ impl NativeContext {
             mixed_context: std::ptr::null_mut(),
             invoke_vm: None,
             allocation_limit: limits.max_native_allocation_bytes,
+            allocation_context: std::ptr::null_mut(),
+            allocate: None,
         }
     }
     pub(super) fn result(&self, status: u32) -> Result<(), LlvmError> {
@@ -306,6 +313,12 @@ impl NativeContext {
             },
             5 => VmArtifactError::NativeAbi {
                 message: "native activation exceeds the requested memory budget or the 1 MiB native stack-resident ceiling",
+            },
+            9 => VmArtifactError::NativeMemory {
+                message: "native layout size overflow",
+            },
+            10 => VmArtifactError::NativeMemory {
+                message: "native reference requires a non-null aligned pointer",
             },
             6 => VmArtifactError::NativeAbi {
                 message: "native execution reached a verified terminal trap",

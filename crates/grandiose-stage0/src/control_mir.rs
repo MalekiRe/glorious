@@ -833,6 +833,10 @@ impl Builder<'_> {
                 },
                 EvalOp::Bind(_) => ControlOperation::Unit,
                 EvalOp::Discard => ControlOperation::Discard(operands[0]),
+                // Core/PlaceFlow authorize this exact abandonment. Keep its
+                // operand on the ordinary consuming disposal path, so an
+                // eventual runtime witness cannot lose capture cleanup.
+                EvalOp::ReleaseAvailable => ControlOperation::Discard(operands[0]),
                 EvalOp::Tuple => ControlOperation::Tuple(operands),
                 EvalOp::Array => ControlOperation::Array(operands),
                 EvalOp::Intrinsic(operator) => ControlOperation::Intrinsic {

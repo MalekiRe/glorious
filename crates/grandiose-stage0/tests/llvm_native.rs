@@ -176,6 +176,270 @@ fn unsupported_native_effects_reject_before_execution() {
     assert!(matches!(error, LlvmError::Unsupported { .. }), "{error:?}");
 }
 
+const MEMORY_HELPERS: &str = r#"
+    pub unsafe fn native_home<T>(value: T) -> *mut T {
+        unsafe {
+            let bytes = __g1_memory_allocate(__g1_memory_size_of<T>(), __g1_memory_align_of<T>());
+            let pointer = __g1_memory_cast<u8,T>(bytes);
+            __g1_memory_write(pointer, value);
+            pointer
+        }
+    }
+    pub unsafe fn native_take<T>(pointer: *mut T) -> T {
+        unsafe {
+            let value = __g1_memory_read(__g1_memory_as_const(pointer));
+            __g1_memory_deallocate(__g1_memory_cast<T,u8>(pointer), __g1_memory_size_of<T>(), __g1_memory_align_of<T>());
+            value
+        }
+    }
+    pub unsafe fn native_grow(pointer: *mut i64) -> *mut i64 {
+        unsafe {
+            let bytes = __g1_memory_reallocate(__g1_memory_cast<i64,u8>(pointer), 8, 8, 16);
+            let pointer = __g1_memory_cast<u8,i64>(bytes);
+            __g1_memory_write(__g1_memory_offset(pointer, 1), 22);
+            pointer
+        }
+    }
+    pub unsafe fn native_sum_take(pointer: *mut i64) -> i64 {
+        unsafe {
+            let first = __g1_memory_read(__g1_memory_as_const(pointer));
+            let second = __g1_memory_read(__g1_memory_offset_const(__g1_memory_as_const(pointer), 1));
+            __g1_memory_deallocate(__g1_memory_cast<i64,u8>(pointer), 16, 8);
+            first + second
+        }
+    }
+    pub unsafe fn native_unique<'a,T>(pointer: *mut T) -> &'a mut T {
+        unsafe { __g1_memory_borrow_unique(pointer) }
+    }
+    pub unsafe fn native_overlap_copy() -> i64 {
+        unsafe {
+            let allocation = __g1_memory_allocate(24, 8);
+            let pointer = __g1_memory_cast<u8,i64>(allocation);
+            __g1_memory_write(pointer, 20);
+            __g1_memory_write(__g1_memory_offset(pointer, 1), 21);
+            __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, 1), 2);
+            let answer = __g1_memory_read(__g1_memory_as_const(__g1_memory_offset(pointer, 1)))
+                + __g1_memory_read(__g1_memory_as_const(__g1_memory_offset(pointer, 2))) + 1;
+            __g1_memory_deallocate(allocation, 24, 8);
+            answer
+        }
+    }
+    pub unsafe fn native_nonoverlap_copy() -> i64 {
+        unsafe {
+            let original = native_grow(native_home(20));
+            let destination = __g1_memory_cast<u8,i64>(__g1_memory_allocate(16, 8));
+            __g1_memory_copy_nonoverlapping(__g1_memory_as_const(original), destination, 2);
+            __g1_memory_deallocate(__g1_memory_cast<i64,u8>(original), 16, 8);
+            native_sum_take(destination)
+        }
+    }
+    pub unsafe fn native_bad_layout() { unsafe { let pointer = __g1_memory_allocate(1, 3); () } }
+    pub unsafe fn native_bad_extent() { unsafe { let pointer = __g1_memory_offset(__g1_memory_dangling<i64>(), 18446744073709551615); () } }
+    pub unsafe fn native_bad_reference<'a>() -> &'a mut i64 { unsafe { __g1_memory_borrow_unique(__g1_memory_null<i64>()) } }
+    pub unsafe fn native_allocate_and_release(size: usize) {
+        unsafe { let pointer = __g1_memory_allocate(size, 8); __g1_memory_deallocate(pointer, size, 8) }
+    }
+"#;
+
+fn memory_request(source: &str) -> CompilationRequest {
+    let mut input = request(&format!("use std::*; {source}"));
+    let standard_library = PackageKey("std@0.1.0".into());
+    let path = LogicalPath::parse("src/lib.glorious").unwrap();
+    input.sources.push(SourceInput::new(
+        standard_library.clone(),
+        path.clone(),
+        include_bytes!("../../../stdlib/src/lib.glorious").as_slice(),
+    ));
+    // Pin the existing machine-leaf manifest before adding ordinary source
+    // helpers. The fixture cannot mint a new machine operation by spelling.
+    let compiler = StageZeroCompiler::new();
+    let revision = compiler.import_revision(input.clone(), None).unwrap();
+    input.runtime_manifest = compiler
+        .open_session(revision)
+        .unwrap()
+        .snapshot()
+        .world()
+        .runtime_manifest
+        .clone();
+    input.sources[1] = SourceInput::new(
+        standard_library,
+        path,
+        format!(
+            "{}\n{MEMORY_HELPERS}",
+            include_str!("../../../stdlib/src/lib.glorious")
+        )
+        .as_bytes(),
+    );
+    input
+}
+
+#[test]
+fn generated_native_allocations_memory_operations_and_zero_byte_owners() {
+    for source in [
+        "pub fn main() -> i64 { unsafe { native_take(native_home(42)) } }",
+        "pub fn main() -> i64 { unsafe { native_sum_take(native_grow(native_home(20))) } }",
+        "pub fn main() -> i64 { unsafe { native_overlap_copy() } }",
+        "pub fn main() -> i64 { unsafe { native_nonoverlap_copy() } }",
+        "pub fn main() -> i64 { unsafe { let pointer = native_home(40); { let view = native_unique(pointer); *view = *view + 2; }; native_take(pointer) } }",
+        "struct Token {} impl Use<[1,1]> for Token {} pub fn main() -> i64 { unsafe { let Token {} = native_take(native_home(Token {})); }; 42 }",
+    ] {
+        let ir = StageZeroCompiler::new()
+            .compile_llvm(memory_request(source), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+        assert_eq!(
+            unsafe { ir.vm_program().run_i64_with_unsafe(Default::default()) }.unwrap(),
+            42
+        );
+        for optimization in [0, 2] {
+            let native = unsafe {
+                ir.compile(&LlvmCompileOptions {
+                    optimization,
+                    ..Default::default()
+                })
+            }
+            .unwrap();
+            assert!(matches!(
+                native.run_i64_with_limits(Default::default()),
+                Err(LlvmError::Runtime(
+                    VmArtifactError::UnsafeExecutionRequiresUnsafeApi
+                ))
+            ));
+            assert_eq!(
+                unsafe { native.run_i64_with_unsafe(Default::default()) }
+                    .unwrap_or_else(|error| panic!("{source}: {error:?}")),
+                42
+            );
+        }
+    }
+}
+
+#[test]
+fn generated_and_vm_allocate_resize_and_release_in_the_same_domain() {
+    use grandiose_stage0::{MemoryPrimitive as M, VmInstruction as I};
+    let source =
+        "pub fn main() -> i64 { unsafe { native_sum_take(native_grow(native_home(20))) } }";
+    let ir = StageZeroCompiler::new()
+        .compile_llvm(memory_request(source), LlvmTarget::host().unwrap())
+        .unwrap();
+    for selected in [M::Allocate, M::Reallocate, M::Deallocate] {
+        let vm_functions = ir
+            .function_keys()
+            .iter()
+            .copied()
+            .filter(|key| {
+                *key == ir.entry_key()
+                    || ir
+                        .function(*key)
+                        .unwrap()
+                        .instructions
+                        .iter()
+                        .any(|instruction| {
+                            matches!(instruction,
+                I::MemoryIntrinsic { primitive, .. } if *primitive == selected)
+                        })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(vm_functions.len(), 2);
+        let mixed = ir.with_vm_functions(vm_functions).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe {
+                mixed.compile(&LlvmCompileOptions {
+                    optimization,
+                    ..Default::default()
+                })
+            }
+            .unwrap();
+            assert_eq!(
+                unsafe { native.run_i64_with_unsafe(Default::default()) }.unwrap(),
+                42
+            );
+        }
+    }
+}
+
+#[test]
+fn native_raw_memory_checks_preserve_errors_and_finite_allocation_limits() {
+    for (source, expected) in [
+        (
+            "pub fn main() -> i64 { unsafe { native_bad_layout(); }; 42 }",
+            "invalid raw allocation layout",
+        ),
+        (
+            "pub fn main() -> i64 { unsafe { native_bad_extent(); }; 42 }",
+            "native layout size overflow",
+        ),
+        (
+            "pub fn main() -> i64 { unsafe { let pointer = native_bad_reference(); }; 42 }",
+            "native reference requires a non-null aligned pointer",
+        ),
+    ] {
+        let ir = StageZeroCompiler::new()
+            .compile_llvm(memory_request(source), LlvmTarget::host().unwrap())
+            .unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe {
+                ir.compile(&LlvmCompileOptions {
+                    optimization,
+                    ..Default::default()
+                })
+            }
+            .unwrap();
+            let error = unsafe { native.run_i64_with_unsafe(Default::default()) }.unwrap_err();
+            assert!(
+                matches!(error, LlvmError::Runtime(VmArtifactError::NativeMemory { message }) if message == expected),
+                "{error:?}"
+            );
+        }
+    }
+    let input = memory_request(
+        "pub fn main() -> i64 { unsafe { native_allocate_and_release(2097152); }; 42 }",
+    );
+    let ir = StageZeroCompiler::new()
+        .compile_llvm(input, LlvmTarget::host().unwrap())
+        .unwrap();
+    for optimization in [0, 2] {
+        let native = unsafe {
+            ir.compile(&LlvmCompileOptions {
+                optimization,
+                ..Default::default()
+            })
+        }
+        .unwrap();
+        assert_eq!(
+            unsafe {
+                native.run_i64_with_unsafe(VmExecutionLimits {
+                    max_native_allocation_bytes: 4194304,
+                    ..Default::default()
+                })
+            }
+            .unwrap(),
+            42
+        );
+        for limits in [
+            VmExecutionLimits {
+                max_native_allocation_bytes: 1048576,
+                ..Default::default()
+            },
+            VmExecutionLimits {
+                max_native_bytes: 1048576,
+                max_native_allocation_bytes: 4194304,
+                ..Default::default()
+            },
+        ] {
+            let error = unsafe { native.run_i64_with_unsafe(limits) }.unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    LlvmError::Runtime(VmArtifactError::NativeMemory {
+                        message: "native memory budget exceeded"
+                    })
+                ),
+                "{error:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn generated_llvm_and_vm_share_references_and_owned_results() {
     let cases = [

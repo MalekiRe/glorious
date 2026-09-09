@@ -90,7 +90,7 @@ impl NativeMemory {
         if !home.is_fully_initialized(&fields) { return Err(error("native reference names moved-out source storage")); }
         Ok(Some(VmValue::Reference { target: super::ReferenceTarget::Home(home), fields: fields.into(), unique, referent: referent.clone() }))
     }
-    fn allocate(
+    pub(super) fn allocate(
         &mut self,
         layout: MemoryLayout,
         block_limit: usize,
@@ -113,7 +113,7 @@ impl NativeMemory {
         Ok(pointer)
     }
 
-    fn deallocate(
+    pub(super) fn deallocate(
         &mut self,
         pointer: *mut u8,
         layout: MemoryLayout,
@@ -139,7 +139,7 @@ impl NativeMemory {
     /// # Safety
     /// The source caller has ended all loans and discharged residents that
     /// relocation or truncation would invalidate. No resident drop is implied.
-    unsafe fn reallocate(
+    pub(super) unsafe fn reallocate(
         &mut self,
         pointer: *mut u8,
         old: MemoryLayout,

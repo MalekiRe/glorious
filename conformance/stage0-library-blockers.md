@@ -13,6 +13,13 @@ The 175-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
 
+Cache 79 fixes the undemanded generic availability-release failure while keeping
+unsealed runtime witnesses inadmissible. The native-allocation/array integration
+batch passes 1,020 tests, including all 891 service tests; later GAT contextual
+inference passes its focused tests. General owning-container region preservation
+and native partial-owner metadata are newly confirmed open issues. The cache 78
+and earlier entries below are historical; see `implementation-progress.md`.
+
 The integrating tree is now cache 78. Its mixed LLVM/VM ordinary-call bridge
 passes 63 native/bridge/request tests. The explicit availability-release Core
 operation still fails lawful generic semantic lowering with G6001 (37/38

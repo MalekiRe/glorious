@@ -172,6 +172,9 @@ pub enum EvaluationOperation {
     /// Dispose of a statement result at this point, before evaluating the
     /// next statement. Ownership MIR selects the actual destruction action.
     Discard,
+    /// Checked abandonment of a pending environment. This consumes the
+    /// witness through ownership disposal; it is never a unit constant.
+    ReleaseAvailable,
     Assign,
     Borrow {
         unique: bool,
@@ -324,6 +327,17 @@ impl EvaluationMir {
             let mut available = BTreeSet::new();
             for (index, instruction) in region.instructions.iter().enumerate() {
                 instruction.validate_shape()?;
+                if instruction.operation == EvaluationOperation::ReleaseAvailable {
+                    let [EvaluationOperand::Value(operand)] = instruction.operands.as_slice()
+                        else { unreachable!("validated release arity"); };
+                    let witness = region.instructions[..index].iter().find(|value| value.value == *operand);
+                    if !witness.is_some_and(|value| matches!(&value.ty,
+                        Type::Nominal { definition, arguments }
+                        if *definition == crate::intrinsic_available_type_definition()
+                            && matches!(arguments.as_slice(), [GenericArgument::Lifetime(_), GenericArgument::Type(_)]))) {
+                        return Err(EvaluationError("release operand is not an availability witness".into()));
+                    }
+                }
                 if let EvaluationOperation::Completion { computation, handles_operations: true, .. } = &instruction.operation
                     && !self.regions.get(computation.0 as usize).is_some_and(|region| {
                         let result = match region.exit { EvaluationExit::Yield(value) | EvaluationExit::Diverge(value) => value };
@@ -429,6 +443,7 @@ impl EvaluationInstruction {
             | Op::Discard
             | Op::Deref
             | Op::LazyBoolean { .. } => values && arity == 1,
+            Op::ReleaseAvailable => values && arity == 1 && self.ty == Type::Unit,
             Op::Transfer(_) => values && arity == 1 && self.ty == Type::Never,
             Op::Move => arity == 1,
             Op::Borrow { .. } => matches!(&self.operands[..], [EvaluationOperand::Place(_)]),
@@ -1020,10 +1035,9 @@ impl Builder<'_> {
                     Op::Intrinsic(operator)
                 }
             }
-            CoreKind::ReleaseAvailable(_) => {
-                return Err(EvaluationError(
-                    "available release requires sealed runtime-environment disposal before executable lowering".into(),
-                ));
+            CoreKind::ReleaseAvailable(value) => {
+                operands = self.values(&[value], sequence)?;
+                Op::ReleaseAvailable
             }
             CoreKind::Block(_) => {
                 let region = self.region(source)?;

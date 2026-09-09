@@ -3401,6 +3401,11 @@ pub(crate) fn vm_nominal_copy_descriptor(
 }
 pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
     match value {
+        // A pending environment witness is proof-only. Until the control
+        // producer supplies a sealed runtime owner and disposal plan, an
+        // ordinary nominal layout cannot represent it (even as a ZST).
+        Type::Nominal { definition, .. }
+            if *definition == crate::intrinsic_available_type_definition() => Err(Box::new(value.clone())),
         // Bottom has no inhabitant at runtime. It still needs a structural
         // register type so a terminal `Perform` can cross a caller-installed
         // handler frame before the terminal clause cancels that frame.
@@ -6439,6 +6444,21 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
             | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. } = instruction {
             seed_terminal_call_handlers(function, pc, *dst, arguments, resumption_consumes, &states, &mut incoming, &mut worklist)?;
         }
+        // The non-consuming constructor opcodes copy their input carriers.
+        // They must not provide a second spelling of Copy that bypasses its
+        // affine/unique-reference permission check in an edited artifact.
+        let copied_fields = match instruction {
+            VmInstruction::MakeTuple { fields, .. } | VmInstruction::MakeArray { fields, .. }
+            | VmInstruction::MakeRecord { fields, .. } | VmInstruction::MakeEnum { fields, .. } => Some(fields),
+            _ => None,
+        };
+        if let Some(fields) = copied_fields {
+            for field in fields {
+                if !vm_type_is_duplicable(&register_type(function, *field)?, &function.nominal_copy_descriptors) {
+                    return Err(VmArtifactError::AffineValueCopy { register: *field });
+                }
+            }
+        }
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {
                 // `declared_result` above has already proven this is the
@@ -8983,6 +9003,12 @@ fn validate_vm_type_with_layouts(value: &VmType, layouts: &[VmNominalCopyDescrip
             validate(element)
         }
         VmType::Tuple(values) => values.iter().try_for_each(validate),
+        VmType::Nominal { definition, .. }
+            if *definition == crate::intrinsic_available_type_definition() => {
+                Err(VmArtifactError::MalformedEncoding {
+                    message: "availability witness requires sealed runtime environment disposal",
+                })
+            }
         VmType::Nominal { arguments, .. } => {
             for argument in arguments {
                 validate_vm_nominal_argument_type(argument)?;

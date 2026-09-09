@@ -63,3 +63,60 @@ fn frozen_release_rejects_forged_witness_and_result_types() {
     assert!(forged.validate().iter().any(|d| d.code == "G4183"),
         "an availability occurrence must retain its declared environment identity");
 }
+
+#[test]
+fn generic_release_preserves_consuming_disposal_until_runtime_admission() {
+    use grandiose_stage0::evaluation_mir::{EvaluationMir, EvaluationOperand, EvaluationOperation};
+    let (core, signatures, contract) = fixture();
+    let definition = *signatures.definitions.iter().find_map(|(key, header)|
+        matches!(header, ElaboratedHeader::Callable(_)).then_some(key)).unwrap();
+    let evaluation = EvaluationMir::lower(definition, &core).unwrap();
+    let region = &evaluation.regions()[evaluation.entry().0 as usize];
+    let release = region.instructions.iter().find(|instruction|
+        instruction.operation == EvaluationOperation::ReleaseAvailable).unwrap();
+    assert!(matches!(release.operands.as_slice(), [EvaluationOperand::Value(_)]));
+    assert_eq!(release.ty, Type::Unit);
+    let flow = PlaceFlow::analyze_with_interface_and_bounds(&core, &signatures, &contract.where_bounds);
+    let lowering = grandiose_stage0::MirLowering::lower_with_bodies_and_signatures(
+        definition, &core, &flow, &std::collections::BTreeMap::new(), Some(&signatures));
+    assert!(lowering.diagnostics.is_empty(), "{:?}", lowering.diagnostics);
+    let mir = lowering.function.unwrap();
+    assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction|
+        matches!(instruction, grandiose_stage0::MirInstruction::Drop { local }
+            if matches!(&mir.locals[local.0 as usize].ty, Type::Nominal { definition, .. }
+                if *definition == grandiose_stage0::intrinsic_available_type_definition()))),
+        "release must retain disposal, not become only a unit constant");
+    assert!(matches!(grandiose_stage0::emit_vm(&mir),
+        Err(grandiose_stage0::VmArtifactError::UnsupportedType { .. })),
+        "runtime admission needs a sealed capture owner, not an ordinary nominal witness");
+}
+
+#[test]
+fn wire_cannot_forge_an_executable_availability_layout() {
+    use grandiose_stage0::{CandidateVmArtifact, DefKey, Digest, VmFunction, VmType,
+        VmInstruction, VmArtifactError, VmGenericArgument};
+    let witness = VmType::Nominal {
+        definition: grandiose_stage0::intrinsic_available_type_definition(),
+        arguments: vec![VmGenericArgument::Type(VmType::Unit)],
+    };
+    for ty in [witness.clone(), VmType::Tuple(vec![witness])] {
+        let mut candidate = CandidateVmArtifact {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+            fingerprint: Digest::of_bytes(b"unsealed-availability"),
+            function: VmFunction {
+                definition: DefKey(Digest::of_bytes(b"unsealed-availability")),
+                safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+                nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+                registers: vec![ty, VmType::Unit],
+                instructions: vec![VmInstruction::ConstUnit { dst: 1 }, VmInstruction::Return { value: 1 }],
+            },
+        };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        for result in [grandiose_stage0::verify_vm(candidate.clone()),
+            grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&candidate))] {
+            assert!(matches!(result, Err(VmArtifactError::MalformedEncoding {
+                message: "availability witness requires sealed runtime environment disposal",
+            })), "{result:?}");
+        }
+    }
+}

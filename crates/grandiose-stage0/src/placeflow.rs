@@ -41,7 +41,8 @@ enum AbruptExit {
 impl Projection {
     fn overlaps(&self, other: &Self) -> bool {
         self.root == other.root
-            && (self.fields.starts_with(&other.fields) || other.fields.starts_with(&self.fields))
+            && (crate::core::reference_path_is_prefix(&self.fields, &other.fields)
+                || crate::core::reference_path_is_prefix(&other.fields, &self.fields))
     }
 
     fn is_strict_ancestor_of(&self, other: &Self) -> bool {
@@ -103,7 +104,8 @@ struct ProjectionLoan {
 impl ProjectionLoan {
     fn disjoint_from(&self, other: &Self) -> bool {
         self.partitions.iter().any(|(call, fields)| other.partitions.get(call)
-            .is_some_and(|other| !fields.starts_with(other) && !other.starts_with(fields)))
+            .is_some_and(|other| !crate::core::reference_path_is_prefix(fields, other)
+                && !crate::core::reference_path_is_prefix(other, fields)))
     }
 }
 
@@ -862,8 +864,47 @@ impl Analyzer<'_> {
     fn origin_loans(&self, owner: &str) -> BTreeSet<ProjectionLoan> {
         let active = self.projection_loans.iter()
             .filter(|loan| loan.owner.as_deref() == Some(owner)).cloned().collect::<BTreeSet<_>>();
-        if active.is_empty() { self.reference_origins.get(owner).cloned().unwrap_or_default() }
-        else { active }
+        if !active.is_empty() { return active; }
+        let mut origins = self.reference_origins.get(owner).cloned().unwrap_or_default();
+        let Some((root, _)) = owner.split_once('.') else { return origins; };
+        let prefix = format!("{root}.");
+        let selected = owner.split('.').collect::<Vec<_>>();
+        let wildcard = crate::core::REFERENCE_PATH_ARRAY_ELEMENT.to_string();
+        for (key, loans) in self.reference_origins.range(prefix.clone()..)
+            .take_while(|(key, _)| key.starts_with(&prefix)) {
+            if key == owner { continue; }
+            let pattern = key.split('.').collect::<Vec<_>>();
+            if pattern.len() != selected.len() { continue; }
+            if !pattern.iter().zip(&selected).all(|(left, right)|
+                left == right || left.parse::<u32>().ok().zip(right.parse::<u32>().ok())
+                    .is_some_and(|(left, right)| crate::core::reference_path_matches(&[left], &[right]))) {
+                continue;
+            }
+            let selected_indices = pattern.iter().zip(&selected)
+                .filter_map(|(left, right)| (*left == wildcard && *right != wildcard)
+                    .then(|| right.parse::<u32>().ok()).flatten()).collect::<Vec<_>>();
+            for mut loan in loans.iter().cloned() {
+                // A selected unique result element is a distinct leaf of the
+                // already checked result, even though its frozen contract
+                // represented all elements with one symbolic component.
+                for fields in loan.partitions.values_mut() {
+                    let mut indices = selected_indices.iter();
+                    for field in fields {
+                        if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT
+                            && let Some(index) = indices.next() { *field = *index; }
+                    }
+                }
+                if loan.indirect && pattern.first().is_some_and(|root| *root == loan.place.root) {
+                    let fields = selected.iter().skip(1).map(|field| field.parse::<u32>()).collect::<Result<Vec<_>, _>>();
+                    if let Ok(fields) = fields
+                        && crate::core::reference_path_matches(&loan.place.fields, &fields) {
+                        loan.place.fields = fields;
+                    }
+                }
+                origins.insert(loan);
+            }
+        }
+        origins
     }
 
     fn reference_ancestors(&self, owner: &str) -> BTreeSet<String> {
@@ -3066,7 +3107,7 @@ impl Analyzer<'_> {
             let mut leaves = vec![];
             let _ = crate::core::input_reference_leaf_paths(self.signatures.unwrap_or(&empty),
                 &self.body.expression(id).ty, &mut leaves);
-            let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| path == fields) else {
+            let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
                 return BTreeSet::new();
             };
             return self.reference_resident_loans(parents, &fields[deref + 1..],
@@ -3100,14 +3141,14 @@ impl Analyzer<'_> {
             } => {
                 let mut loans = BTreeSet::new();
                 for path in paths {
-                    if !fields.starts_with(&path.result_fields) {
+                    if !crate::core::reference_path_is_prefix(&path.result_fields, fields) {
                         continue;
                     }
                     let Some(argument) = arguments.get(path.argument as usize).copied() else { continue; };
                     let mut argument_fields = path.argument_fields.clone();
                     argument_fields.extend_from_slice(&fields[path.result_fields.len()..]);
                     loans.extend(self.reference_loans_from_value_path(argument, &argument_fields).into_iter()
-                        .map(|loan| self.partition_call_result(id, &path.result_fields, loan)));
+                        .map(|loan| self.partition_call_result(id, &fields[..path.result_fields.len()], loan)));
                 }
                 return loans;
             }
@@ -3134,6 +3175,10 @@ impl Analyzer<'_> {
                     return self.origin_loans(&projection_key(&key, remaining));
                 }
             };
+            if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+                return fields.iter().flat_map(|value|
+                    self.reference_loans_from_value_path(*value, tail)).collect();
+            }
             let Some(next) = fields.get(*field as usize).copied() else { return BTreeSet::new(); };
             value = next;
             remaining = tail;
@@ -3179,7 +3224,7 @@ impl Analyzer<'_> {
         let mut leaves = vec![];
         let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
             &self.body.expression(id).ty, &mut vec![], &mut leaves);
-        let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| path == fields) else {
+        let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
             return BTreeSet::new();
         };
         let mut path = vec![];
@@ -3211,9 +3256,11 @@ impl Analyzer<'_> {
         let mut leaves = vec![];
         if crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
             &self.body.expression(call).ty, &mut vec![], &mut leaves).is_ok()
-            && let Some((_, Type::Reference { mutability, .. })) = leaves.iter().find(|(path, _)| path == fields) {
+            && let Some((path, Type::Reference { mutability, .. })) = leaves.iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) {
             loan.unique = matches!(mutability, crate::Mutability::Unique);
-            if leaves.len() > 1 { loan.partitions.insert(call, fields.to_vec()); }
+            if leaves.len() > 1 || path.contains(&crate::core::REFERENCE_PATH_ARRAY_ELEMENT) {
+                loan.partitions.insert(call, fields.to_vec());
+            }
         }
         loan
     }
@@ -3227,7 +3274,7 @@ impl Analyzer<'_> {
         let mut leaves = vec![];
         let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
             &self.body.expression(call).ty, &mut vec![], &mut leaves);
-        let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| path == fields) else {
+        let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
             return BTreeSet::new();
         };
         BTreeSet::from([ProjectionLoan {
@@ -3330,7 +3377,7 @@ impl Analyzer<'_> {
                 let aliases = leaves.into_iter().map(|(leaf, ty)| {
                     let mut source = fields.clone();
                     source.extend_from_slice(&leaf);
-                    let loans = paths.iter().filter(|path| path.result_fields == source)
+                    let loans = paths.iter().filter(|path| crate::core::reference_path_matches(&path.result_fields, &source))
                         .flat_map(|path| arguments.get(path.argument as usize).into_iter().flat_map(|argument|
                             self.reference_loans_from_value_path(*argument, &path.argument_fields)))
                         .map(|mut loan| {
