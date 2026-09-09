@@ -5,6 +5,64 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 97: shared captured and explicit invocation stores
+
+PlaceFlow and EscapeFlow now consume one typed may-store rule producer for
+explicit arguments, captured inputs and higher-order callbacks. Nested callable
+inputs use the same worklist, with repeated identical inputs sharing expansion.
+The old separate logical/captured call-store inference paths are removed.
+Each domain still owns its resident snapshots and storage graph; this is a
+shared rule product, not a globally unified storage-identity analysis.
+
+The original seven source variants all incorrectly accepted mutation after a
+callback stored a reference into a still-live owner (14 O0/O2 acceptances in
+`target/shared-invocation-before-v1.log`). The expanded regression pairs
+13 invocation forms with legal fresh/decoded O0/O2 execution: direct, shared
+and unique receivers, ordinary and generic callbacks, explicit and aggregate
+arguments, nested captures, quantified borrowed callbacks, selected trait
+methods and implementation-level `Fn` bounds. Separate cases reject returning
+a stored factory-local reference and permit an abrupt argument that bypasses
+invocation entirely.
+
+An unconstrained generic forwarding function cannot invoke its substituted
+closure. Ordinary functions and selected trait methods now preserve this
+declared distinction, as well as the distinction between declaration-local
+elided lifetimes and substituted capture lifetimes. Analysis and executable
+materialization share declaration selection and checked implementation binding;
+ordinary and selected signatures share kind-preserving substitution. Three
+non-invoking forwarding variants execute after a legal pre-invocation mutation.
+The original false rejection is retained in
+`target/shared-invocation-noninvoking-before-v1.log`.
+
+Formation no longer applies a hypothetical closure body's stores to its
+creation site. Actual invocation applies the shared relation after its strict
+operands complete. Callable containment retains captured dependencies without
+aliasing the callable resident with its contained owner. Factory forwarding
+preserves typed capture snapshots, including an existing closure wrapped with
+additional inputs; the latter adapter regression fails before the correction
+in `target/shared-invocation-wrapper-before-v1.log`. No physical environment
+field or compiler-owned brand is invented for an opaque factory result.
+
+The five relation units cover mixed explicit/captured stores, fresh lifetime
+binders, known-empty versus unresolved captures, 10,000-deep and cyclic callable
+expansion, and symbolic-array candidate/access matching. Two escape units cover
+containment versus aliasing and preservation of wrapped typed inputs.
+
+The final selected integration run has 1,931 passes and 17 existing failures,
+with no ignores (`target/shared-invocation-integration-v3.log`). All 307 unit,
+25 borrowed-callable, 38 callable-control, 270 Core, 111 destruction,
+39 fixed-array/container, 17 minimum-use, 22 request/revision, 891 service and
+176 library API tests pass. All four tail-label cases pass; the mandatory-tail
+suite retains 16 passes and its existing activation-transfer ABI failure. The
+source-library matrix remains 15 passes and 16 failures. The final all-target
+compile check passes (`target/shared-invocation-check-v2.log`).
+
+Full guarded interprocedural invocation, transfer/cancellation states, shared
+storage identities and captured native/mixed execution remain open. Unknown
+environments retain their observed footprints; this is not a proof of complete
+coverage. Source cache generation is 97; bytecode, verifier and native format
+generations are unchanged.
+
 ## Cache 96: shared capture formation and retained slot dependencies
 
 Frozen Core captures now project into common formation actions: retain the

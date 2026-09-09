@@ -270,7 +270,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // preserves transfers performed while evaluating another transfer's payload.
 // Cache 96 shares capture formation rules and retains borrowed source slots
 // together with the dependencies carried by nested captured values.
-pub const STAGE0_CACHE_GENERATION: u32 = 96;
+// Cache 97 shares explicit/captured invocation store rules and keeps capture
+// containment distinct from aliasing the captured owner's stored residents.
+pub const STAGE0_CACHE_GENERATION: u32 = 97;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

@@ -128,7 +128,37 @@ Copying or moving retains the latter without borrowing the former. Nested
 callables carry their existing dependencies through owned aggregate wrappers.
 Formation mode does not establish shared or unique invocation authority.
 
-This consolidates formation rules, not the entire provenance analysis. Storage
-identities and guarded invocation/store relations still need a common published
-product across analyses. The existing per-consumer environments and higher-order
-store propagation are not claimed to be complete by this migration.
+This consolidates formation rules, not the entire provenance analysis. The
+invocation migration below shares store rules, while storage identities and
+fully guarded outcomes still need a common published product across analyses.
+
+## Captured and explicit invocation inputs
+
+`crates/grandiose-stage0/src/resident_invocations.rs` derives typed may-store
+edges from explicit and captured inputs through one invocation relation.
+PlaceFlow and EscapeFlow supply read-only projections of their resident
+snapshots and apply the resulting edges to their own storage graphs. Their
+previous separate logical/captured call-store inference paths are removed.
+Nested captured callables use the same worklist rules as argument callbacks;
+identical invocation inputs share expansion. Unknown capture coverage is
+reported separately from positively represented empty environments.
+
+Callback authority comes from the declared callable parameters and `Fn`
+bounds, including implementation bounds, not merely from substituting an
+actual closure for an unconstrained type parameter. Declared independently
+elided lifetimes remain distinct from substituted resident lifetimes.
+`callable_declarations.rs` supplies declaration identities and selected
+implementation substitutions to analysis and materialization; both consumers
+share the checked binding algorithm. Factory forwarding retains typed capture
+inputs without inventing physical environment fields or brands. Containing a
+captured owner does not make the callable resident alias that owner.
+
+Consumers apply these relations only after strict operands complete according
+to the shared continuation product. This is not a complete interprocedural
+execution/control relation: it models possible stores, not exact invocation
+order, branch guards, transfer or cancellation states. Storage identities and
+environments remain per-consumer, and unresolved inputs retain their observed
+footprints rather than proving complete coverage. The source regressions cover
+direct, borrowed, higher-order, nested and trait-selected invocation, ordinary
+non-invoking generic forwarding, and abrupt argument evaluation. They do not
+establish full guarded provenance or captured native/mixed execution.

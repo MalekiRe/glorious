@@ -160,13 +160,8 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
     let (parameters, result) = rigid.as_ref().map(|signature| (&signature.parameters, &signature.result)).unwrap_or((parameters, result));
     let inputs = parameters.iter().enumerate().flat_map(|(index, parameter)|
         callable_paths(signatures, parameter, true).into_iter().map(move |(path, ty)| (index, path, ty))).collect::<Vec<_>>();
-    let literal_results = match &expression.kind {
-        crate::core::CoreKind::Function { definition, .. } => match signatures.definitions.get(definition) {
-            Some(crate::ElaboratedHeader::Callable(signature)) => Some(callable_paths(signatures, &signature.result, false)),
-            _ => None,
-        },
-        _ => None,
-    };
+    let literal_results = crate::callable_declarations::declared_invocation_contract(signatures, expression)
+        .map(|(signature, _)| callable_paths(signatures, &signature.result, false));
     let mut paths = vec![];
     for (result_fields, result_ty) in callable_paths(signatures, result, false) {
         let mut matched = false;
@@ -207,13 +202,8 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
 /// receiver is conflated with a reference supplied as T. A Vec<&T> resident
 /// and the short &mut Vec receiver are distinct regions, even if their final
 /// caller-facing type encodings both contain `Elided`.
-pub(crate) fn call_transfers(
-    signatures: &crate::ElaboratedInterface,
-    body: &crate::core::TypedBody,
-    callee: crate::core::CoreId,
-) -> Vec<ResidentTransfer> {
+pub(crate) fn expression_transfers(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Vec<ResidentTransfer> {
     use crate::Type;
-    let expression = body.expression(callee);
     let Type::Callable { parameters: realized, .. } = &expression.ty else { return vec![]; };
     let realized = parameter_transfers(signatures, realized);
     if realized.is_empty() { return realized; }
@@ -228,19 +218,13 @@ pub(crate) fn call_origin(signatures: &crate::ElaboratedInterface, callee: &crat
 }
 
 fn rigid_callable_signature(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Option<crate::CallableSignature> {
-    use crate::core::CoreKind;
-    match &expression.kind {
-        CoreKind::Function { definition, arguments, .. } => {
-            // Distinct type slots can be connected by an ordinary trait
-            // conversion. Preserve equality of their realized regions; only
-            // declaration-local elision, absent from these substitutions,
-            // remains separate from a generic resident's region.
-            let mut regions = BTreeMap::new();
-            let arguments = arguments.iter().map(|argument| rigid_resident_argument(argument, &mut regions)).collect::<Vec<_>>();
-            signatures.instantiate_callable_generic(*definition, &arguments).ok()
-        }
-        _ => None,
-    }
+    let selected = crate::callable_declarations::selected_template(signatures, expression)?;
+    // Distinct type slots can be related by ordinary trait conversion. Keep
+    // their realized region equality, while declaration-local elision stays
+    // separate from substituted residents in both functions and methods.
+    let mut regions = BTreeMap::new();
+    let arguments = selected.arguments.iter().map(|argument| rigid_resident_argument(argument, &mut regions)).collect::<Vec<_>>();
+    selected.signature.instantiate_generic(&arguments).ok()
 }
 
 pub(crate) fn parameter_transfers(signatures: &crate::ElaboratedInterface, parameters: &[crate::Type]) -> Vec<ResidentTransfer> {

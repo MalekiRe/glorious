@@ -17,6 +17,7 @@ use crate::{
     types::{EffectRow, GenericArgument, Type},
 };
 use std::collections::{BTreeMap, BTreeSet};
+mod invocations;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscapeDiagnostic {
@@ -97,7 +98,7 @@ impl EscapeFlow {
 /// Provenance that matters at an outlives boundary.  Scalars and normal
 /// nominal values are omitted; only borrowed storage and closures that carry
 /// one of those borrows can make a body-local region escape.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Value {
     None,
     /// Proven resident without any frame-relative component. Unlike `None`,
@@ -138,8 +139,15 @@ enum Value {
     Closure {
         environment: EnvironmentBrand,
         captures: Vec<Capture>,
+        resident_captures: Vec<crate::resident_invocations::Operand<Value>>,
         frame_independent: bool,
         regions: BTreeSet<crate::placeflow::regions::Region>,
+    },
+    /// An opaque factory result carries selected input snapshots without
+    /// inventing a physical environment field or a compiler-owned brand.
+    CallableResident {
+        footprint: Box<Value>,
+        resident_captures: Vec<crate::resident_invocations::Operand<Value>>,
     },
     Joined(Vec<Value>),
 }
@@ -203,7 +211,7 @@ fn parameter_value(ty: &Type) -> Value {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Capture {
     /// A retained body-local dependency: either the borrowed capture slot or
     /// a backing place reached through its contents (including nested closures).
@@ -275,34 +283,22 @@ impl Analyzer<'_> {
                     fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
                 Value::Logical { physical, arguments } => Value::Logical { physical: Box::new(resolve(physical, graph, active)),
                     arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
-                Value::Closure { environment, captures, frame_independent, regions } => {
+                Value::Closure { environment, captures, resident_captures, frame_independent, regions } => {
                     let possible = resolve(&Value::Region(regions.clone()), graph, active);
                     let roots = capture_dependency_roots(&possible);
                     let mut captures = captures.clone();
                     captures.extend(roots.iter().cloned().map(|root| Capture::Borrowed { root, environment: *environment }));
                     Value::Closure { environment: *environment, captures,
+                        resident_captures: resident_captures.clone(),
                         frame_independent: *frame_independent && roots.is_empty(), regions: BTreeSet::new() }
                 }
+                Value::CallableResident { footprint, resident_captures } => Value::CallableResident {
+                    footprint: Box::new(resolve(footprint, graph, active)), resident_captures: resident_captures.clone(),
+                },
                 value => value.clone(),
             }
         }
         resolve(value, &self.values.regions, &mut BTreeSet::new())
-    }
-
-    fn record_logical_call_stores(&mut self, callee: CoreId, values: &[Value], span: Span) {
-        for transfer in crate::placeflow::regions::call_transfers(self.signatures, self.body, callee) {
-            let (Some(destination), Some(source)) = (values.get(transfer.destination), values.get(transfer.source)) else { continue; };
-            let Some(destination) = self.reference_path_value(destination, &transfer.destination_path) else { continue; };
-            let Some(source) = self.reference_path_value(source, &transfer.source_path) else { continue; };
-            if value_contains_external_reference(&self.resolved_value(&destination)) {
-                self.report_external_store_escape(&source, span);
-            }
-            let mut regions = logical_regions(&destination);
-            let Some(first) = regions.first().cloned() else { continue; };
-            regions.extend(logical_regions(&source));
-            self.values.regions.connect(&regions);
-            self.values.regions.insert(first, source, merge_region_values);
-        }
     }
 
     fn value(&mut self, id: CoreId) -> Value {
@@ -416,19 +412,30 @@ impl Analyzer<'_> {
                     self.values.define(name.clone(), parameter_value(ty));
                 }
                 let returned = self.value(body);
-                let possible_regions = self.values.regions.clone();
+                let returned_snapshot = self.resolved_value(&returned);
                 self.values = outer_values;
-                self.values.regions.merge_from(&possible_regions, merge_region_values);
 
-                let frame_independent = capture_dependency_roots(&self.resolved_value(&returned)).is_empty()
+                // Formation does not execute the body or insert hypothetical
+                // external arguments into captured storage. Invocation applies
+                // the shared relation using its real explicit/captured inputs.
+                let frame_independent = capture_dependency_roots(&returned_snapshot).is_empty()
                     && !crate::core::tail::has_outer_label_dependency(self.body, body)
                     && environment.captures.iter().all(|capture| {
                         !matches!(CaptureFormation::new(capture).source(), CaptureSource::Borrow(_))
                             && self.values.get(&capture.name).is_some_and(|value| frame_independent_value(&self.resolved_value(value)))
                     });
                 let regions = environment.captures.iter().flat_map(|capture|
-                    self.values.get(&capture.name).into_iter().flat_map(logical_regions))
-                    .chain(logical_regions(&returned)).collect();
+                    self.values.get(&capture.name).into_iter().flat_map(contained_regions))
+                    .chain(contained_regions(&returned_snapshot)).collect();
+                let resident_captures = environment.captures.iter().map(|capture| {
+                    let formation = CaptureFormation::new(capture);
+                    let value = match formation.source() {
+                        CaptureSource::Borrow(_) => Value::Borrowed { root: capture.name.clone(),
+                            storage: self.values.bindings.get(&capture.name).copied(), fields: vec![] },
+                        CaptureSource::Copy | CaptureSource::Move => self.values.get(&capture.name).cloned().unwrap_or(Value::None),
+                    };
+                    crate::resident_invocations::Operand { ty: formation.resident_type(), value }
+                }).collect();
                 let mut captures = environment
                     .captures
                     .into_iter()
@@ -455,7 +462,7 @@ impl Analyzer<'_> {
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
-                captures.extend(capture_dependency_roots(&self.resolved_value(&returned)).into_iter().map(|root| {
+                captures.extend(capture_dependency_roots(&returned_snapshot).into_iter().map(|root| {
                     Capture::Borrowed {
                         root,
                         environment: environment.brand,
@@ -466,6 +473,7 @@ impl Analyzer<'_> {
                 Value::Closure {
                     environment: environment.brand,
                     captures,
+                    resident_captures,
                     frame_independent,
                     regions,
                 }
@@ -482,12 +490,14 @@ impl Analyzer<'_> {
                 // frozen Core contract names the caller argument whose region
                 // it forwards, so relaying `&local` through a helper cannot
                 // erase a later return/suspension/drop-check obligation.
-                self.value(callee);
+                let callable = self.value(callee);
                 if self.continuations.is_abrupt(callee) {
                     return Value::None;
                 }
                 let values = self.strict_values(arguments.clone());
-                self.record_logical_call_stores(callee, &values, expression.span);
+                if values.len() == arguments.len() && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
+                    self.record_invocation_stores(callee, callable, &arguments, &values, expression.span);
+                }
                 if mandatory_tail {
                     for (argument, value) in arguments.iter().zip(&values) {
                         if !frame_independent_value(&self.resolved_value(value))
@@ -502,9 +512,18 @@ impl Analyzer<'_> {
                     return Value::None;
                 }
                 let callable_paths = crate::placeflow::regions::callable_result_paths(self.signatures, self.body.expression(callee));
-                let callable_values = callable_paths.iter().filter_map(|path| values.get(path.argument as usize)
-                    .and_then(|value| self.reference_path_value(value, &path.argument_fields))
-                    .map(|value| (path.result_fields.clone(), value))).collect::<Vec<_>>();
+                let mut callable_values = BTreeMap::<Vec<u32>, (Vec<Value>, Vec<crate::resident_invocations::Operand<Value>>)>::new();
+                for path in callable_paths {
+                    let (Some(value), Some(argument)) = (values.get(path.argument as usize), arguments.get(path.argument as usize)) else { continue; };
+                    let Some(value) = self.reference_path_value(value, &path.argument_fields) else { continue; };
+                    let mut inputs = vec![];
+                    let _ = crate::core::input_reference_leaf_paths(self.signatures, &self.body.expression(*argument).ty, &mut inputs);
+                    let (footprint, captures) = callable_values.entry(path.result_fields).or_default();
+                    if let Some((_, ty)) = inputs.into_iter().find(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
+                        captures.push(crate::resident_invocations::Operand { ty, value: value.clone() });
+                    }
+                    footprint.push(value);
+                }
                 let mut result = self.reference_result_value(
                     &reference_origin,
                     reference_shape,
@@ -513,7 +532,9 @@ impl Analyzer<'_> {
                     expression.span,
                     "call",
                 );
-                for (path, value) in callable_values {
+                for (path, (footprint, resident_captures)) in callable_values {
+                    let value = if resident_captures.is_empty() { join(footprint) }
+                        else { Value::CallableResident { footprint: Box::new(join(footprint)), resident_captures } };
                     put_value_at_path(&mut result, &path, value);
                 }
                 result
@@ -1416,13 +1437,29 @@ fn merge_region_values(target: &mut Value, incoming: Value) {
 
 fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
     match value {
-        Value::Region(regions) | Value::Closure { regions, .. } => regions.clone(),
+        Value::Region(regions) => regions.clone(),
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
             values.iter().flat_map(logical_regions).collect(),
         Value::Logical { physical, arguments } => logical_regions(physical).into_iter()
             .chain(arguments.values().flat_map(logical_regions)).collect(),
         Value::Array { length, element, fields } => array_values(*length, element, fields).flat_map(logical_regions).collect(),
         _ => BTreeSet::new(),
+    }
+}
+
+/// Captured owner regions remain live dependencies, not aliases of the
+/// callable's own resident slot. Only an actual store connects their contents.
+fn contained_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
+    match value {
+        Value::Closure { regions, .. } => regions.clone(),
+        Value::CallableResident { footprint, resident_captures } => contained_regions(footprint).into_iter()
+            .chain(resident_captures.iter().flat_map(|operand| contained_regions(&operand.value))).collect(),
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
+            values.iter().flat_map(contained_regions).collect(),
+        Value::Logical { physical, arguments } => contained_regions(physical).into_iter()
+            .chain(arguments.values().flat_map(contained_regions)).collect(),
+        Value::Array { length, element, fields } => array_values(*length, element, fields).flat_map(contained_regions).collect(),
+        _ => logical_regions(value),
     }
 }
 
@@ -1485,6 +1522,7 @@ fn frame_independent_value(value: &Value) -> bool {
         Value::Logical { physical, arguments } => frame_independent_value(physical)
             && arguments.values().all(frame_independent_value),
         Value::Closure { frame_independent, .. } => *frame_independent,
+        Value::CallableResident { footprint, .. } => frame_independent_value(footprint),
         Value::None | Value::Borrowed { .. } => false,
     }
 }
@@ -1523,6 +1561,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
             collect_borrowed_roots(physical, roots);
             for value in arguments.values() { collect_borrowed_roots(value, roots); }
         }
+        Value::CallableResident { footprint, .. } => collect_borrowed_roots(footprint, roots),
         Value::Closure { .. } | Value::None | Value::FrameIndependent | Value::ExternalBorrowed => {}
     }
 }
@@ -1635,6 +1674,7 @@ fn value_contains_external_reference(value: &Value) -> bool {
             array_values(*length, element, fields).any(value_contains_external_reference),
         Value::Logical { physical, arguments } => value_contains_external_reference(physical)
             || arguments.values().any(value_contains_external_reference),
+        Value::CallableResident { footprint, .. } => value_contains_external_reference(footprint),
         Value::None | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
@@ -1653,6 +1693,7 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
         Value::Closure {
             captures: values, ..
         } => captures.extend(values.clone()),
+        Value::CallableResident { footprint, .. } => collect_closure_captures(footprint, captures),
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
             for value in values {
                 collect_closure_captures(value, captures);
@@ -1671,6 +1712,23 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn callable_containment_is_not_aliasing_of_the_captured_owner_region() {
+        use super::*;
+        let region = crate::placeflow::regions::Region { site: "slot".into(), path: vec![1] };
+        let value = Value::CallableResident {
+            footprint: Box::new(Value::Region(BTreeSet::from([region.clone()]))), resident_captures: vec![],
+        };
+        assert!(logical_regions(&value).is_empty());
+        assert_eq!(contained_regions(&value), BTreeSet::from([region]));
+        let value = Value::CallableResident {
+            footprint: Box::new(Value::Borrowed { root: "a".into(), storage: Some(0), fields: vec![] }), resident_captures: vec![],
+        };
+        assert_eq!(borrowed_roots(&value), BTreeSet::from(["a".into()]));
+        assert!(!frame_independent_value(&value));
+        assert!(value_at_path(&value, &[0]).is_none(), "capture snapshots are not addressable fields");
+    }
+
     #[test]
     fn symbolic_array_provenance_keeps_union_and_sparse_replacement_obligations() {
         use super::*;

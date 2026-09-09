@@ -8,12 +8,27 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/shared-capture-integration-v1.log`, cache 96). This includes a source
+ignored (`target/shared-invocation-integration-v3.log`, cache 97). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 97 consolidates captured and explicit invocation may-store rules across
+ownership and escape checking. It retains callback stores through borrowed
+receivers, higher-order calls, nested captures and selected trait methods,
+without treating an unconstrained generic forwarder as an invocation. Factory
+forwarding preserves typed capture inputs; declaration substitution and
+selected implementation binding are shared with materialization. Full guarded
+control, unified storage identities and captured native/mixed execution remain
+open. The final selected run has 1,931 passes and 17 existing failures: the
+tail-call ABI case and 16 source-library cases. All 891 service, 39 fixed-array
+and 176 library API tests pass, as does the all-target compile check. See
+`implementation-progress.md` and `docs/compiler-architecture.md` for exact
+logs and the migration's boundaries.
+
+The following cache 96 and earlier checkpoints are historical.
 
 Cache 96 consolidates capture formation rules across Core contracts, ownership,
 escape and quantity checking. The factory-local closure escape regression now
@@ -26,8 +41,6 @@ tail-call ABI case and 16 source-library cases. All 891 service, 34 fixed-array
 and 176 library API tests pass. Shared invocation/store provenance and complete
 guarded control remain open; see `implementation-progress.md` for exact logs
 and the limits of this migration.
-
-The following cache 95 and earlier checkpoints are historical.
 
 Cache 95 consolidates local continuation reasoning into a frozen rule product
 shared by ownership, escape and quantity checking. Definite and conditional

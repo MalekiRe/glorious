@@ -13,6 +13,8 @@ pub mod coherence;
 pub mod core;
 mod core_continuations;
 mod capture_formation;
+mod resident_invocations;
+mod callable_declarations;
 pub mod callable_control;
 pub mod refinement;
 pub mod dependency;

@@ -140,6 +140,61 @@ pub struct CallableSignature {
     pub universal_bounds: Vec<QuantifiedWhereBound>,
 }
 
+impl CallableSignature {
+    /// Apply one checked, kind-preserving declaration substitution. Ordinary
+    /// functions and selected implementation methods share this operation.
+    pub(crate) fn instantiate_generic(&self, arguments: &[GenericArgument]) -> Result<Self, InstantiationError> {
+        validate_generic_arguments(&self.generic_kinds, arguments)?;
+        Ok(CallableSignature {
+            safety: self.safety,
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: self
+                .parameters
+                .iter()
+                .cloned()
+                .map(|ty| substitute_alias_generic_identity(ty, arguments))
+                .collect(),
+            result: substitute_alias_generic_identity(self.result.clone(), arguments),
+            effects: substitute_alias_generic_identity_effect_row(
+                self.effects.clone(),
+                arguments,
+            ),
+            invocation: self.invocation,
+            where_bounds: self
+                .where_bounds
+                .iter()
+                .map(|(subject, relation)| {
+                    (
+                        substitute_alias_generic_identity(subject.clone(), arguments),
+                        substitute_trait_reference(relation, arguments),
+                    )
+                })
+                .collect(),
+            where_associated_type_bindings: self
+                .where_associated_type_bindings
+                .iter()
+                .cloned()
+                .map(|binding| {
+                    substitute_alias_generic_identity_associated_type_binding(binding, arguments)
+                })
+                .collect(),
+            where_associated_effect_bindings: self
+                .where_associated_effect_bindings
+                .iter()
+                .cloned()
+                .map(|binding| {
+                    substitute_alias_generic_identity_associated_effect_binding(binding, arguments)
+                })
+                .collect(),
+            where_outlives: self.where_outlives.iter().map(|bound| bound.map_terms(|argument|
+                substitute_alias_generic_identity_argument(argument, arguments))).collect(),
+            universal_bounds: self.universal_bounds.iter()
+                .map(|bound| bound.instantiate(arguments)).collect(),
+        })
+    }
+}
+
 /// Native linking must retain the complete source contract before VM types
 /// erase regions and use bounds. Use tagged semantic encodings, never Debug
 /// strings or an ABI-size comparison, for this declaration-owned identity.
@@ -3057,54 +3112,7 @@ impl ElaboratedInterface {
         else {
             return Err(InstantiationError::WrongLayout);
         };
-        validate_generic_arguments(&signature.generic_kinds, arguments)?;
-        Ok(CallableSignature {
-            safety: signature.safety,
-            generics: 0,
-            generic_kinds: vec![],
-            parameters: signature
-                .parameters
-                .iter()
-                .cloned()
-                .map(|ty| substitute_alias_generic_identity(ty, arguments))
-                .collect(),
-            result: substitute_alias_generic_identity(signature.result.clone(), arguments),
-            effects: substitute_alias_generic_identity_effect_row(
-                signature.effects.clone(),
-                arguments,
-            ),
-            invocation: signature.invocation,
-            where_bounds: signature
-                .where_bounds
-                .iter()
-                .map(|(subject, relation)| {
-                    (
-                        substitute_alias_generic_identity(subject.clone(), arguments),
-                        substitute_trait_reference(relation, arguments),
-                    )
-                })
-                .collect(),
-            where_associated_type_bindings: signature
-                .where_associated_type_bindings
-                .iter()
-                .cloned()
-                .map(|binding| {
-                    substitute_alias_generic_identity_associated_type_binding(binding, arguments)
-                })
-                .collect(),
-            where_associated_effect_bindings: signature
-                .where_associated_effect_bindings
-                .iter()
-                .cloned()
-                .map(|binding| {
-                    substitute_alias_generic_identity_associated_effect_binding(binding, arguments)
-                })
-                .collect(),
-            where_outlives: signature.where_outlives.iter().map(|bound| bound.map_terms(|argument|
-                substitute_alias_generic_identity_argument(argument, arguments))).collect(),
-            universal_bounds: signature.universal_bounds.iter()
-                .map(|bound| bound.instantiate(arguments)).collect(),
-        })
+        signature.instantiate_generic(arguments)
     }
 
     pub fn instantiate_callable(

@@ -697,6 +697,101 @@ fn logical_capture_probe_live_residents_and_expired_owners_validate() {
     }
 }
 
+fn resident_invocation_cases() -> &'static [(&'static str, &'static str, &'static str, &'static str)] {
+    &[
+        ("direct", "", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "task(&a)"),
+        ("shared receiver", "", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "(&task)(&a)"),
+        ("unique receiver", "", "let mut task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "(&mut task)(&a)"),
+        ("plain callback", "fn invoke(task:() -> ()) { task() }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(task)"),
+        ("generic callback", "fn invoke<F>(task:F) where F:Fn<(),Output=()> { task() }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(task)"),
+        ("callback argument", "fn invoke<'a>(task:(&'a i64) -> (), value:&'a i64) { task(value) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,&a)"),
+        ("nested callback", "", "let inner = () -> () { SharedSlot::set(&alias,&a); }; let task = () -> () { inner() };", "task()"),
+        ("generic callback argument", "fn invoke<'a,F>(task:F, value:&'a i64) where F:Fn<(&'a i64),Output=()> { task(value) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,&a)"),
+        ("tuple callback argument", "fn invoke<'a>(task:(&'a i64) -> (), pair:(&'a i64,i64)) { task(pair.0) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,(&a,0))"),
+        ("shared generic receiver", "fn invoke<F>(task:&F) where for<'b> &'b F:Fn<(),Output=()> { task() }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(&task)"),
+        ("unique generic receiver", "fn invoke<F>(task:&mut F) where for<'b> &'b mut F:Fn<(),Output=()> { task() }", "let mut task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(&mut task)"),
+        ("selected trait callback", "trait Invoke { fn invoke<F>(receiver:i64, task:F) where F:Fn<(),Output=()>; } impl Invoke for i64 { fn invoke<F>(receiver:i64, task:F) where F:Fn<(),Output=()> { task() } }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "Invoke::invoke(0,task)"),
+        ("implementation-bound callback", "trait Invoke<F> { fn invoke(receiver:i64, task:F); } impl<F> Invoke<F> for i64 where F:Fn<(),Output=()> { fn invoke(receiver:i64, task:F) { task() } }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "Invoke<() -> ()>::invoke(0,task)"),
+    ]
+}
+
+#[test]
+fn invocation_inputs_retain_stores_across_explicit_captured_and_nested_callbacks() {
+    let mut accepted = vec![];
+    for (name, declaration, closure, invocation) in resident_invocation_cases() {
+        let source = format!("use std::*; {declaration} pub fn main() -> i64 {{ let mut a:i64=41; let slot:SharedSlot<&i64> = SharedSlot::new(); {{ let alias = SharedSlot::copy(&slot); {closure} {invocation}; }}; a=42; handle SharedSlot::get(&slot) {{ Result::Ok(value) => *value, Result::Err(_) => 0 }} }}");
+        for optimization in ["0", "2"] {
+            match StageZeroCompiler::new().compile(shared_slot_request(&source, optimization)) {
+                Ok(_) => accepted.push(format!("{name} O{optimization}")),
+                Err(error) => assert!(error.diagnostics().iter().any(|diagnostic|
+                    matches!(diagnostic.code, "G5007" | "G5013" | "G5017" | "G5022")), "{name}: {:#?}", error.diagnostics()),
+            }
+        }
+    }
+    assert!(accepted.is_empty(), "invocation stores lost their retained loans: {accepted:?}");
+}
+
+#[test]
+fn invocation_inputs_execute_after_short_callback_receivers_end() {
+    for (name, declaration, closure, invocation) in resident_invocation_cases() {
+        let source = format!("use std::*; {declaration} pub fn main() -> i64 {{ let a:i64=42; let slot:SharedSlot<&i64> = SharedSlot::new(); {{ let alias = SharedSlot::copy(&slot); {closure} {invocation}; }}; handle SharedSlot::get(&slot) {{ Result::Ok(value) => *value, Result::Err(_) => 0 }} }}");
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(shared_slot_request(&source, optimization))
+                .unwrap_or_else(|error| panic!("{name}: {error:?}")).artifact.unwrap();
+            let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+            // SAFETY: the stored loan refers only to a, which outlives the
+            // slot; short callback and owner-handle borrows are not residents.
+            assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42, "{name}");
+            assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42, "{name}");
+        }
+    }
+}
+
+#[test]
+fn invocation_inputs_cannot_return_a_stored_factory_local_reference() {
+    let source = "use std::*; fn bad() -> SharedSlot<&i64> { let a:i64=42; let slot:SharedSlot<&i64> = SharedSlot::new(); { let alias = SharedSlot::copy(&slot); let task = (value:&i64) -> () { SharedSlot::set(&alias,value); }; task(&a); }; slot } pub fn main() -> i64 { 42 }";
+    for optimization in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(shared_slot_request(source, optimization)) {
+            Err(error) => error,
+            Ok(_) => panic!("the callback's store cannot erase a returned local reference"),
+        };
+        assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5013" | "G5014" | "G5022")), "{:#?}", error.diagnostics());
+    }
+}
+
+#[test]
+fn an_abrupt_argument_does_not_apply_the_uninvoked_callbacks_store_relation() {
+    let source = "use std::*; pub fn main() -> i64 { let mut a:i64=41; let slot:SharedSlot<&i64> = SharedSlot::new(); @done: () { let task = (value:&i64) -> () { SharedSlot::set(&slot,value); }; task(@done(())); }; a=42; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => a } }";
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(shared_slot_request(source, optimization))
+            .unwrap_or_else(|error| panic!("{error:?}")).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the label transfer bypasses invocation; no loan is inserted.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
+fn noninvoking_generic_forwarding_does_not_execute_a_captured_store() {
+    for (declaration, forwarding) in [
+        ("fn keep<T>(task:T, value:&i64) -> T { task }", "keep(task,&a)"),
+        ("trait Forward { fn keep<T>(receiver:i64, task:T, value:&i64) -> T; } impl Forward for i64 { fn keep<T>(receiver:i64, task:T, value:&i64) -> T { task } }", "Forward::keep(0,task,&a)"),
+        ("trait Forward<U> { fn keep<T>(receiver:i64, task:T, value:&i64) -> T; } impl<U> Forward<U> for i64 { fn keep<T>(receiver:i64, task:T, value:&i64) -> T { task } }", "Forward<i64>::keep(0,task,&a)"),
+    ] {
+      let source = format!("use std::*; {declaration} pub fn main() -> i64 {{ let mut a:i64=41; let slot:SharedSlot<&i64> = SharedSlot::new(); {{ let alias = SharedSlot::copy(&slot); let task = (value:&i64) -> () {{ SharedSlot::set(&alias,value); }}; let task = {forwarding}; a=42; task(&a); }}; handle SharedSlot::get(&slot) {{ Result::Ok(value) => *value, Result::Err(_) => 0 }} }}");
+      for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(shared_slot_request(&source, optimization))
+            .unwrap_or_else(|error| panic!("{error:?}")).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: keep cannot invoke unconstrained T; the only inserted loan
+        // starts after the mutation and its referent outlives the slot.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+      }
+    }
+}
+
 #[test]
 fn callable_container_cannot_hide_a_factory_local_capture_slot() {
     // Preserve the original factory source: its reference handle belongs to

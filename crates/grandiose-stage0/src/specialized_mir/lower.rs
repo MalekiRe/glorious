@@ -352,13 +352,8 @@ impl SpecializedMir {
                                         }
                                     }
                                 }
-                                let receiver = match &values[instruction.destination.0 as usize].ty
-                                {
-                                    Type::Callable {
-                                        parameters, result, ..
-                                    } => Some(parameters.first().unwrap_or(result).clone()),
-                                    _ => None,
-                                };
+                                let receiver = crate::callable_declarations::receiver_candidate(
+                                    &values[instruction.destination.0 as usize].ty).cloned();
                                 let receiver = crate::service::trait_method_executable_receiver(
                                     evidence,
                                     method,

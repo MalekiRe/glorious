@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod minimum;
 mod drop;
+mod invocations;
 use minimum::{MinimumBinding, MinimumDisposition, MinimumHandler};
 
 /// A statically-selected subplace of one local.  PlaceFlow deliberately keeps
@@ -599,6 +600,7 @@ impl PlaceFlow {
             projection_loans: vec![],
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
+            capture_types: BTreeMap::new(),
             logical: LogicalFlow::default(),
             open_referent_holes: BTreeMap::new(),
             moved_places: BTreeSet::new(),
@@ -747,6 +749,9 @@ struct Analyzer<'a> {
     /// Provenance outlives one compact active-loan entry.  It is consulted
     /// only when a live descendant proves the parent region remains open.
     reference_origins: BTreeMap<String, BTreeSet<ProjectionLoan>>,
+    /// Immutable types interned for private capture snapshot keys. They grant
+    /// no liveness fact; the snapshot entries participate in normal flow joins.
+    capture_types: BTreeMap<String, Type>,
     logical: LogicalFlow,
     /// A direct `move *reference` leaves its unique referent uninitialized
     /// while retaining the reference handle.  The key is the exact lexical
@@ -1588,7 +1593,7 @@ impl Analyzer<'_> {
                     during_call.insert(owner.clone());
                     self.visit_closure_environment(&environment, e.span, Some(owner.as_str()));
                     self.visit_sequence(&arguments, &during_call);
-                    if operands_complete && self.normal_continuation { self.record_captured_call_stores(callee, Some(&owner), id); }
+                    if operands_complete && self.normal_continuation { self.record_invocation_stores(callee, Some(&owner), &arguments, id); }
                     self.release_owner_loans(&owner, e.span);
                 } else {
                     if matches!(reference_shape, CallReferenceShape::None) {
@@ -1613,8 +1618,9 @@ impl Analyzer<'_> {
                     }
                 }
                 if operands_complete && self.normal_continuation {
-                    self.record_logical_call_stores(callee, &logical_arguments, id);
-                    self.record_captured_call_stores(callee, None, id);
+                    if !matches!(self.body.expression(callee).kind, CoreKind::Closure { .. }) {
+                        self.record_invocation_stores(callee, None, &logical_arguments, id);
+                    }
                     if self.minimum_definitely_aborts(id) { self.minimum_states.clear(); }
                     else { self.check_minimum_call_suspensions(callee, &arguments, e.span); }
                 }
@@ -2239,14 +2245,16 @@ impl Analyzer<'_> {
     /// with different capture orders cannot exchange their store operands.
     /// These lexical analysis keys never become Core projection authority.
     fn capture_origin_key(owner: &str, ty: &Type) -> String {
-        format!("{owner}.<capture-{:?}>", crate::Digest::of_bytes(&crate::types::canonical_type_encoding(ty)))
+        format!("{owner}.{}", Self::capture_type_key(ty))
     }
 
     fn record_capture_origins(&mut self, capture: &crate::core::ClosureCapture, owner: &str) {
         let source = self.resolve_name(&capture.name);
         let formation = crate::capture_formation::CaptureFormation::new(capture);
         let ty = formation.resident_type();
+        self.capture_types.insert(Self::capture_type_key(&ty), ty.clone());
         let root = Self::capture_origin_key(owner, &ty);
+        self.reference_origins.entry(root.clone()).or_default();
         let resident = projection_key(&root, formation.contents_path());
         let prefix = format!("{source}.");
         let references = self.reference_origins.iter().filter(|(key, _)| **key == source || key.starts_with(&prefix))
@@ -2322,7 +2330,9 @@ impl Analyzer<'_> {
             .flat_map(|(_, regions)| regions.iter().cloned()).collect::<BTreeSet<_>>();
         if !regions.is_empty() {
             let owner = owner.map(str::to_owned).unwrap_or_else(|| format!("<anonymous-logical-capture-{}>", span.start));
-            self.logical.origins.entry(owner).or_default().extend(regions);
+            // Containing an owner does not alias the callable's resident slot
+            // with that owner's stored elements.
+            self.logical.origins.entry(format!("{owner}.<contained>")).or_default().extend(regions);
         }
         if self.open_referent_holes.contains_key(&name) {
             self.error(
@@ -2948,9 +2958,15 @@ impl Analyzer<'_> {
             CoreKind::Call { arguments, .. }
             | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(_), .. } => {
                 let mut known = BTreeSet::new();
+                let callable = self.signatures.is_some_and(|signatures| regions::callable_paths(signatures, &self.body.expression(id).ty, false)
+                    .iter().any(|(path, _)| crate::core::reference_path_matches(path, fields)));
                 for path in self.resident_call_paths(id) {
                     if !crate::core::reference_path_is_prefix(&path.result_fields, fields) { continue; }
                     let Some(argument) = arguments.get(path.argument as usize) else { continue; };
+                    // Forwarding a callable aliases its resident; capturing an
+                    // owner's reference does not alias the owner's data region.
+                    if callable && self.signatures.is_some_and(|signatures| !regions::callable_paths(signatures, &self.body.expression(*argument).ty, true)
+                        .iter().any(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields))) { continue; }
                     let mut source = path.argument_fields.clone();
                     source.extend_from_slice(&fields[path.result_fields.len()..]);
                     known.extend(self.logical_regions_from_value_path(*argument, &source));
@@ -2997,65 +3013,6 @@ impl Analyzer<'_> {
             changed = true;
         }
         if changed { self.refresh_logical_loans(id); }
-    }
-
-    fn record_logical_call_stores(&mut self, callee: CoreId, arguments: &[CoreId], call: CoreId) {
-        let Some(signatures) = self.signatures else { return; };
-        let mut changed = false;
-        for transfer in regions::call_transfers(signatures, self.body, callee) {
-            let (Some(destination), Some(source)) = (arguments.get(transfer.destination), arguments.get(transfer.source)) else { continue; };
-            let mut region_ids = self.logical_regions_from_value_path(*destination, &transfer.destination_path);
-            let Some(first) = region_ids.first().cloned() else { continue; };
-            region_ids.extend(self.logical_regions_from_value_path(*source, &transfer.source_path));
-            let loans = self.reference_loans_from_value_path(*source, &transfer.source_path).into_iter()
-                .map(|loan| ProjectionLoan { owner: None, ..loan }).collect::<BTreeSet<_>>();
-            self.logical.regions.connect(&region_ids);
-            self.logical.regions.insert(first, loans, |loans, incoming| loans.extend(incoming));
-            changed = true;
-        }
-        if changed { self.refresh_logical_loans(call); }
-    }
-
-    /// Captures are implicit invocation inputs. Their contract describes the
-    /// same possible resident stores as explicit inputs, while the value's
-    /// live origins retain the actual capture roots after contextual erasure.
-    /// Capture unions need not have a common physical order; typed snapshots
-    /// preserve each operand without inventing environment projections.
-    fn record_captured_call_stores(&mut self, callee: CoreId, owner: Option<&str>, call: CoreId) {
-        let Some(signatures) = self.signatures else { return; };
-        let Type::Callable { contract, .. } = &self.body.expression(callee).ty else { return; };
-        if contract.captures.is_empty() && contract.environment.is_some() { return; }
-        let captures = contract.open(|_| None).map(|contract| contract.captures).unwrap_or_else(|| contract.captures.clone());
-        if !(captures.is_empty() && contract.environment.is_none())
-            && regions::parameter_transfers(signatures, &captures).is_empty() { return; }
-        let owned = owner.map(str::to_owned).or_else(|| self.reference_origin_key(callee));
-        if let Some(owner) = &owned {
-            let mut known = false;
-            for transfer in regions::parameter_transfers(signatures, &captures) {
-                let destination = projection_key(&Self::capture_origin_key(owner, &captures[transfer.destination]), &transfer.destination_path);
-                let source = projection_key(&Self::capture_origin_key(owner, &captures[transfer.source]), &transfer.source_path);
-                let mut regions = self.logical_origin_regions(&destination);
-                let Some(first) = regions.first().cloned() else { continue; };
-                regions.extend(self.logical_origin_regions(&source));
-                let loans = self.origin_loans(&source).into_iter().map(|loan| ProjectionLoan { owner: None, ..loan }).collect();
-                self.logical.regions.connect(&regions);
-                self.logical.regions.insert(first, loans, |loans, incoming| loans.extend(incoming));
-                known = true;
-            }
-            if known { self.refresh_logical_loans(call); return; }
-        }
-        let region_ids = if let Some(owner) = &owned {
-            self.logical.origins.iter().filter(|(key, _)| *key == owner || key.starts_with(&(owner.clone() + ".")))
-                .flat_map(|(_, regions)| regions.iter().cloned()).collect::<BTreeSet<_>>()
-        } else { self.logical_regions_from_value_path(callee, &[]) };
-        let Some(first) = region_ids.first().cloned() else { return; };
-        let loans = if let Some(owner) = &owned {
-            self.captured_origin_loans(owner)
-        } else { self.reference_loans_from_value(callee) };
-        self.logical.regions.connect(&region_ids);
-        self.logical.regions.insert(first, loans.into_iter().map(|loan| ProjectionLoan { owner: None, ..loan }).collect(),
-            |loans, incoming| loans.extend(incoming));
-        self.refresh_logical_loans(call);
     }
 
     fn resident_call_paths(&self, id: CoreId) -> Vec<crate::core::CallReferencePath> {
@@ -3191,6 +3148,17 @@ impl Analyzer<'_> {
         if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(call).kind) {
             for path in regions::callable_result_paths(signatures, self.body.expression(*callee)) {
                 if let Some(argument) = arguments.get(path.argument as usize) {
+                    let owner = projection_key(result, &path.result_fields);
+                    let mut inputs = vec![];
+                    let _ = crate::core::input_reference_leaf_paths(signatures, &self.body.expression(*argument).ty, &mut inputs);
+                    if let Some((_, ty)) = inputs.iter().find(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
+                        self.record_factory_capture_origins(&owner, *argument, &path.argument_fields, ty);
+                    }
+                    if regions::callable_paths(signatures, &self.body.expression(*argument).ty, true).iter()
+                        .any(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
+                        let sources = self.callable_origin_owners(*argument, &path.argument_fields);
+                        self.forward_capture_origins(&owner, &sources);
+                    }
                     for parent in self.reference_loans_from_value_path(*argument, &path.argument_fields) {
                         self.install_reference_alias(&projection_key(result, &path.result_fields), parent, call);
                     }
