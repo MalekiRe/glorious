@@ -42,8 +42,13 @@ pipeline correction, with the remaining integration stated explicitly.
 
 ## Verification and checkpoints
 
+- Keep testing infrequent and focused. Prioritize implementation over repeatedly
+  running broad suites; normally check only the changed semantic boundary.
+  Reserve broad regression sweeps for occasional major integration checkpoints
+  or concrete evidence of a cross-cutting regression. Safety-critical changes
+  still need targeted positive and negative checks.
 - Test the changed semantic boundary, including positive and negative cases,
-  and run broader checks appropriate to the risk. Preserve unrelated work.
+  with verification proportional to the risk. Preserve unrelated work.
 - Commit and push after every meaningful verified change, or a small batch of
   related changes. Do not accumulate many local checkpoints without pushing.
 - A checkpoint may document an existing failing regression; it must not claim

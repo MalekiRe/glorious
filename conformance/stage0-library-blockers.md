@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-09 from the current source and cache 105 verification below,
+Updated 2026-09-09 from the current source and cache 106 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,23 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 106 extends lexical fusion through handler and resumption binders. Distinct
+delimiters retain exact clause/continuation identities through Core, Evaluation
+and Control MIR; resumption name fallback is removed. Nested/deep handler replay,
+normal completion and abandonment cleanup execute in focused VM cases. Owned-only
+callable captures now retain owned invocation authority.
+
+Two new positive regressions remain active: a captured resumption passes ownership
+but loses its snapshot brand at the bytecode verifier's product-extraction boundary
+(G7042 `HandlerResumeUnavailable`), and native/mixed handler composition reaches
+unsupported native `InstallHandlerOwned`. These are separate from the existing
+ordinary native captured-callable ABI failure. Full helper-family fusion and
+mandatory-tail activation transfer remain open. The broad service/library matrix
+was not rerun; its latest completed evidence remains cache 105 above. Exact focused
+logs and snapshot qualifications are recorded in `implementation-progress.md`.
+
+The following cache 105 and earlier checkpoints are historical.
 
 Cache 105 integrates structural fusion for lexical outer-label closures and
 captured label aliases. Tagged environment products preserve ordinary residents,

@@ -21,6 +21,7 @@ struct Frame {
     calls: Vec<(CallableBrand, CoreId)>,
     arguments: Option<Vec<GenericArgument>>,
     locals: BTreeMap<String, Input>,
+    resumptions: BTreeMap<ResumptionId, (ResumptionId, String, Type)>,
     labels: BTreeMap<LabelBrand, LabelBrand>,
     environments: BTreeMap<EnvironmentBrand, EnvironmentBrand>,
     refinements: BTreeMap<RefinementBrand, RefinementBrand>,
@@ -167,7 +168,7 @@ impl Fusion<'_> {
     fn frame(&mut self, owner: DefKey, callable: CallableBrand, arguments: Option<Vec<GenericArgument>>,
         calls: Vec<(CallableBrand, CoreId)>, replacements: Vec<(Type, Type)>) -> Result<Frame, CoreDiagnostic> {
         let mut frame = Frame { owner, callable, proof_root: CallableBrand::Named(self.owner), calls, arguments,
-            locals: BTreeMap::new(), labels: BTreeMap::new(), environments: BTreeMap::new(),
+            locals: BTreeMap::new(), resumptions: BTreeMap::new(), labels: BTreeMap::new(), environments: BTreeMap::new(),
             refinements: BTreeMap::new(), replacements, nodes: BTreeMap::new() };
         // Allocate one hygienic identity namespace per expansion. References
         // are remapped mechanically; only the existing binders create brands.
@@ -280,7 +281,8 @@ impl Fusion<'_> {
         let source_type = self.semantic_type(frame, expression.ty.clone());
         let preserves_input = matches!(expression.kind, CoreKind::Local(_) | CoreKind::Block(_) | CoreKind::Call { .. }
             | CoreKind::Tuple(_) | CoreKind::Field { .. } | CoreKind::Move(_) | CoreKind::Borrow { .. }
-            | CoreKind::Deref(_) | CoreKind::Closure { .. } | CoreKind::Label { .. } | CoreKind::Completion { .. });
+            | CoreKind::Deref(_) | CoreKind::Closure { .. } | CoreKind::Label { .. }
+            | CoreKind::Completion { .. } | CoreKind::Handle { .. });
         let result = self.expression_inner(id, frame)?;
         if !preserves_input { self.with_semantic(result, source_type); }
         if unsafe_scope { self.output.unsafe_scopes.insert(result); }
@@ -478,8 +480,65 @@ impl Fusion<'_> {
                 effect: self.effect(effect, frame), operation, payload_types: payload_types.into_iter().map(|ty| self.ty(frame, ty)).collect(),
                 arguments: self.expressions(arguments, frame)?, terminal, reference_contract, reference_origin, reference_shape,
             },
-            CoreKind::Handle { .. } | CoreKind::Resumption { .. } => return Err(diagnostic(span,
-                "structural control fusion requires an explicit handler continuation expansion contract")),
+            CoreKind::Handle { computation, clauses } => {
+                // Reserve the delimiter before composing either side. Its
+                // clauses and continuations name this exact output binder;
+                // repeated expansions never share a source handler identity.
+                let handler = self.alloc(CoreKind::Error, ty.clone(), span);
+                let computation = self.expression(computation, frame)?;
+                let mut output = vec![];
+                let mut results = vec![(self.semantic(computation).clone(), self.physical_expression(computation).ty.clone())];
+                for (index, mut clause) in clauses.into_iter().enumerate() {
+                    let mut child = frame.clone();
+                    clause.brand = CallableBrand::HandlerClause { owner: self.owner, handler, clause: index as u32 };
+                    clause.effect = self.effect(clause.effect, &child);
+                    clause.payload_types = clause.payload_types.into_iter().map(|ty| self.ty(&child, ty)).collect();
+                    clause.patterns = clause.patterns.into_iter().map(|pattern| self.pattern(pattern, &mut child)).collect();
+                    clause.bindings = self.bindings(clause.bindings, &mut child);
+                    if let Some(contract) = &mut clause.continuation {
+                        contract.brand = CallableBrand::Continuation { owner: self.owner, handler, clause: index as u32 };
+                        contract.parameter = self.ty(&child, contract.parameter.clone());
+                        contract.result = self.ty(&child, contract.result.clone());
+                        let GenericArgument::EffectRow(effects) = self.argument(&child, GenericArgument::EffectRow(contract.effects.clone())) else { unreachable!() };
+                        contract.effects = effects;
+                    }
+                    if let CoreHandlerResumption::Explicit { id: original, name, .. } = &mut clause.resumption {
+                        let contract = clause.continuation.as_ref().ok_or_else(|| diagnostic(clause.span,
+                            "expanded resumption has no checked continuation contract"))?;
+                        let fresh = ResumptionId(self.fresh());
+                        let fresh_name = self.name(name);
+                        let ty = contract.callable_type();
+                        child.resumptions.insert(*original, (fresh, fresh_name.clone(), ty.clone()));
+                        child.locals.insert(name.clone(), Input {
+                            place: CorePlace::Local { name: fresh_name.clone(), ty: ty.clone() }, semantic: ty,
+                        });
+                        *original = fresh;
+                        *name = fresh_name;
+                    }
+                    clause.body = self.expression(clause.body, &mut child)?;
+                    if !matches!(clause.resumption, CoreHandlerResumption::Tail { .. }) {
+                        results.push((self.semantic(clause.body).clone(), self.physical_expression(clause.body).ty.clone()));
+                    }
+                    output.push(clause);
+                }
+                let (semantic, physical) = self.join_layout(self.semantic_type(frame, expression.ty), &results, span)?;
+                // The continuation may return through a surrounding normal
+                // completion transform rather than this protected region.
+                // Do not silently alter that already-bound callable ABI.
+                if physical != ty && output.iter().any(|clause| clause.continuation.is_some()) {
+                    return Err(diagnostic(span, "handler result representation changed after binding its resumption ABI"));
+                }
+                self.values[handler.0 as usize] = Value { semantic, physical: CoreExpr {
+                    kind: CoreKind::Handle { computation, clauses: output }, ty: physical, span,
+                } };
+                return Ok(handler);
+            }
+            CoreKind::Resumption { id, .. } => {
+                let (id, name, contract) = frame.resumptions.get(&id).cloned().ok_or_else(|| diagnostic(span,
+                    "resumption has no active expanded lexical binder"))?;
+                if contract != ty { return Err(diagnostic(span, "expanded resumption differs from its bound continuation ABI")); }
+                CoreKind::Resumption { id, name }
+            }
             CoreKind::Literal(value) => CoreKind::Literal(value),
             CoreKind::Error => return Err(diagnostic(span, "recovered Core cannot enter control fusion")),
         };
@@ -608,6 +667,7 @@ impl Fusion<'_> {
         child.calls.clear();
         child.nodes.clear();
         child.locals.clear();
+        child.resumptions.clear();
         for capture in &mut environment.captures {
             let Some(input @ Input { place: CorePlace::Local { name, ty }, .. }) = outer.locals.get(&capture.name) else {
                 return Err(diagnostic(span, "resident nested closure requires a projected capture formation contract"));

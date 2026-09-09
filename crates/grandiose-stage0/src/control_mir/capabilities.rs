@@ -399,9 +399,9 @@ impl Builder<'_> {
                 self.emit(*block, scope, destination, ControlOperation::Read(value));
                 return Ok(true);
             }
-            EvalOp::Resumption { name, .. } => {
-                let value = *names.get(name).or_else(|| self.active_resumptions.get(name))
-                    .ok_or_else(|| ControlError::Invalid(format!("resumption {name} outside clause")))?;
+            EvalOp::Resumption { id, .. } => {
+                let value = *self.active_resumptions.get(id)
+                    .ok_or_else(|| ControlError::Invalid(format!("resumption {id:?} outside its lexical clause")))?;
                 self.emit(*block, scope, destination, ControlOperation::Read(value));
                 return Ok(true);
             }
@@ -597,14 +597,12 @@ impl Builder<'_> {
                         }, value);
                     }
                     let saved_resumptions = self.active_resumptions.clone();
-                    if let CoreHandlerResumption::Explicit { name, .. } = &arm.resumption {
+                    if let CoreHandlerResumption::Explicit { id, name, .. } = &arm.resumption {
                         let contract = arm.continuation.as_ref().ok_or_else(|| ControlError::Invalid("explicit resumption lacks contract".into()))?;
-                        let token = self.value(Type::Callable { contract: Default::default(), safety: Safety::Safe, lifetime_binders: 0,
-                            parameters: vec![contract.parameter.clone()], result: Box::new(contract.result.clone()),
-                            effects: contract.effects.clone(), invocation: contract.invocation }, instruction.source, arm.span)?;
+                        let token = self.value(contract.callable_type(), instruction.source, arm.span)?;
                         self.emit(selected, arm_scope, token, ControlOperation::Capability(Op::Resumption { handler, clause: index as u32 }));
                         self.result.handlers[handler.0 as usize].clauses[index].token = Some(token);
-                        self.active_resumptions.insert(name.clone(), token);
+                        self.active_resumptions.insert(*id, token);
                         bindings.insert(name.clone(), token);
                         self.result.source_bindings.insert(crate::placeflow::PlaceBindingOrigin::HandlerResumption {
                             handle: instruction.source, clause: index as u32,

@@ -5,6 +5,73 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 106: lexical handler and resumption binders through fusion
+
+Lexical closure fusion now composes handlers instead of rejecting every handler
+node. Each expansion reserves a distinct delimiter and rebrands its clauses and
+continuation contracts. Payload, resumption-parameter and handler-result types
+use the same substitution frame as other invocation inputs. Calls to resumptions
+remain checked control operations, retaining deep reinstatement, completion
+transforms and ordinary abandonment cleanup. Incompatible physical resumption
+result layouts still reject explicitly rather than being reinterpreted.
+
+This required repairing the authoritative binder representation: clause brands
+previously identified only a body owner and clause index, so nested first clauses
+collided. They now include the actual Core handler identity. Explicit binders
+retain their generative resumption IDs; references must match their active binder
+and full callable contract. Core and Evaluation MIR independently check that
+relation. Control MIR uses exact IDs, removing its previous name-based fallback.
+Aliases and captured inputs use ordinary local value reads. Handler edges are
+fingerprinted structurally, preserving arena-order independence.
+
+Composition exposed capture inference borrowing owned-only callable residents.
+Those value captures now use copy-or-move formation according to the callable's
+ownership contract; a shared loan cannot supply owned-call authority. This is a
+general callable capture correction, not a resumption-only lowering exception.
+
+Focused execution evidence includes handlers inside and outside fused closures,
+repeated expansions, nested same-spelled resumption binders, deep reinstatement,
+exact-two replay with normal-completion transforms, and destruction of abandoned
+computation and clause owners. Four handler-fusion groups pass fresh/decoded VM
+execution at O0/O2 and require absence of emitted label carriers
+(`target/handler-fusion-focused-v3.log`). Six handler library units also pass,
+including independent receiving-boundary forgery checks. That snapshot predates
+the owned-only capture correction below.
+
+Two new positive regressions remain active and are not converted to rejections:
+
+- `handler_fusion_preserves_captured_resumption_values` now passes the former
+  G5004 ownership boundary, but fails at G7042 `HandlerResumeUnavailable`
+  (`target/handler-capture-authority-v1.log`). The bytecode verifier preserves a
+  product's resumption may-taint but loses the exact snapshot brand through field
+  extraction. Its scalar snapshot proof requires a structural-value migration.
+- `handler_fusion_runs_with_owned_inputs_through_native_and_mixed_boundaries`
+  reaches the existing explicit native `InstallHandlerOwned` unsupported boundary
+  (`target/handler-fusion-focused-v3.log`). VM execution is not evidence that this
+  native control ABI exists. The separate ordinary native captured-callable
+  limitation from cache 105 remains open too.
+
+The earlier primary gate passed 337 library units, 38 callable-control, 15 fusion,
+274 Core, 39 minimum-use and 22 request/revision tests
+(`target/handler-fusion-primary-v1.log`), before the latest receiving-boundary and
+capture changes. It is historical evidence, not a final-snapshot full sweep.
+The final focused binder gate passes six handler library units and 46 Core
+handler tests (`target/handler-bindings-final-v1.log`), including nested identity
+forgeries, exact contract checks, source escapes and arena-order fingerprint
+invariance. The separate owned-callable capture test passes both direct/aliased
+formation assertions and a double-owner rejection
+(`target/owned-callable-capture-final-v1.log`). These are 53 passing final-snapshot
+tests, not a claim that the two active positive regressions above pass.
+Broad service and library matrices are deliberately not rerun for this slice;
+the user's verification policy now prioritizes infrequent, focused checks.
+
+Full helper-family fusion, mandatory-tail activation transfer, general native
+handlers and remaining environment/result layouts are unfinished. Existing source
+resumption escape admission and its restricted immediate rewrite still need
+migration to the shared lifetime consumer. Compiler/library conformance and
+self-hosting remain incomplete. Source cache generation is 106; executable and
+native ABI generations are unchanged.
+
 ## Cache 105: staged lexical closure fusion and shared callable loan products
 
 The active captured-outer-label ownership regression now executes. Staged Core

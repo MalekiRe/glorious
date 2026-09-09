@@ -102,6 +102,93 @@ fn structural_callable_parameters_and_results_keep_their_selected_environment() 
 }
 
 #[test]
+fn handlers_and_fused_closures_preserve_lexical_transfers() {
+    for arm in ["Ask::ask() => 42", "Ask::ask() with resume => resume(42)"] {
+        executes(&format!("effect Ask {{ [1,1] ask() -> i64; }}
+            pub fn main() -> i64 {{ @done: i64 {{
+                let task = () -> ! / Ask {{ @done(Ask::ask()) }};
+                handle task() {{ {arm} }}
+            }} }}"));
+        executes(&format!("effect Ask {{ [1,1] ask() -> i64; }}
+            pub fn main() -> i64 {{ @done: i64 {{
+                let task = () -> ! {{ let value = handle Ask::ask() {{ {arm} }}; @done(value) }};
+                task()
+            }} }}"));
+    }
+    executes("effect Stop { stop() -> !; }
+        pub fn main() -> i64 { @done: i64 {
+            handle Stop::stop() { Stop::stop() => { let task = () -> ! { @done(42) }; task() } }
+        } }");
+}
+
+#[test]
+fn repeated_handler_expansions_keep_distinct_resumption_binders() {
+    executes("effect Ask { [1,1] ask(value:i64) -> i64; }
+        fn apply<F>(task:F) -> i64 where F:Fn<(),Output=i64> { task() }
+        pub fn main() -> i64 { @done: i64 {
+            let task = () -> i64 { let destination = @done;
+                handle Ask::ask(21) { Ask::ask(value) with resume => { let saved = resume; saved(value) } }
+            };
+            let first = apply(&task); let second = apply(&task); first + second
+        } }");
+}
+
+#[test]
+fn handler_fusion_preserves_nested_resume_and_completion_contracts() {
+    executes("effect Ask { [1,1] ask() -> i64; } effect Other { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { @done: i64 {
+            let task = () -> i64 { let destination = @done;
+                handle Ask::ask() { Ask::ask() with k => { let outer = k;
+                    handle Other::ask() { Other::ask() with k => outer(k(42)) }
+                } }
+            }; task()
+        } }");
+    executes("effect Ask { [1,1] ask(value:i64) -> i64; }
+        pub fn main() -> i64 { @done: i64 {
+            let task = () -> i64 { let destination = @done;
+                handle { let first = Ask::ask(20); let second = Ask::ask(20); first + second }
+                { Ask::ask(value) with resume => resume(value + 1) }
+            }; task()
+        } }");
+    executes("effect Ask { [2,2] ask() -> i64; }
+        pub fn main() -> i64 { @done: i64 {
+            let task = () -> i64 { let destination = @done;
+                handle Ask::ask() { value => value + 1, Ask::ask() with resume => resume(19) + resume(21) }
+            }; task()
+        } }");
+}
+
+#[test]
+fn handler_fusion_preserves_captured_resumption_values() {
+    executes("effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { @done: i64 {
+            handle Ask::ask() { Ask::ask() with k => {
+                let offset = 2;
+                let task = (value:i64) -> i64 { let destination = @done; k(value + offset) };
+                task(40)
+            } }
+        } }");
+}
+
+#[test]
+fn handler_fusion_disposes_abandoned_computation_and_clause_owners() {
+    executes("struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.target = *self.target + 1; } }
+        effect Stop { stop() -> !; }
+        pub fn main() -> i64 { let mut counts = (40,0);
+            @done: () {
+                let first = Probe { target: &mut counts.0 };
+                let task = () -> ! / Stop { let destination = @done; let owned = first; let inspect = &owned; Stop::stop() };
+                handle task() { Stop::stop() => {
+                    let second = Probe { target: &mut counts.1 };
+                    let exit = () -> ! { @done(()) }; exit()
+                } }
+            }; counts.0 + counts.1
+        }");
+}
+
+#[test]
 fn borrowed_receivers_keep_the_original_control_environment() {
     executes("pub fn main() -> i64 { let value = 42; @done: i64 {
         let task = () -> ! { @done(value) }; let receiver = &task; receiver()
@@ -177,7 +264,6 @@ fn fusion_does_not_erase_invalid_source_ownership() {
 
 #[test]
 fn fused_owned_captures_execute_in_native_and_mixed_programs() {
-    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
     let source = "#![no_std]
         struct Token { value:i64 } impl Use<[1,1]> for Token {}
         fn consume(value:Token) -> i64 { let Token { value: result } = value; result }
@@ -185,6 +271,25 @@ fn fused_owned_captures_execute_in_native_and_mixed_programs() {
         fn compute() -> i64 { let value = Token { value:42 }; @done: i64 { apply(() -> ! { @done(consume(value)) }) } }
         fn finish(value:i64) -> i64 { let marker = 41003; value }
         pub fn main() -> i64 { finish(compute()) }";
+    executes_native_and_mixed(source);
+}
+
+#[test]
+fn handler_fusion_runs_with_owned_inputs_through_native_and_mixed_boundaries() {
+    executes_native_and_mixed("#![no_std]
+        struct Token { value:i64 } impl Use<[1,1]> for Token {}
+        fn consume(value:Token) -> i64 { let Token { value: result } = value; result }
+        effect Ask { [1,1] ask(value:i64) -> i64; }
+        fn compute() -> i64 { let value = Token { value:42 }; @done: i64 {
+            let task = () -> ! / Ask { @done(Ask::ask(consume(value))) };
+            handle task() { Ask::ask(answer) with resume => resume(answer) }
+        } }
+        fn finish(value:i64) -> i64 { let marker = 41003; value }
+        pub fn main() -> i64 { finish(compute()) }");
+}
+
+fn executes_native_and_mixed(source: &str) {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
     for optimization in [0, 2] {
         for mixed in [false, true] {
             let selected = std::cell::Cell::new(0);

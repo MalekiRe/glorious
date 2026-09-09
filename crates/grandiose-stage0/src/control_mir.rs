@@ -712,7 +712,7 @@ struct Builder<'a> {
     mapped: BTreeMap<EvaluationValue, ControlValue>,
     active_labels: BTreeMap<crate::LabelBrand, ControlLabelId>,
     active_label_values: BTreeMap<crate::LabelBrand, ControlValue>,
-    active_resumptions: BTreeMap<String, ControlValue>,
+    active_resumptions: BTreeMap<crate::core::ResumptionId, ControlValue>,
     active_handler_clauses: Vec<(ControlHandlerId, u32)>,
     proven_subjects: BTreeMap<CoreId, ControlValue>,
 }

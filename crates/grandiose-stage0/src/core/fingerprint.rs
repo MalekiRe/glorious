@@ -1,7 +1,7 @@
 //! Canonical semantic fingerprinting of frozen Typed Core.
 
 use super::{
-    CaptureEnvironment, CoreId, CoreKind, CorePattern, CorePlace, RefinementEnvironment, TypedBody,
+    CallableBrand, CaptureEnvironment, CoreId, CoreKind, CorePattern, CorePlace, RefinementEnvironment, TypedBody,
 };
 use crate::{
     identity::Digest,
@@ -44,6 +44,23 @@ impl CoreFingerprintEncoder<'_> {
 
     fn debug(&mut self, value: impl std::fmt::Debug) {
         self.bytes(format!("{value:?}").as_bytes());
+    }
+
+    fn callable_brand(&mut self, brand: CallableBrand) {
+        match brand {
+            CallableBrand::HandlerClause { owner, handler, clause }
+            | CallableBrand::Continuation { owner, handler, clause } => {
+                self.bytes(if matches!(brand, CallableBrand::HandlerClause { .. }) {
+                    b"handler-clause"
+                } else { b"handler-continuation" });
+                self.debug(owner);
+                // Core binder edges use the same structural numbering as
+                // executable edges, never physical arena offsets.
+                self.id(handler);
+                self.bytes(&clause.to_le_bytes());
+            }
+            _ => self.debug(brand),
+        }
     }
 
     fn ty(&mut self, value: &Type) {
@@ -429,7 +446,7 @@ impl CoreFingerprintEncoder<'_> {
                 self.id(*computation);
                 self.bytes(&(clauses.len() as u64).to_le_bytes());
                 for clause in clauses {
-                    self.debug(clause.brand);
+                    self.callable_brand(clause.brand);
                     self.effect(&clause.effect);
                     self.bytes(&clause.operation.to_le_bytes());
                     self.types(&clause.payload_types);
@@ -442,7 +459,7 @@ impl CoreFingerprintEncoder<'_> {
                     match &clause.continuation {
                         Some(continuation) => {
                             self.bytes(b"continuation");
-                            self.debug(continuation.brand);
+                            self.callable_brand(continuation.brand);
                             self.ty(&continuation.parameter);
                             self.ty(&continuation.result);
                             self.ty(&Type::Callable { contract: Default::default(),

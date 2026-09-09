@@ -2689,7 +2689,8 @@ fn forged_explicit_resumption_shadowing_cannot_erase_an_outer_loan() {
         panic!("fixture needs an explicit resumption");
     };
     *name = "value".into();
-    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    assert!(core.validate().iter().any(|diagnostic| diagnostic.code == "G4183"),
+        "forged binder must now reject at the Core boundary: {:#?}", core.validate());
     let flow = PlaceFlow::analyze(&core);
     assert!(
         flow.diagnostics
@@ -4848,6 +4849,86 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
 }
 
 #[test]
+fn handler_binders_and_resumption_uses_retain_exact_lexical_identities() {
+    let source = "effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer =>
+            handle Ask::ask() { Ask::ask() with inner => outer(inner(42)) }
+        } }";
+    let core = core_for("core-handler-binder-identities@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    let handlers = core.expressions.iter().enumerate().filter_map(|(index, expression)|
+        if let CoreKind::Handle { clauses, .. } = &expression.kind {
+            Some((index, clauses[0].clone()))
+        } else { None }).collect::<Vec<_>>();
+    assert_eq!(handlers.len(), 2);
+    assert_ne!(handlers[0].1.brand, handlers[1].1.brand, "nested first clauses are distinct callables");
+    let CoreHandlerResumption::Explicit { id: first, .. } = handlers[0].1.resumption else { panic!() };
+    let CoreHandlerResumption::Explicit { id: second, .. } = handlers[1].1.resumption else { panic!() };
+    assert_ne!(first, second);
+    let mut reordered = core.clone();
+    let count = reordered.expressions.len() as u32;
+    let remap = |id: &mut CoreId| *id = CoreId(count - 1 - id.0);
+    reordered.expressions.reverse();
+    remap(&mut reordered.root);
+    for expression in &mut reordered.expressions {
+        match &mut expression.kind {
+            CoreKind::Block(values) | CoreKind::Tuple(values) => values.iter_mut().for_each(&remap),
+            CoreKind::Call { callee, arguments, .. } => { remap(callee); arguments.iter_mut().for_each(&remap); }
+            CoreKind::Perform { arguments, .. } => arguments.iter_mut().for_each(&remap),
+            CoreKind::Label { body, .. } => remap(body),
+            CoreKind::Handle { computation, clauses } => {
+                remap(computation);
+                for clause in clauses {
+                    remap(&mut clause.body);
+                    let CallableBrand::HandlerClause { handler, .. } = &mut clause.brand else { panic!() };
+                    remap(handler);
+                    if let Some(contract) = &mut clause.continuation {
+                        let CallableBrand::Continuation { handler, .. } = &mut contract.brand else { panic!() };
+                        remap(handler);
+                    }
+                }
+            }
+            CoreKind::Literal(_) | CoreKind::Resumption { .. } => {}
+            other => panic!("extend the fixture's explicit edge remapping for {other:?}"),
+        }
+    }
+    assert!(reordered.validate().is_empty(), "{:#?}", reordered.validate());
+    assert_eq!(core.semantic_fingerprint(), reordered.semantic_fingerprint(),
+        "handler identity must not make a fingerprint depend on arena order");
+    for mutation in 0..4 {
+        let mut forged = core.clone();
+        match mutation {
+            0 => {
+                for expression in &mut forged.expressions {
+                    if let CoreKind::Resumption { id, .. } = &mut expression.kind {
+                        *id = if *id == first { second } else { first };
+                    }
+                }
+            }
+            1 => {
+                let CoreKind::Handle { clauses, .. } = &mut forged.expressions[handlers[1].0].kind else { panic!() };
+                let CoreHandlerResumption::Explicit { id, .. } = &mut clauses[0].resumption else { panic!() };
+                *id = first;
+            }
+            2 => {
+                let CoreKind::Handle { clauses, .. } = &mut forged.expressions[handlers[1].0].kind else { panic!() };
+                clauses[0].brand = handlers[0].1.brand;
+            }
+            3 => {
+                let CoreKind::Handle { clauses, .. } = &mut forged.expressions[handlers[1].0].kind else { panic!() };
+                clauses[0].continuation.as_mut().unwrap().parameter = Type::Unit;
+            }
+            _ => unreachable!(),
+        }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"), "forgery {mutation} was admitted");
+        assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(
+            DefKey(Digest::of_bytes(b"forged-handler-binding")), &forged).is_err());
+    }
+    assert_eq!(compile_source(source).run_i64().unwrap(), 42);
+}
+
+#[test]
 fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
     let package = PackageKey("core-handler-resumption-alias@0.1.0".into());
     let source = "effect Ask { [1, 1] ask() -> i64; } effect Log { [1, 1] log(value: i64) -> i64; } pub fn main() -> i64 / Log { handle { let answer = Ask::ask(); Log::log(answer) } { Ask::ask() with k => { let saved = k; saved(41) } } }";
@@ -4878,11 +4959,10 @@ fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(snapshots.len(), 2, "alias must remain explicit in Core");
-    assert_eq!(
-        snapshots[0], snapshots[1],
-        "alias changed snapshot identity"
-    );
+    assert_eq!(snapshots.len(), 1, "only the original binder is a generative continuation reference");
+    assert!(core.expressions.iter().any(|expression|
+        matches!(&expression.kind, CoreKind::Local(name) if name == "saved")),
+        "the alias must read its resident value, not rematerialize its source continuation");
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     let mir = MirLowering::lower(definition.key, &core, &flow);
@@ -7307,6 +7387,27 @@ fn typed_core_rejects_replayed_capture_environment_brand() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4183")
     );
+}
+
+#[test]
+fn owned_only_callable_captures_preserve_resident_invocation_authority() {
+    for use_site in ["task()", "let alias = task; alias()"] {
+        let core = core_for("core-owned-callable-capture@0.1.0", &format!(
+            "pub fn main(task: () -> i64) -> i64 {{ let run = () -> i64 {{ {use_site} }}; run() }}"));
+        assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+        let environment = core.expressions.iter().find_map(|expression| match &expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment), _ => None,
+        }).unwrap();
+        assert_eq!(environment.captures[0].name, "task");
+        assert_eq!(environment.captures[0].mode, CaptureMode::Move);
+        assert_eq!(environment.post_states[0].mode, CaptureMode::Move);
+        assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    }
+    let core = core_for("core-owned-callable-capture-double-use@0.1.0",
+        "pub fn main(task: () -> i64) -> i64 { let run = () -> i64 { task() }; task(); run() }");
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(!PlaceFlow::analyze(&core).diagnostics.is_empty(),
+        "capturing an owned-only callable must not leave another callable owner behind");
 }
 
 #[test]

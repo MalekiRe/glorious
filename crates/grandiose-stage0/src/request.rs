@@ -289,7 +289,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // components without rewriting nominal or effect-family identities.
 // Cache 105 discharges staged lexical closure obligations by checked Core
 // fusion and shares per-callable source loan products with escape/lowering.
-pub const STAGE0_CACHE_GENERATION: u32 = 105;
+// Cache 106 preserves exact handler/resumption binders through structural
+// control fusion and independently validates the receiving lexical scopes.
+pub const STAGE0_CACHE_GENERATION: u32 = 106;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

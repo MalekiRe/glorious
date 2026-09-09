@@ -419,11 +419,45 @@ of formation. The real invocation supplies the destination and payload snapshots
 
 This is an integrated but incomplete fusion slice. The entry condition covers
 outer-label closures and captured label aliases, not every label-bearing helper
-family. Handler/resumption expansion and mandatory-tail activation fusion lack
-the required contracts and explicitly reject in transformed code. Heterogeneous
+family. Mandatory-tail activation fusion lacks the required contracts and
+explicitly rejects in transformed code. Heterogeneous
 environment layouts, projected ordinary nested captures and some nominal/result
 representations remain unsupported. Recursive expansion rejects without a
 finite proof. Output is bounded and charged to the request, but expansion still
 needs finer-grained request cancellation/work accounting. Full helper fusion,
 complete proof erasure and ordinary native captured-callable storage remain
 open; tagged lexical fusion is not an implementation of the latter ABI.
+
+## Handler binders through structural fusion
+
+Handler-clause and continuation brands identify their actual enclosing Core
+handler as well as the body owner and clause index. Explicit resumption binders
+retain their generative resumption identity; a literal resumption reference must
+match that binder's identity, spelling and complete callable contract. Nested
+handlers no longer collide merely because both contain a first clause.
+Fingerprinting encodes the handler edge structurally, not by arena offset.
+
+Core validates those lexical declarations and references independently. The
+existing Evaluation MIR region validator checks the receiving binder/contract
+relation, and Control MIR resolves resumption instructions only by their exact
+identity. The previous name-based fallback is removed. Aliases and selected
+capture inputs are ordinary local values, not fresh generative resumption
+references. Capture selection normalizes the latter representation at the
+producer; it does not infer new alias authority in a lowering consumer.
+Owned-only callable values infer copy-or-move capture formation, rather than a
+shared loan that cannot supply their declared invocation authority.
+
+Fusion reserves each new handler binder before expanding its computation and
+clauses, rebrands continuation contracts, and substitutes payload and result
+types through the same invocation frame as other values. Resumption calls remain
+ordinary checked calls; they do not inline a protected computation or bypass
+deep-handler reinstatement. A physical handler result change incompatible with
+the already-bound resumption ABI rejects explicitly. Ordinary closure bodies
+cannot resolve an ambient resumption instruction: captures must supply values.
+
+This extends lexical fusion, not general native handler support or complete
+resumption lifetime analysis. Existing source escape admission and its restricted
+immediate-resumption rewrite remain pending migration to the shared lifetime
+consumer. Native owned-handler installation is still explicitly unsupported.
+Full helper-family fusion and mandatory-tail handler activation transfer remain
+open; VM handler composition does not establish those separate contracts.

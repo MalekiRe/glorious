@@ -812,7 +812,7 @@ impl Analyzer<'_> {
                         clause.span,
                     );
                     let continuation_key = match &clause.resumption {
-                        CoreHandlerResumption::Explicit { name, quantity } => {
+                        CoreHandlerResumption::Explicit { name, quantity, .. } => {
                             let key = self.contract(name, *quantity, clause.span, true);
                             // A generated continuation may intentionally
                             // shadow an ordinary callable parameter. The

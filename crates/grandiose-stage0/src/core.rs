@@ -2,6 +2,7 @@
 
 mod fingerprint;
 mod callable_contracts;
+mod control_bindings;
 pub(crate) mod control_fusion;
 pub(crate) mod label_dependencies;
 pub(crate) mod tail;
@@ -84,8 +85,8 @@ pub struct LabelBrand {
 pub enum CallableBrand {
     Named(DefKey),
     Closure(EnvironmentBrand),
-    HandlerClause { owner: DefKey, clause: u32 },
-    Continuation { owner: DefKey, clause: u32 },
+    HandlerClause { owner: DefKey, handler: CoreId, clause: u32 },
+    Continuation { owner: DefKey, handler: CoreId, clause: u32 },
 }
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum CaptureMode {
@@ -348,6 +349,15 @@ pub struct CoreHandlerContinuationContract {
     /// ownership passes refine path-sensitive use counts.
     pub direct_uses: u64,
 }
+impl CoreHandlerContinuationContract {
+    pub(crate) fn callable_type(&self) -> Type {
+        Type::Callable {
+            contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0,
+            parameters: vec![self.parameter.clone()], result: Box::new(self.result.clone()),
+            effects: self.effects.clone(), invocation: self.invocation,
+        }
+    }
+}
 /// One normal-completion arm after resolution has established that its source
 /// head was not an operation of the handled effect row.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -504,6 +514,7 @@ pub enum CoreHandlerResumption {
         quantity: crate::quantity::Quantity,
     },
     Explicit {
+        id: ResumptionId,
         name: String,
         quantity: crate::quantity::Quantity,
     },
@@ -1110,6 +1121,7 @@ impl TypedBody {
             self.validate_unsafe_scopes(&mut diagnostics);
         }
         self.validate_binding_pack_accesses(&mut diagnostics);
+        control_bindings::validate(self, &mut diagnostics);
         self.validate_mandatory_tails(&mut diagnostics, label_dependencies.as_ref().ok());
         diagnostics
     }
@@ -2104,6 +2116,7 @@ fn handler_clause_error(clauses: &[CoreHandlerClause]) -> Option<String> {
     for (index, clause) in clauses.iter().enumerate() {
         let CallableBrand::HandlerClause {
             owner,
+            handler,
             clause: branded,
         } = clause.brand
         else {
@@ -2116,6 +2129,7 @@ fn handler_clause_error(clauses: &[CoreHandlerClause]) -> Option<String> {
             && continuation.brand
                 != (CallableBrand::Continuation {
                     owner,
+                    handler,
                     clause: branded,
                 })
         {
@@ -5909,6 +5923,7 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         let captures = self.closure_captures(body, &parameters);
+        self.materialize_captured_resumption_inputs(body, &captures);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -6083,6 +6098,7 @@ impl Elaborator<'_> {
         }
         let captures = self.closure_captures(body, &parameters);
         let captures = self.force_move_captures(captures, forced_move_captures, span);
+        self.materialize_captured_resumption_inputs(body, &captures);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -7856,6 +7872,16 @@ impl Elaborator<'_> {
         if self.inference.has_numeric_constraint(ty.clone()) {
             return CaptureMode::Copy;
         }
+        // An owned-only callable use consumes the resident. Capturing a
+        // shared loan would not provide its required invocation authority;
+        // in particular a one-shot continuation cannot be copied out of that
+        // loan. Explicit borrowed uses are handled by collect_captures before
+        // reaching this default value-use rule.
+        if let Type::Callable { contract, .. } = &ty
+            && !contract.shared_receiver
+        {
+            return self.owned_capture_mode(&ty);
+        }
         // Callable and reference capabilities retain their established
         // invocation/loan authorities when inferred. An explicit `move (...)`
         // remains available when a closure must own such a value; ordinary
@@ -9289,7 +9315,9 @@ impl Elaborator<'_> {
         if path.len() == 1
             && let Some(ty) = self.locals.lookup(&path[0]).cloned()
         {
-            if let Some(active) = self.active_resumption(&path[0]) {
+            if let Some(active) = self.active_resumption(&path[0])
+                && active.name == path[0]
+                && self.locals.binding_generation(&path[0]) == Some(active.binding_generation) {
                 return self.alloc(
                     CoreKind::Resumption {
                         id: active.id,
@@ -9834,6 +9862,26 @@ impl Elaborator<'_> {
         self.resumption_bindings
             .get(&(name.to_owned(), generation))
             .cloned()
+    }
+    /// A captured continuation is an explicit resident input of the closure,
+    /// not permission to look up an ambient handler when that body executes.
+    /// Formation already selected the capture and the exact lexical identity;
+    /// re-express only those references as reads of the incoming capture slot.
+    fn materialize_captured_resumption_inputs(&mut self, root: CoreId, captures: &[ClosureCapture]) {
+        let inputs = captures.iter().filter_map(|capture| self.active_resumption(&capture.name)
+            .map(|identity| (capture.name.clone(), identity.id))).collect::<std::collections::BTreeMap<_, _>>();
+        if inputs.is_empty() { return; }
+        let mut pending = vec![root];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) { continue; }
+            let expression = &mut self.expressions[id.0 as usize];
+            if let CoreKind::Resumption { id, name } = &expression.kind
+                && inputs.get(name) == Some(id) {
+                expression.kind = CoreKind::Local(name.clone());
+            }
+            pending.extend(core_children(&expression.kind));
+        }
     }
     fn resumption_identity(&self, id: CoreId) -> Option<ActiveResumption> {
         match &self.expressions[id.0 as usize].kind {
@@ -12883,6 +12931,11 @@ impl Elaborator<'_> {
                     },
                 );
                 CoreHandlerResumption::Explicit {
+                    id: {
+                        let id = ResumptionId(self.next_resumption);
+                        self.next_resumption = self.next_resumption.saturating_add(1);
+                        id
+                    },
                     name: name.clone(),
                     quantity: clause.operation.resumption,
                 }
@@ -12892,21 +12945,20 @@ impl Elaborator<'_> {
                 }
             };
             let active_resumption = match &resumption {
-                CoreHandlerResumption::Explicit { name, .. } => Some(name.clone()),
+                CoreHandlerResumption::Explicit { id, name, .. } => Some((*id, name.clone())),
                 CoreHandlerResumption::Tail { .. }
                 | CoreHandlerResumption::Discard { .. }
                 | CoreHandlerResumption::Terminal => None,
             };
             let mut active_identity = None;
-            if let Some(name) = &active_resumption {
+            if let Some((id, name)) = &active_resumption {
                 match self.locals.binding_generation(name) {
                     Some(binding_generation) => {
                         let identity = ActiveResumption {
-                            id: ResumptionId(self.next_resumption),
+                            id: *id,
                             name: name.clone(),
                             binding_generation,
                         };
-                        self.next_resumption = self.next_resumption.saturating_add(1);
                         self.resumption_bindings
                             .insert((name.clone(), binding_generation), identity.clone());
                         self.active_resumptions.push(identity.clone());
@@ -12947,7 +12999,7 @@ impl Elaborator<'_> {
             let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
             let body = self.expression_expected(clause.source.body, body_expected);
             self.unsafe_context = previous_unsafe;
-            if let Some(name) = active_resumption.as_ref() {
+            if let Some((_, name)) = active_resumption.as_ref() {
                 self.check_resumption_capture_escapes(
                     body,
                     &std::collections::BTreeSet::from([name.clone()]),
@@ -13018,6 +13070,7 @@ impl Elaborator<'_> {
                 (!clause.operation.terminal).then(|| CoreHandlerContinuationContract {
                     brand: CallableBrand::Continuation {
                         owner: self.definition,
+                        handler,
                         clause: clause_index as u32,
                     },
                     parameter: operation_result.clone(),
@@ -13043,6 +13096,7 @@ impl Elaborator<'_> {
             core_clauses.push(CoreHandlerClause {
                 brand: CallableBrand::HandlerClause {
                     owner: self.definition,
+                    handler,
                     clause: clause_index as u32,
                 },
                 effect: clause.effect,

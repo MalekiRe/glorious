@@ -326,10 +326,12 @@ impl EvaluationMir {
     /// temporaries and unreachable suffixes. Type/quantity/control validators
     /// in subsequent languages additionally check their respective contracts.
     pub fn validate(&self) -> Result<(), EvaluationError> {
-        let mut pending = vec![self.entry];
+        type Resumptions = std::collections::BTreeMap<String, (ResumptionId, Type)>;
+        let mut pending = vec![(self.entry, Resumptions::new())];
         let mut regions = BTreeSet::new();
         let mut values = BTreeSet::new();
-        while let Some(id) = pending.pop() {
+        let mut resumption_binders = std::collections::BTreeMap::new();
+        while let Some((id, mut resumptions)) = pending.pop() {
             let region = self
                 .regions
                 .get(id.0 as usize)
@@ -375,7 +377,52 @@ impl EvaluationMir {
                     return Err(EvaluationError("value has multiple definitions".into()));
                 }
                 available.insert(instruction.value);
-                instruction.operation.regions(&mut pending);
+                match &instruction.operation {
+                    EvaluationOperation::Resumption { id, name } => {
+                        if resumptions.get(name) != Some(&(*id, instruction.ty.clone())) {
+                            return Err(EvaluationError("resumption differs from its active lexical binder and contract".into()));
+                        }
+                    }
+                    EvaluationOperation::Bind(name) => { resumptions.remove(name); }
+                    EvaluationOperation::Closure { body, .. } => pending.push((*body, Resumptions::new())),
+                    EvaluationOperation::Handle { computation, arms } => {
+                        pending.push((*computation, resumptions.clone()));
+                        for (index, arm) in arms.iter().enumerate() {
+                            let crate::CallableBrand::HandlerClause { owner, handler, clause } = arm.brand else {
+                                return Err(EvaluationError("handler arm has no lexical clause identity".into()));
+                            };
+                            if handler != instruction.source || clause != index as u32
+                                || arm.continuation.as_ref().is_some_and(|contract|
+                                    contract.brand != crate::CallableBrand::Continuation { owner, handler, clause }) {
+                                return Err(EvaluationError("handler arm or continuation names a different delimiter".into()));
+                            }
+                            let mut child = resumptions.clone();
+                            for (name, _) in &arm.bindings { child.remove(name); }
+                            if let CoreHandlerResumption::Explicit { id, name, .. } = &arm.resumption {
+                                let contract = arm.continuation.as_ref().ok_or_else(||
+                                    EvaluationError("resumption binder has no continuation contract".into()))?;
+                                if resumption_binders.insert(*id, arm.brand).is_some_and(|brand| brand != arm.brand) {
+                                    return Err(EvaluationError("distinct handler binders share a resumption identity".into()));
+                                }
+                                child.insert(name.clone(), (*id, contract.callable_type()));
+                            }
+                            pending.push((arm.region, child));
+                        }
+                    }
+                    EvaluationOperation::Completion { computation, arms, .. } => {
+                        pending.push((*computation, resumptions.clone()));
+                        for arm in arms {
+                            let mut child = resumptions.clone();
+                            for (name, _) in &arm.bindings { child.remove(name); }
+                            pending.push((arm.region, child));
+                        }
+                    }
+                    operation => {
+                        let mut children = vec![];
+                        operation.regions(&mut children);
+                        pending.extend(children.into_iter().map(|child| (child, resumptions.clone())));
+                    }
+                }
                 if instruction.is_terminal() && index + 1 != region.instructions.len() {
                     return Err(EvaluationError(
                         "instruction after terminal evaluation".into(),
@@ -532,6 +579,70 @@ mod tests {
                 }],
                 exit: EvaluationExit::Yield(EvaluationValue(0)),
             }],
+        }
+    }
+
+    #[test]
+    fn handler_resumption_identity_is_checked_at_the_receiving_boundary() {
+        let mut mir = fixture();
+        let identity = ResumptionId(7);
+        let contract = CoreHandlerContinuationContract {
+            brand: crate::CallableBrand::Continuation { owner: mir.definition, handler: CoreId(0), clause: 0 },
+            parameter: Type::Unit, result: Type::Unit, effects: crate::EffectRow::empty(),
+            invocation: crate::Quantity::AFFINE, direct_uses: 0,
+        };
+        let mut computation = mir.regions[0].clone();
+        computation.instructions[0].value = EvaluationValue(1);
+        computation.exit = EvaluationExit::Yield(EvaluationValue(1));
+        let mut arm = mir.regions[0].clone();
+        let mut reference = arm.instructions[0].clone();
+        reference.value = EvaluationValue(2);
+        reference.ty = contract.callable_type();
+        reference.operation = EvaluationOperation::Resumption { id: identity, name: "resume".into() };
+        arm.instructions[0].value = EvaluationValue(3);
+        arm.instructions.insert(0, reference);
+        arm.exit = EvaluationExit::Yield(EvaluationValue(3));
+        mir.regions[0].instructions[0].operation = EvaluationOperation::Handle {
+            computation: EvaluationRegionId(1), arms: vec![EvaluationHandlerArm {
+                brand: crate::CallableBrand::HandlerClause { owner: mir.definition, handler: CoreId(0), clause: 0 },
+                effect: EffectInstance { definition: mir.definition, arguments: vec![] }, operation: 0,
+                payload_types: vec![], patterns: vec![], bindings: vec![],
+                resumption: CoreHandlerResumption::Explicit { id: identity, name: "resume".into(), quantity: crate::Quantity::AFFINE },
+                continuation: Some(contract), terminal: false,
+                span: mir.regions[0].instructions[0].span, region: EvaluationRegionId(2),
+            }],
+        };
+        mir.regions.extend([computation, arm]);
+        mir.validate().unwrap();
+        for mutation in 0..5 {
+            let mut forged = mir.clone();
+            match mutation {
+                0 => {
+                    let EvaluationOperation::Resumption { id, .. } = &mut forged.regions[2].instructions[0].operation else { panic!() };
+                    *id = ResumptionId(8);
+                }
+                1 => {
+                    let EvaluationOperation::Handle { arms, .. } = &mut forged.regions[0].instructions[0].operation else { panic!() };
+                    let CoreHandlerResumption::Explicit { name, .. } = &mut arms[0].resumption else { panic!() };
+                    *name = "different".into();
+                }
+                2 => {
+                    let EvaluationOperation::Handle { arms, .. } = &mut forged.regions[0].instructions[0].operation else { panic!() };
+                    arms[0].continuation.as_mut().unwrap().parameter = Type::Never;
+                }
+                3 => {
+                    let EvaluationOperation::Handle { arms, .. } = &mut forged.regions[0].instructions[0].operation else { panic!() };
+                    arms[0].brand = crate::CallableBrand::HandlerClause { owner: mir.definition, handler: CoreId(99), clause: 0 };
+                }
+                4 => {
+                    let mut reference = forged.regions[2].instructions.remove(0);
+                    reference.value = EvaluationValue(4);
+                    forged.regions[1].instructions.insert(0, reference);
+                }
+                _ => unreachable!(),
+            }
+            assert!(forged.validate().is_err(), "forged handler mutation {mutation} was accepted");
+            assert!(crate::control_mir::ControlMir::lower(&forged).is_err());
         }
     }
 
