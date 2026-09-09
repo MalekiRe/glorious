@@ -31,7 +31,7 @@ use crate::{
 use crate::MemoryPrimitive;
 
 mod codec;
-mod float_env;
+pub(crate) mod float_env;
 pub use codec::{
     STAGE0_ARTIFACT_MAGIC, STAGE0_MAX_DECODE_FUNCTIONS, STAGE0_MAX_DECODE_INSTRUCTIONS,
     STAGE0_MAX_DECODE_REGISTERS, STAGE0_MAX_DECODE_TEXT_BYTES, STAGE0_PROGRAM_MAGIC,

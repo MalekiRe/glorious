@@ -251,6 +251,18 @@ impl StageZeroCompiler {
         target: LlvmTarget,
         use_vm: impl Fn(&super::VmFunction) -> bool,
     ) -> Result<LlvmIrProgram, LlvmError> {
+        let environment = super::float_env::FloatEnvironment::enter()?;
+        let result = self.compile_llvm_partitioned_in_profile(request, target, use_vm);
+        environment.restore()?;
+        result
+    }
+
+    fn compile_llvm_partitioned_in_profile(
+        &self,
+        request: CompilationRequest,
+        target: LlvmTarget,
+        use_vm: impl Fn(&super::VmFunction) -> bool,
+    ) -> Result<LlvmIrProgram, LlvmError> {
         target.validate_host()?;
         let source_identity = request
             .clone()
@@ -267,7 +279,17 @@ impl StageZeroCompiler {
             .program
             .functions
             .iter()
-            .filter_map(|(key, function)| use_vm(function).then_some(*key))
+            .map(|(key, function)| {
+                // Partition policy is host code. Restore the compiler's
+                // profile even when it changes controls or unwinds.
+                let environment = super::float_env::FloatEnvironment::enter()?;
+                let selected = use_vm(function);
+                environment.restore()?;
+                Ok(selected.then_some(*key))
+            })
+            .collect::<Result<Vec<_>, super::VmArtifactError>>()?
+            .into_iter()
+            .flatten()
             .collect();
         LlvmIrProgram::lower_partitioned(program, source_identity, target, vm_functions)
     }

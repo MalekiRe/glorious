@@ -1,4 +1,4 @@
-//! Per-invocation machine environment shared by bytecode and native execution.
+//! Per-invocation machine environment shared by compilation and execution.
 //! The C bridge uses the host's fenv_t and FE_DFL_ENV, never a guessed libc
 //! layout. Source arithmetic, parsing, formatting and conversion policy do
 //! not live here. WebAssembly's scalar instructions already fix this profile.
@@ -39,7 +39,7 @@ mod selected {
     }
 }
 
-pub(super) struct FloatEnvironment {
+pub(crate) struct FloatEnvironment {
     #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
     saved: Option<selected::Environment>,
     // Floating-point controls are thread-local, including while unwinding.
@@ -47,7 +47,7 @@ pub(super) struct FloatEnvironment {
 }
 
 impl FloatEnvironment {
-    pub(super) fn enter() -> Result<Self, VmArtifactError> {
+    pub(crate) fn enter() -> Result<Self, VmArtifactError> {
         #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
         {
             let saved = selected::Environment::capture().ok_or_else(Self::error)?;
@@ -66,7 +66,7 @@ impl FloatEnvironment {
         })
     }
 
-    pub(super) fn restore(self) -> Result<(), VmArtifactError> {
+    pub(crate) fn restore(self) -> Result<(), VmArtifactError> {
         #[cfg(not(any(target_arch = "wasm32", target_arch = "wasm64")))]
         {
             let mut guard = self;

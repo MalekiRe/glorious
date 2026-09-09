@@ -387,6 +387,23 @@ impl From<RevisionError> for ServiceError {
     }
 }
 
+/// Compilation contains host arithmetic too: literal decoding, pattern
+/// validation and optimization must not inherit an embedding thread's
+/// rounding, subnormal, exception-mask or sticky-status state. Keep the guard
+/// at request entry, not around individual literals or optimization rules.
+fn with_float_profile<T>(
+    body: impl FnOnce() -> Result<T, ServiceError>,
+) -> Result<T, ServiceError> {
+    let failure = |error| ServiceError::Failed(vec![CompileDiagnostic::invariant(
+        "G7043",
+        format!("compiler floating-point environment failed: {error:?}"),
+    )]);
+    let environment = crate::vm_backend::float_env::FloatEnvironment::enter().map_err(failure)?;
+    let result = body();
+    environment.restore().map_err(failure)?;
+    result
+}
+
 impl From<RequestControlError> for ServiceError {
     fn from(value: RequestControlError) -> Self {
         match value {
@@ -754,6 +771,14 @@ impl StageZeroCompiler {
         request: CompilationRequest,
         cache: &PersistentArtifactCache,
     ) -> Result<Option<VerifiedVmProgram>, ServiceError> {
+        with_float_profile(|| self.compile_artifact_with_cache_in_profile(request, cache))
+    }
+
+    fn compile_artifact_with_cache_in_profile(
+        &self,
+        request: CompilationRequest,
+        cache: &PersistentArtifactCache,
+    ) -> Result<Option<VerifiedVmProgram>, ServiceError> {
         let request = bundled_standard_library(request);
         let world = request
             .clone()
@@ -845,6 +870,13 @@ impl StageZeroCompiler {
     /// request that already pinned its world must never switch to a newer
     /// world or fail merely because the host retired it mid-request.
     pub fn compile_session(
+        &self,
+        session: &RequestSession,
+    ) -> Result<CompilationOutcome, ServiceError> {
+        with_float_profile(|| self.compile_session_in_profile(session))
+    }
+
+    fn compile_session_in_profile(
         &self,
         session: &RequestSession,
     ) -> Result<CompilationOutcome, ServiceError> {

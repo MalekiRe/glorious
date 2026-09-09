@@ -5,6 +5,26 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 91: deterministic compilation under host floating-point modes
+
+The complete source-compilation and cached-artifact entry points now establish
+and restore the selected IEEE environment. LLVM compilation and its host
+partition-policy callback use the same guard. This fixes the demonstrated
+one-ULP error when `0.1` was compiled under downward host rounding; parsing,
+optimizer algorithms and source conversion policy are unchanged.
+
+Five main-tree test groups pass across O0/O2, all four rounding modes,
+independent FTZ/DAZ settings, sticky flags, masked/unmasked exceptions and
+cache miss/hit. Canonical VM artifacts and 20 exact results agree, source-error
+diagnostics are unchanged, and LLVM policy mutation/unwinding restores the
+caller's environment (`target/integration-compiler-float-v1.log`). The combined
+run passes 1,687 tests, including all 891 service and 176 library API tests.
+The all-target compile check passes (`target/compiler-float-all-targets-v1.log`).
+The same five generic-helper exit and 16 source-library cases fail; the source
+matrix remains 15 passing/16 failing. Hostile native-environment runtime tests
+remain GNU/Linux x86-64 evidence, with the separate isolated wasm compile check
+passing. This is not full compiler or library conformance.
+
 ## Cache 90: sealed derived control summaries and callable inference
 
 The source-independent control-summary module derives ordered invocations,
