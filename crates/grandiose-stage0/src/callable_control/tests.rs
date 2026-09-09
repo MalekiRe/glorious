@@ -86,6 +86,67 @@ const AFTER_UNKNOWN: &str = "#![no_std]
     fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); relay(42,@select) }";
 
 #[test]
+fn observed_label_addresses_retain_input_identity_through_structural_callable_views() {
+    let fixture = Fixture::new("#![no_std]
+        fn borrower(value:(i64) -> !) -> ! { { let reference = &value; }; value(42) }
+        pub fn main() -> i64 { borrower(@main) }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let obligations = bound.label_address_obligations();
+    assert_eq!(obligations.len(), 1);
+    assert!(!obligations[0].unique);
+    assert_eq!(obligations[0].site.location.callable, CallableBrand::Named(fixture.names["borrower"]));
+    assert!(matches!(&obligations[0].target, ControlLabelTarget::Lexical { brand, .. } if brand.owner == fixture.names["main"]));
+    // The caller invokes a helper that exits through a label; replacing that
+    // helper call by a direct leave would erase the body's preceding borrow.
+    let call = fixture.call_to(fixture.names["main"], fixture.names["borrower"]);
+    assert!(bound.body(fixture.names["main"]).unwrap().get(call).unwrap().direct_label().is_none());
+}
+
+#[test]
+fn an_unknown_prefix_cannot_discard_an_observed_label_address_obligation() {
+    let fixture = Fixture::new("#![no_std]
+        fn borrower(value:(i64) -> !) -> ! { { let reference = &value; }; value(42) }
+        pub fn caller<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); borrower(@caller) }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    assert!(!summaries.get(CallableBrand::Named(fixture.names["caller"])).unwrap().is_complete());
+    let obligations = summaries.bind(&inputs).unwrap().label_address_obligations();
+    assert_eq!(obligations.len(), 1);
+    assert!(matches!(&obligations[0].target, ControlLabelTarget::Lexical { brand, .. } if brand.owner == fixture.names["caller"]));
+}
+
+#[test]
+fn exact_local_label_callees_lower_to_transfers_after_their_strict_operands() {
+    let fixture = Fixture::new("#![no_std]
+        fn keep<T>(value:T) -> T { value }
+        pub fn main() -> i64 { keep(@main)(42) }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let owner = fixture.names["main"];
+    let body = &fixture.bodies[&owner];
+    let call = body.expressions.iter().enumerate().find_map(|(index, expression)| {
+        let CoreKind::Call { callee, .. } = expression.kind else { return None; };
+        matches!(body.expression(callee).kind, CoreKind::Call { .. }).then_some(CoreId(index as u32))
+    }).unwrap();
+    let control = summaries.bind(&inputs).unwrap().body(owner).unwrap();
+    assert!(control.get(call).unwrap().direct_label().is_some());
+    assert!(control.get(fixture.call_to(owner, fixture.names["keep"])).unwrap().direct_label().is_none());
+    let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, Some(control)).unwrap();
+    let evaluation = crate::evaluation_mir::EvaluationMir::lower_with_continuations(owner, body, &facts).unwrap();
+    let operations = evaluation.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
+    assert_eq!(operations.iter().filter(|instruction| matches!(instruction.operation, crate::evaluation_mir::EvaluationOperation::Call(_))).count(), 1,
+        "the callee-producing keep invocation must still execute");
+    assert!(operations.iter().any(|instruction| instruction.source == call
+        && matches!(instruction.operation, crate::evaluation_mir::EvaluationOperation::Transfer(_))));
+    assert!(crate::control_mir::ControlMir::lower(&evaluation).is_ok());
+    let mut forged = body.clone();
+    forged.expressions[call.0 as usize].kind = CoreKind::Literal("0".into());
+    assert!(crate::evaluation_mir::EvaluationMir::lower_with_continuations(owner, &forged, &facts).is_err());
+}
+
+#[test]
 fn a_declared_call_contract_does_not_require_an_observed_prefix() {
     let fixture = Fixture::new(AFTER_UNKNOWN);
     let inputs = fixture.inputs();

@@ -125,6 +125,12 @@ pub enum ControlGuard {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlEvent {
+    Borrow {
+        site: ControlSite,
+        value: ControlValue,
+        unique: bool,
+        span: crate::Span,
+    },
     Invoke {
         site: ControlSite,
         callee: ControlValue,
@@ -388,6 +394,9 @@ pub(crate) struct InvocationControl {
     pub unknown: bool,
     pub transfers: Vec<InvocationTransfer>,
     pub returns: Vec<InvocationPayload>,
+    /// Targets of the callee value itself, not exits executed inside a helper.
+    direct_labels: std::collections::BTreeSet<LabelBrand>,
+    other_callee: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -399,6 +408,21 @@ pub(crate) struct InvocationTransfer {
 }
 
 impl InvocationControl {
+    pub(crate) fn direct_label(&self) -> Option<LabelBrand> {
+        (!self.unknown && !self.other_callee && self.direct_labels.len() == 1)
+            .then(|| *self.direct_labels.first().unwrap())
+    }
+
+    fn observe_callee(&mut self, callable: CallableBrand, callee: Option<&ControlValue>) {
+        if let Some(ControlValue { shape: ControlValueShape::Label(
+            ControlLabelTarget::Lexical { brand, activation }), .. }) = callee
+            && activation.calls.is_empty() && activation.location.callable == callable {
+            self.direct_labels.insert(*brand);
+        } else {
+            self.other_callee = true;
+        }
+    }
+
     fn include(&mut self, outcome: &ControlOutcome, callable: CallableBrand, payload: Option<InvocationPayload>) {
         match outcome {
             ControlOutcome::Return(_) => {
@@ -426,6 +450,14 @@ pub(crate) struct BoundControlSummaries<'a> {
     summaries: &'a ControlSummarySet,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LabelAddressObligation {
+    pub site: ControlSite,
+    pub target: ControlLabelTarget,
+    pub unique: bool,
+    pub span: crate::Span,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct BodyInvocationControl {
     body: Arc<TypedBody>,
@@ -438,6 +470,23 @@ impl BodyInvocationControl {
 }
 
 impl BoundControlSummaries<'_> {
+    /// Positive address observations survive incomplete coverage. This is not
+    /// an absence proof: specialization still checks concrete frozen loans.
+    pub(crate) fn label_address_obligations(&self) -> Vec<LabelAddressObligation> {
+        let mut obligations = Vec::new();
+        for (_, summary) in self.summaries.iter() {
+            for path in summary.alternatives.iter().chain(summary.calls.values().flatten()) {
+                for event in &path.events {
+                    let ControlEvent::Borrow { site, value: ControlValue {
+                        shape: ControlValueShape::Label(target), .. }, unique, span } = event else { continue; };
+                    let obligation = LabelAddressObligation { site: site.clone(), target: target.clone(), unique: *unique, span: *span };
+                    if !obligations.contains(&obligation) { obligations.push(obligation); }
+                }
+            }
+        }
+        obligations
+    }
+
     pub(crate) fn body(&self, owner: DefKey) -> Option<BodyInvocationControl> {
         let root = self.summaries.get(CallableBrand::Named(owner))?;
         let seal = root.dependencies.get(&owner)?;
@@ -454,11 +503,12 @@ impl BoundControlSummaries<'_> {
                 // payload dependencies from a represented guarded execution.
                 control.unknown |= !evidence.coverage.is_complete();
                 for path in evidence.observed {
+                    let inputs = path.events.iter().find_map(|event| match event {
+                        ControlEvent::Invoke { site: actual, callee, arguments } if actual == site => Some((callee, arguments)),
+                        _ => None,
+                    });
+                    control.observe_callee(callable, inputs.map(|(callee, _)| callee));
                     let payload = if let ControlOutcome::LabelExit { value, .. } | ControlOutcome::Return(value) = &path.outcome {
-                        let inputs = path.events.iter().find_map(|event| match event {
-                            ControlEvent::Invoke { site: actual, callee, arguments } if actual == site => Some((callee, arguments)),
-                            _ => None,
-                        });
                         Some(match inputs {
                             Some((callee, arguments)) => self.observed_payload(value, callee, arguments),
                             None => InvocationPayload::unknown(value.ty.clone()),
@@ -1164,12 +1214,13 @@ impl Analyzer<'_, '_> {
                 return states;
             }
             CoreKind::Move(value) => return self.eval(frame, value, state),
-            CoreKind::Borrow { value, .. } => {
+            CoreKind::Borrow { value, unique } => {
                 return self
                     .eval(frame, value, state)
                     .into_iter()
                     .map(|mut state| {
                         if state.running() {
+                            state.events.push(ControlEvent::Borrow { site: frame.site(id), value: state.value(), unique, span: expr.span });
                             let mut result = result.clone();
                             result.shape = ControlValueShape::Borrow(Box::new(state.value()));
                             state.outcome = ControlOutcome::Return(result);

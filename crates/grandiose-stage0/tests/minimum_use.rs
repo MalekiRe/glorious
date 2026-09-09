@@ -468,6 +468,58 @@ fn generative_labels_are_not_addressable_values() {
 }
 
 #[test]
+fn structural_callable_parameters_cannot_erase_label_addressability() {
+    for borrowed in ["&target", "&mut target"] {
+      for invocation in ["borrow(@main)", "let destination = keep(@main); borrow(destination)",
+          "let destination = @main; let relay = move (destination) { borrow(destination) }; relay()"] {
+        let source = format!("{TOKEN}
+            fn keep<T>(value:T) -> T {{ value }}
+            fn borrow(value:(i64) -> !) -> ! {{ let mut target = value; {{ let reference = {borrowed}; }}; target(42) }}
+            pub fn main() -> i64 {{ {invocation} }}");
+        for optimization in ["0", "2"] {
+            let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+                Err(failure) => failure,
+                Ok(_) => panic!("a structural Fn parameter cannot give a generative label a resident address: {source}"),
+            };
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{failure:#?}");
+        }
+      }
+      accepts(&format!("fn borrow(value:(i64) -> !) -> ! {{ let mut target = value; {{ let reference = {borrowed}; }}; target(42) }}
+          pub fn main() -> i64 {{ 42 }}"));
+      let source = format!("{TOKEN}
+          fn borrow(value:(i64) -> !) -> ! {{ let mut target = value; {{ let reference = {borrowed}; }}; target(42) }}
+          pub fn caller<F>(observe:F) -> i64 where F:Fn<(),Output=()> {{ observe(); borrow(@caller) }}
+          pub fn main() -> i64 {{ 42 }}");
+      for optimization in ["0", "2"] {
+          let failure = StageZeroCompiler::new().compile(request(&source, optimization))
+              .expect_err("unknown prefixes cannot erase a later observed label address");
+          assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{failure:#?}");
+      }
+    }
+    accepts("fn invoke(value:(i64) -> !) -> ! { value(42) }
+        pub fn main() -> i64 { invoke(@main) }");
+}
+
+#[test]
+fn resolved_local_label_aliases_execute_without_indirect_label_calls() {
+    for invocation in ["let destination = @main; destination(42)",
+        "keep(@main)(42)", "let (destination,) = (@main,); destination(42)"] {
+        let source = format!("{TOKEN} fn keep<T>(value:T) -> T {{ value }}
+            pub fn main() -> i64 {{ {invocation} }}");
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(request(&source, optimization))
+                .unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+            let candidate = grandiose_stage0::decode_program(&artifact.canonical_bytes()).unwrap();
+            assert!(!candidate.functions.values().flat_map(|function| &function.instructions)
+                .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::CallIndirectOwned { .. })),
+                "a resolved local label invocation must use a direct transfer: {source}");
+            assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:?}\n{candidate:#?}")), 42);
+            assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        }
+    }
+}
+
+#[test]
 fn helper_label_rejoins_cannot_hide_double_use() {
     let source = format!("{TOKEN}
         fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}

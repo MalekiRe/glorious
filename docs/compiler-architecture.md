@@ -300,3 +300,33 @@ emission; that representation is not a source function pointer or proof of
 correctness-required structural fusion. Full proof-carrier erasure, active
 destination resolution across opaque/structural callable boundaries, captured
 outer-label fusion and native/mixed execution remain separate open obligations.
+
+## Resolved invocation targets and label address obligations
+
+The shared callable-control execution relation now records borrow observations
+with their actual input value and invocation context. A structural `Fn`
+parameter does not erase an incoming label's identity in that relation.
+Binding the sealed batch exposes positive label-address obligations to source
+validation, including observations after an unresolved prefix and through
+captured inputs. These observations do not prove the absence of other borrows;
+the concrete frozen-loan check at specialization remains required.
+
+Invocation evidence separately classifies the callee value itself. An exact
+local generative label is distinct from a named helper that eventually exits
+through that label. A direct-transfer lowering proof requires complete coverage
+and one local label callee, with no other callee alternatives. Symbolic, outer,
+mixed and incomplete targets do not acquire this proof from a bottom result or
+the helper's transfer outcomes.
+
+Evaluation lowering binds that same immutable product already owned by
+PlaceFlow. It emits strict callee and payload evaluation, then replaces only
+the proved invocation with the existing direct-transfer operation. Control,
+ownership, cleanup and runtime lowering consume the ordinary label-exit path.
+The callee-producing helper is retained; skipping its body would erase effects
+or obligations before the transfer. Stale Core input is rejected at binding.
+
+This resolves local invocation edges, not full helper/closure fusion or
+proof-carrier erasure. In particular, tuple-pattern lowering still attempts to
+materialize a label as a callable resident. The source execution regression is
+active rather than weakening the non-addressability rule or widening native
+storage to make labels addressable.

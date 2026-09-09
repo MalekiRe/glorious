@@ -5,6 +5,56 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 103: resolved label callees and callable-input address obligations
+
+A structural callable parameter could erase label addressability: a helper
+taking `(i64) -> !` borrowed its argument and then invoked it, and passing
+`@main` was accepted (`target/structural-callable-label-address-before-v2.log`).
+The earlier non-invoking probe was rejected for an unrelated invocation-quantity
+obligation; the corrected probe invokes the owner exactly once.
+
+The shared invocation execution relation now retains borrow observations and
+their actual input values. Binding its dependency-sealed batch yields positive
+label-address obligations for source validation. Aliases, returned labels,
+captured inputs and an unknown callback prefix do not erase an observed label
+identity. Ordinary callable borrowing remains accepted, and a structural
+callable helper can still invoke a label without addressing it. The concrete
+specialization loan check is retained; observations do not establish the
+absence of unobserved borrows. No consumer-side Core alias walker is added.
+
+The same invocation product now distinguishes the actual callee from exits
+inside its body. Complete evidence for one local label callee permits ordered
+Evaluation MIR to emit strict callee and payload evaluation followed by the
+existing direct-transfer operation. A helper that eventually invokes a label
+does not qualify: its preceding work must execute. Unknown, symbolic, outer or
+mixed callees do not acquire a direct-transfer proof. Ownership and the legacy
+lowering entry both bind the same PlaceFlow continuation product; stale input
+is rejected. Simple local aliases and `keep(@main)(42)` execute fresh/decoded
+at O0/O2 without indirect label calls (`target/resolved-label-direct-transfer-v3.log`).
+
+Tuple destructuring exposed a separate existing failure: constructing and
+projecting `(@main,)` still tries to materialize a label in native callable
+storage. An isolated build of the preceding commit `f31a95d0` reproduces the
+same `NativeMemory` type mismatch
+(`target/label-tuple-baseline-cache102-v1.log`). The new execution regression
+remains active and failing; labels are not made addressable to repair that
+runtime representation. Full proof-carrier erasure and correctness-required
+helper/outer-label closure fusion remain unfinished.
+
+The final selected integration run has 1,974 passes, the same 17 previously
+named failures plus that newly preserved tuple execution failure, and no
+ignores (`target/resolved-label-integration-v2.log`). All 330 unit,
+25 borrowed-callable, 38 callable-control, 273 Core, 111 destruction,
+39 array/container, 22 request/revision, 891 service and 176 library API tests
+pass. Minimum-use has 33 passes and two active failures; all four tail-label
+tests pass. Mandatory-tail retains 16 passes and its existing ABI failure.
+The source matrix remains 16 passes and 15 failures, with SourceMap executing.
+The all-target compile check passes (`target/resolved-label-check-v3.log`).
+Three rule/boundary units cover address observations, incomplete coverage,
+actual-callee discrimination, ordered transfer lowering and stale inputs.
+Source cache generation is 103; native, bytecode and verifier generations are
+unchanged. Full compiler/library conformance and self-hosting remain unfinished.
+
 ## Cache 102: invariant nominal label authority
 
 A non-invoking generic helper accepted an ordinary bottom-returning function

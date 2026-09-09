@@ -261,6 +261,20 @@ pub struct EvaluationError(pub String);
 
 impl EvaluationMir {
     pub fn lower(definition: DefKey, body: &TypedBody) -> Result<Self, EvaluationError> {
+        Self::lower_checked(definition, body, None)
+    }
+
+    pub(crate) fn lower_with_continuations(
+        definition: DefKey, body: &TypedBody,
+        facts: &crate::core_continuations::CoreContinuations,
+    ) -> Result<Self, EvaluationError> {
+        facts.bind(body).map_err(|error| EvaluationError(error.message))?;
+        Self::lower_checked(definition, body, Some(facts))
+    }
+
+    fn lower_checked(definition: DefKey, body: &TypedBody,
+        facts: Option<&crate::core_continuations::CoreContinuations>,
+    ) -> Result<Self, EvaluationError> {
         if body.recovered || !body.diagnostics.is_empty() {
             return Err(EvaluationError(
                 "cannot normalize recovered or diagnosed Core".into(),
@@ -271,6 +285,7 @@ impl EvaluationMir {
         }
         let mut builder = Builder {
             body,
+            facts,
             regions: vec![],
             next_value: 0,
             active: BTreeSet::new(),
@@ -615,6 +630,7 @@ mod tests {
 
 struct Builder<'a> {
     body: &'a TypedBody,
+    facts: Option<&'a crate::core_continuations::CoreContinuations>,
     regions: Vec<EvaluationRegion>,
     next_value: u32,
     active: BTreeSet<CoreId>,
@@ -983,12 +999,24 @@ impl Builder<'_> {
                 if sequence.terminal.is_none() {
                     operands.extend(self.values(&arguments, sequence)?);
                 }
-                Op::Call(EvaluationCallContract {
-                    mandatory_tail,
-                    reference_contract,
-                    reference_origin,
-                    reference_shape,
-                })
+                if !mandatory_tail && arguments.len() == 1
+                    && let Some(brand) = self.facts.and_then(|facts| facts.invocation(source))
+                        .and_then(|invocation| invocation.direct_label())
+                    && sequence.terminal.is_none() {
+                    // Strict callee and payload evaluation has already been
+                    // emitted. Only the invocation is replaced; a helper's
+                    // body-derived exit is not evidence that its callee is a label.
+                    operands.remove(0);
+                    ty = Type::Never;
+                    Op::Transfer(brand)
+                } else {
+                    Op::Call(EvaluationCallContract {
+                        mandatory_tail,
+                        reference_contract,
+                        reference_origin,
+                        reference_shape,
+                    })
+                }
             }
             CoreKind::Perform {
                 effect,

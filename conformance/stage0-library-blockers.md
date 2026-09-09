@@ -8,12 +8,30 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/generative-label-integration-v3.log`, cache 102). This includes a source
+ignored (`target/resolved-label-integration-v2.log`, cache 103). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 103 retains observed label-address obligations across structural callable
+inputs, including aliases, captures and unknown prefixes. Exact local label
+callees now lower to direct transfers after strict operand evaluation; helper
+bodies are not skipped merely because their outcome is a label exit. Simple
+aliases and returned labels execute without indirect label calls at O0/O2.
+
+The selected gate has 1,974 passes, the same 17 prior failures plus a newly
+preserved tuple-label execution failure, and no ignores. An isolated build of
+cache 102 reproduces the tuple's native-storage type mismatch. This is an
+existing proof-carrier erasure gap, not permission to give labels addresses.
+All 891 service, 39 array/container and 176 library API tests and the all-target
+compile check pass. The source matrix is unchanged at 16 passes and 15 failures;
+SourceMap still executes. Full helper/outer-label fusion and proof erasure are
+the next label-lowering obligations. Compiler/library completion and self-hosting
+remain unfinished. See `implementation-progress.md` for exact evidence.
+
+The following cache 102 and earlier checkpoints are historical.
 
 Cache 102 gives compiler-created labels invariant nominal identities. Ordinary
 bottom-returning functions cannot satisfy `Label<T>`, and generic inference

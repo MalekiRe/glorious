@@ -1951,6 +1951,12 @@ impl StageZeroCompiler {
         let bound_control = control_summaries.bind(&control_bodies)
             .map_err(|reason| ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180",
                 format!("callable control batch failed dependency validation: {reason:?}"))]))?;
+        for obligation in bound_control.label_address_obligations() {
+            diagnostics.push(CompileDiagnostic::source("G4179",
+                "generative labels are proof-only and cannot be addressed through callable inputs", Some(obligation.span))
+                .with_fact("label_target", format!("{:?}", obligation.target))
+                .with_fact("invocation_site", format!("{:?}", obligation.site)));
+        }
         let continuations = staged_bodies.iter().map(|staged| {
             crate::core_continuations::CoreContinuations::derive_with_invocations(
                 &staged.core, bound_control.body(staged.definition),
