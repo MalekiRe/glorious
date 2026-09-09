@@ -1,0 +1,80 @@
+pub struct Cursor<'a,T> { private owner: IdentityToken, private input: Slice<'a,T>, private position: usize }
+pub struct CursorMark { private owner: IdentityToken, private position: usize }
+pub impl Clone for CursorMark {
+    fn clone(value: &Self) -> Self { CursorMark { owner: Clone::clone(&value.owner), position: value.position } }
+}
+pub enum ParseStep<T,E> { Matched(T), NoMatch, Failed(E) }
+pub enum ParseError<E> { User(E), NoProgress, Limit(BudgetExceeded) }
+impl<'a,T> Cursor<'a,T> {
+    pub fn new(input: Slice<'a,T>) -> Self { Cursor { owner: identity_new(), input: input, position: 0 } }
+    pub fn position(value: &Self) -> usize { value.position }
+    pub fn remaining(value: &Self) -> Slice<'a,T> {
+        handle Slice::slice(value.input, Range { start: value.position, end: Slice::len(&value.input) }) {
+            Result::Ok(view) => view, Result::Err(_) => __g1_abort(),
+        }
+    }
+    pub fn peek(value: &Self) -> Option<&'a T> { Slice::get(value.input, value.position) }
+    pub fn next(value: &mut Self) -> Option<&'a T> {
+        handle Self::peek(value) {
+            Result::Err(_) => None,
+            Result::Ok(item) => { (*value).position = value.position + 1; Some(item) },
+        }
+    }
+    pub fn mark(value: &Self) -> CursorMark { CursorMark { owner: Clone::clone(&value.owner), position: value.position } }
+    pub fn restore(value: &mut Self, mark: CursorMark) -> Result<(),MarkError> {
+        handle identity_same(&value.owner, &mark.owner) {
+            false => Result::Err(MarkError::WrongOwner),
+            true => handle mark.position > Slice::len(&value.input) {
+                true => Result::Err(MarkError::OutOfRange),
+                false => { (*value).position = mark.position; Result::Ok(()) },
+            },
+        }
+    }
+}
+pub fn attempt<'a,'env,Env,T,U,E,F,e: EffectRow>(cursor: &mut Cursor<'a,T>, parse: &mut F)
+    -> ParseStep<U,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call mut Cursor<'a,T>,),Output=ParseStep<U,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call mut Cursor<'a,T>,),After=Env> {
+    let mark = Cursor::mark(cursor);
+    handle parse(&mut *cursor) {
+        ParseStep::NoMatch => {
+            handle Cursor::restore(cursor, mark) { Result::Ok(_) => (), Result::Err(_) => __g1_abort() };
+            ParseStep::NoMatch
+        },
+        ParseStep::Matched(item) => ParseStep::Matched(item),
+        ParseStep::Failed(error) => ParseStep::Failed(error),
+    }
+}
+fn many_from<'a,'env,Env,T,U,E,F,e: EffectRow>(cursor: &mut Cursor<'a,T>, limit: usize, parse: &mut F, output: Vec<U>)
+    -> Result<Vec<U>,(Vec<U>,ParseError<E>)> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call mut Cursor<'a,T>,),Output=ParseStep<U,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call mut Cursor<'a,T>,),After=Env> {
+    let mut output = output;
+    handle Vec::len(&output) == limit {
+        true => Result::Err((output, ParseError::Limit(BudgetExceeded { kind: BudgetKind::Items, requested: 1, remaining: 0 }))),
+        false => {
+            let position = Cursor::position(cursor);
+            handle attempt(&mut *cursor, &mut *parse) {
+                ParseStep::NoMatch => Result::Ok(output),
+                ParseStep::Failed(error) => Result::Err((output, ParseError::User(error))),
+                ParseStep::Matched(item) => {
+                    // Preserve even the successful no-progress iteration's U.
+                    Vec::push(&mut output, item);
+                    handle Cursor::position(cursor) == position {
+                        true => Result::Err((output, ParseError::NoProgress)),
+                        false => tail many_from(cursor, limit, parse, output),
+                    }
+                },
+            }
+        },
+    }
+}
+pub fn many<'a,'env,Env,T,U,E,F,e: EffectRow>(cursor: &mut Cursor<'a,T>, limit: usize, parse: &mut F)
+    -> Result<Vec<U>,(Vec<U>,ParseError<E>)> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call mut Cursor<'a,T>,),Output=ParseStep<U,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call mut Cursor<'a,T>,),After=Env> {
+    many_from(cursor, limit, parse, Vec::new())
+}

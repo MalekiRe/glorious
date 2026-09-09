@@ -9,43 +9,40 @@
 //! bindings are represented only by side-table events rather than executable
 //! storage locals.
 
+mod support;
+
 use grandiose_stage0::{
-    BodySyntax, DeclarationScan, DefinitionIndex, ElaboratedInterface, FileKey, InterfaceSet,
-    LexedFile, LogicalPath, MirLowering, MirStorageEventKind, PackageKey, PlaceBindingOrigin,
+    MirLowering, MirStorageEventKind, PlaceBindingOrigin,
     PlaceFlow, TypedBody,
 };
 use std::collections::BTreeSet;
 
 fn lower_main(source: &str) -> (TypedBody, PlaceFlow, grandiose_stage0::MirLowering) {
-    let package = PackageKey("source-storage-lowering@0.1.0".into());
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious")
-            .expect("valid logical path")
-            .as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (definition, core, signatures) = support::frontend("source-storage-lowering@0.1.0", source, "main");
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
     let lowered = MirLowering::lower_with_bodies_and_signatures(
-        definition.key, &core, &flow, &Default::default(), Some(&signatures));
+        definition, &core, &flow, &Default::default(), Some(&signatures));
     (core, flow, lowered)
+}
+
+#[test]
+fn borrowed_rvalues_retain_exact_storage_identity_through_mir() {
+    let (core, flow, lowered) = lower_main("pub fn main() -> i64 { let value = &42; *value }");
+    let binding = flow.bindings.iter().find(|binding|
+        matches!(binding.origin, PlaceBindingOrigin::Temporary { .. }))
+        .expect("the borrowed rvalue owns frozen source storage");
+    let PlaceBindingOrigin::Temporary { expression } = binding.origin else { unreachable!() };
+    assert_eq!(core.expression(expression).ty, grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64));
+    let mir = lowered.function.unwrap_or_else(|| panic!("{:#?}", lowered.diagnostics));
+    let local = mir.control.source_storage.binding_locals[binding.id.0 as usize]
+        .expect("temporary identity must map to its actual MIR resident");
+    assert_eq!(mir.locals[local.0 as usize].ty, core.expression(expression).ty);
+    assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction|
+        matches!(instruction, grandiose_stage0::MirInstruction::Borrow { src, .. } if *src == local)),
+        "the borrow must address the frozen temporary, not a Unit lifecycle marker");
+    mir.validate().unwrap();
 }
 
 /// The current side table is already useful evidence: normal source lowering
@@ -137,7 +134,7 @@ fn source_lowering_requires_executable_storage_for_payload_and_completion_bindin
                 move pair.left;
                 handle Ask::ask(seed) {
                     completed => transfer done completed + pair.right,
-                    Ask::ask(payload) with resume => transfer done resume(payload) + pair.right
+                    Ask::ask(payload) with resume => resume(payload)
                 }
             }
         }
@@ -300,7 +297,7 @@ fn lifted_closure_assignment_freezes_a_nonvacuous_child_storage_graph() {
     let source = r#"
         pub fn main(seed: i64) -> i64 {
             let delayed = (input: i64) -> i64 {
-                let value = input;
+                let mut value = input;
                 value = seed + 1;
                 value
             };

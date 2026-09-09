@@ -20,6 +20,19 @@ use crate::{
 
 pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
 pub const DEFAULT_MAX_TRAIT_STEPS: u32 = 1_000_000;
+mod contracts;
+
+// Structural performance regression accounting, not wall-clock assertions.
+// Thread-local state keeps concurrently running compiler tests independent.
+#[cfg(test)]
+std::thread_local! {
+    static SNAPSHOT_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn snapshot_builds() -> usize {
+    SNAPSHOT_BUILDS.with(std::cell::Cell::get)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitGoal {
@@ -84,6 +97,7 @@ pub enum TraitCandidateRejection {
     WhereBound {
         outcomes: Vec<TraitWhereBoundExplanation>,
     },
+    AssociatedBinding { outcome: TraitAnswer },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -186,9 +200,6 @@ pub enum TraitEffectRowProjectionAnswer {
     /// active normalization stack.  As with associated value types, there is
     /// no finite normal form to expose to a callable contract.
     RecursiveProjection,
-    /// Substituting a nested row would create two distinct open tails. G1
-    /// rows have one canonical tail, so neither tail can be selected.
-    ConflictingRowTails,
 }
 
 /// The structural-constant counterpart of associated type normalization.
@@ -341,10 +352,20 @@ pub struct TraitSolver {
     principal_active: Vec<Type>,
     limits: TraitSolverLimits,
     steps: u32,
+    assumed_type_bindings: Arc<Vec<crate::ElaboratedAssociatedTypeBinding>>,
+    assumed_effect_bindings: Arc<Vec<crate::ElaboratedAssociatedEffectBinding>>,
+    /// Immutable lexical facts for implementation-contract normalization only.
+    /// Changing this environment invalidates all goal-only table entries.
+    lexical_assumptions: Arc<Vec<TraitGoal>>,
+    lexical_outlives: Arc<Vec<crate::OutlivesPredicate>>,
+    lexical_universal: Arc<Vec<crate::QuantifiedWhereBound>>,
+    quantified_inference: crate::InferContext,
+    quantified_depth: u32,
+    active_domains: Vec<Digest>,
 }
 
 #[derive(Clone, Copy)]
-enum AssociatedItemKind {
+pub(crate) enum AssociatedItemKind {
     Type,
     EffectRow,
     Const,
@@ -361,12 +382,14 @@ enum SupertraitLookup<T> {
 /// effect rows and static-data elements are intentionally opaque there.
 pub(crate) fn type_projection_normalization_is_identity(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => type_projection_normalization_is_identity(element)
+            && !matches!(length.as_ref(), GenericArgument::ConstProjection { .. }),
         Type::Projection { .. } => false,
         Type::Nominal { arguments, .. } => arguments.iter().all(|argument| match argument {
             GenericArgument::Type(value) => type_projection_normalization_is_identity(value),
             GenericArgument::ConstProjection { .. } => false,
             GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
-            | GenericArgument::ConstU32(_) | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstInteger(_) | GenericArgument::ConstIntegerExpr(_)
             | GenericArgument::ConstQuantity(_) | GenericArgument::ConstGeneric { .. }
             | GenericArgument::ConstInfer { .. } => true,
         }),
@@ -378,7 +401,7 @@ pub(crate) fn type_projection_normalization_is_identity(value: &Type) -> bool {
             parameters.iter().all(type_projection_normalization_is_identity)
                 && type_projection_normalization_is_identity(result),
         Type::Unit | Type::Never | Type::Scalar(_) | Type::StaticData { .. }
-        | Type::ConstU32(_) | Type::ConstQuantity(_) | Type::ConstGeneric { .. }
+        | Type::ConstInteger(_) | Type::ConstQuantity(_) | Type::ConstGeneric { .. }
         | Type::Generic(_) | Type::Infer(_) | Type::Error => true,
     }
 }
@@ -432,6 +455,8 @@ impl TraitSolver {
     }
 
     pub fn with_limits(signatures: &ElaboratedInterface, limits: TraitSolverLimits) -> Self {
+        #[cfg(test)]
+        SNAPSHOT_BUILDS.with(|count| count.set(count.get() + 1));
         let mut rules = signatures
             .definitions
             .iter()
@@ -475,6 +500,14 @@ impl TraitSolver {
             principal_active: vec![],
             limits,
             steps: 0,
+            assumed_type_bindings: Arc::new(vec![]),
+            assumed_effect_bindings: Arc::new(vec![]),
+            lexical_assumptions: Arc::new(vec![]),
+            lexical_outlives: Arc::new(vec![]),
+            lexical_universal: Arc::new(vec![]),
+            quantified_inference: crate::InferContext::default(),
+            quantified_depth: 0,
+            active_domains: vec![],
         }
     }
 
@@ -495,7 +528,158 @@ impl TraitSolver {
             principal_active: vec![],
             limits,
             steps: 0,
+            assumed_type_bindings: Arc::clone(&self.assumed_type_bindings),
+            assumed_effect_bindings: Arc::clone(&self.assumed_effect_bindings),
+            lexical_assumptions: Arc::clone(&self.lexical_assumptions),
+            lexical_outlives: Arc::clone(&self.lexical_outlives),
+            lexical_universal: Arc::clone(&self.lexical_universal),
+            quantified_inference: self.quantified_inference.clone(),
+            quantified_depth: self.quantified_depth,
+            active_domains: vec![],
         }
+    }
+
+    /// Install one lexical equality environment and discard answers from the
+    /// previous environment. These are caller obligations, never global rules.
+    pub(crate) fn set_associated_bindings(
+        &mut self,
+        types: Vec<crate::ElaboratedAssociatedTypeBinding>,
+        effects: Vec<crate::ElaboratedAssociatedEffectBinding>,
+    ) {
+        self.tables.clear();
+        self.assumed_type_bindings = Arc::new(types);
+        self.assumed_effect_bindings = Arc::new(effects);
+    }
+
+    pub(crate) fn set_lexical_assumptions(&mut self, assumptions: Vec<TraitGoal>) {
+        self.reset_query();
+        self.lexical_assumptions = Arc::new(assumptions);
+    }
+
+    pub fn set_outlives_assumptions(&mut self, assumptions: Vec<crate::OutlivesPredicate>) {
+        self.reset_query();
+        self.lexical_outlives = Arc::new(assumptions);
+    }
+
+    pub(crate) fn set_universal_assumptions(&mut self, assumptions: Vec<crate::QuantifiedWhereBound>) {
+        self.reset_query();
+        self.lexical_universal = Arc::new(assumptions);
+    }
+
+    /// Introduce fresh rigid regions in an isolated solver. Neither tabled
+    /// answers nor impl substitutions escape this proof. Nested quantified
+    /// obligations inherit the live universe supply and a bounded depth.
+    pub(crate) fn proves_universal(&mut self, bound: &crate::QuantifiedWhereBound) -> bool {
+        if self.quantified_depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
+            return false;
+        }
+        let mut scoped = self.fresh_query();
+        scoped.quantified_depth += 1;
+        scoped.steps = self.steps + 1;
+        let proven = (|| {
+            let Ok(scope) = scoped.quantified_inference.begin_universal_scope(bound.lifetime_binders) else {
+                return false;
+            };
+            let Some(opened) = bound.open(&scope) else { return false; };
+            let goal = TraitGoal { subject: opened.subject, relation: opened.relation };
+            if !matches!(scoped.solve_scoped_hrtb(goal.clone()), TraitAnswer::Proven { .. }) {
+                return false;
+            }
+            let lexical = scoped.lexical_universal.iter()
+                .filter_map(|bound| bound.for_goal(&goal)).collect::<Vec<_>>();
+            for binding in opened.type_bindings {
+                if lexical.iter().any(|bound| bound.type_bindings.iter().any(|actual| actual == &binding)) {
+                    continue;
+                }
+                if !matches!(scoped.select_associated_type_application(goal.clone(), &binding.name, &binding.item_arguments, true),
+                    TraitProjectionAnswer::Normalized { ty, .. } if ty == binding.value) {
+                    return false;
+                }
+            }
+            for binding in opened.effect_bindings {
+                if lexical.iter().any(|bound| bound.effect_bindings.iter().any(|actual| actual == &binding)) {
+                    continue;
+                }
+                if !matches!(scoped.select_associated_effect_row_application(goal.clone(), &binding.name, &binding.item_arguments, true),
+                    TraitEffectRowProjectionAnswer::Normalized { row, .. } if row == binding.value) {
+                    return false;
+                }
+            }
+            scoped.quantified_inference.finish_universal_scope(scope).is_ok()
+        })();
+        self.steps = scoped.steps;
+        proven
+    }
+
+    pub(crate) fn assume_callable_contract(&mut self, signature: &CallableSignature) {
+        self.set_universal_assumptions(self.lexical_universal.iter().cloned().chain(signature.universal_bounds.clone()).collect());
+        self.set_outlives_assumptions(self.lexical_outlives.iter().cloned().chain(signature.outlives_environment())
+            .chain(self.implied_outlives(signature.parameters.clone())).collect());
+        self.set_lexical_assumptions(self.lexical_assumptions.iter().cloned().chain(signature.where_bounds.iter().map(|(subject, relation)|
+            TraitGoal { subject: subject.clone(), relation: relation.clone() })).collect());
+    }
+
+    fn solve_projection_implementation(&mut self, goal: TraitGoal, scoped_hrtb: bool) -> TraitAnswer {
+        if !scoped_hrtb && trait_goal_contains_escaping_hrtb(&goal) {
+            return TraitAnswer::NoSolution;
+        }
+        let assumptions = Arc::clone(&self.lexical_assumptions);
+        // An abstract `T: Trait` fact proves membership, but is not an impl
+        // identity from which an associated definition can be read.
+        self.solve_at_with_assumptions(goal, 0, false, &assumptions, false).into()
+    }
+
+    fn same_associated_owner(&self, left: &TraitGoal, right: &TraitGoal, name: &str, kind: AssociatedItemKind) -> bool {
+        matches!((
+            self.find_associated_item_goal(left, name, kind, &mut vec![]),
+            self.find_associated_item_goal(right, name, kind, &mut vec![]),
+        ), (SupertraitLookup::Found(left), SupertraitLookup::Found(right)) if left == right)
+    }
+
+    fn assumed_type_value(&self, projection: &Type) -> Result<Option<Type>, TraitProjectionAnswer> {
+        if has_free_hrtb_placeholder(projection, 0) { return Ok(None); }
+        let Type::Projection { subject, trait_definition, trait_arguments, name, item_generic_kinds, item_arguments } = projection else {
+            return Ok(None);
+        };
+        let goal = TraitGoal { subject: (**subject).clone(), relation: ElaboratedTraitReference {
+            definition: *trait_definition, arguments: trait_arguments.clone(),
+        } };
+        let mut selected = None;
+        let universal = self.lexical_universal.iter().filter_map(|bound| bound.for_goal(&goal))
+            .flat_map(|bound| bound.type_bindings).collect::<Vec<_>>();
+        for binding in self.assumed_type_bindings.iter().chain(&universal) {
+            if binding.name != *name || binding.item_generic_kinds != *item_generic_kinds
+                || binding.item_arguments != *item_arguments { continue; }
+            let bound = TraitGoal { subject: binding.subject.clone(), relation: binding.relation.clone() };
+            if !self.same_associated_owner(&goal, &bound, name, AssociatedItemKind::Type) { continue; }
+            if selected.as_ref().is_some_and(|value| *value != binding.value) {
+                return Err(TraitProjectionAnswer::Ambiguous);
+            }
+            selected = Some(binding.value.clone());
+        }
+        Ok(selected)
+    }
+
+    fn assumed_effect_value(&self, projection: &crate::EffectRowProjection) -> Result<Option<EffectRow>, TraitEffectRowProjectionAnswer> {
+        let row = EffectRow { effects: Default::default(), tails: Default::default(), projections: vec![projection.clone()] };
+        if effect_row_contains_free_hrtb_placeholder(&row, 0) { return Ok(None); }
+        let goal = TraitGoal { subject: (*projection.subject).clone(), relation: ElaboratedTraitReference {
+            definition: projection.trait_definition, arguments: projection.trait_arguments.clone(),
+        } };
+        let mut selected = None;
+        let universal = self.lexical_universal.iter().filter_map(|bound| bound.for_goal(&goal))
+            .flat_map(|bound| bound.effect_bindings).collect::<Vec<_>>();
+        for binding in self.assumed_effect_bindings.iter().chain(&universal) {
+            if binding.name != projection.name || binding.item_generic_kinds != projection.item_generic_kinds
+                || binding.item_arguments != projection.item_arguments { continue; }
+            let bound = TraitGoal { subject: binding.subject.clone(), relation: binding.relation.clone() };
+            if !self.same_associated_owner(&goal, &bound, &projection.name, AssociatedItemKind::EffectRow) { continue; }
+            if selected.as_ref().is_some_and(|value| *value != binding.value) {
+                return Err(TraitEffectRowProjectionAnswer::Ambiguous);
+            }
+            selected = Some(binding.value.clone());
+        }
+        Ok(selected)
     }
 
     pub(crate) fn has_manual_use_for(&self, definition: DefKey) -> bool {
@@ -532,6 +716,7 @@ impl TraitSolver {
     pub fn reset_query(&mut self) {
         self.tables.clear();
         self.principal_active.clear();
+        self.active_domains.clear();
         self.steps = 0;
     }
 
@@ -577,9 +762,10 @@ impl TraitSolver {
         // Assumptions are guaranteed capabilities, not an assertion that the
         // caller's principal interval is exactly the written bound.
         for quantity in [Quantity::UNRESTRICTED, Quantity::AFFINE, Quantity::ONCE] {
-            if self.assumption_proves(&TraitGoal {
+            let goal = TraitGoal {
                 subject: ty.clone(), relation: relation(quantity),
-            }, assumptions) {
+            };
+            if self.assumption_proves(&goal, assumptions) || self.associated_result_proves(&goal, assumptions, depth + 1) {
                 return Some(quantity);
             }
         }
@@ -591,7 +777,8 @@ impl TraitSolver {
         {
             let implementation = &rule.implementation;
             let mut head = ImplementationSubstitution::default();
-            if match_type(&implementation.self_ty, ty, &mut head).is_none() {
+            if match_type(&implementation.self_ty, ty, &mut head).is_none()
+                || solve_pending_effect_rows(&mut head).is_none() {
                 continue;
             }
             if implementation.negative { return None; }
@@ -623,6 +810,10 @@ impl TraitSolver {
                         },
                     }
                     if !viable { break; }
+                }
+                if viable && let Err(answer) = self.check_implementation_bindings(implementation, &substitution) {
+                    rule_unresolved |= matches!(answer, TraitAnswerIndex::Ambiguous | TraitAnswerIndex::Overflow);
+                    viable = false;
                 }
                 if viable { selected = Some(quantity); break; }
             }
@@ -679,7 +870,20 @@ impl TraitSolver {
                 subject: substitute_type(subject, &substitution),
                 relation: substitute_relation(relation, &substitution),
             }).collect::<Vec<_>>();
-            (quantity, self.structural_principal_use_with_assumptions(&subject, &assumptions))
+            let mut scoped = self.fresh_query();
+            let shifted = substitution_under_region_binder(&substitution).expect("concrete quantity substitution cannot escape a region binder");
+            scoped.set_universal_assumptions(implementation.universal_bounds.iter().map(|bound|
+                bound.map_terms(|argument| substitute_generic_argument(&argument, &shifted))).collect());
+            scoped.set_lexical_assumptions(assumptions.clone());
+            scoped.set_outlives_assumptions(implementation.where_outlives.iter().map(|bound|
+                bound.map_terms(|argument| substitute_generic_argument(&argument, &substitution)))
+                .chain(self.implied_outlives(std::iter::once(subject.clone()))).collect());
+            let bindings = crate::AssociatedItemContract { where_bounds: vec![], where_outlives: vec![],
+                type_bindings: implementation.where_associated_type_bindings.clone(),
+                effect_bindings: implementation.where_associated_effect_bindings.clone(),
+            }.map_terms(|argument| substitute_generic_argument(&argument, &substitution));
+            scoped.set_associated_bindings(bindings.type_bindings, bindings.effect_bindings);
+            (quantity, scoped.structural_principal_use_with_assumptions(&subject, &assumptions))
         }).collect())
     }
 
@@ -697,6 +901,9 @@ impl TraitSolver {
             Type::Callable { invocation, .. } => return Some(*invocation),
             Type::Tuple(fields) => fields.clone(),
             Type::Array(element) => vec![(**element).clone()],
+            Type::FixedArray { element, .. } => if ty.fixed_array_length() == Some(0) {
+                vec![]
+            } else { vec![(**element).clone()] },
             Type::Nominal { definition, arguments } =>
                 self.nominal_structural_fields(*definition, arguments)?,
             _ => return None,
@@ -899,6 +1106,18 @@ impl TraitSolver {
         result
     }
 
+    pub(crate) fn associated_item_owner_is_ambiguous(
+        &self,
+        goal: &TraitGoal,
+        name: &str,
+        kind: AssociatedItemKind,
+    ) -> bool {
+        matches!(
+            self.find_associated_item_goal(goal, name, kind, &mut vec![]),
+            SupertraitLookup::Ambiguous
+        )
+    }
+
     fn find_associated_item_goal(
         &self,
         goal: &TraitGoal,
@@ -942,6 +1161,14 @@ impl TraitSolver {
             principal_active: vec![],
             limits: self.limits.clone(),
             steps: 0,
+            assumed_type_bindings: Arc::clone(&self.assumed_type_bindings),
+            assumed_effect_bindings: Arc::clone(&self.assumed_effect_bindings),
+            lexical_assumptions: Arc::clone(&self.lexical_assumptions),
+            lexical_outlives: Arc::clone(&self.lexical_outlives),
+            lexical_universal: Arc::clone(&self.lexical_universal),
+            quantified_inference: self.quantified_inference.clone(),
+            quantified_depth: self.quantified_depth,
+            active_domains: vec![],
         };
         let mut active = BTreeMap::new();
         let mut explanation = probe.explain_at(goal, 0, false, &mut active);
@@ -1070,6 +1297,14 @@ impl TraitSolver {
                             reason: TraitCandidateRejection::WhereBound { outcomes },
                         };
                     }
+                }
+                if let Err(answer) = self.check_implementation_bindings(&rule.implementation, &substitution) {
+                    saw_cycle |= matches!(answer, TraitAnswerIndex::Ambiguous);
+                    saw_overflow |= matches!(answer, TraitAnswerIndex::Overflow);
+                    return TraitCandidateExplanation::Rejected {
+                        implementation: rule.definition,
+                        reason: TraitCandidateRejection::AssociatedBinding { outcome: answer.into() },
+                    };
                 }
                 if rule.implementation.negative {
                     negatives.push(rule.definition);
@@ -1311,6 +1546,8 @@ impl TraitSolver {
             TraitAnswer::Proven { .. } => {}
             TraitAnswer::NoSolution => return TraitProjectionAnswer::NoSolution,
         }
+        if self.associated_contract(&goal, name, arguments).is_some()
+            && !self.projection_domain_proven(&goal, name, arguments) { return TraitProjectionAnswer::NoSolution; }
         let goal = match self.find_associated_item_goal(
             &goal,
             name,
@@ -1324,11 +1561,7 @@ impl TraitSolver {
         // The surrounding normalizer has verified that the goal's rigid
         // regions are owned by its live callable binder. Re-entering the
         // public solver would reject that same evidence as escaped.
-        let answer = if scoped_hrtb_item_arguments {
-            self.solve_scoped_hrtb(goal.clone())
-        } else {
-            self.solve(goal.clone())
-        };
+        let answer = self.solve_projection_implementation(goal.clone(), scoped_hrtb_item_arguments);
         match answer {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -1486,6 +1719,16 @@ impl TraitSolver {
                     item_generic_kinds,
                     item_arguments,
                 };
+                if let Some(value) = self.assumed_type_value(&projection).map_err(Box::new)? {
+                    if !self.type_domains_proven(&projection) { return Err(Box::new(TraitProjectionAnswer::NoSolution)); }
+                    let key = Digest::of_parts([b"assumed-type-projection".as_slice(), canonical_type_encoding(&projection).as_slice()]);
+                    if active.contains(&key) { return Err(Box::new(TraitProjectionAnswer::RecursiveProjection)); }
+                    if active.len() >= self.limits.max_depth as usize { return Err(Box::new(TraitProjectionAnswer::Overflow)); }
+                    active.push(key);
+                    let normalized = self.normalize_type_projections_in_hrtb(value, active, hrtb_binders);
+                    active.pop();
+                    return normalized;
+                }
                 if !projection_is_concrete_in_hrtb_scope(&projection, hrtb_binders) {
                     return Ok(projection);
                 }
@@ -1541,6 +1784,10 @@ impl TraitSolver {
                     })
                     .collect::<Result<_, _>>()?,
             )),
+            Type::FixedArray { element, length } => Ok(Type::FixedArray {
+                element: Box::new(self.normalize_type_projections_in_hrtb(*element, active, hrtb_binders)?),
+                length: Box::new(self.normalize_trait_argument_in_hrtb(*length, active, hrtb_binders)?),
+            }),
             Type::Array(value) => Ok(Type::Array(Box::new(
                 self.normalize_type_projections_in_hrtb(*value, active, hrtb_binders)?,
             ))),
@@ -1629,7 +1876,7 @@ impl TraitSolver {
             SupertraitLookup::Missing => goal,
             SupertraitLookup::Ambiguous => return TraitConstProjectionAnswer::Ambiguous,
         };
-        match self.solve(goal.clone()) {
+        match self.solve_projection_implementation(goal.clone(), false) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitConstProjectionAnswer::NoSolution;
@@ -1775,6 +2022,8 @@ impl TraitSolver {
             TraitAnswer::Proven { .. } => {}
             TraitAnswer::NoSolution => return TraitEffectRowProjectionAnswer::NoSolution,
         }
+        if self.associated_contract(&goal, name, arguments).is_some()
+            && !self.projection_domain_proven(&goal, name, arguments) { return TraitEffectRowProjectionAnswer::NoSolution; }
         let goal = match self.find_associated_item_goal(
             &goal,
             name,
@@ -1787,11 +2036,7 @@ impl TraitSolver {
         };
         // Effect-row projection selection must use the same HRTB scope as
         // its type projection counterpart above.
-        let answer = if scoped_hrtb_item_arguments {
-            self.solve_scoped_hrtb(goal.clone())
-        } else {
-            self.solve(goal.clone())
-        };
+        let answer = self.solve_projection_implementation(goal.clone(), scoped_hrtb_item_arguments);
         match answer {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -1926,7 +2171,7 @@ impl TraitSolver {
         let mut result = EffectRow {
             effects,
             projections: vec![],
-            tail: value.tail,
+            tails: value.tails.clone(),
         };
         for projection in value.projections {
             let subject = self
@@ -1962,6 +2207,26 @@ impl TraitSolver {
                 item_generic_kinds: projection.item_generic_kinds,
                 item_arguments,
             };
+            if let Some(value) = self.assumed_effect_value(&projection).map_err(Box::new)? {
+                if !self.projection_domain_proven(&TraitGoal { subject: (*projection.subject).clone(), relation: ElaboratedTraitReference {
+                    definition: projection.trait_definition, arguments: projection.trait_arguments.clone(),
+                } }, &projection.name, &projection.item_arguments) { return Err(Box::new(TraitEffectRowProjectionAnswer::NoSolution)); }
+                let key = associated_effect_row_projection_key(&TraitGoal {
+                    subject: (*projection.subject).clone(), relation: ElaboratedTraitReference {
+                        definition: projection.trait_definition, arguments: projection.trait_arguments.clone(),
+                    },
+                }, &projection.name, &projection.item_arguments);
+                if active.contains(&key) { return Err(Box::new(TraitEffectRowProjectionAnswer::RecursiveProjection)); }
+                if active.len() >= self.limits.max_depth as usize { return Err(Box::new(TraitEffectRowProjectionAnswer::Overflow)); }
+                active.push(key);
+                let normalized = self.normalize_effect_row_projections_in_hrtb(value, active, hrtb_binders);
+                active.pop();
+                let normalized = normalized?;
+                result.effects.extend(normalized.effects);
+                result.projections.extend(normalized.projections);
+                result.tails.extend(normalized.tails);
+                continue;
+            }
             if !projection_is_concrete_in_hrtb_scope(&projection.subject, hrtb_binders)
                 || !projection.trait_arguments.iter().all(|argument| {
                     generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
@@ -2011,15 +2276,7 @@ impl TraitSolver {
             let nested = nested?;
             result.effects.extend(nested.effects);
             result.projections.extend(nested.projections);
-            match (result.tail, nested.tail) {
-                (None, tail) => result.tail = tail,
-                (Some(left), Some(right)) if left != right => {
-                    return Err(Box::new(
-                        TraitEffectRowProjectionAnswer::ConflictingRowTails,
-                    ));
-                }
-                _ => {}
-            }
+            result.tails.extend(nested.tails);
         }
         Ok(result)
     }
@@ -2056,6 +2313,46 @@ impl TraitSolver {
     /// Select a method with lexical trait evidence from the enclosing
     /// declaration.  These assumptions can establish inherited parent traits
     /// without becoming globally cached implementation evidence.
+    /// Seed only constraints common to the sole structurally compatible
+    /// implementation head. This is not implementation evidence: the caller
+    /// must still solve the complete goal, including where clauses and
+    /// inherited relations. Multiple compatible heads never pick a winner.
+    /// Each trial has isolated inference state, including numeric classes.
+    pub(crate) fn constrain_unique_implementation_head(
+        &self,
+        goal: &TraitGoal,
+        inference: &mut crate::InferContext,
+    ) {
+        let mut selected = None;
+        for rule in self.rules.iter().filter(|rule| rule.implementation.relation.definition == goal.relation.definition) {
+            let implementation = &rule.implementation;
+            let mut trial = inference.clone();
+            let mut substitution = ImplementationSubstitution::default();
+            for (index, kind) in implementation.generic_kinds.iter().enumerate() {
+                let argument = match kind {
+                    crate::GenericKind::Type => GenericArgument::Type(trial.fresh()),
+                    crate::GenericKind::Lifetime => GenericArgument::Lifetime(trial.fresh_lifetime()),
+                    crate::GenericKind::EffectRow => GenericArgument::EffectRow(trial.fresh_effects()),
+                    crate::GenericKind::Const(kind) => trial.fresh_const(*kind),
+                };
+                install_item_argument(&mut substitution, index as u32, argument);
+            }
+            let mut arguments = implementation.relation.arguments.iter()
+                .map(|argument| substitute_generic_argument(argument, &substitution)).collect::<Vec<_>>();
+            arguments.push(GenericArgument::Type(substitute_type(&implementation.self_ty, &substitution)));
+            let mut actual = goal.relation.arguments.clone();
+            actual.push(GenericArgument::Type(goal.subject.clone()));
+            if trial.unify(
+                Type::Nominal { definition: goal.relation.definition, arguments },
+                Type::Nominal { definition: goal.relation.definition, arguments: actual },
+            ).is_ok() {
+                if selected.is_some() { return; }
+                selected = Some((trial, implementation.negative));
+            }
+        }
+        if let Some((trial, false)) = selected { *inference = trial; }
+    }
+
     pub fn select_method_with_assumptions(
         &self,
         goal: TraitGoal,
@@ -2158,7 +2455,8 @@ impl TraitSolver {
             .filter(|rule| rule.implementation.relation.definition == definition)
         {
             let mut substitution = ImplementationSubstitution::default();
-            if match_type(&rule.implementation.self_ty, subject, &mut substitution).is_some() {
+            if match_type(&rule.implementation.self_ty, subject, &mut substitution).is_some()
+                && solve_pending_effect_rows(&mut substitution).is_some() {
                 let relation = substitute_relation(&rule.implementation.relation, &substitution);
                 if !relations.contains(&relation) {
                     relations.push(relation);
@@ -2173,7 +2471,8 @@ impl TraitSolver {
         depth: u32,
         coinductive_edge: bool,
     ) -> TraitAnswerIndex {
-        self.solve_at_with_assumptions(goal, depth, coinductive_edge, &[], true)
+        let assumptions = Arc::clone(&self.lexical_assumptions);
+        self.solve_at_with_assumptions(goal, depth, coinductive_edge, &assumptions, true)
     }
 
     /// The tabled kernel for one fixed lexical assumption environment. The
@@ -2215,6 +2514,12 @@ impl TraitSolver {
             return TraitAnswerIndex::NoSolution;
         }
         if accept_direct_assumption && self.assumption_proves(&goal, assumptions) {
+            return TraitAnswerIndex::Proven(assumption_evidence(&goal));
+        }
+        if accept_direct_assumption && self.lexical_universal.iter().any(|bound| bound.for_goal(&goal).is_some()) {
+            return TraitAnswerIndex::Proven(assumption_evidence(&goal));
+        }
+        if accept_direct_assumption && self.associated_result_proves(&goal, assumptions, depth + 1) {
             return TraitAnswerIndex::Proven(assumption_evidence(&goal));
         }
         if accept_direct_assumption
@@ -2314,6 +2619,11 @@ impl TraitSolver {
                     }
                 }
             }
+            if viable && let Err(answer) = self.check_implementation_bindings(&rule.implementation, &substitution) {
+                viable = false;
+                saw_cycle |= matches!(answer, TraitAnswerIndex::Ambiguous);
+                saw_overflow |= matches!(answer, TraitAnswerIndex::Overflow);
+            }
             if viable {
                 if rule.implementation.negative {
                     negatives.push(rule.definition);
@@ -2328,6 +2638,78 @@ impl TraitSolver {
         }
         self.tables.insert(key, TableState::Complete(answer));
         answer
+    }
+
+    fn check_implementation_bindings(
+        &mut self, implementation: &ElaboratedImplementation,
+        substitution: &ImplementationSubstitution,
+    ) -> Result<(), TraitAnswerIndex> {
+        for bound in &implementation.universal_bounds {
+            // Inserting impl arguments beneath the quantifier must shift any
+            // caller-owned bound regions rather than capturing them.
+            let shifted = substitution_under_region_binder(substitution).ok_or(TraitAnswerIndex::NoSolution)?;
+            let bound = bound.map_terms(|argument| substitute_generic_argument(&argument, &shifted));
+            if !self.proves_universal(&bound) { return Err(TraitAnswerIndex::NoSolution); }
+        }
+        if implementation.where_outlives.iter().any(|bound| !self.outlives_proven(&bound.map_terms(|argument|
+            substitute_generic_argument(&argument, substitution)))) {
+            return Err(TraitAnswerIndex::NoSolution);
+        }
+        fn type_failure(answer: TraitProjectionAnswer) -> TraitAnswerIndex {
+            match answer {
+                TraitProjectionAnswer::Ambiguous | TraitProjectionAnswer::RecursiveProjection => TraitAnswerIndex::Ambiguous,
+                TraitProjectionAnswer::Overflow => TraitAnswerIndex::Overflow,
+                _ => TraitAnswerIndex::NoSolution,
+            }
+        }
+        fn row_failure(answer: TraitEffectRowProjectionAnswer) -> TraitAnswerIndex {
+            match answer {
+                TraitEffectRowProjectionAnswer::Ambiguous | TraitEffectRowProjectionAnswer::RecursiveProjection => TraitAnswerIndex::Ambiguous,
+                TraitEffectRowProjectionAnswer::Overflow => TraitAnswerIndex::Overflow,
+                TraitEffectRowProjectionAnswer::NestedTypeProjection { answer } => type_failure(*answer),
+                _ => TraitAnswerIndex::NoSolution,
+            }
+        }
+        for binding in &implementation.where_associated_type_bindings {
+            let projection = Type::Projection {
+                subject: Box::new(substitute_type(&binding.subject, substitution)),
+                trait_definition: binding.relation.definition,
+                trait_arguments: substitute_relation(&binding.relation, substitution).arguments,
+                name: binding.name.clone(), item_generic_kinds: binding.item_generic_kinds.clone(),
+                item_arguments: binding.item_arguments.iter().map(|argument| substitute_generic_argument(argument, substitution)).collect(),
+            };
+            let actual = self.normalize_type(projection).map_err(|answer| type_failure(*answer))?;
+            let expected = self.normalize_type(substitute_type(&binding.value, substitution)).map_err(|answer| type_failure(*answer))?;
+            if actual != expected {
+                return Err(if projection_is_concrete_in_hrtb_scope(&actual, &[])
+                    && projection_is_concrete_in_hrtb_scope(&expected, &[]) {
+                    TraitAnswerIndex::NoSolution
+                } else { TraitAnswerIndex::Ambiguous });
+            }
+        }
+        for binding in &implementation.where_associated_effect_bindings {
+            let projection = EffectRow { effects: Default::default(), tails: Default::default(),
+                projections: vec![crate::EffectRowProjection {
+                    subject: Box::new(substitute_type(&binding.subject, substitution)),
+                    trait_definition: binding.relation.definition,
+                    trait_arguments: substitute_relation(&binding.relation, substitution).arguments,
+                    name: binding.name.clone(), item_generic_kinds: binding.item_generic_kinds.clone(),
+                    item_arguments: binding.item_arguments.iter().map(|argument| substitute_generic_argument(argument, substitution)).collect(),
+                }],
+            };
+            let actual = self.normalize_effect_row(projection).map_err(|answer| row_failure(*answer))?;
+            let expected = self.normalize_effect_row(substitute_effect_row(&binding.value, substitution)).map_err(|answer| row_failure(*answer))?;
+            let actual = GenericArgument::EffectRow(actual);
+            let expected = GenericArgument::EffectRow(expected);
+            if canonical_generic_arguments_encoding(std::slice::from_ref(&actual))
+                != canonical_generic_arguments_encoding(std::slice::from_ref(&expected)) {
+                return Err(if generic_argument_is_concrete_in_hrtb_scope(&actual, &[])
+                    && generic_argument_is_concrete_in_hrtb_scope(&expected, &[]) {
+                    TraitAnswerIndex::NoSolution
+                } else { TraitAnswerIndex::Ambiguous });
+            }
+        }
+        Ok(())
     }
 
     fn is_auto_trait(&self, goal: &TraitGoal) -> bool {
@@ -2460,6 +2842,9 @@ impl TraitSolver {
             Type::Unit | Type::Never | Type::Scalar(_) => vec![],
             Type::Tuple(values) => values.clone(),
             Type::Array(value) => vec![(**value).clone()],
+            Type::FixedArray { element, .. } => if goal.subject.fixed_array_length() == Some(0) {
+                vec![]
+            } else { vec![(**element).clone()] },
             // Static data is a sealed VM handle, not an aggregate whose
             // backing bytes participate in user-visible auto-trait proofs.
             Type::StaticData { .. } => vec![],
@@ -2482,7 +2867,7 @@ impl TraitSolver {
             // A generic, projection, inference variable, const carrier, or
             // error has no known representation from which to derive proof.
             Type::Projection { .. }
-            | Type::ConstU32(_)
+            | Type::ConstInteger(_)
             | Type::ConstQuantity(_)
             | Type::ConstGeneric { .. }
             | Type::Generic(_)
@@ -2522,7 +2907,7 @@ impl TraitSolver {
             install_item_argument(&mut substitution, index as u32, argument);
         }
         let fields: Vec<Type> = match layout {
-            ElaboratedNominalLayout::Struct(fields) => {
+            ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields) => {
                 fields.iter().map(|field| field.ty.clone()).collect()
             }
             ElaboratedNominalLayout::Enum(variants) => variants
@@ -2724,6 +3109,40 @@ struct ImplementationSubstitution {
     lifetimes: BTreeMap<u32, crate::Lifetime>,
     generic_arguments: BTreeMap<u32, GenericArgument>,
     effect_rows: BTreeMap<u32, EffectRow>,
+    pending_effect_rows: Vec<(EffectRow, EffectRow, u32)>,
+}
+
+/// Move replacement terms beneath a region binder for substitution only.
+/// The original solver state and its pending proof obligations stay intact.
+fn substitution_under_region_binder(value: &ImplementationSubstitution) -> Option<ImplementationSubstitution> {
+    let mut shifted = value.clone();
+    let shift = |value| crate::types::regions::shift_argument(value, 1);
+    for value in shifted.types.values_mut() {
+        *value = crate::types::regions::shift_type_argument(value.clone(), 1)?;
+    }
+    for value in shifted.lifetimes.values_mut() {
+        let GenericArgument::Lifetime(lifetime) = shift(GenericArgument::Lifetime(*value))? else { return None; };
+        *value = lifetime;
+    }
+    for value in shifted.generic_arguments.values_mut() {
+        *value = shift(value.clone())?;
+    }
+    for value in shifted.effect_rows.values_mut() {
+        let GenericArgument::EffectRow(row) = shift(GenericArgument::EffectRow(value.clone()))? else { return None; };
+        *value = row;
+    }
+    Some(shifted)
+}
+
+fn solve_pending_effect_rows(substitution: &mut ImplementationSubstitution) -> Option<()> {
+    while !substitution.pending_effect_rows.is_empty() {
+        let before = substitution.effect_rows.clone();
+        for (template, actual, depth) in std::mem::take(&mut substitution.pending_effect_rows) {
+            match_effect_row_at(&template, &actual, substitution, depth)?;
+        }
+        if !substitution.pending_effect_rows.is_empty() && before == substitution.effect_rows { return None; }
+    }
+    Some(())
 }
 
 /// Defaults belong to the trait declaration, not the selected implementation:
@@ -2799,52 +3218,13 @@ fn associated_effect_row_contract_matches(
 }
 
 fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::GenericKind) -> bool {
-    matches!(
-        (argument, kind),
-        (GenericArgument::Type(_), crate::GenericKind::Type)
-            | (GenericArgument::EffectRow(_), crate::GenericKind::EffectRow)
-            | (GenericArgument::Lifetime(_), crate::GenericKind::Lifetime)
-            | (
-                GenericArgument::ConstU32(_),
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            )
-            | (
-                GenericArgument::ConstU32Expr(_),
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            )
-            | (
-                GenericArgument::ConstQuantity(_),
-                crate::GenericKind::Const(crate::ConstKind::Quantity)
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::GenericKind::Const(crate::ConstKind::Quantity)
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::GenericKind::Const(crate::ConstKind::Quantity)
-            )
-    )
+    match kind {
+        crate::GenericKind::Const(kind) => !matches!(argument, GenericArgument::ConstInfer { .. })
+            && crate::types::generic_argument_matches_const_kind(argument, kind),
+        crate::GenericKind::Type => matches!(argument, GenericArgument::Type(_)),
+        crate::GenericKind::EffectRow => matches!(argument, GenericArgument::EffectRow(_)),
+        crate::GenericKind::Lifetime => matches!(argument, GenericArgument::Lifetime(_)),
+    }
 }
 
 fn install_item_argument(
@@ -2863,8 +3243,8 @@ fn install_item_argument(
             substitution.effect_rows.insert(index, value.clone());
             substitution.generic_arguments.insert(index, argument);
         }
-        GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
@@ -2891,6 +3271,7 @@ fn match_rule(
     {
         match_generic_argument(template, actual, &mut substitution)?;
     }
+    solve_pending_effect_rows(&mut substitution)?;
     Some(substitution)
 }
 
@@ -2966,7 +3347,7 @@ fn match_generic_argument_at(
 }
 
 /// Match an effect-row argument just as structurally as a type argument.  A
-/// row binder is an open tail: after the implementation's fixed prefix has
+/// row binder is an open tails: after the implementation's fixed prefix has
 /// matched, it receives the caller's residual row. This is what makes
 /// `impl<e: EffectRow> Trait<e>` applicable to a concrete row and to a row
 /// carrying delayed associated-effect projections.
@@ -3058,78 +3439,49 @@ fn match_effect_row_at(
         }
     }
 
-    match template.tail {
-        None if unmatched_effects.is_empty()
-            && unmatched_projections.is_empty()
-            && actual.tail.is_none() =>
-        {
+    let mut known = EffectRow::empty();
+    let mut unknown = vec![];
+    for tail in &template.tails {
+        let crate::EffectTail::Generic(index) = tail else { return None; };
+        if let Some(row) = substitution.effect_rows.get(index) {
+            known.extend(row.clone());
+        } else { unknown.push(*index); }
+    }
+    // Already-bound rows belong to the goal's binder space. Compare their
+    // members as rigid terms instead of interpreting them as new impl slots.
+    if !known.effects.is_subset(&actual.effects) || !known.tails.is_subset(&actual.tails)
+        || !known.projections.iter().all(|projection| actual.projections.contains(projection)) {
+        return None;
+    }
+    unmatched_effects.retain(|effect| !known.effects.contains(effect));
+    unmatched_projections.retain(|projection| !known.projections.contains(projection));
+    let residual = EffectRow {
+        effects: unmatched_effects.into_iter().collect(), projections: unmatched_projections,
+        tails: actual.tails.difference(&known.tails).copied().collect(),
+    }.canonicalized();
+    match unknown.as_slice() {
+        [] => (residual == EffectRow::empty()).then_some(()),
+        [index] => {
+            if binder_depth > 0 && effect_row_contains_free_hrtb_placeholder(&residual, 0) { return None; }
+            substitution.effect_rows.insert(*index, residual.clone());
+            substitution.generic_arguments.insert(*index, GenericArgument::EffectRow(residual));
             Some(())
         }
-        Some(crate::EffectTail::Generic(index)) => {
-            let residual = EffectRow {
-                effects: unmatched_effects.into_iter().collect(),
-                projections: unmatched_projections,
-                tail: actual.tail,
-            }
-            .canonicalized();
-            if binder_depth > 0 && effect_row_contains_free_hrtb_placeholder(&residual, 0) {
-                return None;
-            }
-            match substitution.effect_rows.get(&index) {
-                Some(previous) if previous != &residual => None,
-                Some(_) => Some(()),
-                None => {
-                    substitution.effect_rows.insert(index, residual.clone());
-                    substitution
-                        .generic_arguments
-                        .insert(index, GenericArgument::EffectRow(residual));
-                    Some(())
-                }
-            }
+        _ if *actual == EffectRow::empty() => {
+            for index in unknown { install_item_argument(substitution, index, GenericArgument::EffectRow(EffectRow::empty())); }
+            Some(())
         }
-        Some(crate::EffectTail::Infer(_)) => None,
-        _ => None,
+        _ => {
+            let equation = (template.clone(), actual.clone(), binder_depth);
+            if !substitution.pending_effect_rows.contains(&equation) { substitution.pending_effect_rows.push(equation); }
+            Some(())
+        }
     }
 }
 
 fn generic_argument_is_const_kind(argument: &GenericArgument, expected: crate::ConstKind) -> bool {
-    matches!(
-        (argument, expected),
-        (GenericArgument::ConstU32(_), crate::ConstKind::U32)
-            | (GenericArgument::ConstU32Expr(_), crate::ConstKind::U32)
-            | (
-                GenericArgument::ConstProjection {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstQuantity(_),
-                crate::ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::ConstKind::Quantity
-            )
-    )
+    !matches!(argument, GenericArgument::ConstInfer { .. })
+        && crate::types::generic_argument_matches_const_kind(argument, expected)
 }
 
 fn match_type(
@@ -3186,7 +3538,7 @@ fn match_type_at(
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::Error => (template == actual).then_some(()),
         Type::Nominal {
@@ -3250,6 +3602,13 @@ fn match_type_at(
                 .try_for_each(|(template, actual)| {
                     match_type_at(template, actual, substitution, binder_depth)
                 }),
+            _ => None,
+        },
+        Type::FixedArray { element, length } => match actual {
+            Type::FixedArray { element: actual_element, length: actual_length } => {
+                match_type_at(element, actual_element, substitution, binder_depth)?;
+                match_generic_argument_at(length, actual_length, substitution, binder_depth)
+            }
             _ => None,
         },
         Type::Array(element) => match actual {
@@ -3360,10 +3719,10 @@ fn generic_argument_contains_escaping_hrtb(value: &GenericArgument) -> bool {
                     .iter()
                     .any(generic_argument_contains_escaping_hrtb)
         }
-        GenericArgument::Lifetime(crate::Lifetime::Bound { .. }) => true,
+        GenericArgument::Lifetime(crate::Lifetime::Bound { .. } | crate::Lifetime::Placeholder(_)) => true,
         GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -3376,6 +3735,9 @@ fn generic_argument_contains_escaping_hrtb(value: &GenericArgument) -> bool {
 /// intentionally reaches every generic-argument and effect-row carrier.
 fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
     match value {
+        Type::FixedArray { element, length } => has_free_hrtb_placeholder(element, callable_nesting)
+            || generic_argument_contains_free_hrtb_placeholder(length, callable_nesting),
+        Type::Reference { lifetime: crate::Lifetime::Placeholder(_), .. } => true,
         Type::Reference {
             lifetime: crate::Lifetime::Bound { depth, .. },
             referent,
@@ -3440,12 +3802,13 @@ fn generic_argument_contains_free_hrtb_placeholder(
                     generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
                 })
         }
+        GenericArgument::Lifetime(crate::Lifetime::Placeholder(_)) => true,
         GenericArgument::Lifetime(crate::Lifetime::Bound { depth, .. }) => {
             *depth >= callable_nesting
         }
         GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -3494,25 +3857,12 @@ fn match_lifetime(
 /// its declared const binder.  Generic consts are valid actual terms because
 /// a canonical goal may itself be parameterized; their kind must still agree.
 fn is_const_argument_of_kind(value: &Type, expected: crate::ConstKind) -> bool {
-    matches!(
-        (value, expected),
-        (Type::ConstU32(_), crate::ConstKind::U32)
-            | (Type::ConstQuantity(_), crate::ConstKind::Quantity)
-            | (
-                Type::ConstGeneric {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::ConstKind::U32,
-            )
-            | (
-                Type::ConstGeneric {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::ConstKind::Quantity,
-            )
-    )
+    match value {
+        Type::ConstInteger(value) => value.kind() == expected,
+        Type::ConstQuantity(_) => expected == crate::ConstKind::Quantity,
+        Type::ConstGeneric { kind, .. } => *kind == expected,
+        _ => false,
+    }
 }
 
 fn substitute_relation(
@@ -3560,12 +3910,8 @@ fn substitute_generic_argument(
             .filter(|argument| generic_argument_is_const_kind(argument, *kind))
             .cloned()
             .unwrap_or_else(|| argument.clone()),
-        GenericArgument::ConstU32Expr(value) => {
-            let value = substitute_structural_u32_expr(value, substitution);
-            match value {
-                crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
-                value => GenericArgument::ConstU32Expr(value),
-            }
+        GenericArgument::ConstIntegerExpr(value) => {
+            crate::types::integer_const_argument(substitute_structural_integer_expr(value, substitution))
         }
         GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => GenericArgument::Lifetime(
             substitution
@@ -3578,44 +3924,12 @@ fn substitute_generic_argument(
     }
 }
 
-fn substitute_structural_u32_expr(
-    value: &crate::StructuralU32Expr,
+fn substitute_structural_integer_expr(
+    value: &crate::IntegerConstExpr,
     substitution: &ImplementationSubstitution,
-) -> crate::StructuralU32Expr {
-    use crate::StructuralU32Expr;
-    let value = match value {
-        StructuralU32Expr::Literal(value) => StructuralU32Expr::Literal(*value),
-        StructuralU32Expr::Param(index) => match substitution.generic_arguments.get(index) {
-            Some(GenericArgument::ConstU32(value)) => StructuralU32Expr::Literal(*value),
-            Some(GenericArgument::ConstU32Expr(value)) => value.clone(),
-            Some(GenericArgument::ConstGeneric {
-                index,
-                kind: crate::ConstKind::U32,
-            }) => StructuralU32Expr::Param(*index),
-            _ => StructuralU32Expr::Param(*index),
-        },
-        StructuralU32Expr::Add(left, right) => StructuralU32Expr::Add(
-            Box::new(substitute_structural_u32_expr(left, substitution)),
-            Box::new(substitute_structural_u32_expr(right, substitution)),
-        ),
-        StructuralU32Expr::Sub(left, right) => StructuralU32Expr::Sub(
-            Box::new(substitute_structural_u32_expr(left, substitution)),
-            Box::new(substitute_structural_u32_expr(right, substitution)),
-        ),
-        StructuralU32Expr::Mul(left, right) => StructuralU32Expr::Mul(
-            Box::new(substitute_structural_u32_expr(left, substitution)),
-            Box::new(substitute_structural_u32_expr(right, substitution)),
-        ),
-        StructuralU32Expr::Div(left, right) => StructuralU32Expr::Div(
-            Box::new(substitute_structural_u32_expr(left, substitution)),
-            Box::new(substitute_structural_u32_expr(right, substitution)),
-        ),
-        StructuralU32Expr::Rem(left, right) => StructuralU32Expr::Rem(
-            Box::new(substitute_structural_u32_expr(left, substitution)),
-            Box::new(substitute_structural_u32_expr(right, substitution)),
-        ),
-    };
-    value.clone().normalized().unwrap_or(value)
+) -> Result<crate::IntegerConstExpr, crate::types::StructuralConstError> {
+    value.substitute_with(&|index| substitution.generic_arguments.get(&index)
+        .map(crate::IntegerConstExpr::from_argument).transpose(), 64, &mut 1024)
 }
 
 fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> Type {
@@ -3634,8 +3948,8 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
                     .generic_arguments
                     .get(index)
                     .and_then(|argument| match (argument, kind) {
-                        (GenericArgument::ConstU32(value), crate::ConstKind::U32) => {
-                            Some(Type::ConstU32(*value))
+                        (GenericArgument::ConstInteger(value), expected) if value.kind() == *expected => {
+                            Some(Type::ConstInteger(*value))
                         }
                         (GenericArgument::ConstQuantity(value), crate::ConstKind::Quantity) => {
                             Some(Type::ConstQuantity(*value))
@@ -3690,6 +4004,10 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(substitute_type(value, substitution))),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(substitute_type(element, substitution)),
+            length: Box::new(substitute_generic_argument(length, substitution)),
+        },
         Type::RawPointer { mutability, pointee } => Type::RawPointer {
             mutability: *mutability,
             pointee: Box::new(substitute_type(pointee, substitution)),
@@ -3717,16 +4035,16 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             result,
             effects,
             invocation,
-        } => Type::Callable {
-            safety: *safety,
-            lifetime_binders: *lifetime_binders,
-            parameters: parameters
-                .iter()
-                .map(|value| substitute_type(value, substitution))
-                .collect(),
-            result: Box::new(substitute_type(result, substitution)),
-            effects: substitute_effect_row(effects, substitution),
-            invocation: *invocation,
+        } => {
+            let Some(substitution) = substitution_under_region_binder(substitution) else { return Type::Error; };
+            Type::Callable {
+                safety: *safety,
+                lifetime_binders: *lifetime_binders,
+                parameters: parameters.iter().map(|value| substitute_type(value, &substitution)).collect(),
+                result: Box::new(substitute_type(result, &substitution)),
+                effects: substitute_effect_row(effects, &substitution),
+                invocation: *invocation,
+            }
         },
         _ => value.clone(),
     }
@@ -3769,7 +4087,7 @@ fn substitute_effect_row(
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
+        tails: value.tails.clone(),
     };
     // A row variable denotes the complete residual row, not only its tail.
     // In particular, substituting `e` in `{ Prefix, | e }` must retain both
@@ -3777,13 +4095,10 @@ fn substitute_effect_row(
     // pure-row fast path left `e` stale whenever it followed a prefix,
     // causing defaulted and specialized associated rows to normalize to a
     // declaration-local generic instead of the selected application.
-    if let Some(crate::EffectTail::Generic(index)) = value.tail
-        && let Some(row) = substitution.effect_rows.get(&index)
-    {
-        result.effects.extend(row.effects.iter().cloned());
-        result.projections.extend(row.projections.iter().cloned());
-        result.tail = row.tail;
-    }
+    result.substitute_tails(|tail| match tail {
+        crate::EffectTail::Generic(index) => substitution.effect_rows.get(&index).cloned(),
+        _ => None,
+    });
     result.canonicalized()
 }
 
@@ -3847,6 +4162,16 @@ fn substitute_callable_signature(
                 value: substitute_effect_row(&binding.value, substitution),
             })
             .collect(),
+        where_outlives: value.where_outlives.iter().map(|bound| bound.map_terms(|argument|
+            substitute_generic_argument(&argument, substitution))).collect(),
+        universal_bounds: value.universal_bounds.iter().map(|bound| {
+            // Substitution values are outside the quantified predicate's
+            // region scope. Move their free regions before inserting them.
+            let Some(shifted) = substitution_under_region_binder(substitution) else {
+                return crate::QuantifiedWhereBound { subject: Type::Error, ..bound.clone() };
+            };
+            bound.map_terms(|argument| substitute_generic_argument(&argument, &shifted))
+        }).collect(),
     }
 }
 
@@ -3859,6 +4184,85 @@ fn goal_key(goal: &TraitGoal) -> Digest {
         relation_arguments.as_slice(),
         subject.as_slice(),
     ])
+}
+
+#[cfg(test)]
+mod quantified_substitution_tests {
+    use super::*;
+
+    #[test]
+    fn quantified_evidence_is_lexical_rigid_kind_preserving_and_budgeted() {
+        let reference = |lifetime, referent| Type::Reference {
+            mutability: crate::Mutability::Shared, lifetime, referent: Box::new(referent),
+        };
+        let row = |index| GenericArgument::EffectRow(EffectRow {
+            effects: Default::default(), projections: vec![],
+            tails: [crate::EffectTail::Generic(index)].into_iter().collect(),
+        });
+        let bound = crate::QuantifiedWhereBound {
+            lifetime_binders: 1,
+            subject: reference(crate::Lifetime::Bound { depth: 0, index: 0 }, Type::Generic(0)),
+            relation: ElaboratedTraitReference { definition: DefKey(Digest::of_bytes(b"universal-user-trait")), arguments: vec![row(1)] },
+            type_bindings: vec![], effect_bindings: vec![],
+        };
+        let goal = TraitGoal { subject: reference(crate::Lifetime::Static, Type::Generic(0)), relation: bound.relation.clone() };
+        let mut solver = TraitSolver::new(&ElaboratedInterface::default());
+        solver.set_universal_assumptions(vec![bound.clone()]);
+        assert!(solver.proves_universal(&bound));
+        assert!(matches!(solver.solve(goal.clone()), TraitAnswer::Proven { .. }));
+        let mut different_type = goal.clone();
+        different_type.subject = reference(crate::Lifetime::Static, Type::Generic(1));
+        assert_eq!(solver.solve(different_type), TraitAnswer::NoSolution);
+        let mut different_row = goal.clone();
+        different_row.relation.arguments = vec![row(2)];
+        assert_eq!(solver.solve(different_row), TraitAnswer::NoSolution);
+        let mut inference = crate::InferContext::default();
+        let unknown = TraitGoal { subject: inference.fresh(), relation: bound.relation.clone() };
+        assert!(bound.for_goal(&unknown).is_none(), "foreign inference cells cannot be bound by lexical elimination");
+        solver.set_universal_assumptions(vec![]);
+        assert_eq!(solver.solve(goal), TraitAnswer::NoSolution, "a prior query cannot leak universal evidence");
+        solver.set_universal_assumptions(vec![bound.clone()]);
+        solver.limits.max_steps = 1;
+        assert!(!solver.proves_universal(&bound));
+        assert_eq!(solver.steps, 1);
+        assert!(!solver.proves_universal(&bound));
+    }
+
+    #[test]
+    fn selected_callable_substitution_preserves_quantified_and_nested_scopes() {
+        let reference = |depth| Type::Reference {
+            mutability: crate::Mutability::Shared,
+            lifetime: crate::Lifetime::Bound { depth, index: 7 },
+            referent: Box::new(Type::Unit),
+        };
+        let nested = Type::Callable {
+            safety: crate::Safety::Safe, lifetime_binders: 1,
+            parameters: vec![Type::Generic(0)], result: Box::new(Type::Unit),
+            effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
+        };
+        let signature = CallableSignature {
+            safety: crate::Safety::Safe, generics: 1, generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![], result: Type::Unit, effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
+            where_bounds: vec![], where_outlives: vec![], where_associated_type_bindings: vec![], where_associated_effect_bindings: vec![],
+            universal_bounds: vec![crate::QuantifiedWhereBound {
+                lifetime_binders: 1, subject: Type::Generic(0),
+                relation: ElaboratedTraitReference {
+                    definition: crate::intrinsic_callable_trait_definition(),
+                    arguments: vec![GenericArgument::Type(Type::Tuple(vec![nested]))],
+                },
+                type_bindings: vec![], effect_bindings: vec![],
+            }],
+        };
+        let mut substitution = ImplementationSubstitution::default();
+        substitution.types.insert(0, reference(0));
+        let selected = substitute_callable_signature(&signature, &substitution);
+        let bound = &selected.universal_bounds[0];
+        assert_eq!(bound.subject, reference(1));
+        let GenericArgument::Type(Type::Tuple(inputs)) = &bound.relation.arguments[0] else { panic!("tuple") };
+        let Type::Callable { parameters, .. } = &inputs[0] else { panic!("callable") };
+        assert_eq!(parameters, &[reference(2)]);
+        assert_eq!(substitution.types[&0], reference(0), "checking must not mutate caller substitutions");
+    }
 }
 
 /// Lexical where-clause evidence has no declaration key of its own. Derive a
@@ -3914,6 +4318,7 @@ fn associated_const_projection_key(goal: &TraitGoal, name: &str, kind: crate::Co
     let kind = match kind {
         crate::ConstKind::U32 => b"u32".as_slice(),
         crate::ConstKind::Quantity => b"quantity".as_slice(),
+        kind => kind.name().as_bytes(),
     };
     Digest::of_parts([
         b"grandiose-stage0-associated-const-projection-v1".as_slice(),
@@ -3931,6 +4336,7 @@ fn associated_const_projection_key(goal: &TraitGoal, name: &str, kind: crate::Co
 /// global implementation by accident.
 fn projection_is_concrete(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => projection_is_concrete(element) && generic_argument_is_concrete(length),
         Type::Generic(_) | Type::Infer(_) | Type::Error => false,
         Type::Nominal { arguments, .. } => arguments.iter().all(generic_argument_is_concrete),
         Type::Tuple(arguments) => arguments.iter().all(projection_is_concrete),
@@ -3955,7 +4361,7 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. } => true,
     }
@@ -3966,6 +4372,8 @@ fn projection_is_concrete(value: &Type) -> bool {
 /// Bruijn depth names a live callable binder in this traversal.
 fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> bool {
     match value {
+        Type::FixedArray { element, length } => projection_is_concrete_in_hrtb_scope(element, hrtb_binders)
+            && generic_argument_is_concrete_in_hrtb_scope(length, hrtb_binders),
         Type::Generic(_) | Type::Infer(_) | Type::Error => false,
         Type::Nominal { arguments, .. } => arguments
             .iter()
@@ -4011,7 +4419,7 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. } => true,
     }
@@ -4021,7 +4429,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
     match value {
         GenericArgument::Type(value) => projection_is_concrete(value),
         GenericArgument::EffectRow(value) => {
-            value.tail.is_none()
+            value.tails.is_empty()
                 && value.projections.is_empty()
                 && value
                     .effects
@@ -4029,11 +4437,11 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
                     .all(|effect| effect.arguments.iter().all(generic_argument_is_concrete))
         }
         GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
-        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_) => true,
-        GenericArgument::ConstU32Expr(_) => false,
+        GenericArgument::ConstIntegerExpr(_) => false,
         GenericArgument::ConstProjection { .. } => false,
-        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. } | crate::Lifetime::Infer(_))
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. } | crate::Lifetime::Infer(_) | crate::Lifetime::Placeholder(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
@@ -4051,7 +4459,7 @@ fn generic_argument_is_concrete_in_hrtb_scope(
     match value {
         GenericArgument::Type(value) => projection_is_concrete_in_hrtb_scope(value, hrtb_binders),
         GenericArgument::EffectRow(value) => {
-            value.tail.is_none()
+            value.tails.is_empty()
                 && value.projections.is_empty()
                 && value.effects.iter().all(|effect| {
                     effect.arguments.iter().all(|argument| {
@@ -4063,11 +4471,11 @@ fn generic_argument_is_concrete_in_hrtb_scope(
             .get(*depth as usize)
             .is_some_and(|count| *index < *count),
         GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
-        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_) => true,
-        GenericArgument::ConstU32Expr(_)
+        GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstProjection { .. }
-        | GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_))
+        | GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_) | crate::Lifetime::Placeholder(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
@@ -4083,7 +4491,7 @@ mod tests {
         let signatures = ElaboratedInterface::default();
         let definition = DefKey(Digest::of_bytes(b"normalization-container"));
         let leaves = [Type::Unit, Type::Never, Type::Scalar(ScalarType::I64), Type::Generic(0),
-            Type::Error, Type::Infer(crate::types::InferVar(0)), Type::ConstU32(7), Type::ConstQuantity(crate::Quantity::AFFINE),
+            Type::Error, Type::Infer(crate::types::InferVar(0)), Type::ConstInteger(7u32.into()), Type::ConstQuantity(crate::Quantity::AFFINE),
             Type::ConstGeneric { index: 1, kind: crate::ConstKind::U32 }];
         let mut solver = TraitSolver::new(&signatures);
         for leaf in leaves {
@@ -4092,10 +4500,10 @@ mod tests {
                 Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 1, parameters: vec![leaf.clone()], result: Box::new(leaf.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE },
                 Type::StaticData { element: Box::new(leaf.clone()), tag: 7, alignment: 8 },
                 Type::Nominal { definition, arguments: vec![GenericArgument::Type(leaf), GenericArgument::Lifetime(crate::Lifetime::Static),
-                    GenericArgument::ConstU32(2), GenericArgument::ConstQuantity(crate::Quantity::AFFINE), GenericArgument::EffectRow(EffectRow::empty()),
+                    GenericArgument::ConstInteger(2u32.into()), GenericArgument::ConstQuantity(crate::Quantity::AFFINE), GenericArgument::EffectRow(EffectRow::empty()),
                     GenericArgument::ConstGeneric { index: 0, kind: crate::ConstKind::U32 },
                     GenericArgument::ConstInfer { variable: crate::types::ConstInferVar(0), kind: crate::ConstKind::U32 },
-                    GenericArgument::ConstU32Expr(crate::StructuralU32Expr::Add(Box::new(crate::StructuralU32Expr::Literal(1)), Box::new(crate::StructuralU32Expr::Literal(2))))] }];
+                    GenericArgument::ConstIntegerExpr(crate::IntegerConstExpr::binary(crate::types::integer_const::IntegerConstOp::Add, Box::new(crate::IntegerConstExpr::Literal(1u32.into())), Box::new(crate::IntegerConstExpr::Literal(2u32.into()))))] }];
             for value in variants {
                 assert!(type_projection_normalization_is_identity(&value), "{value:?}");
                 assert_eq!(solver.normalize_type(value.clone()).unwrap(), value);
@@ -4128,7 +4536,7 @@ mod tests {
         let row = EffectRow { effects: Default::default(), projections: vec![crate::EffectRowProjection {
             subject: Box::new(projection.clone()), trait_definition: definition, trait_arguments: vec![],
             name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
-        }], tail: None };
+        }], tails: Default::default() };
         let opaque = [Type::StaticData { element: Box::new(projection), tag: 1, alignment: 1 },
             Type::Callable { safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
             Type::Nominal { definition, arguments: vec![GenericArgument::EffectRow(row)] }];
@@ -4248,6 +4656,7 @@ mod tests {
         let key = DefKey(Digest::of_bytes(b"frozen-nominal-layout"));
         let layout = |ty| ElaboratedHeader::Nominal {
             generics: 0, generic_kinds: vec![],
+            contract: Default::default(), universal_bounds: vec![],
             layout: ElaboratedNominalLayout::Struct(vec![crate::NominalField {
                 name: "field".into(), ty, private_authority: None,
             }]),

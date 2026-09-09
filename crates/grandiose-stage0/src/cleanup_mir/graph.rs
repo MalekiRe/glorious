@@ -75,8 +75,8 @@ impl CleanupMir {
                     matches!(ty, Type::Tuple(types) if types.len() == fields.len()
                     && types.iter().zip(fields).all(|(ty, field)| self.graph_type(field.value).ok() == Some(ty)))
                 }
-                OwnershipAggregate::Array => matches!(ty, Type::Array(element)
-                    if fields.iter().all(|field| self.graph_type(field.value).ok() == Some(element.as_ref()))),
+                OwnershipAggregate::Array => ty.array_accepts_count(fields.len()) && ty.array_element().is_some_and(|element|
+                    fields.iter().all(|field| self.graph_type(field.value).ok() == Some(element))),
                 OwnershipAggregate::Record(definition)
                 | OwnershipAggregate::Enum { definition, .. } => {
                     matches!(ty, Type::Nominal { definition: actual, .. } if actual == definition)
@@ -127,6 +127,7 @@ impl CleanupMir {
                 arguments,
                 result,
                 continuation,
+                contract,
                 ..
             } => {
                 let mut ty = self.graph_type(*callee)?;
@@ -146,7 +147,7 @@ impl CleanupMir {
                                 .is_ok_and(|actual| call_type_matches(ty, actual))
                         })
                         || !call_type_matches(result_ty, self.graph_type(*result)?)
-                        || continuation.is_none() != (**result_ty == Type::Never)
+                        || continuation.is_none() != (**result_ty == Type::Never || contract.mandatory_tail)
                     {
                         return Err(invalid(
                             "ownership invocation disagrees with callable contract",

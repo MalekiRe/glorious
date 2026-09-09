@@ -8,11 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use crate::{
-    header::{GenericParameters, HeaderStructuralConst, HeaderStructuralU32Expr, ParsedHeader},
+    header::{GenericParameters, ParsedHeader},
     identity::{DefKey, ModuleKey, PackageKey, package_module_alias},
     interface::{DefinitionNamespace, PackageInterface},
+    scanner::Visibility,
     source::Span,
-    types::{GenericArgument, GenericKind, StructuralU32Expr},
+    types::GenericKind,
 };
 
 /// The language prelude owns the quantitative relation and destruction hook.
@@ -172,7 +173,7 @@ pub struct DefinitionIndex {
     /// edge in the same immutable index as definitions prevents a public item
     /// inside a private module from becoming reachable merely by spelling its
     /// fully-qualified path.
-    module_visibility: BTreeMap<ModuleKey, bool>,
+    module_visibility: BTreeMap<ModuleKey, Visibility>,
     /// Module declarations retain the concrete child they introduce.  A
     /// public module binding is an exported traversal capability, so sealing
     /// an interface must include the public surface behind that binding rather
@@ -186,10 +187,9 @@ pub struct DefinitionIndex {
     enum_variant_names: BTreeMap<DefKey, BTreeSet<String>>,
     type_generic_arities: BTreeMap<DefKey, u32>,
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
-    /// Structural defaults are frozen by binder position, not source name, so
-    /// a consuming body can complete a trailing nominal application without
-    /// reopening declaration parsing or changing specialization identity.
-    type_generic_defaults: BTreeMap<DefKey, Vec<Option<GenericArgument>>>,
+    /// Source contracts needed to resolve defaults in their declaring scope.
+    /// Signature elaboration freezes the resolved position-aligned templates.
+    type_generic_parameters: BTreeMap<DefKey, GenericParameters>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
     trait_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     /// Source-shaped supertrait edges are retained just long enough to extend
@@ -198,6 +198,7 @@ pub struct DefinitionIndex {
     /// supplies item binder kinds while a projection is being elaborated.
     trait_supertrait_paths: BTreeMap<DefKey, Vec<Vec<String>>>,
     associated_type_generic_kinds: BTreeMap<(DefKey, String), Vec<GenericKind>>,
+    associated_effect_row_items: BTreeSet<(DefKey, String)>,
     /// Associated structural constants are declaration-owned contracts just
     /// like associated type binders.  Implementation headers need the kind
     /// before their value can be frozen, especially when that value is a
@@ -211,7 +212,7 @@ pub struct DefinitionIndex {
 struct IndexedDefinition {
     key: DefKey,
     module: ModuleKey,
-    public: bool,
+    visibility: Visibility,
 }
 
 #[derive(Clone, Debug)]
@@ -228,82 +229,6 @@ struct DefinitionContract {
     constant_value_fingerprint: Option<crate::identity::Digest>,
 }
 
-fn generic_const_defaults(generics: &GenericParameters) -> Vec<Option<GenericArgument>> {
-    fn u32_expression(
-        value: &HeaderStructuralU32Expr,
-        generics: &GenericParameters,
-    ) -> Option<StructuralU32Expr> {
-        Some(match value {
-            HeaderStructuralU32Expr::Literal(value) => StructuralU32Expr::Literal(*value),
-            HeaderStructuralU32Expr::Param(name) => {
-                let index = generics.names.iter().position(|candidate| candidate == name)?;
-                (generics.kind(name) == GenericKind::Const(crate::ConstKind::U32))
-                    .then_some(StructuralU32Expr::Param(index as u32))?
-            }
-            HeaderStructuralU32Expr::Add(left, right) => StructuralU32Expr::Add(
-                Box::new(u32_expression(left, generics)?),
-                Box::new(u32_expression(right, generics)?),
-            ),
-            HeaderStructuralU32Expr::Sub(left, right) => StructuralU32Expr::Sub(
-                Box::new(u32_expression(left, generics)?),
-                Box::new(u32_expression(right, generics)?),
-            ),
-            HeaderStructuralU32Expr::Mul(left, right) => StructuralU32Expr::Mul(
-                Box::new(u32_expression(left, generics)?),
-                Box::new(u32_expression(right, generics)?),
-            ),
-            HeaderStructuralU32Expr::Div(left, right) => StructuralU32Expr::Div(
-                Box::new(u32_expression(left, generics)?),
-                Box::new(u32_expression(right, generics)?),
-            ),
-            HeaderStructuralU32Expr::Rem(left, right) => StructuralU32Expr::Rem(
-                Box::new(u32_expression(left, generics)?),
-                Box::new(u32_expression(right, generics)?),
-            ),
-        })
-    }
-
-    generics
-        .names
-        .iter()
-        .map(|name| {
-            let kind = generics.kind(name);
-            let value = generics.const_defaults.get(name)?;
-            match (kind, value) {
-                (GenericKind::Const(crate::ConstKind::U32), HeaderStructuralConst::U32(value)) => {
-                    Some(GenericArgument::ConstU32(*value))
-                }
-                (
-                    GenericKind::Const(crate::ConstKind::U32),
-                    HeaderStructuralConst::U32Expression(value),
-                ) => match u32_expression(value, generics)?.normalized().ok()? {
-                    StructuralU32Expr::Literal(value) => Some(GenericArgument::ConstU32(value)),
-                    value => Some(GenericArgument::ConstU32Expr(value)),
-                },
-                (
-                    GenericKind::Const(expected),
-                    HeaderStructuralConst::Generic(source_name),
-                ) => {
-                    let index = generics
-                        .names
-                        .iter()
-                        .position(|candidate| candidate == source_name)?;
-                    (generics.kind(source_name) == GenericKind::Const(expected)).then_some(
-                        GenericArgument::ConstGeneric {
-                            index: index as u32,
-                            kind: expected,
-                        },
-                    )
-                }
-                (
-                    GenericKind::Const(crate::ConstKind::Quantity),
-                    HeaderStructuralConst::Quantity(value),
-                ) => Some(GenericArgument::ConstQuantity(*value)),
-                _ => None,
-            }
-        })
-        .collect()
-}
 
 /// An explicit source-level import binding, retained independently of body
 /// scopes so diagnostics, tooling, and all semantic namespaces consult the
@@ -318,7 +243,7 @@ pub struct ImportBinding {
     pub path: Vec<String>,
     pub alias: String,
     pub module: ModuleKey,
-    pub public: bool,
+    pub visibility: Visibility,
     pub span: Span,
 }
 
@@ -372,25 +297,24 @@ impl DefinitionIndex {
                 // widen access while that error is present.
                 self.module_visibility
                     .entry(child.clone())
-                    .and_modify(|public| *public &= definition.public)
-                    .or_insert(definition.public);
+                    .and_modify(|visibility| *visibility = (*visibility).min(definition.visibility))
+                    .or_insert(definition.visibility);
                 self.module_targets.entry(definition.key).or_insert(child);
             }
             if definition.namespace == Some(DefinitionNamespace::Type) {
-                let (arity, kinds, defaults) = match &definition.syntax.header {
+                let (arity, kinds) = match &definition.syntax.header {
                     ParsedHeader::Nominal { generics, .. }
                     | ParsedHeader::TypeAlias { generics, .. } => {
+                        self.type_generic_parameters.insert(definition.key, generics.clone());
                         (
                             generics.len() as u32,
                             generics.kinds(),
-                            generic_const_defaults(generics),
                         )
                     }
-                    _ => (0, vec![], vec![]),
+                    _ => (0, vec![]),
                 };
                 self.type_generic_arities.insert(definition.key, arity);
                 self.type_generic_kinds.insert(definition.key, kinds);
-                self.type_generic_defaults.insert(definition.key, defaults);
             }
             match &definition.syntax.header {
                 ParsedHeader::Nominal {
@@ -421,6 +345,9 @@ impl DefinitionIndex {
                     for item in &header.associated_types {
                         self.associated_type_generic_kinds
                             .insert((definition.key, item.name.clone()), item.generics.kinds());
+                        if item.effect_row {
+                            self.associated_effect_row_items.insert((definition.key, item.name.clone()));
+                        }
                     }
                     for item in &header.associated_consts {
                         self.associated_const_kinds
@@ -454,7 +381,7 @@ impl DefinitionIndex {
                             path: binding.path.clone(),
                             alias,
                             module: definition.module.clone(),
-                            public: definition.public,
+                            visibility: definition.visibility,
                             span: definition.span,
                         });
                 }
@@ -470,18 +397,21 @@ impl DefinitionIndex {
                             definition: IndexedDefinition {
                                 key: definition.key,
                                 module: definition.module.clone(),
-                                public: definition.public,
+                                visibility: definition.visibility,
                             },
                         },
                     );
                     // Associated lookup follows the owning type identity, so
                     // importing or renaming the type preserves its members.
-                    continue;
+                    if !matches!(&header.self_ty, crate::HeaderType::Path(path)
+                        if path.len() == 1 && crate::signature::scalar(&path[0]).is_some()) {
+                        continue;
+                    }
                 }
                 let entry = IndexedDefinition {
                     key: definition.key,
                     module: definition.module.clone(),
-                    public: definition.public,
+                    visibility: definition.visibility,
                 };
                 self.entries
                     .entry((namespace, name.clone()))
@@ -490,7 +420,14 @@ impl DefinitionIndex {
                 self.qualified
                     .entry((namespace, definition.module.clone(), name.clone()))
                     .or_default()
-                    .push(entry);
+                    .push(entry.clone());
+                if namespace == DefinitionNamespace::Type && matches!(&definition.syntax.header,
+                    ParsedHeader::Nominal { layout: crate::header::NominalLayoutHeader::Struct(_)
+                        | crate::header::NominalLayoutHeader::TupleStruct(_), .. }) {
+                    self.entries.entry((DefinitionNamespace::Value, name.clone())).or_default().push(entry.clone());
+                    self.qualified.entry((DefinitionNamespace::Value, definition.module.clone(), name.clone()))
+                        .or_default().push(entry);
+                }
             }
         }
     }
@@ -566,9 +503,10 @@ impl DefinitionIndex {
         // responsibility of TraitSolver's instantiated lookup.
         let traits = self.trait_generic_arities.keys().copied().collect::<Vec<_>>();
         for definition in traits {
-            for (name, kinds) in
+            for (name, (kinds, effect_row)) in
                 self.inherited_associated_type_kinds(definition, &mut BTreeSet::new())
             {
+                if effect_row { self.associated_effect_row_items.insert((definition, name.clone())); }
                 self.associated_type_generic_kinds
                     .entry((definition, name))
                     .or_insert(kinds);
@@ -580,7 +518,7 @@ impl DefinitionIndex {
         &self,
         definition: DefKey,
         active: &mut BTreeSet<DefKey>,
-    ) -> BTreeMap<String, Vec<GenericKind>> {
+    ) -> BTreeMap<String, (Vec<GenericKind>, bool)> {
         if !active.insert(definition) {
             return BTreeMap::new();
         }
@@ -588,7 +526,8 @@ impl DefinitionIndex {
             .associated_type_generic_kinds
             .iter()
             .filter_map(|((owner, name), kinds)| {
-                (*owner == definition).then(|| (name.clone(), kinds.clone()))
+                (*owner == definition).then(|| (name.clone(), (kinds.clone(),
+                    self.associated_effect_row_items.contains(&(*owner, name.clone())))))
             })
             .collect::<BTreeMap<_, _>>();
         let requester = self.owners.get(&definition);
@@ -816,7 +755,7 @@ impl DefinitionIndex {
         }
         for ((owner, _), members) in &self.inherent_members {
             if *owner == key {
-                for member in members.iter().filter(|member| member.public) {
+                for member in members.iter().filter(|member| member.visibility.is_public()) {
                     if &member.module != origin {
                         dependencies.insert(member.module.clone());
                     }
@@ -914,7 +853,7 @@ impl DefinitionIndex {
         }
         for ((owner, name), members) in &self.inherent_members {
             if *owner == key {
-                for member in members.iter().filter(|member| member.public) {
+                for member in members.iter().filter(|member| member.visibility.is_public()) {
                     append_surface(bytes, b"inherent-member");
                     append_surface(bytes, name.as_bytes());
                     self.append_definition_contract(bytes, member.key);
@@ -937,11 +876,8 @@ impl DefinitionIndex {
         self.type_generic_kinds.get(&definition).map(Vec::as_slice)
     }
 
-    /// Position-aligned defaults for nominal and alias binders.  A `None`
-    /// entry remains a required source argument (or an inference site where
-    /// that form is explicitly permitted).
-    pub fn type_generic_defaults(&self, definition: DefKey) -> Option<&[Option<GenericArgument>]> {
-        self.type_generic_defaults.get(&definition).map(Vec::as_slice)
+    pub(crate) fn type_generic_parameters(&self, definition: DefKey) -> Option<&GenericParameters> {
+        self.type_generic_parameters.get(&definition)
     }
 
     pub fn trait_generic_arity(&self, definition: DefKey) -> Option<u32> {
@@ -966,6 +902,12 @@ impl DefinitionIndex {
         self.associated_type_generic_kinds
             .get(&(trait_definition, name.to_owned()))
             .map(Vec::as_slice)
+    }
+
+    /// The declaration, not the spelling of an implementation value, owns
+    /// whether a bare projection is a type or an effect row.
+    pub fn associated_type_is_effect_row(&self, trait_definition: DefKey, name: &str) -> bool {
+        self.associated_effect_row_items.contains(&(trait_definition, name.to_owned()))
     }
 
     /// Declared kind of an associated structural constant.  This is queried
@@ -1104,7 +1046,7 @@ impl DefinitionIndex {
                 // consumer) and are diagnosed by `validate_exported_imports`
                 // below.  Checking them here as the importing module would
                 // produce a weaker, duplicate privacy diagnostic.
-                if import.public {
+                if import.visibility.is_public() {
                     continue;
                 }
                 let requester = &import.module;
@@ -1395,15 +1337,19 @@ impl DefinitionIndex {
         for imports in self.imports.values() {
             for import in imports
                 .iter()
-                .filter(|import| import.public && self.module_path_is_public(&import.module))
+                .filter(|import| match import.visibility {
+                    Visibility::Public => self.module_path_is_public(&import.module),
+                    Visibility::Crate | Visibility::Super => true,
+                    Visibility::Private => false,
+                })
             {
-                let external_requester = ModuleKey {
+                let external_requester = import.visibility.scope(&import.module).unwrap_or_else(|| ModuleKey {
                     package: import.module.package.clone(),
                     // This is intentionally not a graph node.  It models a
                     // dependency consumer, which owns no private module edge
                     // or definition in this package.
                     path: "<dependency>".into(),
-                };
+                });
                 if import.glob {
                     match self.lexical_module(&import.module, &external_requester, &import.path) {
                         ModuleLookup::Found(_) => continue,
@@ -1481,26 +1427,25 @@ impl DefinitionIndex {
                 }
             }
         }
-        // A public alias is itself an exported name.  Validate the merged
-        // namespace after all public edges have contributed, rather than
-        // checking each edge in isolation: two individually valid `pub use`
-        // declarations must not freeze an interface which is ambiguous to a
-        // dependency.  Local definitions intentionally win here, matching
-        // ordinary resolution and preserving lexical shadowing.
+        // An exposed alias is itself an interface name. Validate the merged
+        // namespace at every exported scope, including overlapping restricted
+        // scopes. Individually valid edges must not freeze an ambiguous facade.
         for (module, imports) in &self.imports {
-            if !self.module_path_is_public(module) {
-                continue;
-            }
-            let requester = ModuleKey {
-                package: module.package.clone(),
-                path: "<dependency>".into(),
-            };
             let aliases = imports
                 .iter()
-                .filter(|import| import.public && !import.glob)
-                .map(|import| (import.alias.clone(), import.span))
+                .filter(|import| !import.glob && match import.visibility {
+                    Visibility::Private => false,
+                    Visibility::Public => self.module_path_is_public(module),
+                    Visibility::Crate | Visibility::Super => true,
+                })
+                .map(|import| {
+                    let requester = import.visibility.scope(module).unwrap_or_else(|| ModuleKey {
+                        package: module.package.clone(), path: "<dependency>".into(),
+                    });
+                    ((import.alias.clone(), requester), import.span)
+                })
                 .collect::<BTreeMap<_, _>>();
-            for (alias, span) in aliases {
+            for ((alias, requester), span) in aliases {
                 for namespace in all_namespaces() {
                     if matches!(
                         self.resolve_member(
@@ -1608,7 +1553,7 @@ impl DefinitionIndex {
         for import in imports
             .iter()
             .filter(|import| import.glob == glob)
-            .filter(|import| !require_public || import.public)
+            .filter(|import| !require_public || import.visibility.allows(requester, &import.module))
             .filter(|import| import.glob || import.alias == alias)
         {
             // Preserve the original requester across every re-export hop.
@@ -1755,6 +1700,23 @@ impl DefinitionIndex {
         path: &[String],
         visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
     ) -> ResolutionState {
+        // A scalar has no source nominal identity. Its functions retain an
+        // ordinary declaration-owned qualified spelling instead; module
+        // traversal and imports still decide visibility and ambiguity.
+        if path.len() >= 2 && crate::signature::scalar(&path[path.len() - 2]).is_some() {
+            let spelling = path[path.len() - 2..].join("::");
+            if path.len() == 2 {
+                return self.resolve_direct_path(DefinitionNamespace::Value,
+                    lexical_owner, requester, &[spelling], visited);
+            }
+            return match self.lexical_module(lexical_owner, requester, &path[..path.len() - 2]) {
+                ModuleLookup::Found(module) => self.resolve_member(DefinitionNamespace::Value,
+                    &module, &spelling, requester, !requester_has_lexical_authority(requester, &module), visited),
+                ModuleLookup::Ambiguous(modules) => self.ambiguous_modules(modules),
+                ModuleLookup::Inaccessible => ResolutionState::Inaccessible(vec![]),
+                ModuleLookup::Absent => ResolutionState::Unresolved,
+            };
+        }
         let owner = self.resolve_direct_path(
             DefinitionNamespace::Type,
             lexical_owner,
@@ -1791,7 +1753,7 @@ impl DefinitionIndex {
             // same descendant rule to private module edges.
             .filter(|entry| {
                 owner.is_none_or(|owner| {
-                    entry.public || requester_has_lexical_authority(owner, &entry.module)
+                    entry.visibility.allows(owner, &entry.module)
                 })
             })
             .map(|entry| entry.key)
@@ -2008,9 +1970,30 @@ impl DefinitionIndex {
             // A private import is lexical to its declaring module.  It must
             // not become a module edge for an outside requester merely
             // because the final imported definition happens to be public.
-            if !import.public && !requester_has_lexical_authority(requester, &import.module) {
-                if import.glob || import.alias == alias {
-                    inaccessible = true;
+            if !import.visibility.allows(requester, &import.module) {
+                if (import.glob || import.alias == alias) && visited_aliases.insert(import.clone()) {
+                    // Privacy can hide an existing binding, not every name
+                    // that might be searched through this glob. Inspect the
+                    // edge with its owner's authority only to establish
+                    // whether it actually supplies the requested module.
+                    // Never return the discovered module to the requester.
+                    let target = self.lexical_module_with_visited(
+                        &import.module, &import.module, &import.path, visited_aliases,
+                    );
+                    let provides_module = match target {
+                        ModuleLookup::Found(target) if import.glob => matches!(
+                            self.walk_module_path(&target, &import.module, &[alias.to_owned()], visited_aliases),
+                            ModuleLookup::Found(_) | ModuleLookup::Ambiguous(_)
+                        ),
+                        ModuleLookup::Ambiguous(targets) if import.glob => targets.iter().any(|target| matches!(
+                            self.walk_module_path(target, &import.module, &[alias.to_owned()], visited_aliases),
+                            ModuleLookup::Found(_) | ModuleLookup::Ambiguous(_)
+                        )),
+                        ModuleLookup::Found(_) | ModuleLookup::Ambiguous(_) => true,
+                        ModuleLookup::Absent | ModuleLookup::Inaccessible => false,
+                    };
+                    visited_aliases.remove(import);
+                    inaccessible |= provides_module;
                 }
                 continue;
             }
@@ -2108,8 +2091,9 @@ impl DefinitionIndex {
                 package: module.package.clone(),
                 path: prefix.clone(),
             };
-            let public = self.module_visibility.get(&child).copied().unwrap_or(false);
-            if !public && !module_is_descendant_of(requester, &parent) {
+            let visibility = self.module_visibility.get(&child).copied().unwrap_or_default();
+            let owner = ModuleKey { package: module.package.clone(), path: parent };
+            if !visibility.allows(requester, &owner) {
                 return false;
             }
         }
@@ -2128,7 +2112,7 @@ impl DefinitionIndex {
                 package: module.package.clone(),
                 path: prefix.clone(),
             };
-            if !self.module_visibility.get(&child).copied().unwrap_or(false) {
+            if !self.module_visibility.get(&child).copied().unwrap_or_default().is_public() {
                 return false;
             }
         }
@@ -2190,23 +2174,12 @@ fn module_child_path(parent: &str, child: &str) -> String {
     }
 }
 
-fn module_is_descendant_of(module: &ModuleKey, ancestor: &str) -> bool {
-    module.path == ancestor
-        || module
-            .path
-            .strip_prefix(ancestor)
-            .is_some_and(|suffix| suffix.starts_with("::"))
-}
-
 /// Private item and import authority is lexical rather than a property of a
 /// spelling: a module may use declarations introduced by itself or any
 /// enclosing module in the same package. Keeping this shared predicate for
 /// direct definitions and imported module aliases prevents one namespace from
 /// becoming more permissive than another.
-fn requester_has_lexical_authority(requester: &ModuleKey, defining_module: &ModuleKey) -> bool {
-    requester.package == defining_module.package
-        && module_is_descendant_of(requester, &defining_module.path)
-}
+pub(crate) use grandiose_compiler_base::identity::requester_has_lexical_authority;
 
 fn canonicalize_keys(keys: &mut Vec<DefKey>) {
     keys.sort();

@@ -1,0 +1,281 @@
+pub mod fmt {
+    use crate::*;
+    pub trait Display { fn fmt(value: &Self, out: &mut Formatter); }
+    pub trait Debug { fn fmt(value: &Self, out: &mut Formatter); }
+    pub trait Error: Debug + Display {}
+    pub struct FormatOptions { pub indent_width: usize, pub maximum_output_bytes: Option<usize> }
+    pub enum FormatError { OutputLimit, InvalidIndent, Allocation(ReserveError) }
+    pub struct Formatter {
+        private output: String, private options: FormatOptions, private depth: usize,
+        private line_start: Bool, private error: Option<FormatError>,
+    }
+    fn has_error(value: &Formatter) -> Bool { handle value.error { Result::Ok(_) => true, Result::Err(_) => false } }
+    fn reserve(value: &mut Formatter, additional: usize) -> Bool {
+        handle has_error(value) {
+            true => false,
+            false => {
+                let length = String::len(&value.output);
+                handle value.options.maximum_output_bytes {
+                    Result::Err(_) => (),
+                    Result::Ok(limit) => handle length > limit {
+                        true => { (*value).error = Some(FormatError::OutputLimit); return(false, @reserve) },
+                        false => handle additional > limit - length {
+                            true => { (*value).error = Some(FormatError::OutputLimit); return(false, @reserve) }, false => (),
+                        },
+                    },
+                };
+                handle Vec::try_reserve(&mut value.output.storage, additional) {
+                    Result::Ok(_) => true,
+                    Result::Err(error) => { (*value).error = Some(FormatError::Allocation(error)); false },
+                }
+            },
+        }
+    }
+    fn spaces(value: &mut Formatter, remaining: usize) {
+        handle remaining == 0 { true => (), false => { Vec::push(&mut value.output.storage, 32); tail spaces(value, remaining - 1) } }
+    }
+    fn write_chars(value: &mut Formatter, text: Str, index: usize) {
+        handle index == Str::len(text) {
+            true => (),
+            false => handle has_error(value) {
+                true => (),
+                false => handle crate::utf8_decode(Str::as_bytes(text), index) {
+                    Result::Err(_) => crate::__g1_abort(),
+                    Result::Ok((character, width)) => {
+                        Formatter::write_char(&mut *value, character);
+                        tail write_chars(value, text, index + width)
+                    },
+                },
+            },
+        }
+    }
+    fn quote_chars(value: &mut Formatter, text: Str, index: usize) {
+        handle index == Str::len(text) {
+            true => (),
+            false => handle crate::utf8_decode(Str::as_bytes(text), index) {
+                Result::Err(_) => crate::__g1_abort(),
+                Result::Ok((character, width)) => {
+                    let mut escape = char::escape_default(character);
+                    write_escape(&mut *value, &mut escape);
+                    tail quote_chars(value, text, index + width)
+                },
+            },
+        }
+    }
+    fn write_escape(value: &mut Formatter, escape: &mut CharEscape) {
+        handle CharEscape::next(&mut *escape) {
+            Result::Err(_) => (),
+            Result::Ok(character) => { Formatter::write_char(&mut *value, character); tail write_escape(value, escape) },
+        }
+    }
+    impl Formatter {
+        pub fn new() -> Self { Self::with_options(FormatOptions { indent_width: 4, maximum_output_bytes: None }) }
+        pub fn with_options(options: FormatOptions) -> Self {
+            Formatter { output: String::new(), options: options, depth: 0, line_start: true, error: None }
+        }
+        pub fn write_str(value: &mut Self, text: Str) { write_chars(value, text, 0) }
+        pub fn write_char(value: &mut Self, character: char) {
+            handle has_error(value) {
+                true => (),
+                false => {
+                    let newline = char_to_u32(character) == 10;
+                    let indent = handle value.line_start { false => 0, true => handle newline { true => 0, false => value.depth * value.options.indent_width } };
+                    let width = char_utf8_len(character);
+                    handle indent > bit_not<usize>(0) - width {
+                        true => { (*value).error = Some(FormatError::InvalidIndent); },
+                        false => handle reserve(&mut *value, indent + width) {
+                            false => (),
+                            true => {
+                                spaces(&mut *value, indent);
+                                String::push(&mut value.output, character);
+                                (*value).line_start = newline;
+                            },
+                        },
+                    }
+                },
+            }
+        }
+        pub fn newline(value: &mut Self) { Self::write_char(value, '\n') }
+        pub fn indent(value: &mut Self) -> Result<(),FormatError> {
+            handle value.depth == bit_not<usize>(0) {
+                true => Result::Err(FormatError::InvalidIndent),
+                false => {
+                    let next = value.depth + 1;
+                    handle value.options.indent_width == 0 {
+                        true => { (*value).depth = next; Result::Ok(()) },
+                        false => handle next > bit_not<usize>(0) / value.options.indent_width {
+                            true => Result::Err(FormatError::InvalidIndent),
+                            false => { (*value).depth = next; Result::Ok(()) },
+                        },
+                    }
+                },
+            }
+        }
+        pub fn dedent(value: &mut Self) -> Result<(),FormatError> {
+            handle value.depth == 0 {
+                true => Result::Err(FormatError::InvalidIndent),
+                false => { (*value).depth = value.depth - 1; Result::Ok(()) },
+            }
+        }
+        pub fn quoted(value: &mut Self, text: Str) {
+            Self::write_char(&mut *value, '"'); quote_chars(&mut *value, text, 0); Self::write_char(value, '"')
+        }
+        pub fn display<T>(value: &mut Self, item: &T) where T: Display { Display::fmt(item, value) }
+        pub fn debug<T>(value: &mut Self, item: &T) where T: Debug { Debug::fmt(item, value) }
+        pub fn finish(value: Self) -> Result<String,FormatError> {
+            handle value.error { Result::Ok(error) => Result::Err(error), Result::Err(_) => Result::Ok(value.output) }
+        }
+    }
+    pub fn format<T>(value: &T) -> String where T: Display {
+        let mut out = Formatter::new(); Display::fmt(value, &mut out);
+        handle Formatter::finish(out) { Result::Ok(text) => text, Result::Err(_) => crate::__g1_abort() }
+    }
+    pub fn format_debug<T>(value: &T) -> String where T: Debug {
+        let mut out = Formatter::new(); Debug::fmt(value, &mut out);
+        handle Formatter::finish(out) { Result::Ok(text) => text, Result::Err(_) => crate::__g1_abort() }
+    }
+    pub fn try_format<T>(value: &T, options: FormatOptions) -> Result<String,FormatError> where T: Display {
+        let mut out = Formatter::with_options(options); Display::fmt(value, &mut out); Formatter::finish(out)
+    }
+    pub fn error_string<E>(value: &E) -> String where E: Error { format(value) }
+    pub fn fmt_result<T,E>(value: &Result<T,E>, out: &mut Formatter) where T: Debug, E: Debug {
+        handle *value {
+            Result::Ok(_) => { Formatter::write_str(&mut *out, "Ok("); Debug::fmt(&value.0, &mut *out); },
+            Result::Err(_) => { Formatter::write_str(&mut *out, "Err("); Debug::fmt(&value.0, &mut *out); },
+        };
+        Formatter::write_str(out, ")")
+    }
+    pub fn fmt_option<T>(value: &Option<T>, out: &mut Formatter) where T: Debug {
+        handle *value {
+            Result::Ok(_) => { Formatter::write_str(&mut *out, "Some("); Debug::fmt(&value.0, &mut *out); Formatter::write_str(out, ")") },
+            Result::Err(_) => Formatter::write_str(out, "None"),
+        }
+    }
+    fn unsigned(value: u128, out: &mut Formatter) {
+        handle value / 10 == 0 { true => (), false => unsigned(value / 10, &mut *out) };
+        Formatter::write_char(out, crate::__g1_char_from_u32_checked(48 + as<u32>(value % 10)))
+    }
+    pub impl Display for () { fn fmt(value: &(), out: &mut Formatter) { Formatter::write_str(out, "()") } }
+    pub impl Debug for () { fn fmt(value: &(), out: &mut Formatter) { Formatter::write_str(out, "()") } }
+    pub impl Display for Bool { fn fmt(value: &Bool, out: &mut Formatter) { Formatter::write_str(out, handle *value { true => "true", false => "false" }) } }
+    pub impl Display for char { fn fmt(value: &char, out: &mut Formatter) { Formatter::write_char(out, *value) } }
+    pub impl Debug for char { fn fmt(value: &char, out: &mut Formatter) {
+        Formatter::write_char(&mut *out, '\''); let mut escape = char::escape_default(*value); write_escape(&mut *out, &mut escape); Formatter::write_char(out, '\'')
+    } }
+    pub impl Display for String { fn fmt(value: &String, out: &mut Formatter) { Formatter::write_str(out, String::as_str(value)) } }
+    pub impl Debug for String { fn fmt(value: &String, out: &mut Formatter) { Formatter::quoted(out, String::as_str(value)) } }
+    pub impl<'a> Display for Str<'a> { fn fmt(value: &Self, out: &mut Formatter) { Formatter::write_str(out, *value) } }
+    pub impl<'a> Debug for Str<'a> { fn fmt(value: &Self, out: &mut Formatter) { Formatter::quoted(out, *value) } }
+    pub impl<T,E> Debug for Result<T,E> where T: Debug, E: Debug { fn fmt(value: &Self, out: &mut Formatter) { fmt_result(value, out) } }
+    pub impl<T> Debug for Vec<T> where T: Debug { fn fmt(value: &Self, out: &mut Formatter) { slice_debug(Vec::as_slice(value), out) } }
+    pub impl<'a,T> Debug for Slice<'a,T> where T: Debug { fn fmt(value: &Self, out: &mut Formatter) { slice_debug(*value, out) } }
+    fn slice_items<T>(items: Slice<T>, index: usize, out: &mut Formatter) where T: Debug {
+        handle index == Slice::len(&items) {
+            true => (),
+            false => {
+                handle index == 0 { true => (), false => Formatter::write_str(&mut *out, ", ") };
+                Debug::fmt(Slice::get_unchecked(items, index), &mut *out);
+                tail slice_items(items, index + 1, out)
+            },
+        }
+    }
+    fn slice_debug<T>(items: Slice<T>, out: &mut Formatter) where T: Debug {
+        Formatter::write_str(&mut *out, "["); slice_items(items, 0, &mut *out); Formatter::write_str(out, "]")
+    }
+
+    pub impl Display for u8 {
+        fn fmt(value: &u8, out: &mut Formatter) {
+
+            unsigned(as<u128>(crate::num_u8_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for u8 { fn fmt(value: &u8, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for u16 {
+        fn fmt(value: &u16, out: &mut Formatter) {
+
+            unsigned(as<u128>(crate::num_u16_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for u16 { fn fmt(value: &u16, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for u32 {
+        fn fmt(value: &u32, out: &mut Formatter) {
+
+            unsigned(as<u128>(crate::num_u32_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for u32 { fn fmt(value: &u32, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for u64 {
+        fn fmt(value: &u64, out: &mut Formatter) {
+
+            unsigned(as<u128>(crate::num_u64_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for u64 { fn fmt(value: &u64, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for u128 {
+        fn fmt(value: &u128, out: &mut Formatter) {
+
+            unsigned(as<u128>(crate::num_u128_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for u128 { fn fmt(value: &u128, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for usize {
+        fn fmt(value: &usize, out: &mut Formatter) {
+
+            unsigned(as<u128>(crate::num_usize_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for usize { fn fmt(value: &usize, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for i8 {
+        fn fmt(value: &i8, out: &mut Formatter) {
+            handle *value < 0 { true => Formatter::write_str(&mut *out, "-"), false => () };
+            unsigned(as<u128>(crate::num_i8_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for i8 { fn fmt(value: &i8, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for i16 {
+        fn fmt(value: &i16, out: &mut Formatter) {
+            handle *value < 0 { true => Formatter::write_str(&mut *out, "-"), false => () };
+            unsigned(as<u128>(crate::num_i16_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for i16 { fn fmt(value: &i16, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for i32 {
+        fn fmt(value: &i32, out: &mut Formatter) {
+            handle *value < 0 { true => Formatter::write_str(&mut *out, "-"), false => () };
+            unsigned(as<u128>(crate::num_i32_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for i32 { fn fmt(value: &i32, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for i64 {
+        fn fmt(value: &i64, out: &mut Formatter) {
+            handle *value < 0 { true => Formatter::write_str(&mut *out, "-"), false => () };
+            unsigned(as<u128>(crate::num_i64_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for i64 { fn fmt(value: &i64, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for i128 {
+        fn fmt(value: &i128, out: &mut Formatter) {
+            handle *value < 0 { true => Formatter::write_str(&mut *out, "-"), false => () };
+            unsigned(as<u128>(crate::num_i128_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for i128 { fn fmt(value: &i128, out: &mut Formatter) { Display::fmt(value, out) } }
+
+    pub impl Display for isize {
+        fn fmt(value: &isize, out: &mut Formatter) {
+            handle *value < 0 { true => Formatter::write_str(&mut *out, "-"), false => () };
+            unsigned(as<u128>(crate::num_isize_magnitude(*value)), out)
+        }
+    }
+    pub impl Debug for isize { fn fmt(value: &isize, out: &mut Formatter) { Display::fmt(value, out) } }
+}

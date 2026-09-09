@@ -38,6 +38,10 @@ impl RuntimeProgram {
                     .iter()
                     .map(|action| action.destructor),
             );
+            pending.extend(body.blocks.iter().filter_map(|block| match block.terminator {
+                RuntimeTerminator::TailCall { callee, .. } => Some(callee),
+                _ => None,
+            }));
             for operation in body.blocks.iter().flat_map(|block| &block.instructions) {
                 match operation {
                     RuntimeOperation::Call { callee, .. } => {
@@ -196,6 +200,16 @@ impl RuntimeProgram {
                 ));
             }
             for block in &function.blocks {
+                if let RuntimeTerminator::TailCall { callee, arguments } = &block.terminator {
+                    let target = self.functions.get(callee).ok_or_else(|| RuntimeError("mandatory tail target is missing".into()))?;
+                    if target.captures != 0 || (target.result != Type::Never && target.result != function.result)
+                        || arguments.len() != target.parameters.len()
+                        || arguments.iter().zip(&target.parameters).any(|(argument, parameter)|
+                            function.locals[argument.0 as usize].ty != target.locals[parameter.0 as usize].ty)
+                        || (target.safety == Safety::Unsafe && !function.unsafe_execution) {
+                        return Err(RuntimeError("mandatory tail activation-transfer ABI mismatch".into()));
+                    }
+                }
                 for operation in &block.instructions {
                     let target = match operation {
                         RuntimeOperation::Call { callee, .. }

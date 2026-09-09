@@ -99,6 +99,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "grandiose-compiler-base"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "grandiose-runtime"
 version = "0.1.0"
 
@@ -107,7 +114,16 @@ name = "grandiose-stage0"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "grandiose-compiler-base",
  "grandiose-runtime",
+ "grandiose-syntax",
+]
+
+[[package]]
+name = "grandiose-syntax"
+version = "0.1.0"
+dependencies = [
+ "grandiose-compiler-base",
 ]
 
 [[package]]

@@ -26,6 +26,23 @@ pub struct PatternGenericScope {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BinderKey(pub u32);
 
+/// Compact skipped run in an array pattern; no wildcard vector is expanded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ArrayPatternRest {
+    pub prefix: u32,
+    pub omitted: u32,
+}
+impl ArrayPatternRest {
+    pub fn length(rest: Option<Self>, explicit: usize) -> Option<usize> {
+        if rest.is_some_and(|rest| rest.prefix as usize > explicit) { return None; }
+        explicit.checked_add(rest.map_or(0, |rest| rest.omitted as usize))
+            .filter(|length| u32::try_from(*length).is_ok())
+    }
+    pub fn index(rest: Option<Self>, index: usize) -> usize {
+        index + rest.filter(|rest| index >= rest.prefix as usize).map_or(0, |rest| rest.omitted as usize)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingMode {
     /// The projected value is structurally duplicable in the bootstrap model.
@@ -49,7 +66,7 @@ pub enum PatternDecision {
     Bind(BinderKey),
     Literal(String),
     Tuple(Vec<PatternDecision>),
-    Array(Vec<PatternDecision>),
+    Array { elements: Vec<PatternDecision>, rest: Option<ArrayPatternRest> },
     Record {
         definition: DefKey,
         fields: Vec<(u32, PatternDecision)>,
@@ -122,12 +139,26 @@ pub fn elaborate_pattern_with_scope(
     module: &ModuleKey,
     scope: &PatternGenericScope,
 ) -> PatternElaboration {
+    elaborate_pattern_in_context(body, pattern, subject, index, signatures, module, scope, None)
+}
+
+pub(crate) fn elaborate_pattern_in_context(
+    body: &BodySyntax,
+    pattern: PatternId,
+    subject: Type,
+    index: &DefinitionIndex,
+    signatures: &ElaboratedInterface,
+    module: &ModuleKey,
+    scope: &PatternGenericScope,
+    inference: Option<&mut crate::InferContext>,
+) -> PatternElaboration {
     let mut elaborator = Elaborator {
         body,
         index,
         signatures,
         module,
         scope,
+        inference,
         bindings: vec![],
         binding_names: std::collections::BTreeSet::new(),
         discarded: vec![],
@@ -141,8 +172,11 @@ pub fn elaborate_pattern_with_scope(
     });
     PatternElaboration {
         plan: PatternPlan {
+            refutable: match (&subject, &decision) {
+                (Type::FixedArray { .. }, PatternDecision::Array { elements: values, .. }) => values.iter().any(decision_refutable),
+                _ => decision_refutable(&decision),
+            },
             subject,
-            refutable: decision_refutable(&decision),
             decision,
             bindings: elaborator.bindings,
             discarded: elaborator.discarded,
@@ -161,7 +195,7 @@ fn decision_refutable(decision: &PatternDecision) -> bool {
         PatternDecision::Any | PatternDecision::Bind(_) => false,
         PatternDecision::Literal(_) | PatternDecision::Enum { .. } | PatternDecision::Error => true,
         PatternDecision::Tuple(values) => values.iter().any(decision_refutable),
-        PatternDecision::Array(_) => true,
+        PatternDecision::Array { .. } => true,
         PatternDecision::Record { fields, .. } => fields
             .iter()
             .any(|(_, decision)| decision_refutable(decision)),
@@ -178,7 +212,7 @@ pub(crate) fn initializer_pattern(body: &crate::TypedBody, id: crate::CoreId, si
         CoreKind::Literal(value) => PatternDecision::Literal(value.clone()),
         CoreKind::Tuple(values) if values.is_empty() => PatternDecision::Any,
         CoreKind::Tuple(values) => PatternDecision::Tuple(values.iter().copied().map(child).collect::<Option<_>>()?),
-        CoreKind::Array(values) => PatternDecision::Array(values.iter().copied().map(child).collect::<Option<_>>()?),
+        CoreKind::Array(values) => PatternDecision::Array { elements: values.iter().copied().map(child).collect::<Option<_>>()?, rest: None },
         CoreKind::Record { definition, fields } => PatternDecision::Record {
             definition: *definition,
             fields: fields.iter().copied().enumerate().map(|(index, id)| child(id).map(|pattern| (index as u32, pattern))).collect::<Option<_>>()?,
@@ -205,6 +239,8 @@ fn pattern_value_type_matches(pattern: &Type, subject: &Type, substitutions: &mu
         }),
         (Type::Tuple(a), Type::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a,b)| pattern_value_type_matches(a,b,substitutions)),
         (Type::Array(a), Type::Array(b)) => pattern_value_type_matches(a,b,substitutions),
+        (Type::FixedArray { element: a, length: an }, Type::FixedArray { element: b, length: bn }) =>
+            an == bn && pattern_value_type_matches(a,b,substitutions),
         _ => pattern == subject,
     }
 }
@@ -215,6 +251,7 @@ struct Elaborator<'a> {
     signatures: &'a ElaboratedInterface,
     module: &'a ModuleKey,
     scope: &'a PatternGenericScope,
+    inference: Option<&'a mut crate::InferContext>,
     bindings: Vec<PatternBinding>,
     binding_names: std::collections::BTreeSet<String>,
     discarded: Vec<Type>,
@@ -225,6 +262,7 @@ struct Elaborator<'a> {
 
 impl Elaborator<'_> {
     fn pattern(&mut self, id: PatternId, subject: Type) -> PatternDecision {
+        let subject = self.inference.as_ref().map_or(subject.clone(), |inference| inference.resolve_type_structure(subject));
         let pattern = self.body.pattern(id).clone();
         match pattern.kind {
             PatternKind::Wildcard => {
@@ -235,9 +273,9 @@ impl Elaborator<'_> {
                 if let ResolutionState::Resolved(definition) = self.index.resolve_path(
                     DefinitionNamespace::Value, self.module, &[name.clone()],
                 ) {
-                    if let Some((ty, decision)) = self.signatures.pattern_values.get(&definition) {
-                        if pattern_value_type_matches(ty, &subject, &mut Default::default()) {
-                            return decision.clone();
+                    if let Some((ty, decision)) = self.signatures.pattern_values.get(&definition).cloned() {
+                        if self.constant_pattern_matches(definition, &ty, &subject) {
+                            return decision;
                         }
                         self.error(pattern.span, "G4201", "constant pattern does not match the subject type");
                         return PatternDecision::Error;
@@ -256,7 +294,9 @@ impl Elaborator<'_> {
                 self.bindings.push(PatternBinding {
                     key,
                     name,
-                    mode: binding_mode(&subject),
+                    mode: if self.inference.as_mut().is_some_and(|inference| inference.has_numeric_constraint(subject.clone())) {
+                        BindingMode::Copy
+                    } else { binding_mode(&subject) },
                     ty: subject,
                     span: pattern.span,
                 });
@@ -272,10 +312,24 @@ impl Elaborator<'_> {
                 // The decision retains the source spelling and is lowered
                 // against `subject`, so no implicit runtime conversion is
                 // introduced here.
-                let matches_subject = literal_ty == subject
+                let inferred_numeric = literal_is_numeric(&literal)
+                    && matches!(subject, Type::Infer(_))
+                    && self.inference.as_mut().is_some_and(|inference| inference.constrain_numeric(
+                        subject.clone(), literal_ty == Type::Scalar(ScalarType::F64),
+                    ).is_ok());
+                let matches_subject = inferred_numeric || literal_ty == subject
                     || (literal_is_numeric(&literal)
                         && matches!(&subject, Type::Scalar(scalar) if scalar_is_numeric(*scalar)));
-                if !matches_subject {
+                let fits_width = match &subject {
+                    Type::Scalar(scalar) if crate::ConstKind::from_integer_scalar(*scalar).is_some() => {
+                        let (negative, token) = literal.strip_prefix('-').map_or((false, literal.as_str()), |token| (true, token));
+                        crate::IntegerConst::from_literal(*scalar, token, negative, 64).is_ok()
+                    }
+                    Type::Scalar(ScalarType::F32) => literal.replace('_', "").parse::<f32>().is_ok_and(f32::is_finite),
+                    Type::Scalar(ScalarType::F64) => literal.replace('_', "").parse::<f64>().is_ok_and(f64::is_finite),
+                    _ => true,
+                };
+                if !matches_subject || !fits_width {
                     self.error(
                         pattern.span,
                         "G4201",
@@ -313,8 +367,8 @@ impl Elaborator<'_> {
                         .collect(),
                 )
             }
-            PatternKind::Array(values) => {
-                let Type::Array(element) = subject else {
+            PatternKind::Array { elements: values, rest } => {
+                let Some(element) = subject.array_element() else {
                     self.error(
                         pattern.span,
                         "G4215",
@@ -322,12 +376,29 @@ impl Elaborator<'_> {
                     );
                     return PatternDecision::Error;
                 };
-                PatternDecision::Array(
-                    values
-                        .into_iter()
-                        .map(|value| self.pattern(value, (*element).clone()))
-                        .collect(),
-                )
+                let element = element.clone();
+                let rest = if let Some(prefix) = rest {
+                    let Some(length) = subject.fixed_array_length().and_then(|n| u32::try_from(n).ok()) else {
+                        self.error(pattern.span, "G4215", "array remainder requires a fixed length representable by projection indices");
+                        return PatternDecision::Error;
+                    };
+                    let Some(omitted) = length.checked_sub(values.len() as u32) else {
+                        self.error(pattern.span, "G4215", "array pattern has more explicit elements than its subject");
+                        return PatternDecision::Error;
+                    };
+                    if omitted != 0 { self.discarded.push(element.clone()); }
+                    Some(ArrayPatternRest { prefix, omitted })
+                } else {
+                    if !subject.array_accepts_count(values.len()) {
+                        self.error(pattern.span, "G4215", "fixed array pattern length differs from its subject");
+                        return PatternDecision::Error;
+                    }
+                    None
+                };
+                PatternDecision::Array {
+                    elements: values.into_iter().map(|value| self.pattern(value, element.clone())).collect(),
+                    rest,
+                }
             }
             PatternKind::Record {
                 path,
@@ -341,8 +412,8 @@ impl Elaborator<'_> {
             } => {
                 if arguments.is_empty() && fields.is_empty()
                     && let ResolutionState::Resolved(definition) = self.index.resolve_path(DefinitionNamespace::Value, self.module, &path)
-                    && let Some((ty, decision)) = self.signatures.pattern_values.get(&definition) {
-                    if pattern_value_type_matches(ty, &subject, &mut Default::default()) { return decision.clone(); }
+                    && let Some((ty, decision)) = self.signatures.pattern_values.get(&definition).cloned() {
+                    if self.constant_pattern_matches(definition, &ty, &subject) { return decision; }
                     self.error(pattern.span, "G4201", "constant pattern does not match the subject type");
                     return PatternDecision::Error;
                 }
@@ -410,6 +481,12 @@ impl Elaborator<'_> {
             );
             return PatternDecision::Error;
         };
+        if matches!(self.signatures.definitions.get(&definition), Some(crate::ElaboratedHeader::Nominal {
+            layout: crate::ElaboratedNominalLayout::TupleStruct(_), ..
+        })) {
+            self.error(span, "G4420", "tuple struct patterns require parentheses");
+            return PatternDecision::Error;
+        }
         self.record_fields(span, definition, fields, layout, None)
     }
 
@@ -427,12 +504,13 @@ impl Elaborator<'_> {
         if layout.iter().any(|field| {
             field
                 .private_authority
-                .is_some_and(|authority| authority != span.file)
+                .as_ref()
+                .is_some_and(|authority| !authority.allows(self.module))
         }) {
             self.error(
                 span,
                 "G4218",
-                "record pattern deconstructs a private field outside its declaring source entry",
+                "record pattern deconstructs a private field outside its declaring module",
             );
             return PatternDecision::Error;
         }
@@ -475,6 +553,23 @@ impl Elaborator<'_> {
         }
     }
 
+    fn constant_pattern_matches(&mut self, definition: DefKey, ty: &Type, subject: &Type) -> bool {
+        let Some(inference) = self.inference.as_mut() else {
+            return pattern_value_type_matches(ty, subject, &mut Default::default());
+        };
+        let arguments = match self.signatures.definitions.get(&definition) {
+            Some(crate::ElaboratedHeader::ValueInitializer { generic_kinds, .. }) => generic_kinds.iter().map(|kind| match kind {
+                GenericKind::Type => GenericArgument::Type(inference.fresh()),
+                GenericKind::Lifetime => GenericArgument::Lifetime(inference.fresh_lifetime()),
+                GenericKind::EffectRow => GenericArgument::EffectRow(inference.fresh_effects()),
+                GenericKind::Const(kind) => inference.fresh_const(*kind),
+            }).collect::<Vec<_>>(),
+            _ => vec![],
+        };
+        let ty = self.signatures.instantiate_value_initializer_generic(definition, &arguments).unwrap_or_else(|_| ty.clone());
+        inference.unify(ty, subject.clone()).is_ok()
+    }
+
     fn enum_tuple(
         &mut self,
         span: Span,
@@ -483,6 +578,29 @@ impl Elaborator<'_> {
         fields: Vec<PatternId>,
         subject: Type,
     ) -> PatternDecision {
+        if let Some(pattern_type) = self.tuple_struct_pattern_type(span, &path, &source_arguments) {
+            let Some((actual, arguments)) = nominal_subject(&subject) else {
+                self.error(span, "G4421", "tuple struct pattern requires a nominal subject");
+                return PatternDecision::Error;
+            };
+            let (pattern_type, mut inference) = pattern_type;
+            if inference.unify(pattern_type, subject.clone()).is_err() {
+                self.error(span, "G4421", "tuple struct pattern type differs from its subject");
+                return PatternDecision::Error;
+            }
+            if let Some(body_inference) = self.inference.as_mut() { **body_inference = inference; }
+            let definition = actual;
+            let Ok(layout) = self.signatures.instantiate_struct_fields_generic(definition, &arguments) else {
+                self.error(span, "G4421", "tuple struct pattern has no matching layout");
+                return PatternDecision::Error;
+            };
+            if fields.len() != layout.len() {
+                self.error(span, "G4422", "tuple struct pattern field count does not match its declaration");
+                return PatternDecision::Error;
+            }
+            let fields = fields.into_iter().enumerate().map(|(index, pattern)| (index.to_string(), pattern)).collect();
+            return self.record_fields(span, definition, fields, layout, None);
+        }
         let Some((variant, enum_path)) = path.split_last() else {
             self.error(span, "G4210", "enum pattern has no variant name");
             return PatternDecision::Error;
@@ -534,7 +652,8 @@ impl Elaborator<'_> {
     /// interval explicitly permits zero uses; an unknown generic interval is
     /// not proof and must remain source-visible rather than being erased.
     fn discard_omitted_tuple_payload(&mut self, span: Span, ty: Type) {
-        let affine_erasure_allowed = self
+        let ty = self.inference.as_ref().map_or(ty.clone(), |inference| inference.resolve_type_structure(ty));
+        let affine_erasure_allowed = self.inference.as_ref().is_some_and(|inference| inference.has_numeric_constraint(ty.clone())) || self
             .signatures
             .principal_use_interval(&ty)
             .is_some_and(|quantity| quantity.contains(crate::Quantity::AFFINE));
@@ -556,6 +675,38 @@ impl Elaborator<'_> {
             ResolutionState::Resolved(definition) => Some(definition),
             _ => None,
         }
+    }
+
+    /// Infer aliases against the matched nominal, not by copying the
+    /// subject's slots: aliases can reorder, fix, or erase their parameters.
+    fn tuple_struct_pattern_type(&mut self, span: Span, path: &[String], source: &[crate::HeaderGenericArgument]) -> Option<(Type, crate::types::InferContext)> {
+        let definition = self.resolve_type(path)?;
+        if !matches!(self.signatures.definitions.get(&definition), Some(
+            crate::ElaboratedHeader::Alias { .. } | crate::ElaboratedHeader::Nominal {
+                layout: crate::ElaboratedNominalLayout::TupleStruct(_), ..
+            }
+        )) { return None; }
+        let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]).to_vec();
+        let mut inference = self.inference.as_deref().cloned().unwrap_or_default();
+        let arguments = if source.is_empty() {
+            kinds.into_iter().map(|kind| match kind {
+                GenericKind::Type => GenericArgument::Type(inference.fresh()),
+                GenericKind::Lifetime => GenericArgument::Lifetime(inference.fresh_lifetime()),
+                GenericKind::EffectRow => GenericArgument::EffectRow(inference.fresh_effects()),
+                GenericKind::Const(kind) => inference.fresh_const(kind),
+            }).collect()
+        } else {
+            if source.len() != kinds.len() {
+                self.error(span, "G4215", "nominal pattern has the wrong generic arity");
+                return None;
+            }
+            source.iter().zip(kinds).map(|(argument, kind)| self.generic_argument(span, argument, kind)).collect::<Option<Vec<_>>>()?
+        };
+        let ty = self.signatures.normalize_type_aliases(Type::Nominal { definition, arguments });
+        let Type::Nominal { definition, .. } = &ty else { return None; };
+        matches!(self.signatures.definitions.get(definition), Some(crate::ElaboratedHeader::Nominal {
+            layout: crate::ElaboratedNominalLayout::TupleStruct(_), ..
+        })).then_some((ty, inference))
     }
 
     fn nominal_arguments_match(
@@ -580,7 +731,13 @@ impl Elaborator<'_> {
             };
             supplied.push(argument);
         }
-        if supplied != actual {
+        let matches = if let Some(inference) = self.inference.as_mut() {
+            inference.unify(
+                Type::Nominal { definition, arguments: supplied },
+                Type::Nominal { definition, arguments: actual.to_vec() },
+            ).is_ok()
+        } else { supplied == actual };
+        if !matches {
             self.error(
                 span,
                 "G4216",
@@ -607,8 +764,33 @@ impl Elaborator<'_> {
             (crate::HeaderGenericArgument::EffectRow(value), GenericKind::EffectRow) => self
                 .source_effect_row(span, value)
                 .map(GenericArgument::EffectRow),
-            (crate::HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
-                Some(GenericArgument::ConstU32(*value))
+            (crate::HeaderGenericArgument::Integer(_) | crate::HeaderGenericArgument::StructuralConst(_), GenericKind::Const(kind)) => {
+                let Some(scalar) = kind.integer_scalar() else {
+                    self.error(span, "G4217", "integer pattern argument requires an integer const slot");
+                    return None;
+                };
+                let source = match argument {
+                    crate::HeaderGenericArgument::Integer(token) => crate::HeaderIntegerExpr::Literal(token.clone()),
+                    crate::HeaderGenericArgument::StructuralConst(crate::HeaderStructuralConst::Integer(token)) => crate::HeaderIntegerExpr::Literal(token.clone()),
+                    crate::HeaderGenericArgument::StructuralConst(crate::HeaderStructuralConst::IntegerExpression(value)) => value.clone(),
+                    _ => {
+                        self.error(span, "G4217", "pattern const argument has the wrong structural kind");
+                        return None;
+                    }
+                };
+                let result = source.elaborate(scalar, &mut |name| {
+                    let (index, found) = self.scope.consts.get(name)
+                        .ok_or(crate::types::StructuralConstError::KindMismatch)?;
+                    if *found != kind { return Err(crate::types::StructuralConstError::KindMismatch); }
+                    Ok(crate::IntegerConstExpr::Param { index: *index, scalar })
+                });
+                match result {
+                    Ok(value) => Some(crate::types::integer_const_argument(Ok(value))),
+                    Err(_) => {
+                        self.error(span, "G4217", "invalid or out-of-range structural integer pattern argument");
+                        None
+                    }
+                }
             }
             (
                 crate::HeaderGenericArgument::Quantity(value),
@@ -647,6 +829,12 @@ impl Elaborator<'_> {
 
     fn source_type(&mut self, span: Span, value: &crate::HeaderType) -> Option<Type> {
         match value {
+            crate::HeaderType::FixedArray { element, length } => Some(Type::FixedArray {
+                element: Box::new(self.source_type(span, element)?),
+                length: Box::new(self.generic_argument(span,
+                    &crate::HeaderGenericArgument::StructuralConst((**length).clone()),
+                    GenericKind::Const(crate::ConstKind::Usize))?),
+            }),
             crate::HeaderType::Path(path) => {
                 if path.len() == 1 {
                     if let Some(index) = self.scope.types.get(&path[0]) {
@@ -670,10 +858,10 @@ impl Elaborator<'_> {
                     );
                     return None;
                 }
-                Some(Type::Nominal {
+                Some(self.signatures.normalize_type_aliases(Type::Nominal {
                     definition,
                     arguments: vec![],
-                })
+                }))
             }
             crate::HeaderType::Application(base, arguments) => {
                 let crate::HeaderType::Path(path) = base.as_ref() else {
@@ -695,11 +883,12 @@ impl Elaborator<'_> {
                     .zip(kinds)
                     .map(|(argument, kind)| self.generic_argument(span, argument, *kind))
                     .collect::<Option<Vec<_>>>()?;
-                Some(Type::Nominal {
+                Some(self.signatures.normalize_type_aliases(Type::Nominal {
                     definition,
                     arguments,
-                })
+                }))
             }
+            crate::HeaderType::Tuple(values) if values.is_empty() => Some(Type::Unit),
             crate::HeaderType::Tuple(values) => values
                 .iter()
                 .map(|value| self.source_type(span, value))
@@ -967,7 +1156,7 @@ impl Elaborator<'_> {
                 arguments,
             });
         }
-        if let Some(tail) = &value.tail {
+        for tail in &value.tails {
             let Some(index) = self.scope.effect_rows.get(tail).copied() else {
                 self.error(
                     span,
@@ -976,7 +1165,7 @@ impl Elaborator<'_> {
                 );
                 return None;
             };
-            row.tail = Some(EffectTail::Generic(index));
+            row.tails.insert(EffectTail::Generic(index));
         }
         Some(row.canonicalized())
     }
@@ -1019,7 +1208,8 @@ fn literal_type(value: &str) -> Type {
         Type::Scalar(ScalarType::Text)
     } else if value.starts_with('\'') {
         Type::Scalar(ScalarType::Char)
-    } else if value.contains('.') || value.contains('e') || value.contains('E') {
+    } else if !["0x", "0X", "0b", "0B", "0o", "0O"].iter().any(|prefix| value.trim_start_matches(['+', '-']).starts_with(prefix))
+        && (value.contains('.') || value.contains('e') || value.contains('E')) {
         Type::Scalar(ScalarType::F64)
     } else {
         Type::Scalar(ScalarType::I64)

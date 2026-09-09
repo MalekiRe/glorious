@@ -1,0 +1,112 @@
+# Stage-zero generated LLVM checkpoint
+
+`StageZeroCompiler::compile_llvm(request, LlvmTarget::host())` compiles Glorious
+source through the ordinary checked compiler and lowers its verified concrete
+VM-LIR into LLVM IR. `LlvmIrProgram::compile` invokes an explicitly selected
+trusted LLVM compiler and loads the generated object. This is actual generated
+CPU code, not the Rust compiler's backend selection, a host arithmetic fixture,
+or a call to the VM interpreter from each emitted operation.
+
+This is an executable backend and ordinary mixed-call checkpoint, **not complete
+language-spec §17**. Existing native-import/callback tests
+remain distinct from the generated-code tests in `tests/llvm_native.rs`.
+
+## Admitted execution
+
+The initial selected profile is little-endian, 64-bit x86-64 Linux. Its explicit
+LLVM data layout is checked against the shared native storage layouts. Other
+profiles fail closed. Scalar integer widths include i128/u128; records, tuples,
+fixed arrays, enums, references, raw-pointer *representations*, and zero-sized
+residents use the same concrete offsets, alignment, stride, and enum tag rules
+as shared VM storage. Initialization metadata is separate from resident bytes.
+
+The emitter supports checked/wrapping integer arithmetic and conversions,
+comparisons and shifts, basic f32/f64 operations with canonical NaNs,
+constructors/projections, basic ownership/storage instructions, real reference
+loads and stores, direct calls, branches, final lexical transfers, source
+destructor glue expressed by admitted operations, and direct mandatory tails.
+The exact admissible boundary is whole-graph instruction/layout admission, not
+a promise that every operation on the listed type families is supported.
+
+Ordinary direct calls use a uniform native slot ABI. Mandatory tail transfers
+return to a native dispatcher that recycles two aligned argument packets. They
+do not depend on LLVM tail-call optimization: alternating packets preserve
+parallel argument permutation and the old body activation returns before the
+next body starts. The tests execute 10,000 mutual tail transfers at native O0
+and O2 under a finite call-depth limit.
+
+Every execution has shared instruction, activation-depth, and logical native
+resident-byte budgets. The initial stack-backed implementation also limits an
+individual planned body to 64 KiB, its initialization tree to 16,384 paths, and
+total charged native activation storage to 1 MiB. Charged storage includes body
+residents, initialization metadata, parallel-transfer temporaries, and recycled
+argument packets. These are logical resident limits, not an exact accounting of
+LLVM register spills or a native process-memory sandbox.
+
+## Identity and trust boundary
+
+The immutable IR plan and emitted ABI witness bind the native format generation,
+target triple/data layout, concrete nominal source/layout identities, original
+normalized source-request identity, full verified code identity, runtime
+manifest, exact VM/native body partition, control convention, and allocation-domain convention. Independent
+descriptor mutations are rejected before an entry can execute. No pointer is
+serialized as authority. The loaded library owns all resolved entries and is
+closed before its exclusively owned temporary outputs are removed.
+
+Compiling/loading native code is an unsafe embedding action: the selected LLVM
+compiler, linker, and native runtime libraries must be trusted. Merely naming an
+arbitrary executable `clang` does not authenticate it. Source unsafe contracts
+still require the unsafe runner; native execution does not sandbox unsafe code.
+
+## Generated LLVM and bytecode sharing
+
+`compile_llvm_partitioned(request, target, use_vm)` selects the bytecode bodies
+before native admission. `LlvmIrProgram::with_vm_functions` changes the partition
+of an already admitted plan. Unselected functions execute generated LLVM; this
+is an explicit whole-function selection, never an instruction fallback. Local
+VM-only operations are allowed in selected bodies, but unsupported control is
+rejected even when placed entirely in the VM partition.
+
+Ordinary crossings use the shared native bridge in one allocation domain. Owned
+aggregate parameters enter the generated body by their existing resident pointer,
+without an argument-byte copy. The reverse callback installs the same external
+native storage as the VM parameter home. Owned returns initialize the caller's
+slot. Scalar/reference slot values are copied as ABI values while the actual
+referent backing address is preserved. Source Drop glue remains the exact checked
+source implementation bound by the full code identity; no same-shaped foreign
+destructor is selected by a symbol name.
+
+Source tests run actual LLVM↔VM chains at O0 and O2, including unique-reference
+mutation and return, raw observation of unchanged reference backing addresses,
+owned records/results, fixed-array results and VM patterns, linear zero-sized
+owners, and once-only source Drop on both sides. Instruction/depth/byte limits
+are shared, including still-live native frames during a VM callback. The current
+synchronous mixed runner adds an explicit eight-crossing re-entry limit and
+starts its closed zero-argument graph on a 16 MiB worker stack. It does not
+transfer borrowed host state between threads. Native activation allocation is
+also checked against the requested single-allocation limit.
+
+## Explicit remaining frontier
+
+The generated backend does not yet execute cross-engine mandatory tails,
+first-class/captured/borrowed callable parameters, raw allocation operations,
+outward effects, resumptions, or captured lexical control. Float conversions,
+private dynamic-array/text layouts, and some pattern/projection forms are also
+rejected. Ordinary closed-graph VM calls from native bodies are supported;
+they are not yet a public callable-value ABI. Pointer address/cast/comparison and
+size/alignment intrinsics are supported, but native allocation-domain operations
+still need direct generated-code tests and lowering.
+
+The public runner currently exposes only a zero-argument i64 entry. Expanding the boundary
+requires source-level differential tests and actual generated LLVM↔VM calls for
+callable values, allocation-domain operations, mandatory mixed tails, and
+supported outward control contracts.
+
+Run the targeted regression with:
+
+```sh
+CARGO_BUILD_JOBS=1 bash tooling/cargo-fast.sh test -p grandiose-stage0 --test llvm_native -- --test-threads=1
+```
+
+The test requires an installed compatible `clang` and Linux dynamic loader. It
+compiles each native fixture at both O0 and O2 and compares results with the VM.

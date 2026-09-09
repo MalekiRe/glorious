@@ -131,12 +131,119 @@ pub struct CompilerBuildIdentity {
 /// contexts and audit every suspended suffix reaching a shared clause.
 /// Cache twenty-six checks pattern binder uniqueness after constant resolution.
 /// Cache twenty-seven elaborates empty tuple syntax against the Unit type.
+/// Cache twenty-eight diagnoses concrete floating literal overflow in Core.
+/// Cache twenty-nine includes normal-completion transformations in returning
+/// resumption contracts and keeps their result type distinct from the computation.
+/// Interface five and cache thirty retain module-scoped field authority,
+/// admit `pub` fields, and allow source-owned scalar inherent functions.
+/// Cache thirty-one preserves captured callable resident contracts and checks
+/// immediately applied compact closures using argument-provided type evidence.
+/// Cache thirty-two releases vacated reference-carrier loans after their
+/// provenance has been transferred to a new lexical binding.
+/// It also gives inherent methods their unqualified source implicit label.
+/// Canceled indirect calls account for entry into the callee without assuming
+/// that callable arguments were invoked before cancellation.
+/// Lifted closures preserve their own frozen safety qualifier.
+/// Direct lexical resumption aliases retain their closure-escape restriction.
+/// Cache thirty-three records contextual numeric literal constraints and
+/// resolves existing expected-type substitutions before choosing a literal type.
+/// Cache thirty-four includes the normal-completion path in handler callable
+/// use summaries unless direct operation dispatch has been established.
+/// Cache thirty-five shares structural coverage with that dispatch proof and
+/// fuses proven immediate, continuation-only closure invocations in scope.
+/// Ordinary `resume` bindings take precedence over its migration shorthand.
+/// Cache thirty-six enforces explicit mutable local binding authority for
+/// assignment and unique borrowing, independently of referent mutability.
+/// Cache thirty-seven checks explicit local type annotations and supplies
+/// their types as initializer context without relaxing rigid lifetime bounds.
+/// Cache thirty-eight admits checked numeric tuple value/place projections.
+/// Cache thirty-nine admits irrefutable destructuring lets with a lexical
+/// continuation, checked ownership transfer, and explicit binder mutability.
+/// Cache forty requires zero-use permission for values discarded by a let
+/// pattern and reserves distinct diagnostic codes for binding authority.
+/// Cache forty-one independently rederives tuple value/place projection
+/// arities and selected field types from their structural base layouts.
+/// Cache forty-two admits associated effect-row union terms after `|` and
+/// uses declared associated-item kinds for bare row definitions/defaults.
+/// Cache forty-three and interface six retain independent effect-row union
+/// operands; bytecode sixty-five/verifier twenty-two use their framed set
+/// encoding and reject noncanonical untrusted operand sequences.
+/// Cache forty-four distinguishes an absent module name from an existing
+/// binding hidden behind a private import edge.
+/// Cache forty-five retains mandatory tail sites through cleanup and runtime
+/// lowering. Bytecode sixty-six/verifier twenty-three add checked consuming
+/// activation transfers, independent of optional tail-call optimization.
+/// Cache forty-six/interface seven retain scoped item/import/member visibility
+/// and make record fields private by default under declaring-module authority.
+/// Cache forty-seven/interface eight distinguish nominal tuple-struct layouts
+/// and expose concrete struct constructors in the value namespace.
+/// Cache forty-eight infers omitted nominal row and const arguments from
+/// constructor payloads and contextual results instead of inventing defaults.
+/// Bytecode sixty-seven/verifier twenty-four retain generic argument kinds
+/// in nominal identities and their independently checked layout descriptors.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 4;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
-pub const STAGE0_INTERFACE_GENERATION: u32 = 4;
-pub const STAGE0_CACHE_GENERATION: u32 = 27;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 64;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 21;
+pub const STAGE0_INTERFACE_GENERATION: u32 = 18;
+// Integer const values and expressions retain kind, sign, and full magnitude;
+// source range checks wait for the declared slot kind. Older identities and
+// artifacts cannot be reinterpreted using the new canonical representation.
+// Cache 58 checks scalar integer literals after inference and admits the
+// directly constrained, immediately negated signed-minimum magnitude.
+// Cache 59 substitutes trait-method lifetimes simultaneously and preserves
+// implementation-owned lifetimes in Self and inserted generic arguments.
+// Cache 60 checks tail carriers using post-NLL value provenance, including
+// incoming borrows and assignment joins, instead of rejecting reference types.
+// Cache 61 gives explicitly borrowed temporaries frozen storage/loan identity
+// and propagates referent context through explicit borrow expressions.
+// Cache 62 classifies associated row equalities through the resolved item
+// contract, including inherited items and bare effect-row parameters, and
+// unifies intrinsic Fn row equalities before permission minimization.
+// Cache 63 shifts free bound regions in caller-owned generic arguments and
+// selected Self types when specialization enters a callable binder scope.
+// Cache 64/interface 13 retain lifetime-quantified predicate bundles across
+// frozen callable transformations and native source-contract fingerprints.
+// Cache 65 checks lifetime-universal Fn predicates with fresh rigid regions
+// and transactional leak checks instead of rejecting all quantified bounds.
+// Cache 66 distinguishes omitted call-region inference from rigid enclosing
+// lifetimes in structural callable values and explicit generic applications.
+// Cache 67 infers explicit anonymous lifetime arguments and adds safe,
+// address-only pointer equality/inspection to the finite memory authority.
+// Cache 68 publishes inferred structural expression/place types before use
+// and evaluates computed assignment capabilities in frozen loan analysis.
+// Cache 69/verifier 30 reconstruct typed memory and independent-input helper
+// preservation for mandatory-tail frame transfer.
+// Cache 70/interface 14 preserve and prove implementation associated-item
+// equalities, with body-local equality assumptions isolated from global rules.
+// Cache 71 materializes expected shared reborrows, carries contextual type
+// evidence across call regions, and normalizes impl contracts in lexical scope.
+// Cache 72/verifier 32 prove that disposing a lexical label has no capture
+// destructor, without making the live label a frame-independent tail carrier.
+// Cache 73/interface 15 preserve stored reference paths, expected unique
+// reborrows, and associated-item domains/result/outlives contracts. Verifier
+// 33 audits exact local-label transfers and proves conditional preservation
+// for executable higher-order callbacks independently of their destruction.
+// Cache 74/interface 16 and bytecode 71 preserve fixed-array identity/lengths
+// and sparse array pattern indices. Verifier 34 checks their native layout
+// overflow and the changed schema-115 pattern encoding independently.
+// Cache 75/interface 17 retain lifetime-universal implementation predicates
+// and prove user-trait bounds in isolated, budgeted lexical universes.
+// Cache 76/interface 18 preserve nominal declaration predicates and enforce
+// their instantiated domains; minimum-use checks retain every ordinary owner
+// through scopes, branches and cancellation, with exact lexical evidence.
+// Cache 77 protects conditionally selected destructor shells after freezing
+// and normalizes rigid structural projections under exact lexical evidence.
+// Cache 78 retains an explicit checked availability-release operation rather
+// than erasing its lexical Environment/affine evidence into a discarded value.
+pub const STAGE0_CACHE_GENERATION: u32 = 78;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
+// Verifier 27 shares checked signed/radix pattern parsing and rounds f32
+// patterns directly at f32 precision, without an intermediate f64 parse.
+// Verifier 28 independently reconstructs frame-independence must facts and
+// reference-result/mutation summaries from the executable call graph.
+// Verifier 29 checks the exact safe signatures of address-only pointer leaves.
+// Verifier 31 distinguishes independent reference contents from the local
+// address of their carrier; overwrites invalidate retained referent proofs.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 34;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

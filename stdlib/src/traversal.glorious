@@ -1,0 +1,267 @@
+// Ordered borrowed traversals: each callback receives the original owner loan.
+
+fn traversal_each_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, body: &mut F, index: usize) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => (),
+        false => { body(Slice::get_unchecked(items, index)); tail traversal_each_from(items, body, index + 1) },
+    }
+}
+pub fn each<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, body: &mut F) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_each_from(items, body, 0) }
+
+fn traversal_each_indexed_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, body: &mut F, index: usize) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(usize,&'a T),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(usize,&'a T),After=Env> {
+    handle index == Slice::len(&items) {
+        true => (),
+        false => { body(index, Slice::get_unchecked(items, index)); tail traversal_each_indexed_from(items, body, index + 1) },
+    }
+}
+pub fn each_indexed<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, body: &mut F) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(usize,&'a T),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(usize,&'a T),After=Env> { traversal_each_indexed_from(items, body, 0) }
+
+fn traversal_fold_from<'a,'env,Env,T,A,F,e: EffectRow>(items: Slice<'a,T>, state: A, step: &mut F, index: usize) -> A / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(A,&'a T),Output=A,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(A,&'a T),After=Env> {
+    handle index == Slice::len(&items) {
+        true => state,
+        false => { let next = step(state, Slice::get_unchecked(items, index)); tail traversal_fold_from(items, next, step, index + 1) },
+    }
+}
+pub fn fold_slice<'a,'env,Env,T,A,F,e: EffectRow>(items: Slice<'a,T>, initial: A, step: &mut F) -> A / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(A,&'a T),Output=A,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(A,&'a T),After=Env> { traversal_fold_from(items, initial, step, 0) }
+fn traversal_map_from<'a,'env,Env,T,U,F,e: EffectRow>(items: Slice<'a,T>, map: &mut F, index: usize, output: Vec<U>) -> Vec<U> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => output,
+        false => { let item = map(Slice::get_unchecked(items, index)); let mut output = output; Vec::push(&mut output, item); tail traversal_map_from(items, map, index + 1, output) },
+    }
+}
+pub fn map_collect<'a,'env,Env,T,U,F,e: EffectRow>(items: Slice<'a,T>, map: &mut F) -> Vec<U> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_map_from(items, map, 0, Vec::new()) }
+fn traversal_find_map_from<'a,'env,Env,T,U,F,e: EffectRow>(items: Slice<'a,T>, map: &mut F, index: usize) -> Option<U> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => None,
+        false => handle map(Slice::get_unchecked(items, index)) {
+            Result::Ok(output) => Some(output), Result::Err(_) => tail traversal_find_map_from(items, map, index + 1),
+        },
+    }
+}
+pub fn find_map<'a,'env,Env,T,U,F,e: EffectRow>(items: Slice<'a,T>, map: &mut F) -> Option<U> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_find_map_from(items, map, 0) }
+
+fn traversal_all_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Bool / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => true, false => handle predicate(Slice::get_unchecked(items, index)) {
+            true => tail traversal_all_from(items, predicate, index + 1), false => false,
+        } }
+}
+pub fn all<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Bool / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_all_from(items, predicate, 0) }
+
+fn traversal_try_all_from<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Result<Bool,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => Result::Ok(true), false => handle predicate(Slice::get_unchecked(items, index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(matched) => handle matched { true => tail traversal_try_all_from(items, predicate, index + 1), false => Result::Ok(false) },
+        } }
+}
+pub fn try_all<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Result<Bool,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_try_all_from(items, predicate, 0) }
+
+fn traversal_any_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Bool / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => false, false => handle predicate(Slice::get_unchecked(items, index)) {
+            true => true, false => tail traversal_any_from(items, predicate, index + 1),
+        } }
+}
+pub fn any<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Bool / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_any_from(items, predicate, 0) }
+
+fn traversal_try_any_from<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Result<Bool,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => Result::Ok(false), false => handle predicate(Slice::get_unchecked(items, index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(matched) => handle matched { true => Result::Ok(true), false => tail traversal_try_any_from(items, predicate, index + 1) },
+        } }
+}
+pub fn try_any<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Result<Bool,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_try_any_from(items, predicate, 0) }
+
+fn traversal_position_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Option<usize> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => None, false => handle predicate(Slice::get_unchecked(items, index)) {
+            true => Some(index), false => tail traversal_position_from(items, predicate, index + 1),
+        } }
+}
+pub fn position<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Option<usize> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_position_from(items, predicate, 0) }
+
+fn traversal_try_position_from<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Result<Option<usize>,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => Result::Ok(None), false => handle predicate(Slice::get_unchecked(items, index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(matched) => handle matched { true => Result::Ok(Some(index)), false => tail traversal_try_position_from(items, predicate, index + 1) },
+        } }
+}
+pub fn try_position<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Result<Option<usize>,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_try_position_from(items, predicate, 0) }
+
+fn traversal_find_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Option<&'a T> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => None, false => handle predicate(Slice::get_unchecked(items, index)) {
+            true => Some(Slice::get_unchecked(items, index)), false => tail traversal_find_from(items, predicate, index + 1),
+        } }
+}
+pub fn find<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Option<&'a T> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_find_from(items, predicate, 0) }
+
+fn traversal_try_find_from<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize) -> Result<Option<&'a T>,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) { true => Result::Ok(None), false => handle predicate(Slice::get_unchecked(items, index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(matched) => handle matched { true => Result::Ok(Some(Slice::get_unchecked(items, index))), false => tail traversal_try_find_from(items, predicate, index + 1) },
+        } }
+}
+pub fn try_find<'a,'env,Env,T,E,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Result<Option<&'a T>,E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Result<Bool,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_try_find_from(items, predicate, 0) }
+
+fn traversal_count_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize, count: usize) -> usize / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => count,
+        false => { let next = count + handle predicate(Slice::get_unchecked(items, index)) { true => 1, false => 0 }; tail traversal_count_from(items, predicate, index + 1, next) },
+    }
+}
+pub fn count_where<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> usize / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_count_from(items, predicate, 0, 0) }
+fn traversal_rposition_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, end: usize) -> Option<usize> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle end == 0 {
+        true => None,
+        false => handle predicate(Slice::get_unchecked(items, end - 1)) { true => Some(end - 1), false => tail traversal_rposition_from(items, predicate, end - 1) },
+    }
+}
+pub fn rposition<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Option<usize> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_rposition_from(items, predicate, Slice::len(&items)) }
+pub enum UniqueMatch<T> { Missing, Unique(T), Ambiguous(T,T) }
+fn traversal_unique_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize, first: Option<&'a T>) -> UniqueMatch<&'a T> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => handle first { Result::Ok(item) => UniqueMatch::Unique(item), Result::Err(_) => UniqueMatch::Missing },
+        false => {
+            let item = Slice::get_unchecked(items, index);
+            handle predicate(item) {
+                false => tail traversal_unique_from(items, predicate, index + 1, first),
+                true => handle first {
+                    Result::Ok(previous) => UniqueMatch::Ambiguous(previous, item),
+                    Result::Err(_) => tail traversal_unique_from(items, predicate, index + 1, Some(item)),
+                },
+            }
+        },
+    }
+}
+pub fn find_unique<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> UniqueMatch<&'a T> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_unique_from(items, predicate, 0, None) }
+fn traversal_filter_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize, output: Vec<&'a T>) -> Vec<&'a T> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => output,
+        false => {
+            let item = Slice::get_unchecked(items, index);
+            let mut output = output;
+            handle predicate(item) { true => Vec::push(&mut output, item), false => () };
+            tail traversal_filter_from(items, predicate, index + 1, output)
+        },
+    }
+}
+pub fn filter_refs<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> Vec<&'a T> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_filter_from(items, predicate, 0, Vec::new()) }
+fn traversal_partition_from<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F, index: usize, yes: Vec<&'a T>, no: Vec<&'a T>)
+    -> (Vec<&'a T>,Vec<&'a T>) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle index == Slice::len(&items) {
+        true => (yes, no),
+        false => {
+            let item = Slice::get_unchecked(items, index);
+            let mut yes = yes;
+            let mut no = no;
+            handle predicate(item) { true => Vec::push(&mut yes, item), false => Vec::push(&mut no, item) };
+            tail traversal_partition_from(items, predicate, index + 1, yes, no)
+        },
+    }
+}
+pub fn partition_refs<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, predicate: &mut F) -> (Vec<&'a T>,Vec<&'a T>) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> { traversal_partition_from(items, predicate, 0, Vec::new(), Vec::new()) }

@@ -1,5 +1,54 @@
 # Stage0 authoring performance
 
+## September 8 opt-in Rust edit profile
+
+Use `bash tooling/cargo-fast.sh test -p grandiose-stage0 --test service FILTER`
+for focused iterations. The single selected default is the installed
+nightly LLVM backend plus mold, optimization level 1, no debug information,
+incremental compilation and two build jobs. Assertions and overflow checks stay
+enabled; the existing time and RAM guards still apply. Ordinary Cargo, CI and
+global toolchain settings are unchanged. Build caches are isolated per backend,
+linker and optimization level.
+
+This replaces the earlier Cranelift O0 default. The same representative test
+(30 Glorious compilations and decoded executions, excluding the Rust build)
+took 65.74 seconds at Cranelift O0, median 60.30 at Cranelift O1, median 63.18
+at Cranelift O2, and median 11.84 at LLVM O1. A real projection-validation edit
+rebuilt the Rust service target in 6.55 / 8.61 / 8.76 / approximately 62 seconds,
+respectively. These are local observations on a shared workstation, not a
+full-suite timing comparison. LLVM O1 is selected for its much better larger
+test-run throughput and functioning panic recovery. Cranelift O1 and O2 both
+still fail the existing panic-publication recovery regression. Backend/profile
+measurements are finished; no separate everyday versus validation profile is
+being adopted.
+
+Explicit backend/optimization overrides remain available for diagnostics;
+`G1_RUST_LINKER=wild` selects Wild. Use the LLVM O1 default for normal work.
+`CARGO_BUILD_JOBS`, `CARGO_TARGET_DIR`, and `G1_RUST_TOOLCHAIN` can be overridden.
+The wrapper rejects conflicting RUSTFLAGS. See its `--help` output.
+
+Same-target cold builds (`--test service --no-run`, nightly, opt 0, debug 0,
+incremental, two jobs) took 19.54 seconds with Cranelift+mold, 21.06 with
+LLVM+mold, and 19.09 with Cranelift+Wild. These are single local runs, not a
+distribution. ELF metadata confirmed the requested backend/linkers. Warm
+no-op invocations took 0.01–0.02 seconds; those are **not edit rebuilds**.
+One later actual Cranelift rebuild after compiler changes took 7.51 seconds.
+
+Six inference service tests passed with both backends, taking 16.41 seconds
+under Cranelift and 14.47 under unoptimized LLVM. Optimized LLVM had previously
+run this selection in roughly three seconds. Fast code generation does not
+imply fast execution of a large compiler/VM test suite.
+
+The installed Cranelift backend **fails**
+`panic_before_publication_clears_running_marker_for_later_recovery`; LLVM passes
+that test and the hostile-decoder test. Keep LLVM validation for unwind paths
+and final acceptance. This is a recorded failure, not an ignored assertion or
+a reason to use `panic=abort`. Upstream documents
+[experimental unwinding support](https://github.com/rust-lang/rustc_codegen_cranelift).
+
+The separate [Subsecond probe](../tooling/subsecond-probe/README.md) remains an
+unfinished experiment, not an adopted compiler hotpatch workflow.
+
 ## September 6 test-throughput inspection
 
 The A36 workspace run excluding GSC-2 passes 2,652 tests (two existing ignored

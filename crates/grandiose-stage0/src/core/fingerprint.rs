@@ -90,8 +90,13 @@ impl CoreFingerprintEncoder<'_> {
                     self.pattern(value);
                 }
             }
-            CorePattern::Array { element, elements } => {
+            CorePattern::Array { element, elements, rest } => {
                 self.bytes(b"array");
+                self.bytes(&[u8::from(rest.is_some())]);
+                if let Some(rest) = rest {
+                    self.bytes(&rest.prefix.to_le_bytes());
+                    self.bytes(&rest.omitted.to_le_bytes());
+                }
                 self.ty(element);
                 self.bytes(&(elements.len() as u64).to_le_bytes());
                 for element in elements {
@@ -243,6 +248,10 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(b"literal");
                 self.bytes(value.as_bytes());
             }
+            CoreKind::ConstValue(value) => {
+                self.bytes(b"const-value");
+                self.bytes(&crate::types::canonical_generic_arguments_encoding(std::slice::from_ref(value)));
+            }
             CoreKind::Local(name) => {
                 self.bytes(b"local");
                 self.bytes(name.as_bytes());
@@ -382,8 +391,10 @@ impl CoreFingerprintEncoder<'_> {
                 reference_contract,
                 reference_origin,
                 reference_shape,
+                mandatory_tail,
             } => {
                 self.bytes(b"call");
+                self.debug(mandatory_tail);
                 self.id(*callee);
                 self.ids(arguments);
                 self.debug(reference_contract);
@@ -505,6 +516,10 @@ impl CoreFingerprintEncoder<'_> {
             }
             CoreKind::Move(value) => {
                 self.bytes(b"move");
+                self.id(*value);
+            }
+            CoreKind::ReleaseAvailable(value) => {
+                self.bytes(b"release-available");
                 self.id(*value);
             }
             CoreKind::Error => self.bytes(b"error"),

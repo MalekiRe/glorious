@@ -93,6 +93,11 @@ pub(super) fn expand(
     pending: Vec<PendingDestroy>,
     plans: &BTreeMap<DefKey, Plan>,
 ) -> Result<(), String> {
+    // Mandatory transfers need an explicit consuming discharge in the frozen
+    // frame proof. Inline structural cleanup leaves an empty aggregate shell;
+    // retain the selected glue call until that proof tracks per-field vacancy.
+    let mandatory_transfer = function.blocks.iter().any(|block|
+        matches!(block.terminator, RuntimeTerminator::TailCall { .. }));
     let original_blocks = function.blocks.len();
     let mut sites = BTreeMap::<(usize, usize), Vec<PendingDestroy>>::new();
     for site in pending {
@@ -175,7 +180,7 @@ pub(super) fn expand(
                 builder.branch(condition, selected, next);
                 builder.current = selected;
                 let owned = builder.local(plan.ty.clone());
-                if !indirect && plan.hook.is_none() {
+                if !mandatory_transfer && !indirect && plan.hook.is_none() {
                     builder.structural_fields(local, &plan.shape)?;
                     if !matches!(plan.shape, Shape::Callable) {
                         builder.emit(RuntimeOperation::Move {

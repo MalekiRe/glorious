@@ -87,6 +87,7 @@ pub enum OwnershipAggregate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OwnershipComputation {
     Literal(String),
+    ConstValue(GenericArgument),
     Unit,
     Function {
         definition: DefKey,
@@ -233,6 +234,16 @@ impl OwnershipMir {
     /// instances or emits runtime instructions.
     pub fn from_typed(definition: DefKey, body: &crate::TypedBody, flow: &PlaceFlow,
         signatures: Option<&ElaboratedInterface>) -> Result<(Self, Type), OwnershipError> {
+        let solver = signatures.map(crate::TraitSolver::new);
+        Self::from_typed_with_frozen_solver(definition, body, flow, signatures, solver.as_ref())
+    }
+
+    /// The supplied snapshot belongs to the same immutable interface. Never
+    /// share mutable query tables or consume the producer's work budget.
+    pub(crate) fn from_typed_with_frozen_solver(
+        definition: DefKey, body: &crate::TypedBody, flow: &PlaceFlow,
+        signatures: Option<&ElaboratedInterface>, solver: Option<&crate::TraitSolver>,
+    ) -> Result<(Self, Type), OwnershipError> {
         if body.recovered || !body.diagnostics.is_empty() || !body.validate().is_empty() {
             return Err(OwnershipError("cannot lower invalid Typed Core".into()));
         }
@@ -243,10 +254,13 @@ impl OwnershipMir {
             let crate::CoreKind::Closure { environment, parameters, body: root, .. } = &expression.kind else { return None; };
             let abi = environment.captures.iter().map(|capture| (capture.name.clone(), capture.ty.clone())).chain(parameters.iter().cloned()).collect::<Vec<_>>();
             let flow = signatures.map_or_else(|| PlaceFlow::analyze_lifted(body, *root, &abi),
-                |signatures| PlaceFlow::analyze_lifted_with_interface_and_bounds(body, *root, &abi, signatures, &flow.lexical_bounds));
+                |signatures| match solver {
+                    Some(solver) => PlaceFlow::analyze_lifted_with_frozen_solver(body, *root, &abi, signatures, &flow.lexical_bounds, &flow.lexical_effect_bindings, solver, flow.abort_primitive),
+                    None => PlaceFlow::analyze_lifted_with_interface_and_bounds(body, *root, &abi, signatures, &flow.lexical_bounds),
+                });
             Some((crate::mir::lifted_callable_definition(environment.brand), flow))
         }).collect();
-        let ownership = Self::lower_with_closure_flows(control, flow, &closure_flows, signatures)?;
+        let ownership = Self::lower_body(control, flow, &closure_flows, signatures, solver, &[])?;
         let result = if body.expression(body.root).ty == Type::Never {
             signatures.and_then(|signatures| signatures.definitions.get(&definition)).and_then(|header| match header {
                 crate::ElaboratedHeader::Callable(signature) | crate::ElaboratedHeader::ValueAlias { signature, .. } => Some(signature.result.clone()),
@@ -298,7 +312,8 @@ impl OwnershipMir {
         closure_flows: &BTreeMap<DefKey, PlaceFlow>,
         signatures: Option<&ElaboratedInterface>,
     ) -> Result<Self, OwnershipError> {
-        Self::lower_body(control, flow, closure_flows, signatures, &[])
+        let solver = signatures.map(crate::TraitSolver::new);
+        Self::lower_body(control, flow, closure_flows, signatures, solver.as_ref(), &[])
     }
 
     fn lower_body(
@@ -306,6 +321,7 @@ impl OwnershipMir {
         flow: &PlaceFlow,
         closure_flows: &BTreeMap<DefKey, PlaceFlow>,
         signatures: Option<&ElaboratedInterface>,
+        solver: Option<&crate::TraitSolver>,
         captures: &[crate::CaptureMode],
     ) -> Result<Self, OwnershipError> {
         control
@@ -316,7 +332,6 @@ impl OwnershipMir {
                 "ownership input has diagnosed obligations".into(),
             ));
         }
-        let solver = signatures.map(crate::TraitSolver::new);
         let mut owners = control
             .values()
             .iter()
@@ -343,7 +358,7 @@ impl OwnershipMir {
                         Some(Quantity::UNRESTRICTED)
                     }
                     ty => signatures
-                        .zip(solver.as_ref())
+                        .zip(solver)
                         .and_then(|(signatures, solver)| {
                             signatures
                                 .principal_use_interval_with_solver(ty, solver)
@@ -806,6 +821,7 @@ impl OwnershipMir {
                     },
                     operation => OwnershipOperation::Compute(match operation {
                         ControlOperation::Literal(text) => OwnershipComputation::Literal(text),
+                        ControlOperation::ConstValue(value) => OwnershipComputation::ConstValue(value),
                         ControlOperation::Unit => OwnershipComputation::Unit,
                         ControlOperation::Function {
                             definition,
@@ -940,6 +956,7 @@ impl OwnershipMir {
                         child_flow,
                         closure_flows,
                         signatures,
+                        solver,
                         &captures,
                     )?),
                 })

@@ -5,11 +5,13 @@ use std::{
 };
 
 use grandiose_stage0::{
-    BodySyntax, CaptureMode, CompilationMode, CompilationRequest, CompileDiagnostic,
-    CompilerBuildIdentity, CoreId, CoreKind, DeclarationScan, DefinitionIndex, DiagnosticClass,
-    Digest, ElaboratedInterface, FileKey, InterfaceSet, LabelBrand, LexedFile, LogicalPath,
+    CaptureMode, CompilationMode, CompilationRequest, CompileDiagnostic,
+    CompilerBuildIdentity, CoreId, CoreKind, DeclarationScan, DiagnosticClass,
+    Digest, FileKey, LabelBrand, LexedFile, LogicalPath,
     PackageKey, SourceInput, StageZeroCompiler, TypedBody,
 };
+
+mod support;
 
 // This inventory indexes existing regressions from the earlier core draft.
 // It is not the acceptance inventory for the consolidated specifications.
@@ -46,32 +48,7 @@ fn request(source: &str) -> CompilationRequest {
 }
 
 fn core_for(package_name: &str, source: &str) -> TypedBody {
-    let package = PackageKey(package_name.into());
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(
-        &lexed,
-        source,
-        definition.body.expect("main must have a body"),
-    );
-    TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    )
+    support::frontend(package_name, source, "main").1
 }
 
 fn rejection(source: &str) -> Vec<CompileDiagnostic> {

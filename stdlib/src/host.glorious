@@ -1,0 +1,88 @@
+// These are direct typed request contracts, not installed capabilities. Only an
+// admitted embedding/handler may supply them. Recoverable host failures resume
+// once with structured errors; terminal runtime contract faults are separate.
+pub mod host {
+    use crate::*;
+    use crate::path::{OsString,OsStr,Path,PathBuf};
+    pub effect ProcessArgs { args() -> Result<Vec<OsString>,IoError>; }
+    pub effect FileRead { read_file<'a>(path: Path<'a>) -> Result<Vec<u8>,IoError>; }
+    pub effect FileWrite {
+        write_file<'a,'b>(path: Path<'a>, bytes: Slice<'b,u8>) -> Result<(),IoError>;
+        write_file_atomic<'a,'b>(path: Path<'a>, bytes: Slice<'b,u8>) -> Result<(),IoError>;
+    }
+    pub effect Diagnostic { write_diagnostic<'a>(text: Str<'a>) -> Result<(),IoError>; }
+    pub effect Console {
+        read_stdin<'a>(buffer: SliceMut<'a,u8>) -> Result<usize,IoError>;
+        write_stdout<'a>(buffer: Slice<'a,u8>) -> Result<usize,IoError>;
+        write_stderr<'a>(buffer: Slice<'a,u8>) -> Result<usize,IoError>;
+        flush_stdout() -> Result<(),IoError>;
+        flush_stderr() -> Result<(),IoError>;
+    }
+    pub effect ProcessEnvironment {
+        env<'a>(name: OsStr<'a>) -> Result<Option<OsString>,IoError>;
+        current_dir() -> Result<PathBuf,IoError>;
+    }
+}
+pub mod fs {
+    use crate::*;
+    use crate::path::{OsString,Path,PathBuf};
+    use crate::io::{Read,Write,Seek,SeekFrom};
+    // Provider-scoped handle storage. There is no safe source constructor, raw
+    // integer conversion, ambient opener, or effectful destructor for File.
+    pub struct File { private provider: u64, private handle: u64 }
+    pub impl Use<[1,1]> for File {}
+    pub struct DirectoryEntry { pub name: OsString, pub kind: FileKind }
+    pub enum FileKind { File, Directory, Symlink, Other }
+    pub struct Metadata { pub kind: FileKind, pub length: u64 }
+    pub enum OpenMode { Read, WriteTruncate, ReadWrite, Append, CreateNew }
+    pub enum CloseOutcome<R,E> { Closed, ClosedWithError(E), StillOpen { resource: R, error: E } }
+    pub effect FileSystem {
+        open<'a>(path: Path<'a>, mode: OpenMode) -> Result<File,IoError>;
+        metadata<'a>(path: Path<'a>) -> Result<Metadata,IoError>;
+        read_dir<'a>(path: Path<'a>) -> Result<Vec<DirectoryEntry>,IoError>;
+        canonicalize<'a>(path: Path<'a>) -> Result<PathBuf,IoError>;
+        create_dir<'a>(path: Path<'a>) -> Result<(),IoError>;
+        remove_file<'a>(path: Path<'a>) -> Result<(),IoError>;
+        remove_dir<'a>(path: Path<'a>) -> Result<(),IoError>;
+        rename<'a,'b>(from: Path<'a>, to: Path<'b>) -> Result<(),IoError>;
+    }
+    pub effect FileHandle {
+        read<'a,'b>(file: &'a mut File, buffer: SliceMut<'b,u8>) -> Result<usize,IoError>;
+        write<'a,'b>(file: &'a mut File, buffer: Slice<'b,u8>) -> Result<usize,IoError>;
+        seek<'a>(file: &'a mut File, from: SeekFrom) -> Result<u64,IoError>;
+        flush<'a>(file: &'a mut File) -> Result<(),IoError>;
+        sync<'a>(file: &'a mut File) -> Result<(),IoError>;
+        close(file: File) -> CloseOutcome<File,IoError>;
+    }
+    pub impl Read for File {
+        type Effects = {FileHandle};
+        fn read(value: &mut Self, buffer: SliceMut<u8>) -> Result<usize,IoError> / {FileHandle} {
+            FileHandle::read(value, buffer)
+        }
+    }
+    pub impl Write for File {
+        type Effects = {FileHandle};
+        fn write(value: &mut Self, buffer: Slice<u8>) -> Result<usize,IoError> / {FileHandle} {
+            FileHandle::write(value, buffer)
+        }
+        fn flush(value: &mut Self) -> Result<(),IoError> / {FileHandle} { FileHandle::flush(value) }
+    }
+    pub impl Seek for File {
+        type Effects = {FileHandle};
+        fn seek(value: &mut Self, from: SeekFrom) -> Result<u64,IoError> / {FileHandle} { FileHandle::seek(value, from) }
+    }
+}
+pub mod process {
+    use crate::*;
+    use crate::path::OsString;
+    pub struct Command { pub program: OsString, pub arguments: Vec<OsString> }
+    pub struct Child { private provider: u64, private handle: u64 }
+    pub impl Use<[1,1]> for Child {}
+    pub enum ExitStatus { Exited(i32), Signaled(i32) }
+    pub enum WaitFailure { StillRunning { child: Child, error: IoError }, ReapedWithError(IoError) }
+    pub effect ProcessControl {
+        spawn(command: Command) -> Result<Child,Rejected<Command,IoError>>;
+        wait(child: Child) -> Result<ExitStatus,WaitFailure>;
+        terminate<'a>(child: &'a mut Child) -> Result<(),IoError>;
+    }
+}

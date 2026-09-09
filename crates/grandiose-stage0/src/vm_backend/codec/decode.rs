@@ -1,5 +1,130 @@
 //! Bounded parsing of untrusted Stage 0 artifact payloads.
 
+#[cfg(test)]
+mod const_kind_tests {
+    use super::*;
+    use crate::ConstKind;
+
+    #[test]
+    fn closed_integer_values_round_trip_all_kinds_and_boundaries() {
+        use crate::types::integer_const::IntegerConst;
+        for kind in (0..=12).filter_map(ConstKind::from_tag) {
+            let Some(scalar) = kind.integer_scalar() else { continue };
+            for (negative, magnitude) in [(false, 0), (false, 42), (false, u128::MAX), (true, 1u128 << 127)] {
+                let Ok(value) = IntegerConst::new(scalar, negative, magnitude, 64) else { continue };
+                let argument = VmGenericArgument::ConstInteger(value);
+                let mut bytes = vec![];
+                super::super::encode_vm_generic_argument(&argument, &mut bytes);
+                assert_eq!(Decoder::new(&bytes).vm_generic_argument_at_depth(0).unwrap(), argument);
+                for length in 0..bytes.len() {
+                    assert!(Decoder::new(&bytes[..length]).vm_generic_argument_at_depth(0).is_err());
+                }
+                let ty = VmType::ConstInteger(value);
+                bytes.clear();
+                super::super::encode_type(&ty, &mut bytes);
+                assert_eq!(Decoder::new(&bytes).vm_type().unwrap(), ty);
+            }
+        }
+    }
+
+    #[test]
+    fn untrusted_integer_values_reject_invalid_kinds_signs_and_ranges() {
+        use crate::types::integer_const::IntegerConst;
+        use crate::ScalarType;
+        let value = IntegerConst::new(ScalarType::U8, false, 0, 64).unwrap();
+        let valid = value.canonical_bytes();
+        for tag in 0..=u8::MAX {
+            if ConstKind::from_tag(tag).and_then(ConstKind::integer_scalar).is_some() { continue }
+            let mut bytes = valid;
+            bytes[0] = tag;
+            assert!(Decoder::new(&bytes).integer_const().is_err());
+        }
+        for sign in 1..=u8::MAX {
+            let mut bytes = valid;
+            bytes[1] = sign;
+            assert!(Decoder::new(&bytes).integer_const().is_err());
+        }
+        let mut bytes = valid;
+        bytes[3] = 1; // u8 cannot represent 256.
+        assert!(Decoder::new(&bytes).integer_const().is_err());
+    }
+
+    #[test]
+    fn symbolic_integer_codec_requires_canonical_kinded_expressions() {
+        use crate::types::integer_const::{IntegerConst, IntegerConstOp as Op};
+        for kind in (0..=12).filter_map(ConstKind::from_tag) {
+            let Some(scalar) = kind.integer_scalar() else { continue };
+            let parameter = IntegerConstExpr::Param { index: 3, scalar };
+            let literal = IntegerConstExpr::Literal(IntegerConst::new(scalar, false, 1, 64).unwrap());
+            let expression = IntegerConstExpr::binary(Op::Add, Box::new(parameter.clone()), Box::new(literal.clone())).normalized().unwrap();
+            let argument = VmGenericArgument::ConstIntegerExpr(expression);
+            let mut bytes = vec![];
+            super::super::encode_vm_generic_argument(&argument, &mut bytes);
+            assert_eq!(Decoder::new(&bytes).vm_generic_argument_at_depth(0).unwrap(), argument);
+            for length in 0..bytes.len() {
+                assert!(Decoder::new(&bytes[..length]).vm_generic_argument_at_depth(0).is_err());
+            }
+            for expression in [parameter, literal] {
+                bytes.clear();
+                super::super::encode_vm_generic_argument(&VmGenericArgument::ConstIntegerExpr(expression), &mut bytes);
+                assert!(Decoder::new(&bytes).vm_generic_argument_at_depth(0).is_err());
+            }
+        }
+        assert!(Decoder::new(&[255]).canonical_integer_expr(0).is_err());
+        use crate::ScalarType;
+        let parameter = IntegerConstExpr::Param { index: 0, scalar: ScalarType::U8 };
+        let literal = |scalar, magnitude| IntegerConstExpr::Literal(IntegerConst::new(scalar, false, magnitude, 64).unwrap());
+        let sum = IntegerConstExpr::binary(Op::Add, Box::new(parameter.clone()), Box::new(literal(ScalarType::U8, 1))).normalized().unwrap();
+        let IntegerConstExpr::Binary { op, left, right } = sum else { panic!("symbolic sum") };
+        for malformed in [
+            IntegerConstExpr::Binary { op, left: right, right: left },
+            IntegerConstExpr::binary(Op::Add, Box::new(parameter.clone()), Box::new(literal(ScalarType::U16, 1))),
+            IntegerConstExpr::binary(Op::Div, Box::new(parameter), Box::new(literal(ScalarType::U8, 0))),
+            IntegerConstExpr::binary(Op::Add, Box::new(literal(ScalarType::U8, 255)), Box::new(literal(ScalarType::U8, 1))),
+        ] {
+            let mut bytes = vec![];
+            super::super::encode_vm_generic_argument(&VmGenericArgument::ConstIntegerExpr(malformed), &mut bytes);
+            assert!(Decoder::new(&bytes).vm_generic_argument_at_depth(0).is_err());
+        }
+        let mut deep = vec![7; 100];
+        deep.push(255);
+        assert!(matches!(Decoder::new(&deep).canonical_integer_expr(0), Err(VmArtifactError::DecodeLimit { .. })));
+    }
+
+    #[test]
+    fn const_kind_metadata_round_trips_without_erasing_width_or_signedness() {
+        for kind in (0..=12).filter_map(ConstKind::from_tag) {
+            let argument = VmGenericArgument::ConstGeneric { index: 7, kind };
+            let mut bytes = vec![];
+            super::super::encode_vm_generic_argument(&argument, &mut bytes);
+            let mut decoder = Decoder::new(&bytes);
+            assert_eq!(decoder.vm_generic_argument_at_depth(0).unwrap(), argument);
+            assert_eq!(decoder.remaining(), 0);
+
+            let value = VmType::ConstGeneric { index: 7, kind };
+            let mut bytes = vec![];
+            super::super::encode_type(&value, &mut bytes);
+            let mut decoder = Decoder::new(&bytes);
+            assert_eq!(decoder.vm_type().unwrap(), value);
+            assert_eq!(decoder.remaining(), 0);
+        }
+    }
+
+    #[test]
+    fn untrusted_const_kind_metadata_rejects_unknown_tags_and_truncation() {
+        let argument = VmGenericArgument::ConstGeneric { index: 0, kind: ConstKind::Usize };
+        let mut bytes = vec![];
+        super::super::encode_vm_generic_argument(&argument, &mut bytes);
+        for length in 0..bytes.len() {
+            assert!(Decoder::new(&bytes[..length]).vm_generic_argument_at_depth(0).is_err());
+        }
+        for tag in 13..=u8::MAX {
+            *bytes.last_mut().unwrap() = tag;
+            assert!(Decoder::new(&bytes).vm_generic_argument_at_depth(0).is_err());
+        }
+    }
+}
+
 use super::super::{
     VmArtifactError, VmCapture, VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace,
     VmCleanupProof, VmCompare, VmContinuationPolicy, VmEffectInstance, VmEffectRow,
@@ -16,7 +141,7 @@ use crate::{
     identity::{DefKey, Digest},
     mir::{is_canonical_f32_bits, is_canonical_f64_bits},
     runtime_manifest::PrimitiveRole,
-    types::{EffectTail, Lifetime, PointerMutability, Safety, StructuralU32Expr},
+    types::{EffectTail, Lifetime, PointerMutability, Safety, IntegerConstExpr},
 };
 
 pub(super) struct Decoder<'a> {
@@ -81,6 +206,20 @@ impl<'a> Decoder<'a> {
     }
     fn u128(&mut self) -> Result<u128, VmArtifactError> {
         Ok(u128::from_le_bytes(self.bytes(16)?.try_into().unwrap()))
+    }
+    fn integer_const(&mut self) -> Result<crate::types::integer_const::IntegerConst, VmArtifactError> {
+        let kind = decode_const_kind(self.byte()?)?;
+        let scalar = kind.integer_scalar().ok_or(VmArtifactError::MalformedEncoding {
+            message: "non-integer const value kind",
+        })?;
+        let negative = self.boolean()?;
+        let magnitude = self.u128()?;
+        if negative && magnitude == 0 {
+            return Err(VmArtifactError::MalformedEncoding { message: "noncanonical negative zero const value" });
+        }
+        // The Stage 0 VM ABI has 64-bit indexing; this is not host usize.
+        crate::types::integer_const::IntegerConst::new(scalar, negative, magnitude, 64)
+            .map_err(|_| VmArtifactError::MalformedEncoding { message: "integer const value is out of range" })
     }
     fn i8(&mut self) -> Result<i8, VmArtifactError> {
         Ok(i8::from_le_bytes(self.bytes(1)?.try_into().unwrap()))
@@ -226,7 +365,7 @@ impl<'a> Decoder<'a> {
                 let count = self.count("nominal type arguments", MAX_DECODE_REGISTERS)?;
                 let mut arguments = Vec::with_capacity(count);
                 for _ in 0..count {
-                    arguments.push(self.vm_type_at_depth(depth + 1)?);
+                    arguments.push(self.vm_generic_argument_at_depth(depth + 1)?);
                 }
                 Ok(VmType::Nominal {
                     definition,
@@ -235,6 +374,9 @@ impl<'a> Decoder<'a> {
             }
             9 => Ok(VmType::Generic(self.u32()?)),
             10 => Ok(VmType::Array(Box::new(self.vm_type_at_depth(depth + 1)?))),
+            32 => Ok(VmType::FixedArray {
+                element: Box::new(self.vm_type_at_depth(depth + 1)?), length: self.u64()?,
+            }),
             11 => Ok(VmType::Reference {
                 unique: match self.byte()? {
                     0 => false,
@@ -247,9 +389,9 @@ impl<'a> Decoder<'a> {
                 },
                 referent: Box::new(self.vm_type_at_depth(depth + 1)?),
             }),
-            12 => Ok(VmType::ConstU32(self.u32()?)),
-            13 => Ok(VmType::ConstU32Expr(
-                self.vm_structural_u32_expr(depth + 1)?,
+            12 => Ok(VmType::ConstInteger(self.integer_const()?)),
+            13 => Ok(VmType::ConstIntegerExpr(
+                self.canonical_integer_expr(depth + 1)?,
             )),
             14 => {
                 let lower = self.u64()?;
@@ -279,36 +421,33 @@ impl<'a> Decoder<'a> {
             }),
         }
     }
-    fn vm_structural_u32_expr(&mut self, depth: u64) -> Result<StructuralU32Expr, VmArtifactError> {
+    fn vm_structural_integer_expr(&mut self, depth: u64) -> Result<IntegerConstExpr, VmArtifactError> {
+        use crate::types::integer_const::IntegerConstOp as Op;
         if depth > MAX_DECODE_TYPE_DEPTH {
-            return Err(VmArtifactError::DecodeLimit {
-                kind: "structural const nesting",
-                limit: MAX_DECODE_TYPE_DEPTH,
-            });
+            return Err(VmArtifactError::DecodeLimit { kind: "structural const nesting", limit: MAX_DECODE_TYPE_DEPTH });
         }
-        let binary = |decoder: &mut Self,
-                      constructor: fn(
-            Box<StructuralU32Expr>,
-            Box<StructuralU32Expr>,
-        ) -> StructuralU32Expr|
-         -> Result<StructuralU32Expr, VmArtifactError> {
-            Ok(constructor(
-                Box::new(decoder.vm_structural_u32_expr(depth + 1)?),
-                Box::new(decoder.vm_structural_u32_expr(depth + 1)?),
-            ))
-        };
-        match self.byte()? {
-            0 => Ok(StructuralU32Expr::Literal(self.u32()?)),
-            1 => Ok(StructuralU32Expr::Param(self.u32()?)),
-            2 => binary(self, StructuralU32Expr::Add),
-            3 => binary(self, StructuralU32Expr::Sub),
-            4 => binary(self, StructuralU32Expr::Mul),
-            5 => binary(self, StructuralU32Expr::Div),
-            6 => binary(self, StructuralU32Expr::Rem),
-            _ => Err(VmArtifactError::MalformedEncoding {
-                message: "invalid structural u32 expression tag",
-            }),
-        }
+        let tag = self.byte()?;
+        Ok(match tag {
+            0 => IntegerConstExpr::Literal(self.integer_const()?),
+            1 => {
+                let scalar = decode_const_kind(self.byte()?)?.integer_scalar().ok_or(VmArtifactError::MalformedEncoding {
+                    message: "non-integer structural const parameter",
+                })?;
+                IntegerConstExpr::Param { index: self.u32()?, scalar }
+            }
+            2..=6 => IntegerConstExpr::Binary {
+                op: match tag { 2 => Op::Add, 3 => Op::Sub, 4 => Op::Mul, 5 => Op::Div, _ => Op::Rem },
+                left: Box::new(self.vm_structural_integer_expr(depth + 1)?),
+                right: Box::new(self.vm_structural_integer_expr(depth + 1)?),
+            },
+            7 => IntegerConstExpr::Neg(Box::new(self.vm_structural_integer_expr(depth + 1)?)),
+            _ => return Err(VmArtifactError::MalformedEncoding { message: "invalid structural integer expression tag" }),
+        })
+    }
+    fn canonical_integer_expr(&mut self, depth: u64) -> Result<IntegerConstExpr, VmArtifactError> {
+        let value = self.vm_structural_integer_expr(depth)?;
+        super::super::validate_vm_structural_integer_expr(&value)?;
+        Ok(value)
     }
     fn vm_generic_arguments(&mut self) -> Result<Vec<VmGenericArgument>, VmArtifactError> {
         self.vm_generic_arguments_at_depth(0)
@@ -353,7 +492,7 @@ impl<'a> Decoder<'a> {
                     });
                 }
             })),
-            3 => Ok(VmGenericArgument::ConstU32(self.u32()?)),
+            3 => Ok(VmGenericArgument::ConstInteger(self.integer_const()?)),
             4 => {
                 let lower = self.u64()?;
                 let upper = self.quantity_upper()?;
@@ -369,8 +508,8 @@ impl<'a> Decoder<'a> {
                 let kind = decode_const_kind(self.byte()?)?;
                 Ok(VmGenericArgument::ConstGeneric { index, kind })
             }
-            6 => Ok(VmGenericArgument::ConstU32Expr(
-                self.vm_structural_u32_expr(depth + 1)?,
+            6 => Ok(VmGenericArgument::ConstIntegerExpr(
+                self.canonical_integer_expr(depth + 1)?,
             )),
             _ => Err(VmArtifactError::MalformedEncoding {
                 message: "unknown VM effect argument tag",
@@ -409,20 +548,27 @@ impl<'a> Decoder<'a> {
                 item_arguments,
             });
         }
-        let tail = match self.byte()? {
-            0 => Some(EffectTail::Infer(crate::types::EffectVar(self.u32()?))),
-            1 => Some(EffectTail::Generic(self.u32()?)),
-            2 => None,
+        let tail_count = self.count("effect row operands", MAX_DECODE_REGISTERS)?;
+        let mut tails = std::collections::BTreeSet::new();
+        for _ in 0..tail_count {
+            let tail = match self.byte()? {
+            0 => EffectTail::Infer(crate::types::EffectVar(self.u32()?)),
+            1 => EffectTail::Generic(self.u32()?),
             _ => {
                 return Err(VmArtifactError::MalformedEncoding {
                     message: "invalid effect row tail tag",
                 });
             }
-        };
+            };
+            if tails.last().is_some_and(|previous| previous >= &tail) {
+                return Err(VmArtifactError::MalformedEncoding { message: "effect row operands are not a canonical set" });
+            }
+            tails.insert(tail);
+        }
         let row = VmEffectRow {
             effects,
             projections,
-            tail,
+            tails,
         };
         if row
             .effects
@@ -458,13 +604,16 @@ impl<'a> Decoder<'a> {
                 Ok(VmPattern::Tuple(values))
             }
             5 => {
+                let rest = if self.boolean()? {
+                    Some(crate::pattern::ArrayPatternRest { prefix: self.u32()?, omitted: self.u32()? })
+                } else { None };
                 let element = self.vm_type_at_depth(depth + 1)?;
                 let count = self.count("array pattern fields", MAX_DECODE_REGISTERS)?;
                 let mut elements = Vec::with_capacity(count);
                 for _ in 0..count {
                     elements.push(self.pattern_at_depth(depth + 1)?);
                 }
-                Ok(VmPattern::Array { element, elements })
+                Ok(VmPattern::Array { element, elements, rest })
             }
             tag @ (3 | 4) => {
                 let definition = self.def_key()?;
@@ -716,7 +865,7 @@ impl<'a> Decoder<'a> {
                 self.count("nominal copy descriptor arguments", MAX_DECODE_REGISTERS)?;
             let mut arguments = Vec::with_capacity(argument_count);
             for _ in 0..argument_count {
-                arguments.push(self.vm_type()?);
+                arguments.push(self.vm_generic_argument_at_depth(0)?);
             }
             let variant_count =
                 self.count("nominal copy descriptor variants", MAX_DECODE_REGISTERS)?;
@@ -1225,6 +1374,14 @@ impl<'a> Decoder<'a> {
                     instruction
                 })
             }
+            211 => {
+                let callee = self.def_key()?;
+                let count = self.count("tail transfer arguments", MAX_DECODE_REGISTERS)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count { arguments.push(self.u32()?); }
+                Ok(VmInstruction::TailCallOwned { callee, arguments })
+            }
+            212 => Ok(VmInstruction::StoreOwned { dst: self.u32()?, src: self.u32()? }),
             7 => {
                 let dst = self.u32()?;
                 let bits = self.u64()?;
@@ -1722,16 +1879,17 @@ impl<'a> Decoder<'a> {
                 then_target: self.u32()?,
                 else_target: self.u32()?,
             }),
-            33 => {
+            opcode @ (33 | 213) => {
                 let dst = self.u32()?;
                 let count = self.count("tuple fields", MAX_DECODE_REGISTERS)?;
                 let mut fields = Vec::with_capacity(count);
                 for _ in 0..count {
                     fields.push(self.u32()?);
                 }
-                Ok(VmInstruction::MakeTuple { dst, fields })
+                let value = VmInstruction::MakeTuple { dst, fields };
+                Ok(if opcode == 213 { value.with_owned_aggregate() } else { value })
             }
-            34 => {
+            opcode @ (34 | 215) => {
                 let dst = self.u32()?;
                 let definition = self.def_key()?;
                 let count = self.count("record fields", MAX_DECODE_REGISTERS)?;
@@ -1741,12 +1899,13 @@ impl<'a> Decoder<'a> {
                     fields.push(self.u32()?);
                     field_types.push(self.vm_type()?);
                 }
-                Ok(VmInstruction::MakeRecord {
+                let value = VmInstruction::MakeRecord {
                     dst,
                     definition,
                     fields,
                     field_types,
-                })
+                };
+                Ok(if opcode == 215 { value.with_owned_aggregate() } else { value })
             }
             35 => Ok(VmInstruction::ProjectRecord {
                 dst: self.u32()?,
@@ -1755,7 +1914,7 @@ impl<'a> Decoder<'a> {
                 field_count: self.u32()?,
                 field_type: self.vm_type()?,
             }),
-            36 => {
+            opcode @ (36 | 216) => {
                 let dst = self.u32()?;
                 let definition = self.def_key()?;
                 let variant = self.u32()?;
@@ -1766,15 +1925,16 @@ impl<'a> Decoder<'a> {
                     fields.push(self.u32()?);
                     field_types.push(self.vm_type()?);
                 }
-                Ok(VmInstruction::MakeEnum {
+                let value = VmInstruction::MakeEnum {
                     dst,
                     definition,
                     variant,
                     fields,
                     field_types,
-                })
+                };
+                Ok(if opcode == 216 { value.with_owned_aggregate() } else { value })
             }
-            37 => {
+            opcode @ (37 | 214) => {
                 let dst = self.u32()?;
                 let element_type = self.vm_type()?;
                 let count = self.count("array fields", MAX_DECODE_REGISTERS)?;
@@ -1782,11 +1942,12 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     fields.push(self.u32()?);
                 }
-                Ok(VmInstruction::MakeArray {
+                let value = VmInstruction::MakeArray {
                     dst,
                     fields,
                     element_type,
-                })
+                };
+                Ok(if opcode == 214 { value.with_owned_aggregate() } else { value })
             }
             _ => Err(VmArtifactError::MalformedEncoding {
                 message: "unknown VM instruction opcode",
@@ -1832,5 +1993,32 @@ impl<'a> Decoder<'a> {
                 op,
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod row_operand_tests {
+    use super::*;
+
+    #[test]
+    fn row_union_wire_operands_are_bounded_unique_and_sorted() {
+        let row = VmEffectRow { effects: vec![], projections: vec![],
+            tails: [EffectTail::Generic(2), EffectTail::Generic(7)].into_iter().collect() };
+        let mut bytes = vec![];
+        super::super::encode_vm_effect_row(&row, &mut bytes);
+        assert_eq!(Decoder::new(&bytes).vm_effect_row_at_depth(0).unwrap(), row);
+        // Empty member/projection counts precede the operand count, then
+        // each operand has a one-byte kind and four-byte binder index.
+        for invalid_index in [1u32, 2] {
+            let mut invalid = bytes.clone();
+            invalid[30..34].copy_from_slice(&invalid_index.to_le_bytes());
+            assert!(matches!(Decoder::new(&invalid).vm_effect_row_at_depth(0),
+                Err(VmArtifactError::MalformedEncoding { message: "effect row operands are not a canonical set" })));
+        }
+        let mut excessive = bytes.clone();
+        excessive[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(matches!(Decoder::new(&excessive).vm_effect_row_at_depth(0), Err(VmArtifactError::DecodeLimit { .. })));
+        bytes.pop();
+        assert!(Decoder::new(&bytes).vm_effect_row_at_depth(0).is_err());
     }
 }

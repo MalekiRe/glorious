@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     quantity::Quantity,
-    scanner::{DeclarationKind, DeclarationShell, TokenRange},
+    scanner::{DeclarationKind, DeclarationShell, TokenRange, Visibility},
     source::{LexedFile, Span, TokenKind},
     types::{ConstKind, GenericKind, PointerMutability, Safety},
 };
@@ -28,6 +28,9 @@ pub struct GenericParameters {
     /// remain source-shaped until the receiving application's earlier
     /// arguments are known, so `m: u32 = n + 1` folds at specialization.
     pub const_defaults: BTreeMap<String, HeaderStructuralConst>,
+    /// Kind-preserving source defaults; names are resolved in the declaring
+    /// module, never in the module that omits an argument.
+    pub defaults: BTreeMap<String, HeaderGenericArgument>,
 }
 
 impl GenericParameters {
@@ -99,6 +102,10 @@ pub enum HeaderType {
         item_arguments: Vec<HeaderGenericArgument>,
     },
     Tuple(Vec<HeaderType>),
+    FixedArray {
+        element: Box<HeaderType>,
+        length: Box<HeaderStructuralConst>,
+    },
     Callable {
         safety: Safety,
         /// Lifetimes quantified by this callable type.  These bind only the
@@ -163,10 +170,12 @@ pub enum HeaderGenericArgument {
     /// retains source paths and its optional tail until signature elaboration
     /// resolves named effects and declaration binders.
     EffectRow(EffectRowHeader),
-    U32(u32),
-    /// A `u32` const expression whose operands may include declared const
+    /// An integer token awaiting the referenced declaration's const kind.
+    /// Retaining the token avoids checking a wide or signed value as u32.
+    Integer(String),
+    /// An integer const expression whose operands may include declared const
     /// binders. It remains source-shaped until the target generic slot has
-    /// established that a structural `u32` is required.
+    /// established the required integer kind.
     StructuralConst(HeaderStructuralConst),
     /// A structural quantity interval supplied to a `Quantity` const slot.
     /// Keeping this distinct from `HeaderType` makes the source kind boundary
@@ -181,14 +190,13 @@ pub struct HeaderParameter {
     pub span: Span,
 }
 
-/// A field in a nominal layout. Unlike a callable parameter, a field retains
-/// the declaration-entry authority introduced by the `private` modifier so
-/// later body elaboration can prevent structural access from another entry.
+/// A field in a nominal layout retains its source visibility. Elaboration
+/// resolves private/restricted scopes to declaring-module capabilities.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NominalFieldHeader {
     pub name: String,
     pub ty: HeaderType,
-    pub private: bool,
+    pub visibility: Visibility,
     pub span: Span,
 }
 
@@ -211,7 +219,7 @@ pub struct EffectRowHeader {
     /// Row-polymorphic tails are resolved only against a binder explicitly
     /// declared with the `EffectRow` kind; ordinary generic binders never
     /// enter this namespace.
-    pub tail: Option<String>,
+    pub tails: Vec<String>,
 }
 
 /// A trait reference retains source-shaped generic arguments until interface
@@ -227,9 +235,19 @@ pub struct TraitRefHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhereBoundHeader {
-    pub subject: HeaderType,
-    pub relation: TraitRefHeader,
+    /// A universal binder belongs to the entire predicate, including the
+    /// relation's arguments and associated equalities, not just its subject.
+    /// It is distinct from declaration generics and callable-type binders.
+    pub universal: Option<GenericParameters>,
+    pub predicate: PredicateHeader,
     pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PredicateHeader {
+    Trait { subject: HeaderType, relation: TraitRefHeader },
+    TypeOutlives { subject: HeaderType, lifetime: String },
+    RegionOutlives { longer: String, shorter: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -239,6 +257,8 @@ pub struct AssociatedTypeHeader {
     /// `type Output: EffectRow;` declares an associated effect row rather
     /// than an ordinary associated type.
     pub effect_row: bool,
+    pub bounds: Vec<TraitRefHeader>,
+    pub where_bounds: Vec<WhereBoundHeader>,
     /// A value-type fallback used when a positive implementation omits this
     /// associated item.  The parser retains it in the trait declaration so
     /// signature elaboration can resolve its outer and item binders before
@@ -255,6 +275,7 @@ pub struct AssociatedTypeHeader {
 pub struct AssociatedTypeDefinitionHeader {
     pub name: String,
     pub generics: GenericParameters,
+    pub where_bounds: Vec<WhereBoundHeader>,
     pub value: HeaderType,
     /// An implementation-side associated effect row uses a row literal, for
     /// example `type Effects = {Ask, Trace};`, rather than a value type.
@@ -283,10 +304,10 @@ pub struct AssociatedConstHeader {
 /// as runtime constant references.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderStructuralConst {
-    U32(u32),
+    Integer(String),
     Quantity(Quantity),
     Generic(String),
-    U32Expression(HeaderStructuralU32Expr),
+    IntegerExpression(HeaderIntegerExpr),
     /// A delayed associated structural-constant selection. This is kept in
     /// the header rather than parsed as a runtime expression so interface
     /// elaboration can retain its mixed-kind trait evidence for later
@@ -297,14 +318,64 @@ pub enum HeaderStructuralConst {
 /// Source-shaped structural arithmetic.  Names are intentionally preserved
 /// until elaboration maps them to owner-local generic slots.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum HeaderStructuralU32Expr {
-    Literal(u32),
+pub enum HeaderIntegerExpr {
+    Literal(String),
     Param(String),
+    Neg(Box<Self>),
     Add(Box<Self>, Box<Self>),
     Sub(Box<Self>, Box<Self>),
     Mul(Box<Self>, Box<Self>),
     Div(Box<Self>, Box<Self>),
     Rem(Box<Self>, Box<Self>),
+}
+
+impl HeaderIntegerExpr {
+    /// Select the declared scalar before literal range checks or arithmetic.
+    /// Lookup is owned by the lexical elaborator; this syntax helper cannot
+    /// resolve runtime values or manufacture generic-slot identities.
+    pub(crate) fn elaborate(
+        &self,
+        scalar: crate::types::ScalarType,
+        lookup: &mut dyn FnMut(&str) -> Result<crate::types::IntegerConstExpr, crate::types::StructuralConstError>,
+    ) -> Result<crate::types::IntegerConstExpr, crate::types::StructuralConstError> {
+        use crate::types::{IntegerConst, IntegerConstExpr as Expr, StructuralConstError as Error};
+        use crate::types::integer_const::IntegerConstOp as Op;
+        fn walk(
+            source: &HeaderIntegerExpr,
+            scalar: crate::types::ScalarType,
+            lookup: &mut dyn FnMut(&str) -> Result<Expr, Error>,
+            budget: &mut u32,
+            depth: u32,
+        ) -> Result<Expr, Error> {
+            if *budget == 0 || depth >= 128 { return Err(Error::ResourceLimit); }
+            *budget -= 1;
+            let (op, left, right) = match source {
+                HeaderIntegerExpr::Literal(token) => return IntegerConst::from_literal(scalar, token, false, 64).map(Expr::Literal),
+                HeaderIntegerExpr::Param(name) => {
+                    let value = lookup(name)?;
+                    if value.scalar()? != scalar { return Err(Error::KindMismatch); }
+                    return Ok(value);
+                }
+                HeaderIntegerExpr::Neg(value) => {
+                    if let HeaderIntegerExpr::Literal(token) = value.as_ref() {
+                        return IntegerConst::from_literal(scalar, token, true, 64).map(Expr::Literal);
+                    }
+                    return Ok(Expr::Neg(Box::new(walk(value, scalar, lookup, budget, depth + 1)?)));
+                }
+                HeaderIntegerExpr::Add(left, right) => (Op::Add, left, right),
+                HeaderIntegerExpr::Sub(left, right) => (Op::Sub, left, right),
+                HeaderIntegerExpr::Mul(left, right) => (Op::Mul, left, right),
+                HeaderIntegerExpr::Div(left, right) => (Op::Div, left, right),
+                HeaderIntegerExpr::Rem(left, right) => (Op::Rem, left, right),
+            };
+            Ok(Expr::Binary {
+                op,
+                left: Box::new(walk(left, scalar, lookup, budget, depth + 1)?),
+                right: Box::new(walk(right, scalar, lookup, budget, depth + 1)?),
+            })
+        }
+        walk(self, scalar, lookup, &mut 1024, 0)?.normalized()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -317,7 +388,7 @@ pub struct AssociatedConstDefinitionHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImplementationMethodHeader {
     pub name: String,
-    pub public: bool,
+    pub visibility: Visibility,
     pub signature: CallableHeader,
     /// Exact brace-delimited source range of the method body. The
     /// implementation declaration itself remains an interface fact, while
@@ -417,6 +488,7 @@ pub struct EnumVariantHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NominalLayoutHeader {
     Struct(Vec<NominalFieldHeader>),
+    TupleStruct(Vec<NominalFieldHeader>),
     Enum(Vec<EnumVariantHeader>),
     /// A body-less nominal is retained for recovery and for future opaque
     /// declarations; no layout-dependent operation may assume fields exist.
@@ -498,6 +570,7 @@ pub enum ParsedHeader {
     Nominal {
         generics: GenericParameters,
         layout: NominalLayoutHeader,
+        where_bounds: Vec<WhereBoundHeader>,
     },
     Opaque,
 }
@@ -524,12 +597,11 @@ impl HeaderParse {
             source,
             tokens,
             position: 0,
+            operator_offset: 0,
             diagnostics: vec![],
             recovered: false,
         };
-        if parser.word() == Some("pub") {
-            parser.position += 1;
-        }
+        parser.visibility();
         if shell.safety == Safety::Unsafe {
             parser.position += 1;
         }
@@ -590,6 +662,7 @@ impl HeaderParse {
                         .map(|range| significant(lexed, range))
                         .unwrap_or_default(),
                     position: 0,
+                    operator_offset: 0,
                     diagnostics: vec![],
                     recovered: false,
                 };
@@ -609,6 +682,7 @@ impl HeaderParse {
             DeclarationKind::Struct | DeclarationKind::Enum => {
                 parser.identifier();
                 let generics = parser.generics();
+                let where_bounds = parser.where_bounds();
                 let mut layout_parser = Parser {
                     lexed,
                     source,
@@ -617,13 +691,14 @@ impl HeaderParse {
                         .map(|range| significant(lexed, range))
                         .unwrap_or_default(),
                     position: 0,
+                    operator_offset: 0,
                     diagnostics: vec![],
                     recovered: false,
                 };
                 let layout = layout_parser.nominal_layout(shell.kind);
                 parser.diagnostics.extend(layout_parser.diagnostics);
                 parser.recovered |= layout_parser.recovered;
-                ParsedHeader::Nominal { generics, layout }
+                ParsedHeader::Nominal { generics, layout, where_bounds }
             }
             DeclarationKind::Trait => {
                 parser.identifier();
@@ -639,6 +714,7 @@ impl HeaderParse {
                         .map(|range| significant(lexed, range))
                         .unwrap_or_default(),
                     position: 0,
+                    operator_offset: 0,
                     diagnostics: vec![],
                     recovered: false,
                 };
@@ -648,7 +724,7 @@ impl HeaderParse {
                 ParsedHeader::Trait(value)
             }
             DeclarationKind::Implementation => {
-                parser.implementation(shell.body, shell.safety, shell.visibility_public)
+                parser.implementation(shell.body, shell.safety, shell.visibility != Visibility::Private)
             }
             DeclarationKind::Effect => {
                 parser.identifier();
@@ -663,6 +739,7 @@ impl HeaderParse {
                         .map(|range| significant(lexed, range))
                         .unwrap_or_default(),
                     position: 0,
+                    operator_offset: 0,
                     diagnostics: vec![],
                     recovered: false,
                 };
@@ -706,10 +783,22 @@ struct Parser<'a> {
     source: &'a str,
     tokens: Vec<usize>,
     position: usize,
+    // Header grammar can split adjacent type delimiters without changing
+    // maximal-munch operator tokens used by body/fixity parsing.
+    operator_offset: usize,
     diagnostics: Vec<HeaderDiagnostic>,
     recovered: bool,
 }
 impl Parser<'_> {
+    fn visibility(&mut self) -> Visibility {
+        crate::scanner::parse_visibility(self.lexed, self.source, &self.tokens, &mut self.position)
+            .unwrap_or_else(|span| {
+                self.recovered = true;
+                self.diagnostics.push(HeaderDiagnostic { code: "G3280", span,
+                    message: "expected `pub`, `pub(crate)`, or `pub(super)` visibility" });
+                Visibility::Private
+            })
+    }
     fn trait_header(
         &mut self,
         generics: GenericParameters,
@@ -742,32 +831,37 @@ impl Parser<'_> {
                     "<error>".into()
                 });
                 let item_generics = self.generics();
+                let mut bounds = vec![];
                 let effect_row = if self.punctuation(':') {
                     if self.word() == Some("EffectRow") {
                         self.position += 1;
                         true
                     } else {
-                        self.error("G3234", "expected `EffectRow` after associated item `:`");
+                        loop {
+                            bounds.push(self.trait_ref());
+                            if !self.operator("+") { break; }
+                        }
                         false
                     }
                 } else {
                     false
                 };
+                let mut where_bounds = self.where_bounds();
                 let (default, effect_row_default) = if self.operator("=") {
-                    if effect_row && self.at_punctuation('{') {
-                        (None, Some(self.effect_row_literal()))
+                    if effect_row {
+                        let row = if self.at_punctuation('{') {
+                            self.effect_row_literal()
+                        } else {
+                            EffectRowHeader { effects: vec![self.ty()], tails: Default::default() }
+                        };
+                        (None, Some(row))
                     } else {
-                        if effect_row {
-                            self.error(
-                                "G3235",
-                                "associated effect-row defaults require a row literal",
-                            );
-                        }
                         (Some(self.ty()), None)
                     }
                 } else {
                     (None, None)
                 };
+                where_bounds.extend(self.where_bounds());
                 if !self.punctuation(';') {
                     self.error("G3236", "expected `;` after associated type declaration");
                     self.skip_to_item_end();
@@ -780,6 +874,8 @@ impl Parser<'_> {
                     name,
                     generics: item_generics,
                     effect_row,
+                    bounds,
+                    where_bounds,
                     default,
                     effect_row_default,
                     span: self.span(start, end),
@@ -796,9 +892,10 @@ impl Parser<'_> {
                     self.error("G3256", "expected `:` after associated constant name");
                 }
                 let kind = match self.word() {
-                    Some("u32") => {
+                    Some(name) if ConstKind::from_integer_name(name).is_some() => {
+                        let kind = ConstKind::from_integer_name(name).unwrap();
                         self.position += 1;
-                        ConstKind::U32
+                        kind
                     }
                     Some("Quantity") => {
                         self.position += 1;
@@ -807,7 +904,7 @@ impl Parser<'_> {
                     _ => {
                         self.error(
                             "G3257",
-                            "associated constants must have structural kind `u32` or `Quantity`",
+                            "associated constants must have an integer scalar or `Quantity` kind",
                         );
                         ConstKind::U32
                     }
@@ -893,10 +990,12 @@ impl Parser<'_> {
         let generics = self.generics();
         let negative = self.operator("!");
         let head_start = self.position;
+        let head_operator_offset = self.operator_offset;
         let relation = self.trait_ref();
         let inherent = self.word() != Some("for");
         if inherent {
             self.position = head_start;
+            self.operator_offset = head_operator_offset;
             if negative || safety == Safety::Unsafe || public {
                 self.error("G3270", "inherent impl blocks cannot be negative, unsafe, or public; put visibility and safety on their functions");
             }
@@ -917,6 +1016,7 @@ impl Parser<'_> {
                 .map(|range| significant(lexed, range))
                 .unwrap_or_default(),
             position: 0,
+            operator_offset: 0,
             diagnostics: vec![],
             recovered: false,
         };
@@ -926,11 +1026,8 @@ impl Parser<'_> {
         if body_parser.punctuation('{') {
             let mut names = BTreeSet::new();
             while body_parser.current().is_some() && !body_parser.at_punctuation('}') {
-                let public = body_parser.word() == Some("pub");
-                if public {
-                    body_parser.position += 1;
-                }
-                if public && !inherent {
+                let visibility = body_parser.visibility();
+                if visibility != Visibility::Private && !inherent {
                     body_parser.error(
                         "G3271",
                         "trait implementation members inherit trait visibility",
@@ -982,6 +1079,7 @@ impl Parser<'_> {
                         "<error>".into()
                     });
                     let item_generics = body_parser.generics();
+                    let mut where_bounds = body_parser.where_bounds();
                     if !body_parser.operator("=") {
                         body_parser.error("G3243", "expected `=` in associated type definition");
                     }
@@ -993,6 +1091,7 @@ impl Parser<'_> {
                     } else {
                         (body_parser.ty(), None)
                     };
+                    where_bounds.extend(body_parser.where_bounds());
                     if !body_parser.punctuation(';') {
                         body_parser.error("G3244", "expected `;` after associated type definition");
                         body_parser.skip_to_item_end();
@@ -1004,6 +1103,7 @@ impl Parser<'_> {
                     associated_types.push(AssociatedTypeDefinitionHeader {
                         name,
                         generics: item_generics,
+                        where_bounds,
                         value,
                         effect_row_value,
                         span: body_parser.span(start, end),
@@ -1075,7 +1175,7 @@ impl Parser<'_> {
                     let end = body_parser.previous().unwrap_or(start);
                     methods.push(ImplementationMethodHeader {
                         name,
-                        public,
+                        visibility,
                         signature,
                         body,
                         span: body_parser.span(start, end),
@@ -1320,16 +1420,52 @@ impl Parser<'_> {
         let mut bounds = vec![];
         while self.current().is_some() {
             let start = self.current().unwrap();
-            let subject = self.ty();
+            let universal = if self.word() == Some("for") {
+                self.position += 1;
+                if !self.at_operator("<") {
+                    self.error("G3334", "expected `<` after higher-ranked bound `for`");
+                }
+                let binders = self.generics();
+                if binders.names.is_empty() {
+                    self.error("G3334", "a higher-ranked bound requires at least one binder");
+                }
+                if !binders.defaults.is_empty() || !binders.const_defaults.is_empty() {
+                    self.error("G3334", "universal binders cannot have defaults");
+                }
+                let mut seen = BTreeSet::new();
+                if binders.names.iter().any(|name| !seen.insert(name)) {
+                    self.error("G3334", "duplicate higher-ranked bound binder");
+                }
+                Some(binders)
+            } else {
+                None
+            };
+            let region_subject = self.word().filter(|word| word.starts_with('\'')).map(str::to_owned);
+            let subject = if region_subject.is_some() {
+                self.position += 1;
+                HeaderType::Recovered
+            } else { self.ty() };
             if !self.punctuation(':') {
                 self.error("G3256", "expected `:` in where bound");
                 break;
             }
-            let relation = self.trait_ref();
+            let predicate = if self.word().is_some_and(|word| word.starts_with('\'')) {
+                let lifetime = self.identifier().unwrap();
+                if let Some(longer) = region_subject {
+                    PredicateHeader::RegionOutlives { longer, shorter: lifetime }
+                } else {
+                    PredicateHeader::TypeOutlives { subject, lifetime }
+                }
+            } else {
+                if region_subject.is_some() {
+                    self.error("G3335", "a region predicate requires an outlives lifetime");
+                }
+                PredicateHeader::Trait { subject, relation: self.trait_ref() }
+            };
             let end = self.previous().unwrap_or(start);
             bounds.push(WhereBoundHeader {
-                subject,
-                relation,
+                universal,
+                predicate,
                 span: self.span(start, end),
             });
             if !self.punctuation(',') {
@@ -1380,7 +1516,18 @@ impl Parser<'_> {
         match self.current() {
             Some(index) if self.lexed.tokens[index].kind == TokenKind::Integer => {
                 self.position += 1;
-                self.text(index).parse().unwrap_or_else(|_| {
+                // Keep the existing u64 arithmetic domain for quantities and
+                // closed structural expressions, but accept every integer
+                // token spelling accepted by the lexer. The literal reader
+                // itself retains u128 magnitudes for width-aware elaboration.
+                crate::types::integer_const::IntegerConst::from_literal(
+                    crate::types::ScalarType::U64,
+                    self.text(index),
+                    false,
+                    64, // U64 is target-independent, not a host usize.
+                )
+                .map(|value| value.magnitude() as u64)
+                .unwrap_or_else(|_| {
                     self.error(code, message);
                     0
                 })
@@ -1442,12 +1589,28 @@ impl Parser<'_> {
         if self.tokens.is_empty() {
             return NominalLayoutHeader::Opaque;
         }
+        if kind == DeclarationKind::Struct && self.punctuation('(') {
+            let mut fields = vec![];
+            while self.current().is_some() && !self.at_punctuation(')') {
+                let start = self.current().unwrap();
+                let visibility = self.visibility();
+                let ty = self.ty();
+                fields.push(NominalFieldHeader {
+                    name: fields.len().to_string(), ty, visibility,
+                    span: self.span(start, self.previous().unwrap_or(start)),
+                });
+                if !self.punctuation(',') { break; }
+            }
+            if !self.punctuation(')') { self.error("G3281", "expected `)` after tuple-struct fields"); }
+            if self.current().is_some() { self.error("G3222", "unexpected trailing token in tuple-struct declaration"); }
+            return NominalLayoutHeader::TupleStruct(fields);
+        }
         if !self.punctuation('{') {
             self.error("G3220", "expected nominal declaration body");
             return NominalLayoutHeader::Opaque;
         }
         let layout = match kind {
-            DeclarationKind::Struct => NominalLayoutHeader::Struct(self.nominal_fields('}')),
+            DeclarationKind::Struct => NominalLayoutHeader::Struct(self.nominal_fields('}', Visibility::Private)),
             DeclarationKind::Enum => NominalLayoutHeader::Enum(self.enum_variants()),
             _ => NominalLayoutHeader::Opaque,
         };
@@ -1459,7 +1622,7 @@ impl Parser<'_> {
         }
         layout
     }
-    fn nominal_fields(&mut self, closing: char) -> Vec<NominalFieldHeader> {
+    fn nominal_fields(&mut self, closing: char, default_visibility: Visibility) -> Vec<NominalFieldHeader> {
         let mut fields = vec![];
         let mut names = BTreeSet::new();
         while self.current().is_some() && !self.at_punctuation(closing) {
@@ -1470,17 +1633,14 @@ impl Parser<'_> {
             // visibility modifier only when another field identifier follows;
             // `public: Bool` is a field named `public`, not a modifier plus a
             // malformed `Bool` field.
-            let private = self.word() == Some("private")
-                && !self.tokens.get(self.position + 1).is_some_and(|next| {
-                    self.lexed.tokens[*next].kind == TokenKind::Punctuation(':')
-                });
-            if matches!(self.word(), Some("private" | "public"))
-                && !self.tokens.get(self.position + 1).is_some_and(|next| {
-                    self.lexed.tokens[*next].kind == TokenKind::Punctuation(':')
-                })
-            {
-                self.position += 1;
-            }
+            let modifier = !self.tokens.get(self.position + 1).is_some_and(|next|
+                self.lexed.tokens[*next].kind == TokenKind::Punctuation(':'));
+            let visibility = match (modifier, self.word()) {
+                (true, Some("pub")) => self.visibility(),
+                (true, Some("private")) => { self.position += 1; Visibility::Private }
+                (true, Some("public")) => { self.position += 1; Visibility::Public }
+                _ => default_visibility,
+            };
             let name = self.identifier().unwrap_or_else(|| {
                 self.error("G3223", "expected nominal field name");
                 "<error>".into()
@@ -1496,7 +1656,7 @@ impl Parser<'_> {
             fields.push(NominalFieldHeader {
                 name,
                 ty,
-                private,
+                visibility,
                 span: Span {
                     file: self.lexed.file,
                     start: self.lexed.tokens[start].span.start,
@@ -1535,7 +1695,9 @@ impl Parser<'_> {
                 }
                 EnumVariantPayloadHeader::Tuple(fields)
             } else if self.punctuation('{') {
-                let fields = self.nominal_fields('}');
+                // Enum payloads are exposed by their closed variants; unlike
+                // nominal record representation they inherit that surface.
+                let fields = self.nominal_fields('}', Visibility::Public);
                 if !self.punctuation('}') {
                     self.error("G3228", "expected `}` after enum record payload");
                 }
@@ -1616,7 +1778,7 @@ impl Parser<'_> {
         if !self.at_punctuation('{') {
             return EffectRowHeader {
                 effects: vec![self.ty()],
-                tail: None,
+                tails: Default::default(),
             };
         }
         self.effect_row_literal()
@@ -1646,19 +1808,33 @@ impl Parser<'_> {
             return EffectRowHeader::default();
         }
         let mut effects = vec![];
-        let mut tail = None;
+        let mut tails = vec![];
+        let mut in_union = false;
         while self.current().is_some() && !self.at_punctuation('}') {
             if self.operator("|") {
-                tail = self.identifier();
-                if tail.is_none() {
-                    self.error("G3262", "expected effect-row tail after `|`");
+                if in_union {
+                    self.error("G3262", "only one `|` is permitted in an effect row");
                 }
-                break;
+                in_union = true;
+                if self.at_punctuation('}') {
+                    self.error("G3262", "expected effect-row term after `|`");
+                    break;
+                }
             }
-            effects.push(self.ty());
+            if in_union && !self.at_operator("<") {
+                let next = self.identifier();
+                if next.is_none() {
+                    self.error("G3262", "expected row parameter or associated effect-row projection");
+                    break;
+                }
+                tails.extend(next);
+            } else {
+                effects.push(self.ty());
+            }
             if !self.punctuation(',') {
                 if !self.at_punctuation('}') && !self.at_operator("|") {
                     self.error("G3263", "expected `,` between effect-row members");
+                    break;
                 }
                 continue;
             }
@@ -1666,7 +1842,9 @@ impl Parser<'_> {
         if !self.punctuation('}') {
             self.error("G3264", "expected `}` after effect row");
         }
-        EffectRowHeader { effects, tail }
+        tails.sort();
+        tails.dedup();
+        EffectRowHeader { effects, tails }
     }
     fn fixity(&mut self, keyword: Option<&str>) -> FixityHeader {
         let form = match keyword {
@@ -1810,6 +1988,8 @@ impl Parser<'_> {
         let mut generics = GenericParameters::default();
         let mut saw_default = false;
         while self.current().is_some() && !self.at_operator(">") {
+            let explicit_const = self.word() == Some("const");
+            if explicit_const { self.position += 1; }
             if let Some(name) = self.identifier() {
                 let is_lifetime = name.starts_with('\'');
                 let kind = if self.punctuation(':') {
@@ -1822,9 +2002,10 @@ impl Parser<'_> {
                                 self.position += 1;
                                 Some(GenericKind::EffectRow)
                             }
-                            Some("u32") => {
+                            Some(name) if ConstKind::from_integer_name(name).is_some() => {
+                                let kind = ConstKind::from_integer_name(name).unwrap();
                                 self.position += 1;
-                                Some(GenericKind::Const(ConstKind::U32))
+                                Some(GenericKind::Const(kind))
                             }
                             Some("Quantity") => {
                                 self.position += 1;
@@ -1833,7 +2014,7 @@ impl Parser<'_> {
                             _ => {
                                 self.error(
                                     "G3205",
-                                    "expected `EffectRow`, `u32`, or `Quantity` after generic kind `:`",
+                                    "expected `EffectRow`, an integer scalar, or `Quantity` after generic kind `:`",
                                 );
                                 None
                             }
@@ -1842,29 +2023,39 @@ impl Parser<'_> {
                 } else {
                     None
                 };
+                if explicit_const && !matches!(kind, Some(GenericKind::Const(_))) {
+                    self.error("G3205", "an explicit const binder requires a const kind");
+                }
                 if kind == Some(GenericKind::EffectRow) {
                     generics.effect_rows.insert(name.clone());
                 }
                 if let Some(GenericKind::Const(kind)) = kind {
                     generics.consts.insert((name.clone(), kind));
                 }
-                let default = self.operator("=").then(|| self.structural_const_value());
-                if default.is_none() && saw_default {
+                let has_default = self.operator("=");
+                if !has_default && saw_default {
                     self.error(
                         "G3205",
                         "generic defaults must be trailing declaration binders",
                     );
                 }
-                if let Some(default) = default {
-                    if !matches!(kind, Some(GenericKind::Const(_))) {
-                        self.error(
-                            "G3205",
-                            "only structural const generic binders may declare defaults",
-                        );
-                        self.recovered = true;
-                    } else {
-                        saw_default = true;
+                if has_default {
+                    saw_default = true;
+                    if matches!(kind, Some(GenericKind::Const(_))) {
+                        let default = self.structural_const_value();
                         generics.const_defaults.insert(name.clone(), default);
+                    } else {
+                        let default = if is_lifetime {
+                            HeaderGenericArgument::Lifetime(self.identifier().unwrap_or_else(|| {
+                                self.error("G3205", "expected lifetime default");
+                                "'_".into()
+                            }))
+                        } else if kind == Some(GenericKind::EffectRow) && self.at_punctuation('{') {
+                            HeaderGenericArgument::EffectRow(self.effect_row_literal())
+                        } else {
+                            HeaderGenericArgument::Type(self.ty())
+                        };
+                        generics.defaults.insert(name.clone(), default);
                     }
                 }
                 if is_lifetime {
@@ -2017,6 +2208,18 @@ impl Parser<'_> {
                 referent: Box::new(self.ty()),
             };
         }
+        if self.punctuation('[') {
+            let element = self.ty();
+            if !self.punctuation(';') {
+                self.error("G3330", "expected `;` between fixed array element and length");
+            }
+            let length = if self.at_operator("<") { self.structural_const_value() }
+                else { self.structural_const_expression("G3330", "expected a usize array length") };
+            if !self.punctuation(']') {
+                self.error("G3330", "expected `]` after fixed array length");
+            }
+            return HeaderType::FixedArray { element: Box::new(element), length: Box::new(length) };
+        }
         if self.punctuation('(') {
             let mut values = vec![];
             while self.current().is_some() && !self.at_punctuation(')') {
@@ -2053,10 +2256,9 @@ impl Parser<'_> {
         value
     }
     fn generic_arguments(&mut self) -> Vec<HeaderGenericArgument> {
-        if !self.at_operator("<") {
+        if !self.operator("<") {
             return vec![];
         }
-        self.position += 1;
         let mut arguments = vec![];
         while self.current().is_some() && !self.at_operator(">") {
             if self.associated_type_binding_ahead() {
@@ -2086,32 +2288,16 @@ impl Parser<'_> {
                 arguments.push(HeaderGenericArgument::Lifetime(
                     self.identifier().expect("checked lifetime token"),
                 ));
-            } else if self.at_punctuation('[') {
+            } else if self.at_punctuation('[') && !self.fixed_array_ahead() {
                 arguments.push(HeaderGenericArgument::Quantity(
                     self.structural_quantity_argument(),
                 ));
             } else if self.starts_symbolic_structural_u32_expression() {
-                arguments.push(HeaderGenericArgument::StructuralConst(
-                    self.structural_const_expression(
-                        "G3222",
-                        "structural u32 generic argument is out of range",
-                    ),
-                ));
-            } else if let Some(index) = self.current()
-                && self.lexed.tokens[index].kind == TokenKind::Integer
-            {
-                match u32::try_from(self.structural_integer_expression(
-                    "G3222",
-                    "structural u32 generic argument is out of range",
-                    "G3228",
-                    "structural constant arithmetic overflowed or divided by zero",
-                )) {
-                    Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
-                    Err(_) => {
-                        self.error("G3222", "structural u32 generic argument is out of range");
-                        arguments.push(HeaderGenericArgument::U32(0));
-                    }
-                }
+                let value = self.structural_const_expression("G3222", "malformed structural integer generic argument");
+                arguments.push(match value {
+                    HeaderStructuralConst::Integer(token) => HeaderGenericArgument::Integer(token),
+                    value => HeaderGenericArgument::StructuralConst(value),
+                });
             } else {
                 arguments.push(HeaderGenericArgument::Type(self.ty()));
             }
@@ -2159,6 +2345,10 @@ impl Parser<'_> {
             } else if self.at_operator_at(*token, ">") {
                 depth -= 1;
                 if depth == 0 {
+                    if self.text(*token).strip_prefix('>').is_some_and(|suffix|
+                        Self::operator_starts_expected(suffix, "=")) {
+                        return true;
+                    }
                     return self
                         .tokens
                         .get(offset + 1)
@@ -2166,6 +2356,21 @@ impl Parser<'_> {
                 }
             }
             offset += 1;
+        }
+        false
+    }
+    fn fixed_array_ahead(&self) -> bool {
+        let mut depth = 0;
+        for &index in &self.tokens[self.position..] {
+            match self.lexed.tokens[index].kind {
+                TokenKind::Punctuation('[' | '(' | '{') => depth += 1,
+                TokenKind::Punctuation(']' | ')' | '}') => {
+                    depth -= 1;
+                    if depth == 0 { return false; }
+                }
+                TokenKind::Punctuation(';') if depth == 1 => return true,
+                _ => {}
+            }
         }
         false
     }
@@ -2216,29 +2421,13 @@ impl Parser<'_> {
         }
         if self.starts_symbolic_structural_u32_expression() {
             return self
-                .structural_const_expression("G3262", "associated u32 constant is out of range");
-        }
-        if let Some(index) = self.current()
-            && self.lexed.tokens[index].kind == TokenKind::Integer
-        {
-            return match u32::try_from(self.structural_integer_expression(
-                "G3262",
-                "associated u32 constant is out of range",
-                "G3263",
-                "associated constant arithmetic overflowed or divided by zero",
-            )) {
-                Ok(value) => HeaderStructuralConst::U32(value),
-                Err(_) => {
-                    self.error("G3262", "associated u32 constant is out of range");
-                    HeaderStructuralConst::U32(0)
-                }
-            };
+                .structural_const_expression("G3262", "malformed structural integer constant");
         }
         match self.identifier() {
             Some(name) => HeaderStructuralConst::Generic(name),
             None => {
                 self.error("G3264", "expected a structural associated constant value");
-                HeaderStructuralConst::U32(0)
+                HeaderStructuralConst::Integer("0".into())
             }
         }
     }
@@ -2252,17 +2441,8 @@ impl Parser<'_> {
             return false;
         };
         let token = &self.lexed.tokens[index];
-        if token.kind == TokenKind::Integer {
-            // The literal-only evaluator deliberately does not accept a
-            // binder.  When an integer-led expression contains one (`1 + N`)
-            // dispatch to the symbolic parser before it can recover as `1`.
-            return self.tokens[self.position + 1..]
-                .iter()
-                .take_while(|next| {
-                    let token = &self.lexed.tokens[**next];
-                    token.kind != TokenKind::Punctuation(',') && !self.at_operator_at(**next, ">")
-                })
-                .any(|next| self.lexed.tokens[*next].kind == TokenKind::Identifier);
+        if token.kind == TokenKind::Integer || self.at_operator("-") {
+            return true;
         }
         if token.kind == TokenKind::Punctuation('(') {
             // A parenthesized arithmetic stream cannot be a source type: a
@@ -2284,7 +2464,7 @@ impl Parser<'_> {
                     TokenKind::Punctuation(',') => return false,
                     _ => {}
                 }
-                arithmetic |= matches!(
+                arithmetic |= token.kind == TokenKind::Integer || matches!(
                     self.lexed.text(self.source, token),
                     "+" | "-" | "*" | "/" | "%"
                 );
@@ -2302,7 +2482,7 @@ impl Parser<'_> {
 
     fn at_operator_at(&self, index: usize, value: &str) -> bool {
         self.lexed.tokens[index].kind == TokenKind::Operator
-            && self.lexed.text(self.source, &self.lexed.tokens[index]) == value
+            && Self::operator_starts_expected(self.lexed.text(self.source, &self.lexed.tokens[index]), value)
     }
 
     fn structural_const_expression(
@@ -2311,11 +2491,11 @@ impl Parser<'_> {
         value_message: &'static str,
     ) -> HeaderStructuralConst {
         match self.structural_u32_expression(value_code, value_message) {
-            Ok(HeaderStructuralU32Expr::Literal(value)) => HeaderStructuralConst::U32(value),
-            Ok(value) => HeaderStructuralConst::U32Expression(value),
+            Ok(HeaderIntegerExpr::Literal(value)) => HeaderStructuralConst::Integer(value),
+            Ok(value) => HeaderStructuralConst::IntegerExpression(value),
             Err(()) => {
                 self.error(value_code, value_message);
-                HeaderStructuralConst::U32(0)
+                HeaderStructuralConst::Integer("0".into())
             }
         }
     }
@@ -2324,7 +2504,7 @@ impl Parser<'_> {
         &mut self,
         value_code: &'static str,
         value_message: &'static str,
-    ) -> Result<HeaderStructuralU32Expr, ()> {
+    ) -> Result<HeaderIntegerExpr, ()> {
         let mut value = self.structural_u32_product(value_code, value_message)?;
         while let Some(operator) = self
             .at_operator("+")
@@ -2334,8 +2514,8 @@ impl Parser<'_> {
             self.position += 1;
             let right = self.structural_u32_product(value_code, value_message)?;
             value = match operator {
-                '+' => HeaderStructuralU32Expr::Add(Box::new(value), Box::new(right)),
-                '-' => HeaderStructuralU32Expr::Sub(Box::new(value), Box::new(right)),
+                '+' => HeaderIntegerExpr::Add(Box::new(value), Box::new(right)),
+                '-' => HeaderIntegerExpr::Sub(Box::new(value), Box::new(right)),
                 _ => unreachable!(),
             };
         }
@@ -2346,7 +2526,7 @@ impl Parser<'_> {
         &mut self,
         value_code: &'static str,
         value_message: &'static str,
-    ) -> Result<HeaderStructuralU32Expr, ()> {
+    ) -> Result<HeaderIntegerExpr, ()> {
         let mut value = self.structural_u32_primary(value_code, value_message)?;
         while let Some(operator) = self
             .at_operator("*")
@@ -2357,9 +2537,9 @@ impl Parser<'_> {
             self.position += 1;
             let right = self.structural_u32_primary(value_code, value_message)?;
             value = match operator {
-                '*' => HeaderStructuralU32Expr::Mul(Box::new(value), Box::new(right)),
-                '/' => HeaderStructuralU32Expr::Div(Box::new(value), Box::new(right)),
-                '%' => HeaderStructuralU32Expr::Rem(Box::new(value), Box::new(right)),
+                '*' => HeaderIntegerExpr::Mul(Box::new(value), Box::new(right)),
+                '/' => HeaderIntegerExpr::Div(Box::new(value), Box::new(right)),
+                '%' => HeaderIntegerExpr::Rem(Box::new(value), Box::new(right)),
                 _ => unreachable!(),
             };
         }
@@ -2370,7 +2550,11 @@ impl Parser<'_> {
         &mut self,
         value_code: &'static str,
         value_message: &'static str,
-    ) -> Result<HeaderStructuralU32Expr, ()> {
+    ) -> Result<HeaderIntegerExpr, ()> {
+        if self.operator("-") {
+            return self.structural_u32_primary(value_code, value_message)
+                .map(|value| HeaderIntegerExpr::Neg(Box::new(value)));
+        }
         if self.punctuation('(') {
             let value = self.structural_u32_expression(value_code, value_message)?;
             if !self.punctuation(')') {
@@ -2382,15 +2566,11 @@ impl Parser<'_> {
         if let Some(index) = self.current()
             && self.lexed.tokens[index].kind == TokenKind::Integer
         {
-            let value = self.integer(value_code, value_message);
-            return u32::try_from(value)
-                .map(HeaderStructuralU32Expr::Literal)
-                .map_err(|_| {
-                    self.error(value_code, value_message);
-                });
+            self.position += 1;
+            return Ok(HeaderIntegerExpr::Literal(self.text(index).to_owned()));
         }
         self.identifier()
-            .map(HeaderStructuralU32Expr::Param)
+            .map(HeaderIntegerExpr::Param)
             .ok_or_else(|| {
                 self.error(value_code, value_message);
             })
@@ -2615,12 +2795,23 @@ impl Parser<'_> {
     fn at_operator(&self, value: &str) -> bool {
         self.current().is_some_and(|i| {
             self.lexed.tokens[i].kind == TokenKind::Operator
-                && self.lexed.text(self.source, &self.lexed.tokens[i]) == value
+                && Self::operator_starts_expected(&self.lexed.text(self.source, &self.lexed.tokens[i])[self.operator_offset..], value)
         })
+    }
+    fn operator_starts_expected(text: &str, value: &str) -> bool {
+        text == value || match value {
+            "=" => text.strip_prefix('=').is_some_and(|suffix| suffix.starts_with(['<', '&', '*', '!'])),
+            ">" => text.strip_prefix('>').is_some_and(|suffix| suffix.starts_with('=')),
+            _ => false,
+        }
     }
     fn operator(&mut self, value: &str) -> bool {
         if self.at_operator(value) {
-            self.position += 1;
+            self.operator_offset += value.len();
+            if self.operator_offset == self.text(self.current().expect("matched operator")).len() {
+                self.position += 1;
+                self.operator_offset = 0;
+            }
             true
         } else {
             false

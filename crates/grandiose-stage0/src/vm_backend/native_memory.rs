@@ -189,6 +189,55 @@ pub(super) struct NativeField {
     pub(super) layout: Arc<NativeLayout>,
 }
 
+/// Product fields are either explicitly heterogeneous or a compact repeated
+/// layout. Iteration is reserved for resident operations; metadata queries use
+/// `distinct` so a huge array never expands into tuple-shaped layout metadata.
+#[derive(Clone, Debug)]
+pub(super) enum NativeFields {
+    Explicit(Vec<NativeField>),
+    Repeated { element: Arc<NativeLayout>, count: usize, stride: usize },
+}
+
+impl NativeFields {
+    pub(super) fn len(&self) -> usize {
+        match self { Self::Explicit(fields) => fields.len(), Self::Repeated { count, .. } => *count }
+    }
+    pub(super) fn get(&self, index: usize) -> Option<NativeField> {
+        match self {
+            Self::Explicit(fields) => fields.get(index).cloned(),
+            Self::Repeated { element, count, stride } if index < *count => Some(NativeField {
+                layout: element.clone(), offset: stride.checked_mul(index)?,
+            }),
+            _ => None,
+        }
+    }
+    pub(super) fn iter(&self) -> NativeFieldIter<'_> {
+        NativeFieldIter { fields: self, indices: 0..self.len() }
+    }
+    pub(super) fn distinct(&self) -> impl Iterator<Item = NativeField> + '_ {
+        self.iter().take(match self { Self::Repeated { count, .. } => usize::from(*count != 0), _ => self.len() })
+    }
+}
+
+pub(super) struct NativeFieldIter<'a> {
+    fields: &'a NativeFields,
+    indices: std::ops::Range<usize>,
+}
+impl Iterator for NativeFieldIter<'_> {
+    type Item = NativeField;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.indices.next().map(|index| self.fields.get(index).expect("admitted product field"))
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) { self.indices.size_hint() }
+}
+impl ExactSizeIterator for NativeFieldIter<'_> {}
+
+impl<'a> IntoIterator for &'a NativeFields {
+    type Item = NativeField;
+    type IntoIter = NativeFieldIter<'a>;
+    fn into_iter(self) -> Self::IntoIter { self.iter() }
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum NativeShape {
     Scalar,
@@ -200,10 +249,10 @@ pub(super) enum NativeShape {
         unique: bool,
         descriptors: Arc<[VmNominalCopyDescriptor]>,
     },
-    Product(Vec<NativeField>),
+    Product(NativeFields),
     Enum {
         payload_offset: usize,
-        variants: Vec<Vec<NativeField>>,
+        variants: Vec<NativeFields>,
     },
 }
 
@@ -227,8 +276,8 @@ impl NativeLayout {
                 NativeShape::Scalar => true,
                 NativeShape::Reference { referent, .. } => native_layout(referent, descriptors, &mut vec![])
                     .is_ok_and(|layout| visit(&layout, descriptors, seen, depth + 1)),
-                NativeShape::Product(fields) => fields.iter().all(|field| visit(&field.layout, descriptors, seen, depth + 1)),
-                NativeShape::Enum { variants, .. } => variants.iter().flatten().all(|field| visit(&field.layout, descriptors, seen, depth + 1)),
+                NativeShape::Product(fields) => fields.distinct().all(|field| visit(&field.layout, descriptors, seen, depth + 1)),
+                NativeShape::Enum { variants, .. } => variants.iter().flat_map(NativeFields::distinct).all(|field| visit(&field.layout, descriptors, seen, depth + 1)),
             }
         }
         visit(self, descriptors, &mut std::collections::BTreeSet::new(), 0)
@@ -339,6 +388,7 @@ impl NativeReference {
                 .collect::<Result<Vec<_>, _>>()?.into();
             return Ok(match (&field.layout.ty, variant) {
                 (VmType::Tuple(_), None) => VmValue::Tuple(values),
+                (VmType::FixedArray { .. }, None) => VmValue::Array { values },
                 (VmType::Nominal { definition, .. }, None) => VmValue::Record {
                     definition: *definition, fields: values, signature: field.layout.ty.clone(),
                 },
@@ -385,7 +435,7 @@ impl NativeReference {
                 return Ok(());
             }
             let (offset, fields, values, tag) = match (&layout.shape, &value) {
-                (NativeShape::Product(fields), VmValue::Tuple(values) | VmValue::Record { fields: values, .. }) => (0, fields, values, None),
+                (NativeShape::Product(fields), VmValue::Tuple(values) | VmValue::Array { values } | VmValue::Record { fields: values, .. }) => (0, fields, values, None),
                 (NativeShape::Enum { payload_offset, variants }, VmValue::Enum { variant, fields: values, .. }) =>
                     (*payload_offset, variants.get(*variant as usize).ok_or_else(|| error("invalid native enum discriminant"))?, values, Some(*variant)),
                 _ => return unsafe { layout.write(pointer, value) },
@@ -414,7 +464,7 @@ fn product_layout(
     types: &[VmType],
     descriptors: &Arc<[VmNominalCopyDescriptor]>,
     active: &mut Vec<VmType>,
-) -> Result<(MemoryLayout, Vec<NativeField>), VmArtifactError> {
+) -> Result<(MemoryLayout, NativeFields), VmArtifactError> {
     let mut memory = MemoryLayout::of::<()>();
     let mut fields = Vec::with_capacity(types.len());
     for ty in types {
@@ -423,7 +473,7 @@ fn product_layout(
         memory = next;
         fields.push(NativeField { offset, layout: Arc::new(layout) });
     }
-    Ok((memory.pad_to_alignment(), fields))
+    Ok((memory.pad_to_alignment(), NativeFields::Explicit(fields)))
 }
 
 pub(super) fn native_layout(
@@ -461,6 +511,16 @@ pub(super) fn native_layout(
                     descriptors: descriptors.clone(),
                 },
             });
+        }
+        VmType::FixedArray { element, length } => {
+            active.push(ty.clone());
+            let element = Arc::new(native_layout(element, descriptors, active)?);
+            active.pop();
+            let count = usize::try_from(*length).map_err(|_| error("fixed array count exceeds target indexing width"))?;
+            let stride = element.memory.pad_to_alignment().size();
+            let memory = element.memory.repeat(count).map_err(memory_error)?;
+            return Ok(NativeLayout { ty: ty.clone(), memory,
+                shape: NativeShape::Product(NativeFields::Repeated { element, count, stride }) });
         }
         VmType::Tuple(types) => {
             active.push(ty.clone());
@@ -569,6 +629,7 @@ impl NativeLayout {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(match &self.ty {
                     VmType::Tuple(_) => VmValue::Tuple(values.into()),
+                    VmType::FixedArray { .. } => VmValue::Array { values: values.into() },
                     VmType::Nominal { definition, .. } => VmValue::Record {
                         definition: *definition,
                         fields: values.into(),
@@ -673,7 +734,7 @@ impl NativeLayout {
             }
             (
                 NativeShape::Product(fields),
-                VmValue::Tuple(values) | VmValue::Record { fields: values, .. },
+                VmValue::Tuple(values) | VmValue::Array { values } | VmValue::Record { fields: values, .. },
             ) => {
                 if fields.len() != values.len() {
                     return Err(error("native product field count mismatch"));
@@ -847,6 +908,10 @@ pub(super) fn execute_memory_intrinsic(
             })
         }
         IsNull => VmValue::U32(u32::from(ptr_arg(0)?.is_null())),
+        // Compare/inspect the address only: do not load a resident, validate
+        // an allocation, or expose provenance for reconstructing a pointer.
+        PointerEq => VmValue::U32(u32::from(ptr_arg(0)?.addr() == ptr_arg(1)?.addr())),
+        PointerAddress => VmValue::Usize(ptr_arg(0)?.addr() as u64),
         Offset | OffsetConst => {
             let bytes = layout(0)?
                 .memory
@@ -961,6 +1026,69 @@ mod tests {
     fn budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
             limits: Default::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn fixed_array_layout_is_compact_contiguous_and_checked() {
+        let ty = VmType::FixedArray { element: Box::new(VmType::U16), length: 1_000_000_000 };
+        let layout = native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap();
+        assert_eq!((layout.memory.size(), layout.memory.alignment()), (2_000_000_000, 2));
+        let NativeShape::Product(NativeFields::Repeated { count, stride, .. }) = layout.shape else { panic!() };
+        assert_eq!((count, stride), (1_000_000_000, 2));
+        let overflow = VmType::FixedArray { element: Box::new(VmType::U128), length: u64::MAX };
+        assert!(native_layout(&overflow, &Arc::from([]), &mut vec![]).is_err());
+        let empty = VmType::FixedArray { element: Box::new(VmType::U128), length: 0 };
+        let empty = native_layout(&empty, &Arc::from([]), &mut vec![]).unwrap();
+        assert_eq!((empty.memory.size(), empty.memory.alignment()), (0, 16));
+    }
+
+    #[test]
+    fn fixed_array_zero_sized_residents_keep_distinct_move_holes() {
+        let ty = VmType::FixedArray { element: Box::new(VmType::Unit), length: 2 };
+        let layout = Arc::new(native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
+        let allocation = RawAllocation::new(layout.memory, 0).unwrap();
+        let native = NativeReference::new(allocation.as_ptr().as_ptr(), layout);
+        let left = native.project(&[0]).unwrap();
+        let right = native.project(&[1]).unwrap();
+        assert_eq!(left.pointer, right.pointer);
+        let mut budget = budget();
+        assert!(matches!(left.take(&[], &mut budget).unwrap(), VmValue::Unit));
+        assert!(left.take(&[], &mut budget).is_err());
+        assert!(right.is_initialized(&[]));
+        let VmValue::Array { values } = native.read(&[], &mut budget).unwrap() else { panic!() };
+        assert!(matches!(values[0], VmValue::Uninitialized(VmType::Unit)));
+        assert!(matches!(values[1], VmValue::Unit));
+        left.write(&[], VmValue::Unit, &mut budget).unwrap();
+        assert!(native.is_fully_initialized());
+    }
+
+    #[test]
+    fn safe_address_inspection_does_not_read_storage_or_grant_unsafe_authority() {
+        let raw = VmType::RawPointer { mutability: crate::PointerMutability::Const, pointee: Box::new(VmType::I64) };
+        let function = VmFunction {
+            definition: crate::DefKey(crate::Digest::of_bytes(b"address-only-memory")),
+            safety: Safety::Safe, unsafe_execution: false, nominal_copy_descriptors: vec![],
+            captures: 0, parameters: 2, registers: vec![raw.clone(), raw.clone()], instructions: vec![],
+        };
+        let mut budget = budget();
+        budget.unsafe_execution = false;
+        // Deliberately no allocation/provenance exists for these addresses.
+        for (left, right) in [(0, 0), (8, 8), (8, 16), (usize::MAX, 0)] {
+            let mut registers = [left, right].map(|address| Some(VmValue::RawPointer {
+                pointer: ptr::without_provenance_mut(address), signature: raw.clone(),
+            }));
+            assert!(matches!(execute_memory_intrinsic(MemoryPrimitive::PointerEq,
+                &[VmType::I64], &[0, 1], &function, &mut registers, &mut budget).unwrap(),
+                VmValue::U32(value) if value == u32::from(left == right)));
+            assert!(matches!(execute_memory_intrinsic(MemoryPrimitive::PointerAddress,
+                &[VmType::I64], &[0], &function, &mut registers, &mut budget).unwrap(),
+                VmValue::Usize(value) if value == left as u64));
+            assert!(!budget.unsafe_execution);
+            assert!(budget.native_memory.allocations.is_empty());
+            assert!(matches!(execute_memory_intrinsic(MemoryPrimitive::Read,
+                &[VmType::I64], &[0], &function, &mut registers, &mut budget),
+                Err(VmArtifactError::UnsafeExecutionRequiresUnsafeApi)));
+        }
     }
 
     #[test]

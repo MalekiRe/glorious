@@ -19,7 +19,7 @@ fn sixteen(map: &Map, key: usize) -> i64 {
     four(map, key) + four(map, key) + four(map, key) + four(map, key)
 }
 pub fn main() -> i64 {
-    let map = HashMap<usize, usize>::new();
+    let mut map = HashMap<usize, usize>::new();
     fill(&mut map, 0);
     handle @READ@ == 0 {
         true => 42,

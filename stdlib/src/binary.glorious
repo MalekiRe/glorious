@@ -1,0 +1,188 @@
+// Bounded binary reads (specification §23). A failed operation never
+// publishes its speculative cursor. Reader marks require stable owner brands
+// and are tracked separately as an unimplemented interface in README.md.
+pub enum DecodeErrorKind { Truncated, Overflow, NonCanonical, InvalidTag, InvalidUtf8, LimitExceeded }
+pub struct DecodeError { pub offset: usize, pub kind: DecodeErrorKind }
+pub struct ByteReader<'a> { private bytes: Slice<'a,u8>, private position: usize }
+fn byte_reader_window<'a>(value: &ByteReader<'a>, length: usize) -> Result<Slice<'a,u8>,DecodeError> {
+    handle length > Slice::len(&value.bytes) - value.position {
+        true => Result::Err(DecodeError { offset: value.position, kind: DecodeErrorKind::Truncated }),
+        false => handle Slice::slice(value.bytes, Range { start: value.position, end: value.position + length }) {
+            Result::Ok(bytes) => Result::Ok(bytes), Result::Err(_) => __g1_abort(),
+        },
+    }
+}
+fn byte_reader_word(bytes: Slice<u8>, index: usize, width: usize, little: Bool, result: u128) -> u128 {
+    handle index == width {
+        true => result,
+        false => {
+            let place = handle little { true => index, false => width - index - 1 };
+            let byte = as<u128>(*Slice::get_unchecked(bytes, index));
+            tail byte_reader_word(bytes, index + 1, width, little, bit_or(result, bit_shl(byte, as<u32>(place * 8))))
+        },
+    }
+}
+fn byte_reader_var(bytes: Slice<u8>, start: usize, index: usize, result: u64) -> Result<(u64,usize),DecodeError> {
+    handle index == Slice::len(&bytes) {
+        true => Result::Err(DecodeError { offset: index, kind: DecodeErrorKind::Truncated }),
+        false => {
+            let byte = *Slice::get_unchecked(bytes, index);
+            let count = index - start;
+            handle count == 9 {
+                true => handle byte > 1 {
+                    true => return(Result::Err(DecodeError { offset: index, kind: DecodeErrorKind::Overflow }), @byte_reader_var),
+                    false => (),
+                },
+                false => (),
+            };
+            let payload = as<u64>(bit_and(byte, 127));
+            let result = bit_or(result, bit_shl(payload, as<u32>(count * 7)));
+            handle byte < 128 {
+                true => handle count > 0 {
+                    true => handle payload == 0 {
+                        true => Result::Err(DecodeError { offset: index, kind: DecodeErrorKind::NonCanonical }),
+                        false => Result::Ok((result, index + 1)),
+                    },
+                    false => Result::Ok((result, index + 1)),
+                },
+                false => tail byte_reader_var(bytes, start, index + 1, result),
+            }
+        },
+    }
+}
+impl<'a> ByteReader<'a> {
+    pub fn new(bytes: Slice<'a,u8>) -> Self { ByteReader { bytes: bytes, position: 0 } }
+    pub fn position(value: &Self) -> usize { value.position }
+    pub fn remaining_len(value: &Self) -> usize { Slice::len(&value.bytes) - value.position }
+    pub fn remaining(value: &Self) -> Slice<'a,u8> {
+        handle byte_reader_window(value, Self::remaining_len(value)) {
+            Result::Ok(bytes) => bytes, Result::Err(_) => __g1_abort(),
+        }
+    }
+    pub fn read_exact(value: &mut Self, length: usize) -> Result<Slice<'a,u8>,DecodeError> {
+        handle byte_reader_window(value, length) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => { (*value).position = value.position + length; Result::Ok(bytes) },
+        }
+    }
+    pub fn read_str(value: &mut Self, length: usize) -> Result<Str<'a>,DecodeError> {
+        handle byte_reader_window(value, length) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let prefix = utf8_valid_up_to(bytes, 0);
+                handle prefix == length {
+                    true => { (*value).position = value.position + length; Result::Ok(Str { bytes: bytes }) },
+                    false => Result::Err(DecodeError { offset: value.position + prefix, kind: DecodeErrorKind::InvalidUtf8 }),
+                }
+            },
+        }
+    }
+    pub fn skip(value: &mut Self, length: usize) -> Result<(),DecodeError> {
+        handle Self::read_exact(value, length) { Result::Ok(_) => Result::Ok(()), Result::Err(error) => Result::Err(error) }
+    }
+    pub fn subreader(value: &mut Self, length: usize) -> Result<Self,DecodeError> {
+        handle Self::read_exact(value, length) { Result::Ok(bytes) => Result::Ok(Self::new(bytes)), Result::Err(error) => Result::Err(error) }
+    }
+    pub fn finish(value: Self) -> Result<(),DecodeError> {
+        handle value.position == Slice::len(&value.bytes) {
+            true => Result::Ok(()),
+            false => Result::Err(DecodeError { offset: value.position, kind: DecodeErrorKind::NonCanonical }),
+        }
+    }
+    pub fn read_var_u64(value: &mut Self) -> Result<u64,DecodeError> {
+        handle byte_reader_var(value.bytes, value.position, value.position, 0) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok((word, position)) => { (*value).position = position; Result::Ok(word) },
+        }
+    }
+    pub fn read_u8(value: &mut Self) -> Result<u8,DecodeError> {
+        handle byte_reader_window(value, 1) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u8>(byte_reader_word(bytes, 0, 1, true, 0));
+                (*value).position = value.position + 1;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u16_le(value: &mut Self) -> Result<u16,DecodeError> {
+        handle byte_reader_window(value, 2) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u16>(byte_reader_word(bytes, 0, 2, true, 0));
+                (*value).position = value.position + 2;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u32_le(value: &mut Self) -> Result<u32,DecodeError> {
+        handle byte_reader_window(value, 4) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u32>(byte_reader_word(bytes, 0, 4, true, 0));
+                (*value).position = value.position + 4;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u64_le(value: &mut Self) -> Result<u64,DecodeError> {
+        handle byte_reader_window(value, 8) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u64>(byte_reader_word(bytes, 0, 8, true, 0));
+                (*value).position = value.position + 8;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u128_le(value: &mut Self) -> Result<u128,DecodeError> {
+        handle byte_reader_window(value, 16) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u128>(byte_reader_word(bytes, 0, 16, true, 0));
+                (*value).position = value.position + 16;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u16_be(value: &mut Self) -> Result<u16,DecodeError> {
+        handle byte_reader_window(value, 2) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u16>(byte_reader_word(bytes, 0, 2, false, 0));
+                (*value).position = value.position + 2;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u32_be(value: &mut Self) -> Result<u32,DecodeError> {
+        handle byte_reader_window(value, 4) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u32>(byte_reader_word(bytes, 0, 4, false, 0));
+                (*value).position = value.position + 4;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_u64_be(value: &mut Self) -> Result<u64,DecodeError> {
+        handle byte_reader_window(value, 8) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<u64>(byte_reader_word(bytes, 0, 8, false, 0));
+                (*value).position = value.position + 8;
+                Result::Ok(word)
+            },
+        }
+    }
+    pub fn read_i64_le(value: &mut Self) -> Result<i64,DecodeError> {
+        handle byte_reader_window(value, 8) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(bytes) => {
+                let word = as<i64>(byte_reader_word(bytes, 0, 8, true, 0));
+                (*value).position = value.position + 8;
+                Result::Ok(word)
+            },
+        }
+    }
+}

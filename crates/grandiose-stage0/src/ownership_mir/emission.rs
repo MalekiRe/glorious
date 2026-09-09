@@ -86,6 +86,12 @@ impl OwnershipMir {
         retain_destruction: bool,
         signatures: Option<&crate::ElaboratedInterface>,
     ) -> Option<(MirFunction, BTreeMap<DefKey, MirFunction>)> {
+        // The compatibility ABI has no mandatory frame-transfer terminator.
+        // Never silently turn a checked tail obligation into an ordinary call.
+        if self.blocks.iter().any(|block| matches!(&block.terminator.control,
+            ControlTerminator::Invoke { contract, .. } if contract.mandatory_tail)) {
+            return None;
+        }
         if !plain(&declared_result)
             || self
                 .parameters
@@ -336,7 +342,7 @@ impl OwnershipMir {
                                 dst,
                                 fields,
                                 element_type: match ty {
-                                    Type::Array(element) => (**element).clone(),
+                                    Type::Array(element) | Type::FixedArray { element, .. } => (**element).clone(),
                                     _ => return None,
                                 },
                             },
@@ -542,7 +548,7 @@ impl OwnershipMir {
                                     field_count: *field_count,
                                     field_type: ty.clone(),
                                 },
-                                Type::Array(_) => MirInstruction::ProjectArray {
+                                Type::Array(_) | Type::FixedArray { .. } => MirInstruction::ProjectArray {
                                     dst,
                                     base: local(*base),
                                     index: *index,
@@ -725,6 +731,9 @@ impl OwnershipMir {
                         continue;
                     }
                     OwnershipOperation::Compute(computation) => match computation {
+                        // Compile-time terms must cross Specialization before
+                        // the legacy concrete ABI can represent their value.
+                        OwnershipComputation::ConstValue(_) => return None,
                         OwnershipComputation::Unit => MirInstruction::ConstUnit { dst },
                         OwnershipComputation::Function {
                             definition,

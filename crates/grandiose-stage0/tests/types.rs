@@ -6,6 +6,83 @@ use grandiose_stage0::{
 };
 
 #[test]
+fn associated_row_subset_candidate_trials_do_not_leak_or_guess_bindings() {
+    let projection = |subject: Type, argument: Type| EffectRowProjection {
+        subject: Box::new(subject),
+        trait_definition: DefKey(Digest::of_bytes(b"transactional-row-subset")),
+        trait_arguments: vec![GenericArgument::Type(argument)],
+        name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
+    };
+    let row = |projections| EffectRow { effects: BTreeSet::new(), projections, tails: BTreeSet::new() };
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let u8_ty = Type::Scalar(ScalarType::U8);
+    let mut inference = InferContext::default();
+    let subject = inference.fresh();
+    inference.constrain_effect_subset(
+        row(vec![projection(subject.clone(), i64_ty.clone())]),
+        row(vec![projection(u8_ty.clone(), u8_ty.clone()), projection(i64_ty.clone(), i64_ty.clone())]),
+    ).unwrap();
+    assert_eq!(inference.zonk(subject).unwrap(), i64_ty);
+
+    let mut inference = InferContext::default();
+    let subject = inference.fresh();
+    assert!(inference.constrain_effect_subset(
+        row(vec![projection(subject.clone(), i64_ty.clone())]),
+        row(vec![projection(u8_ty, i64_ty.clone()), projection(i64_ty.clone(), i64_ty)]),
+    ).is_err(), "an unknown subject cannot arbitrarily choose a union operand");
+    assert!(matches!(inference.zonk(subject), Err(TypeError::Unresolved(_))));
+}
+
+fn row_callable(effects: EffectRow) -> Type {
+    Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 0,
+        parameters: vec![], result: Box::new(Type::Unit), effects, invocation: Quantity::ONCE }
+}
+
+#[test]
+fn row_union_equations_wait_for_independent_operand_evidence() {
+    let mut inference = InferContext::default();
+    let first = inference.fresh_effects();
+    let second = inference.fresh_effects();
+    let mut union = first.clone(); union.extend(second.clone());
+    let a = DefKey(Digest::of_bytes(b"row-union-a"));
+    let b = DefKey(Digest::of_bytes(b"row-union-b"));
+    inference.unify(row_callable(union.clone()), row_callable(EffectRow::closed([a,b]))).unwrap();
+    inference.unify(row_callable(first.clone()), row_callable(EffectRow::closed([a]))).unwrap();
+    inference.unify(row_callable(second.clone()), row_callable(EffectRow::closed([b]))).unwrap();
+    assert_eq!(inference.zonk_effects(union).unwrap(), EffectRow::closed([a,b]));
+    assert_eq!(inference.zonk_effects(first).unwrap(), EffectRow::closed([a]));
+    assert_eq!(inference.zonk_effects(second).unwrap(), EffectRow::closed([b]));
+}
+
+#[test]
+fn unresolved_nonempty_union_is_ambiguous_but_empty_union_is_unique() {
+    for empty in [false, true] {
+        let mut inference = InferContext::default();
+        let first = inference.fresh_effects();
+        let second = inference.fresh_effects();
+        let mut union = first.clone(); union.extend(second.clone());
+        let known = if empty { EffectRow::empty() } else { EffectRow::closed([DefKey(Digest::of_bytes(b"known"))]) };
+        inference.unify(row_callable(union.clone()), row_callable(known)).unwrap();
+        if empty {
+            assert_eq!(inference.zonk_effects(first).unwrap(), EffectRow::empty());
+            assert_eq!(inference.zonk_effects(second).unwrap(), EffectRow::empty());
+        } else {
+            assert!(matches!(inference.zonk_effects(union), Err(TypeError::AmbiguousEffectUnion { .. })));
+        }
+    }
+}
+
+#[test]
+fn row_union_identity_is_unordered_but_never_discards_an_operand() {
+    let row = |indices: &[u32]| EffectRow { effects: BTreeSet::new(), projections: vec![],
+        tails: indices.iter().copied().map(EffectTail::Generic).collect() };
+    let mut inference = InferContext::default();
+    let fingerprint = inference.type_fingerprint(row_callable(row(&[1,0,1]))).unwrap();
+    assert_eq!(fingerprint, inference.type_fingerprint(row_callable(row(&[0,1]))).unwrap());
+    assert_ne!(fingerprint, inference.type_fingerprint(row_callable(row(&[0]))).unwrap());
+}
+
+#[test]
 fn canonical_generic_arguments_keep_lifetimes_and_effect_rows_out_of_type_slots() {
     let lifetime = GenericArgument::Lifetime(Lifetime::Static);
     let row = GenericArgument::EffectRow(EffectRow::empty());
@@ -78,7 +155,7 @@ fn const_generic_inference_is_kind_checked_occurs_checked_and_zonked() {
             Type::Nominal {
                 definition: carrier,
                 arguments: vec![
-                    GenericArgument::ConstU32(7),
+                    GenericArgument::ConstInteger(7u32.into()),
                     GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
                 ],
             },
@@ -89,7 +166,7 @@ fn const_generic_inference_is_kind_checked_occurs_checked_and_zonked() {
         Type::Nominal {
             definition: carrier,
             arguments: vec![
-                GenericArgument::ConstU32(7),
+                GenericArgument::ConstInteger(7u32.into()),
                 GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
             ],
         }
@@ -386,7 +463,7 @@ fn effect_row_subset_constraints_preserve_open_tail_remainders() {
     let log = DefKey(Digest::of_bytes(b"Log"));
     let mut inference = InferContext::default();
     let required_tail = inference.fresh_effects();
-    let variable = required_tail.tail;
+    let variable = required_tail.tails.first().copied();
     let mut required = required_tail;
     required.effects.insert(EffectInstance {
         definition: trace,
@@ -403,7 +480,7 @@ fn effect_row_subset_constraints_preserve_open_tail_remainders() {
                 arguments: vec![],
             }]),
             projections: vec![],
-            tail: Some(EffectTail::Infer(variable)),
+            tails: [EffectTail::Infer(variable)].into_iter().collect(),
         },
         _ => unreachable!(),
     });
@@ -419,7 +496,7 @@ fn effect_row_subset_rejects_rigid_generic_tail_mismatches() {
             arguments: vec![],
         }]),
         projections: vec![],
-        tail: Some(EffectTail::Generic(1)),
+        tails: [EffectTail::Generic(1)].into_iter().collect(),
     };
     let allowed = EffectRow {
         effects: BTreeSet::from([EffectInstance {
@@ -427,7 +504,7 @@ fn effect_row_subset_rejects_rigid_generic_tail_mismatches() {
             arguments: vec![],
         }]),
         projections: vec![],
-        tail: Some(EffectTail::Generic(2)),
+        tails: [EffectTail::Generic(2)].into_iter().collect(),
     };
     assert!(matches!(
         InferContext::default().constrain_effect_subset(required, allowed),
@@ -480,7 +557,7 @@ fn callable_fingerprints_include_associated_effect_row_projections() {
                 item_generic_kinds: vec![],
                 item_arguments: vec![],
             }],
-            tail: None,
+            tails: Default::default(),
         },
         invocation: Quantity::ONCE,
     };
@@ -505,7 +582,7 @@ fn symbolic_effect_row_projections_are_sorted_deduplicated_and_fingerprinted_can
     let row = |projections| EffectRow {
         effects: BTreeSet::new(),
         projections,
-        tail: None,
+        tails: Default::default(),
     };
     let callable = |effects| Type::Callable {
         safety: grandiose_stage0::Safety::Safe,
@@ -559,7 +636,7 @@ fn matching_associated_effect_row_projections_unify_without_erasure() {
             item_generic_kinds: vec![],
             item_arguments: vec![],
         }],
-        tail: None,
+        tails: Default::default(),
     };
     let callable = |effects| Type::Callable {
         safety: grandiose_stage0::Safety::Safe,
@@ -589,7 +666,7 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
             item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
             item_arguments: vec![GenericArgument::Type(inference.fresh())],
         }],
-        tail: None,
+        tails: Default::default(),
     };
     let right = EffectRow {
         effects: BTreeSet::new(),
@@ -601,7 +678,7 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
             item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
             item_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::U8))],
         }],
-        tail: None,
+        tails: Default::default(),
     };
     let callable = |effects| Type::Callable {
         safety: grandiose_stage0::Safety::Safe,
@@ -633,12 +710,12 @@ fn associated_effect_row_projection_sets_unify_independently_of_source_order() {
     let left = EffectRow {
         effects: BTreeSet::new(),
         projections: vec![projection(first, "First"), projection(second, "Second")],
-        tail: None,
+        tails: Default::default(),
     };
     let right = EffectRow {
         effects: BTreeSet::new(),
         projections: vec![projection(second, "Second"), projection(first, "First")],
-        tail: None,
+        tails: Default::default(),
     };
     let callable = |effects| Type::Callable {
         safety: grandiose_stage0::Safety::Safe,
@@ -670,7 +747,7 @@ fn distinct_associated_effect_row_projections_do_not_unify() {
             item_generic_kinds: vec![],
             item_arguments: vec![],
         }],
-        tail: None,
+        tails: Default::default(),
     };
     let callable = |effects| Type::Callable {
         safety: grandiose_stage0::Safety::Safe,
@@ -745,7 +822,7 @@ fn nominal_identity_preserves_mixed_kind_generic_arguments() {
         arguments: vec![
             GenericArgument::Lifetime(Lifetime::Static),
             GenericArgument::EffectRow(EffectRow::empty()),
-            GenericArgument::ConstU32(7),
+            GenericArgument::ConstInteger(7u32.into()),
             GenericArgument::ConstQuantity(quantity),
             GenericArgument::Type(Type::Scalar(ScalarType::I64)),
         ],
@@ -755,7 +832,7 @@ fn nominal_identity_preserves_mixed_kind_generic_arguments() {
         arguments: vec![
             GenericArgument::Lifetime(Lifetime::Static),
             GenericArgument::EffectRow(EffectRow::empty()),
-            GenericArgument::ConstU32(8),
+            GenericArgument::ConstInteger(8u32.into()),
             GenericArgument::ConstQuantity(quantity),
             GenericArgument::Type(Type::Scalar(ScalarType::I64)),
         ],
@@ -836,11 +913,11 @@ fn effect_instance_identity_preserves_generic_argument_kinds() {
     let definition = DefKey(Digest::of_bytes(b"kind-preserving-effect"));
     let type_encoded_const = EffectInstance {
         definition,
-        arguments: vec![GenericArgument::Type(Type::ConstU32(1))],
+        arguments: vec![GenericArgument::Type(Type::ConstInteger(1u32.into()))],
     };
     let structural_const = EffectInstance {
         definition,
-        arguments: vec![GenericArgument::ConstU32(1)],
+        arguments: vec![GenericArgument::ConstInteger(1u32.into())],
     };
     assert_ne!(type_encoded_const, structural_const);
 
@@ -850,4 +927,15 @@ fn effect_instance_identity_preserves_generic_argument_kinds() {
         2,
         "effect identity must not erase argument kinds"
     );
+}
+
+#[test]
+fn result_generalization_defaults_numeric_variables_but_preserves_parametric_values() {
+    let mut inference = InferContext::default();
+    let number = inference.fresh();
+    inference.constrain_numeric(number.clone(), false).unwrap();
+    let arbitrary = inference.fresh();
+    let (result, binders) = inference.generalize_result_type(Type::Tuple(vec![number, arbitrary])).unwrap();
+    assert_eq!(result, Type::Tuple(vec![Type::Scalar(ScalarType::I64), Type::Generic(0)]));
+    assert_eq!(binders, vec![grandiose_stage0::GenericKind::Type]);
 }

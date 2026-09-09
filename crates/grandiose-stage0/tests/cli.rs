@@ -343,7 +343,7 @@ fn cli_binds_a_private_generic_int_leaf_from_an_explicit_manifest() {
     let source = directory.join("runtime.glorious");
     fs::write(
         &source,
-        "fn __g1_int_greater<T>(left: T, right: T) -> u32 { () } pub fn main() -> u32 { __g1_int_greater<i64>(0, -1) }",
+        "prefix 50 -; trait Neg { -(value: Self) -> Self; } impl Neg for i64 { -(value: i64) -> i64 { __g1_int_wrapping_neg<i64>(value) } } fn __g1_int_wrapping_neg<T>(value: T) -> T { () } fn __g1_int_greater<T>(left: T, right: T) -> u32 { () } pub fn main() -> u32 { __g1_int_greater<i64>(0, -1) }",
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
@@ -354,6 +354,10 @@ fn cli_binds_a_private_generic_int_leaf_from_an_explicit_manifest() {
             "int-greater",
             "crate",
             "__g1_int_greater",
+            "--runtime-leaf",
+            "int-wrapping-neg",
+            "crate",
+            "__g1_int_wrapping_neg",
             "run",
             source.to_str().unwrap(),
         ])

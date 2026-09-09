@@ -356,7 +356,8 @@ impl OwnershipMir {
                             captures.iter().zip(&closure.environment.captures)
                         {
                             if *mode != capture.mode || self.checked_type(*value)? != &capture.ty {
-                                return Err(invalid("capture disagrees with sealed environment"));
+                                return Err(invalid(&format!("capture {} disagrees with sealed environment: expected {:?} {:?}, found {:?} {:?}",
+                                    capture.name, capture.mode, capture.ty, mode, self.checked_type(*value)?)));
                             }
                             if *mode == crate::CaptureMode::Copy {
                                 self.validate_operand(OwnershipOperand {
@@ -493,7 +494,7 @@ mod tests {
 
     #[test]
     fn a_reassigned_callable_cannot_keep_its_initial_copy_permission() {
-        let mir = fixture("pub fn main(value: &mut i64) -> i64 { let pending = () -> i64 { 42 }; pending = () -> i64 { let taken = move value; 42 }; let held = pending; held() }");
+        let mir = fixture("pub fn main(value: &mut i64) -> i64 { let mut pending = () -> i64 { 42 }; pending = () -> i64 { let taken = move value; 42 }; let held = pending; held() }");
         let replaced = mir.blocks.iter().flat_map(|block| &block.instructions)
             .find_map(|instruction| match &instruction.operation {
                 OwnershipOperation::Replace { place: ControlPlace::Local(value), .. } => Some(*value),
@@ -557,7 +558,7 @@ mod tests {
     #[test]
     fn rejects_copying_an_affine_replacement() {
         let mut mir = fixture(
-            "struct Ticket {} impl Use<[0, 1]> for Ticket {} pub fn main(old: Ticket, new: Ticket) -> Ticket { old = new; old }",
+            "struct Ticket {} impl Use<[0, 1]> for Ticket {} pub fn main(old: Ticket, new: Ticket) -> Ticket { let mut old = old; old = new; old }",
         );
         let mode = mir
             .blocks
@@ -990,6 +991,6 @@ mod tests {
 
     #[test]
     fn replacing_a_moved_field_restores_its_availability() {
-        fixture("struct Ticket {} impl Use<[0, 1]> for Ticket {} struct Pair { left: Ticket, right: Ticket } impl Use<[0, 1]> for Pair {} pub fn main(pair: Pair) -> Ticket { let taken = pair.left; pair.left = Ticket {}; pair.left }").validate_partial_paths().unwrap();
+        fixture("struct Ticket {} impl Use<[0, 1]> for Ticket {} struct Pair { left: Ticket, right: Ticket } impl Use<[0, 1]> for Pair {} pub fn main(pair: Pair) -> Ticket { let mut pair = pair; let taken = pair.left; pair.left = Ticket {}; pair.left }").validate_partial_paths().unwrap();
     }
 }

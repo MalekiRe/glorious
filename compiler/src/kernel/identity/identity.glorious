@@ -1,14 +1,14 @@
 use std::*;
 
 pub struct Digest { private a: u64, private b: u64, private c: u64, private d: u64 }
-pub struct FileKey { digest: Digest }
-pub struct DefKey { digest: Digest }
+pub struct FileKey { pub(crate) digest: Digest }
+pub struct DefKey { pub(crate) digest: Digest }
 // This is the stable identity projection, not the future validated argument
 // tree. Equality/order retain the complete canonical substitution, like Rust.
-pub struct InstanceKey { callable: DefKey, canonical_substitution: Vec<u8> }
-pub struct PackageKey { value: String }
-pub struct ModuleKey { package: PackageKey, path: String }
-pub struct RevisionId { database: u64, ordinal: u64 }
+pub struct InstanceKey { pub(crate) callable: DefKey, pub(crate) canonical_substitution: Vec<u8> }
+pub struct PackageKey { pub(crate) value: String }
+pub struct ModuleKey { pub(crate) package: PackageKey, pub(crate) path: String }
+pub struct RevisionId { pub(crate) database: u64, pub(crate) ordinal: u64 }
 pub enum IdentityError { DigestLength, Capacity }
 
 // An index and a retained product own separate keys. The canonical bytes are

@@ -56,6 +56,41 @@ fn one_clause_resumes_three_distinct_performance_sites() {
 }
 
 #[test]
+fn explicit_resumption_returns_the_transformed_completion_result() {
+    candidate("effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask(k) => k(40) + 1 } }");
+}
+
+#[test]
+fn each_replay_runs_completion_before_returning_to_its_clause() {
+    candidate("effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask(k) => k(19) + k(21) } }");
+}
+
+#[test]
+fn completion_changes_the_resumption_result_type() {
+    candidate("struct Answer { value: i64 } effect Ask { [1,1] ask() -> i64; } fn transformed() -> Answer { handle Ask::ask() { value => Answer { value: value + 2 }, Ask::ask(k) => k(40) } } pub fn main() -> i64 { transformed().value }");
+}
+
+#[test]
+fn cancellation_bypasses_nonidentity_completion() {
+    candidate("effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 100, Ask::ask(_) => 42 } }");
+}
+
+#[test]
+fn reentry_applies_completion_once_to_the_protected_result() {
+    candidate(&THREE_PERFORMANCES.replace("a + b + c", "a + b + c - 1").replace("{ Tick::tick(value, k)", "{ result => result + 1, Tick::tick(value, k)"));
+}
+
+#[test]
+fn completion_of_a_resumed_helper_call_returns_to_the_clause() {
+    candidate("effect Ask { [1,1] ask() -> i64; } fn helper() -> i64 / Ask { Ask::ask() + 1 } pub fn main() -> i64 { handle helper() { value => value + 1, Ask::ask(k) => k(39) + 1 } }");
+}
+
+#[test]
+fn effectful_completion_runs_inside_an_outer_resumption() {
+    candidate("effect Ask { [1,1] ask() -> i64; } effect Add { [1,1] add(i64) -> i64; } pub fn main() -> i64 { handle { handle Ask::ask() { value => Add::add(value), Ask::ask(k) => k(40) + 1 } } { Add::add(value, k) => k(value + 1) } }");
+}
+
+#[test]
 fn repeated_pattern_dispatch_retains_first_match_and_forwarding() {
     candidate(&THREE_PERFORMANCES.replace(
         "Tick::tick(value, k) => k(value)",

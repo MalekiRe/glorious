@@ -1,0 +1,16 @@
+// Canonical generator protocols live in their own module so superseded
+// bootstrap Yield<T> cannot silently acquire this declaration's identity.
+pub mod generator {
+    use crate::*;
+    pub effect Yield<Y,R> { [0,1] yield(value: Y) -> R; }
+    pub effect YieldOnce<Y,R> { yield_once(value: Y) -> R; }
+    pub enum GeneratorStep<Y,T,G> { Yielded { value: Y, rest: G }, Complete(T) }
+    pub trait Generator<R> {
+        type Yield;
+        type Return;
+        type Effects: EffectRow;
+        fn resume(value: Self, input: R) -> GeneratorStep<<Self as Generator<R>>::Yield,<Self as Generator<R>>::Return,Self>
+            / { | <Self as Generator<R>>::Effects };
+    }
+    pub fn close_generator<G>(value: G) where G: Use<[0,1]> { () }
+}

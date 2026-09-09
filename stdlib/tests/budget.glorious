@@ -1,0 +1,21 @@
+pub fn main() -> i64 {
+    let mut steps = StepBudget::new(3);
+    assert_true(handle StepBudget::charge(&mut steps, 2) { Result::Ok(_) => true, _ => false });
+    assert_true(handle StepBudget::charge(&mut steps, 2) { Result::Err(error) => error.remaining == 1, _ => false });
+    assert_true(StepBudget::remaining(&steps) == 1);
+    let mut memory = MemoryBudget::new(8);
+    let mut other = MemoryBudget::new(8);
+    let charge = handle MemoryBudget::charge(&mut memory, 6) { Result::Ok(charge) => charge, _ => return(0, @main) };
+    assert_true(MemoryBudget::remaining(&memory) == 2);
+    let charge = handle MemoryBudget::release(&mut other, charge) {
+        Result::Err(rejected) => { assert_true(handle rejected.error { MarkError::WrongOwner => true, _ => false }); rejected.value },
+        Result::Ok(_) => return(0, @main),
+    };
+    assert_true(handle MemoryBudget::release(&mut memory, charge) { Result::Ok(_) => true, _ => false });
+    assert_true(MemoryBudget::remaining(&memory) == 8);
+    let mut depth = DepthBudget::new(1);
+    let permit = handle DepthBudget::enter(&mut depth) { Result::Ok(permit) => permit, _ => return(0, @main) };
+    handle DepthBudget::enter(&mut depth) { Result::Err(_) => (), Result::Ok(unexpected) => { DepthBudget::leave(&mut depth, unexpected); return(0, @main) } };
+    assert_true(handle DepthBudget::leave(&mut depth, permit) { Result::Ok(_) => true, _ => false });
+    42
+}

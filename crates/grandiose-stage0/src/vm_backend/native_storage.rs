@@ -2,7 +2,7 @@
 //! value initialization, not by a native call. Resident bytes are authoritative;
 //! the separate state records only initialization and checked-reference origins.
 
-use super::native_memory::{NativeLayout, NativeReference, NativeShape};
+use super::native_memory::{NativeFields, NativeLayout, NativeReference, NativeShape};
 use super::native_profile::{AllocationKind, NativeAllocation, NativeMemoryMeasurements};
 use super::{
     ExecutionBudget, ReferenceTarget, VmArtifactError, VmFunction, VmInstruction,
@@ -110,6 +110,8 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
         | VmInstruction::I64ToI128Checked { dst, .. }
         | VmInstruction::I64ToI128Wrapping { dst, .. }
         | VmInstruction::MakeTuple { dst, .. }
+        | VmInstruction::MakeTupleOwned { dst, .. } | VmInstruction::MakeArrayOwned { dst, .. }
+        | VmInstruction::MakeRecordOwned { dst, .. } | VmInstruction::MakeEnumOwned { dst, .. }
         | VmInstruction::MakeArray { dst, .. }
         | VmInstruction::MakeRecord { dst, .. }
         | VmInstruction::MakeEnum { dst, .. }
@@ -125,7 +127,7 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
         | VmInstruction::ResumeReturn { dst, .. }
         | VmInstruction::CaptureResumption { dst, .. }
         | VmInstruction::Copy { dst, .. }
-        | VmInstruction::Store { dst, .. }
+        | VmInstruction::Store { dst, .. } | VmInstruction::StoreOwned { dst, .. }
         | VmInstruction::Move { dst, .. }
         | VmInstruction::Borrow { dst, .. }
         | VmInstruction::DerefCopy { dst, .. }
@@ -182,6 +184,9 @@ fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
 /// Literal field indices, jump targets, and declaration metadata are not locals.
 fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
     match instruction {
+        VmInstruction::TailCallOwned { arguments, .. } => {
+            for argument in arguments { visit(*argument); }
+        }
         VmInstruction::DestroyCallable { dst, value } => { visit(*dst); visit(*value); }
         VmInstruction::DeclareResult { .. }
         | VmInstruction::DeclareFrameCleanup { .. }
@@ -458,6 +463,8 @@ fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
             visit(*item);
         }
         VmInstruction::MakeTuple { dst, fields, .. }
+        | VmInstruction::MakeTupleOwned { dst, fields } | VmInstruction::MakeArrayOwned { dst, fields, .. }
+        | VmInstruction::MakeRecordOwned { dst, fields, .. } | VmInstruction::MakeEnumOwned { dst, fields, .. }
         | VmInstruction::MakeArray { dst, fields, .. }
         | VmInstruction::MakeRecord { dst, fields, .. }
         | VmInstruction::MakeEnum { dst, fields, .. } => {
@@ -521,7 +528,7 @@ fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u32)) {
             visit(*value);
         }
         VmInstruction::Copy { dst, src, .. }
-        | VmInstruction::Store { dst, src, .. }
+        | VmInstruction::Store { dst, src, .. } | VmInstruction::StoreOwned { dst, src }
         | VmInstruction::Move { dst, src, .. }
         | VmInstruction::Borrow { dst, src, .. } => {
             visit(*dst);
@@ -625,7 +632,7 @@ impl NativeFramePlan {
             match ty {
                 VmType::Callable { .. } => true,
                 VmType::Tuple(fields) => fields.iter().any(|field| owns_callable(field, descriptors, active)),
-                VmType::Array(element) => owns_callable(element, descriptors, active),
+                VmType::Array(element) | VmType::FixedArray { element, .. } => owns_callable(element, descriptors, active),
                 VmType::Nominal { definition, arguments } => {
                     if active.contains(ty) { return false; }
                     let Some(descriptor) = descriptors.iter().find(|descriptor|
@@ -674,7 +681,7 @@ impl NativeFramePlan {
                 for &local in arguments.iter().chain(std::iter::once(dst)) {
                     if matches!(
                         function.registers[local as usize],
-                        VmType::Tuple(_) | VmType::Nominal { .. }
+                        VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. }
                     ) {
                         resident_demands.push(local);
                         if local == *dst {
@@ -701,8 +708,11 @@ impl NativeFramePlan {
             match instruction {
                 VmInstruction::Copy { dst, src }
                 | VmInstruction::Move { dst, src }
-                | VmInstruction::Store { dst, src } => predecessors[*dst as usize].push(*src),
+                | VmInstruction::Store { dst, src } | VmInstruction::StoreOwned { dst, src } => predecessors[*dst as usize].push(*src),
                 VmInstruction::MakeTuple { dst, fields }
+                | VmInstruction::MakeTupleOwned { dst, fields }
+                | VmInstruction::MakeRecordOwned { dst, fields, .. }
+                | VmInstruction::MakeEnumOwned { dst, fields, .. }
                 | VmInstruction::MakeRecord { dst, fields, .. }
                 | VmInstruction::MakeEnum { dst, fields, .. } => {
                     predecessors[*dst as usize].extend(fields)
@@ -719,7 +729,7 @@ impl NativeFramePlan {
                 continue;
             }
             let ty = &function.registers[local as usize];
-            if !matches!(ty, VmType::Tuple(_) | VmType::Nominal { .. }) {
+            if !matches!(ty, VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. }) {
                 continue;
             }
             if let Ok(layout) = super::native_memory::native_layout(ty, descriptors, &mut vec![])
@@ -1061,7 +1071,7 @@ impl NativeHome {
             match &layout.shape {
                 NativeShape::Reference { .. } => Ok(true),
                 NativeShape::Product(fields) => {
-                    for field in fields {
+                    for field in fields.distinct() {
                         if inspect(&field.layout, budget)? {
                             return Ok(true);
                         }
@@ -1069,7 +1079,7 @@ impl NativeHome {
                     Ok(false)
                 }
                 NativeShape::Enum { variants, .. } => {
-                    for field in variants.iter().flatten() {
+                    for field in variants.iter().flat_map(|fields| fields.distinct()) {
                         if inspect(&field.layout, budget)? {
                             return Ok(true);
                         }
@@ -1264,7 +1274,20 @@ impl NativeHome {
                 }
                 _ => return Ok(None),
             };
-            for (index, field) in fields.iter().enumerate() {
+            // Repeated array metadata must also support address lookup without
+            // scanning N fields. At a boundary the preceding element can own
+            // a trailing zero-sized field, so inspect at most two candidates.
+            let (indices, previous) = match fields {
+                NativeFields::Repeated { count: 0, .. } => return Ok(None),
+                NativeFields::Repeated { count, stride, .. } => {
+                    let relative = target.addr().saturating_sub(at.addr() + offset);
+                    let index = if *stride == 0 { 0 } else { (relative / stride).min(count - 1) };
+                    (index..index + 1, index.checked_sub(1).filter(|_| *stride != 0 && relative % stride == 0))
+                }
+                NativeFields::Explicit(_) => (0..fields.len(), None),
+            };
+            for index in indices.chain(previous) {
+                let field = fields.get(index).expect("admitted native product index");
                 path.push(index as u32);
                 let found = visit(
                     home,
@@ -1338,6 +1361,7 @@ impl NativeHome {
         }
         Ok(match (&layout.ty, variant) {
             (VmType::Tuple(_), None) => VmValue::Tuple(values.into()),
+            (VmType::FixedArray { .. }, None) => VmValue::Array { values: values.into() },
             (VmType::Nominal { definition, .. }, None) => VmValue::Record {
                 definition: *definition,
                 fields: values.into(),
@@ -1393,7 +1417,7 @@ impl NativeHome {
         budget: &mut ExecutionBudget,
     ) -> Result<(), VmArtifactError> {
         let (pointer, layout) = self.project(path)?;
-        if !super::vm_type_matches(&value.ty(), &layout.ty) {
+        if !super::vm_type_matches(&super::borrowed_value_type(value, &layout.ty), &layout.ty) {
             return Err(error("native storage value has a different concrete type"));
         }
         if !path.is_empty() && !self.state.borrow().root {
@@ -1479,7 +1503,7 @@ impl NativeHome {
         let (offset, fields, values, tag) = match (&layout.shape, value) {
             (
                 NativeShape::Product(fields),
-                VmValue::Tuple(values) | VmValue::Record { fields: values, .. },
+                VmValue::Tuple(values) | VmValue::Array { values } | VmValue::Record { fields: values, .. },
             ) => (0, fields, values, None),
             (
                 NativeShape::Enum {
@@ -1604,6 +1628,18 @@ impl NativeHome {
         }
         let (pointer, layout) = self.project(path)?;
         let fields = match (&layout.shape, pattern) {
+            (NativeShape::Product(fields), VmPattern::Array { elements: patterns, rest, .. })
+                if crate::pattern::ArrayPatternRest::length(*rest, patterns.len()) == Some(fields.len()) =>
+            {
+                for (index, pattern) in patterns.iter().enumerate() {
+                    budget.tick()?;
+                    path.push(crate::pattern::ArrayPatternRest::index(*rest, index) as u32);
+                    let matched = self.matches_pattern(path, pattern, budget)?;
+                    path.pop();
+                    if !matched { return Ok(false); }
+                }
+                return Ok(true);
+            }
             (NativeShape::Product(fields), VmPattern::Tuple(patterns))
                 if fields.len() == patterns.len() =>
             {

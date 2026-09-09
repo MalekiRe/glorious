@@ -1,0 +1,27 @@
+pub fn main() -> i64 {
+    assert_true(handle TryAs<u8>::try_cast(-0.5) { Result::Err(ConversionError::OutOfRange) => true, _ => false });
+    assert_true(handle TryAs<u8>::try_cast(255.9) { Result::Ok(255) => true, _ => false });
+    assert_true(handle TryAs<u8>::try_cast(256.0) { Result::Err(ConversionError::OutOfRange) => true, _ => false });
+    assert_true(handle TryAs<i8>::try_cast(-128.0) { Result::Ok(-128) => true, _ => false });
+    assert_true(handle TryAs<i8>::try_cast(-128.5) { Result::Err(ConversionError::OutOfRange) => true, _ => false });
+    assert_true(handle TryAs<i8>::try_cast(127.9) { Result::Ok(127) => true, _ => false });
+    assert_true(handle ExactAs<i8>::exact_cast(127.9) { Result::Err(ConversionError::Fractional) => true, _ => false });
+    assert_true(handle ExactAs<i8>::exact_cast(-128.0) { Result::Ok(-128) => true, _ => false });
+    assert_true(handle TryAs<u128>::try_cast(f64::nan()) { Result::Err(ConversionError::NonFinite) => true, _ => false });
+    assert_true(handle ExactAs<i128>::exact_cast(f64::infinity()) { Result::Err(ConversionError::NonFinite) => true, _ => false });
+    let negative_zero = f64::from_bits(9223372036854775808);
+    assert_true(handle ExactAs<u128>::exact_cast(negative_zero) { Result::Ok(0) => true, _ => false });
+    assert_true(handle TryAs<f32>::try_cast(u128::max_value()) { Result::Err(ConversionError::OutOfRange) => true, _ => false });
+    assert_true(handle TryAs<f64>::try_cast(u128::max_value()) { Result::Ok(_) => true, _ => false });
+    assert_true(handle ExactAs<f64>::exact_cast(u128::max_value()) { Result::Err(ConversionError::PrecisionLoss) => true, _ => false });
+    assert_true(handle ExactAs<f64>::exact_cast(as<u64>(9007199254740992)) { Result::Ok(_) => true, _ => false });
+    assert_true(handle ExactAs<f64>::exact_cast(as<u64>(9007199254740993)) { Result::Err(ConversionError::PrecisionLoss) => true, _ => false });
+    assert_true(handle ExactAs<f32>::exact_cast(as<u32>(16777217)) { Result::Err(ConversionError::PrecisionLoss) => true, _ => false });
+    assert_true(handle TryAs<f32>::try_cast(f64::max_finite()) { Result::Err(ConversionError::OutOfRange) => true, _ => false });
+    assert_true(handle ExactAs<f32>::exact_cast(0.1) { Result::Err(ConversionError::PrecisionLoss) => true, _ => false });
+    assert_true(handle ExactAs<f32>::exact_cast(1.5) { Result::Ok(value) => f32::to_bits(value) == 1069547520, _ => false });
+    assert_true(handle ExactAs<f32>::exact_cast(negative_zero) { Result::Ok(value) => f32::to_bits(value) == 2147483648, _ => false });
+    assert_true(handle ExactAs<f32>::exact_cast(f64::nan()) { Result::Ok(value) => f32::is_nan(value), _ => false });
+    assert_true(handle ExactAs<f64>::exact_cast(f32::neg_infinity()) { Result::Ok(value) => f64::to_bits(value) == f64::to_bits(f64::neg_infinity()), _ => false });
+    42
+}

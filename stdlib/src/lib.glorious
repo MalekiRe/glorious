@@ -39,8 +39,13 @@ pub mod prelude {
 pub struct PhantomData<T> {}
 pub impl<T, q: Quantity> Use<q> for PhantomData<T> where T: Use<q> {}
 
+// Fallible consuming operations return the input owner with their error.
+pub struct Rejected<T,E> { pub value: T, pub error: E }
+pub struct BoundsError { pub index: usize, pub length: usize }
+
 // General machine memory leaves. These do not own collection policy or element
-// lifetimes. All pointer operations require explicit unsafe source scopes;
+// lifetimes. Pointer access/construction requires explicit unsafe source scopes;
+// address equality and inspection do not access storage or grant provenance.
 // their exact signatures/identities are bound by the runtime manifest. A trailing
 // semicolon declares an externally supplied implementation, not a stub body.
 __g1_abort() -> !;
@@ -52,6 +57,8 @@ unsafe fn __g1_memory_allocate(size: usize, alignment: usize) -> *mut u8;
 unsafe fn __g1_memory_reallocate(pointer: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8;
 unsafe fn __g1_memory_deallocate(pointer: *mut u8, size: usize, alignment: usize) -> ();
 unsafe fn __g1_memory_is_null<T>(pointer: *mut T) -> u32;
+__g1_memory_pointer_eq<T>(left: *const T, right: *const T) -> u32;
+__g1_memory_pointer_address<T>(pointer: *const T) -> usize;
 unsafe fn __g1_memory_offset<T>(pointer: *mut T, count: usize) -> *mut T;
 unsafe fn __g1_memory_offset_const<T>(pointer: *const T, count: usize) -> *const T;
 unsafe fn __g1_memory_cast<T, U>(pointer: *mut T) -> *mut U;
@@ -536,7 +543,7 @@ pub impl Comparison for char {
 }
 
 pub enum Ordering { Less, Equal, Greater }
-pub struct Range<T> { start: T, end: T }
+pub struct Range<T> { pub start: T, pub end: T }
 pub enum SliceRangeError { Reversed, OutOfBounds }
 
 impl Range<usize> {
@@ -1081,7 +1088,7 @@ impl<'a> Str<'a> {
     pub fn chars(value: Self) -> Chars<'a> { Chars { text: value, position: 0 } }
 
     pub fn to_string(source: Self) -> String {
-        let value = String::new();
+        let mut value = String::new();
         String::push_str(&mut value, source);
         value
     }
@@ -1173,7 +1180,7 @@ unsafe fn vec_drop_chunk<T>(pointer: *mut T, length: usize) -> ()
 // recursion is logarithmic; a leaf processes at most sixteen 64-byte blocks.
 pub fn blake3(input: Slice<u8>) -> Vec<u8> {
     let digest = blake3_tree(input, 0, input.length, true);
-    let output = Vec<u8>::with_capacity(32);
+    let mut output = Vec<u8>::with_capacity(32);
     // The complete result extent is reserved once; publish initialization only
     // after every byte has been written. No native-endian u32 stores are used.
     unsafe {
@@ -1230,7 +1237,7 @@ fn blake3_rounds(s: &mut Blake3Words, m: Blake3Words, remaining: usize) -> () {
     }
 }
 fn blake3_compress(cv: Blake3Cv, block: Blake3Words, counter: u64, length: u32, flags: u32) -> Blake3Cv {
-    let state = Blake3Words {
+    let mut state = Blake3Words {
         a: cv.a, b: cv.b, c: cv.c, d: cv.d, e: cv.e, f: cv.f, g: cv.g, h: cv.h,
         i: 1779033703, j: 3144134277, k: 1013904242, l: 2773480762,
         m: __g1_int_convert_wrapping_to_u32(counter),
@@ -1472,7 +1479,7 @@ impl<T> Vec<T> {
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
-        let value = Vec::new();
+        let mut value = Vec::new();
         Vec::reserve(&mut value, capacity);
         value
     }
@@ -1651,7 +1658,7 @@ impl<T> Vec<T> {
         }
     }
 
-    pub fn insert(value: &mut Self, index: usize, item: T) -> Option<()> {
+    pub fn insert(value: &mut Self, index: usize, item: T) -> Result<(), Rejected<T, BoundsError>> {
         handle index <= value.length {
             true => {
                 Vec::reserve(&mut *value, 1);
@@ -1663,7 +1670,7 @@ impl<T> Vec<T> {
                 (*value).length = value.length + 1;
                 Result::Ok(())
             },
-            false => Result::Err(()),
+            false => Result::Err(Rejected { value: item, error: BoundsError { index: index, length: value.length } }),
         }
     }
 
@@ -1700,6 +1707,7 @@ impl<T> Vec<T> {
     }
 
     pub fn append(value: &mut Self, source: Self) -> () {
+        let mut source = source;
         Vec::reserve(&mut *value, source.length);
         unsafe {
             __g1_memory_copy_nonoverlapping(__g1_memory_as_const(source.pointer),
@@ -1738,7 +1746,7 @@ impl<T> Vec<T> {
         handle index <= value.length {
             false => Result::Err(()),
             true => {
-                let output = Vec<T>::with_capacity(value.length - index);
+                let mut output = Vec<T>::with_capacity(value.length - index);
                 unsafe {
                     __g1_memory_copy_nonoverlapping(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)),
                         output.pointer, value.length - index);
@@ -1781,7 +1789,7 @@ impl<T> Vec<T> {
 
     pub fn sort_stable(value: &mut Self) -> ()
         where T: Ord {
-        let scratch = Vec::with_capacity(Vec::len(& *value));
+        let mut scratch = Vec::with_capacity(Vec::len(& *value));
         vec_sort_stable_into_scratch(&mut *value, &mut scratch);
         Vec::append(&mut *value, scratch)
     }
@@ -1981,6 +1989,7 @@ impl<T> VecIntoIter<T> {
     // as `Vec::clear`; an exact-linear resident must be iterated to completion.
     pub fn discard(value: Self) -> ()
         where T: Use<[0, 1]> {
+        let mut value = value;
         Vec::clear(&mut value.remaining)
     }
 }
@@ -2000,7 +2009,7 @@ struct HashMapIndex { fingerprint: usize, bucket: usize }
 
 fn hash_key<K>(key: &K) -> usize
     where K: Hash {
-    let state = Hasher::new();
+    let mut state = Hasher::new();
     Hash::hash(key, &mut state);
     Hasher::finish(state)
 }
@@ -2065,7 +2074,7 @@ fn hash_map_reindex(buckets: &mut Vec<usize>, indices: &mut Vec<HashMapIndex>, i
     }
 }
 fn hash_map_rehash<K, V>(value: &mut HashMap<K, V>, capacity: usize) -> () {
-    let buckets = Vec<usize>::new();
+    let mut buckets = Vec<usize>::new();
     Vec::resize(&mut buckets, capacity, 0);
     hash_map_reindex(&mut buckets, &mut (*value).indices, 0);
     (*value).buckets = buckets;
@@ -2269,7 +2278,7 @@ impl<T> VecDeque<T> {
     pub fn push_front(value: &mut Self, item: T) -> () {
         handle Vec::insert(&mut value.storage, 0, item) {
             Result::Ok(_) => (),
-            Result::Err(_) => (),
+            Result::Err(rejected) => __g1_abort(),
         }
     }
 
@@ -2473,17 +2482,20 @@ fn vec_clone_from<T>(source: &Vec<T>, target: &mut Vec<T>, index: usize) -> () w
 }
 pub impl<T> Clone for Vec<T> where T: Clone {
     clone(value: &Vec<T>) -> Vec<T> {
-        let result = Vec::with_capacity(Vec::len(value));
+        let mut result = Vec::with_capacity(Vec::len(value));
         vec_clone_from(value, &mut result, 0);
         result
     }
 }
 pub impl Clone for String {
     clone(value: &String) -> String {
-        let storage = Vec::with_capacity(Vec::len(&value.storage));
+        let mut storage = Vec::with_capacity(Vec::len(&value.storage));
         Vec::extend_from_slice(&mut storage, Vec::as_slice(&value.storage));
         String { storage: storage }
     }
+}
+pub impl<'a> Clone for Str<'a> {
+    clone(value: &Str<'a>) -> Str<'a> { *value }
 }
 pub impl<A, E> Clone for Result<A, E> where A: Clone, E: Clone {
     clone(value: &Result<A, E>) -> Result<A, E> {
@@ -2873,6 +2885,24 @@ pub trait Hash { hash(value: &Self, state: &mut Hasher) -> (); }
 pub trait Display { display(value: &Self, formatter: &mut Formatter) -> (); }
 pub trait Debug { debug(value: &Self, formatter: &mut Formatter) -> (); }
 
+pub impl Eq for () {
+    eq(left: &(), right: &()) -> Bool { true }
+}
+pub impl<T,E> Eq for Result<T,E> where T: Eq, E: Eq {
+    eq(left: &Self, right: &Self) -> Bool {
+        handle *left {
+            Result::Ok(_) => handle *right {
+                Result::Ok(_) => Eq::eq(&left.0, &right.0),
+                Result::Err(_) => false,
+            },
+            Result::Err(_) => handle *right {
+                Result::Ok(_) => false,
+                Result::Err(_) => Eq::eq(&left.0, &right.0),
+            },
+        }
+    }
+}
+
 // Formatting is an ordinary source-owned String buffer. Hashing remains a
 // separate deterministic state object because collection lookup will use it
 // without exposing VM representation details.
@@ -2903,12 +2933,12 @@ impl Formatter {
 }
 
 pub fn format_value<T>(value: &T) -> String where T: Display {
-    let formatter = Formatter::new();
+    let mut formatter = Formatter::new();
     Display::display(value, &mut formatter);
     Formatter::into_string(formatter)
 }
 pub fn format_debug_value<T>(value: &T) -> String where T: Debug {
-    let formatter = Formatter::new();
+    let mut formatter = Formatter::new();
     Debug::debug(value, &mut formatter);
     Formatter::into_string(formatter)
 }
@@ -2930,6 +2960,16 @@ pub impl Eq for String {
         handle Ord::compare(left, right) { Ordering::Equal => true, _ => false }
     }
 }
+pub impl<'a> Ord for Str<'a> {
+    compare(left: &Str<'a>, right: &Str<'a>) -> Ordering {
+        Slice::lex_compare(Str::as_bytes(*left), Str::as_bytes(*right))
+    }
+}
+pub impl<'a> Eq for Str<'a> {
+    eq(left: &Str<'a>, right: &Str<'a>) -> Bool {
+        handle Ord::compare(left, right) { Ordering::Equal => true, _ => false }
+    }
+}
 fn hash_string_bytes(bytes: Slice<u8>, state: &mut Hasher, cursor: usize) -> () {
     handle cursor < Slice::len(&bytes) {
         false => (),
@@ -2944,6 +2984,12 @@ pub impl Hash for String {
         Hasher::write_usize(&mut *state, String::len(value));
         let view = String::as_str(value);
         hash_string_bytes(Str::as_bytes(view), state, 0)
+    }
+}
+pub impl<'a> Hash for Str<'a> {
+    hash(value: &Str<'a>, state: &mut Hasher) -> () {
+        Hasher::write_usize(&mut *state, Str::len(*value));
+        hash_string_bytes(Str::as_bytes(*value), state, 0)
     }
 }
 pub impl Hash for usize {
@@ -2983,6 +3029,11 @@ pub impl Eq for char { eq(left: &char, right: &char) -> Bool { *left == *right }
 pub impl Display for String {
     display(value: &String, formatter: &mut Formatter) -> () {
         Formatter::write_str(formatter, String::as_str(value))
+    }
+}
+pub impl<'a> Display for Str<'a> {
+    display(value: &Str<'a>, formatter: &mut Formatter) -> () {
+        Formatter::write_str(formatter, *value)
     }
 }
 // At most twenty recursive frames on the current 64-bit usize ABI. The

@@ -110,7 +110,7 @@ fn unused_token_cancellation_destroys_callee_owners_exactly_once() {
             handle helper(target) { Ask::ask(k) => 0 }
         }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             finish(&mut count);
             count
         }

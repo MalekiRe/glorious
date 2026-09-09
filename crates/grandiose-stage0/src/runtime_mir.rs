@@ -59,6 +59,9 @@ pub enum RuntimeTerminator {
     Return {
         value: MirLocal,
     },
+    /// Outgoing carriers are protected and all frame cleanup has run before
+    /// this terminator. There is no local result slot or return continuation.
+    TailCall { callee: DefKey, arguments: Vec<MirLocal> },
     Unreachable,
 }
 

@@ -15,6 +15,534 @@ use grandiose_stage0::{
 };
 use std::collections::BTreeMap;
 
+fn tail_reference_program(relay_instructions: Vec<VmInstruction>) -> CandidateVmProgram {
+    let entry = DefKey(Digest::of_bytes(b"tail-reference-entry"));
+    let relay = DefKey(Digest::of_bytes(b"tail-reference-relay"));
+    let read = DefKey(Digest::of_bytes(b"tail-reference-read"));
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    let function = |definition, parameters, registers, instructions| VmFunction {
+        definition, parameters, registers, instructions, safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0,
+    };
+    let mut instructions = vec![VmInstruction::DeclareResult { result: VmType::I64, returns: true }];
+    instructions.extend(relay_instructions);
+    instructions.push(VmInstruction::TailCallOwned { callee: read, arguments: vec![3] });
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        fingerprint: Digest::of_bytes(b"unsealed-tail-reference"),
+        entry, host_capabilities: vec![], callable_environments: BTreeMap::new(),
+        functions: BTreeMap::from([
+            (entry, function(entry, 0, vec![VmType::I64, reference.clone(), VmType::I64], vec![
+                VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false },
+                VmInstruction::CallOwned { dst: 2, callee: relay, arguments: vec![1] },
+                VmInstruction::Return { value: 2 },
+            ])),
+            (relay, function(relay, 1, vec![reference.clone(), VmType::I64, reference.clone(),
+                reference.clone(), VmType::Bool, VmType::Tuple(vec![reference.clone()]), reference.clone()], instructions)),
+            (read, function(read, 1, vec![reference, VmType::I64], vec![
+                VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                VmInstruction::DerefCopy { dst: 1, reference: 0 },
+                VmInstruction::Return { value: 1 },
+            ])),
+        ]),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    program
+}
+
+#[test]
+fn mandatory_tail_vm_audits_the_destination_of_a_forwarded_local_label() {
+    let relay = DefKey(Digest::of_bytes(b"tail-reference-relay"));
+    let shim = DefKey(Digest::of_bytes(b"anonymous-label-forwarding-shim"));
+    let label_type = VmType::Callable { safety: grandiose_stage0::Safety::Safe,
+        parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() };
+    for (local_tail, opaque) in [(false, false), (true, false), (true, true)] {
+        let mut program = tail_reference_program(vec![
+            VmInstruction::ConstI64 { dst: 10, value: 99 },
+            VmInstruction::MakeLabel { dst: 7, brand_owner: relay, brand_label: 0, target: 6, destination: 1 },
+            VmInstruction::Move { dst: 8, src: 7 },
+            VmInstruction::CallOwned { dst: 9, callee: shim, arguments: vec![10, 8] },
+            VmInstruction::Trap,
+            if local_tail {
+                VmInstruction::Borrow { dst: 3, src: 1, unique: false, fields: vec![], reborrow: false }
+            } else { VmInstruction::Copy { dst: 3, src: 0 } },
+        ]);
+        program.functions.get_mut(&relay).unwrap().registers.extend([
+            label_type.clone(), label_type.clone(), VmType::Unit, VmType::I64,
+        ]);
+        program.functions.insert(shim, VmFunction {
+            definition: shim, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 2,
+            registers: vec![VmType::I64, label_type.clone(), VmType::Unit, VmType::Unit],
+            instructions: {
+                let mut body = vec![VmInstruction::DeclareResult { result: VmType::Unit, returns: false }];
+                // Still valid executable bytecode, but outside the exact
+                // forwarding-shim proof: the label edge cannot be ignored.
+                if opaque { body.push(VmInstruction::ConstUnit { dst: 3 }); }
+                body.extend([
+                    VmInstruction::CallIndirectOwned { dst: 2, callee: 1, arguments: vec![0] },
+                    VmInstruction::Trap,
+                ]);
+                body
+            },
+        });
+        program.fingerprint = program.computed_fingerprint();
+        for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+            if local_tail {
+                assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { function, pc: 7, register: 3, .. }) if function == relay), "{result:?}");
+            } else {
+                assert_eq!(result.unwrap().run_i64().unwrap(), 42);
+            }
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_requires_exact_unexposed_label_identity_at_a_shim_call() {
+    let relay = DefKey(Digest::of_bytes(b"tail-reference-relay"));
+    let shim = DefKey(Digest::of_bytes(b"label-identity-shim"));
+    let ordinary = DefKey(Digest::of_bytes(b"label-identity-ordinary"));
+    let label_type = VmType::Callable { safety: grandiose_stage0::Safety::Safe,
+        parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() };
+    for exposed in [false, true] {
+        let mut program = tail_reference_program(vec![]);
+        let function = program.functions.get_mut(&relay).unwrap();
+        function.registers.extend([label_type.clone(), label_type.clone(), VmType::Unit, VmType::I64,
+            VmType::Reference { unique: true, referent: Box::new(label_type.clone()) }]);
+        function.instructions = if exposed { vec![
+            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+            VmInstruction::ConstI64 { dst: 10, value: 99 },
+            VmInstruction::MakeLabel { dst: 7, brand_owner: relay, brand_label: 0, target: 6, destination: 1 },
+            VmInstruction::Borrow { dst: 11, src: 7, fields: vec![], unique: true, reborrow: false },
+            VmInstruction::CallOwned { dst: 9, callee: shim, arguments: vec![10, 7] },
+            VmInstruction::Trap,
+            VmInstruction::Copy { dst: 3, src: 0 },
+        ] } else { vec![
+            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+            VmInstruction::ConstI64 { dst: 10, value: 99 },
+            VmInstruction::ConstBool { dst: 4, value: true },
+            // Either traversal order must meet a label and an ordinary
+            // callable to unknown identity, never promote the may-label taint.
+            VmInstruction::BranchBool { condition: 4, then_target: 6, else_target: 4 },
+            VmInstruction::MakeCallable { dst: 7, callee: ordinary, captures: vec![], environment: None },
+            VmInstruction::Jump { target: 8 },
+            VmInstruction::MakeLabel { dst: 7, brand_owner: relay, brand_label: 0, target: 10, destination: 1 },
+            VmInstruction::Jump { target: 8 },
+            VmInstruction::CallOwned { dst: 9, callee: shim, arguments: vec![10, 7] },
+            VmInstruction::Trap,
+            VmInstruction::Copy { dst: 3, src: 0 },
+        ] };
+        function.instructions.push(VmInstruction::TailCallOwned {
+            callee: DefKey(Digest::of_bytes(b"tail-reference-read")), arguments: vec![3],
+        });
+        for (definition, parameters, registers, instructions) in [
+            (shim, 2, vec![VmType::I64, label_type.clone(), VmType::Unit], vec![
+                VmInstruction::DeclareResult { result: VmType::Unit, returns: false },
+                VmInstruction::CallIndirectOwned { dst: 2, callee: 1, arguments: vec![0] },
+                VmInstruction::Trap,
+            ]),
+            (ordinary, 1, vec![VmType::I64, VmType::Unit], vec![
+                VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                VmInstruction::ConstUnit { dst: 1 }, VmInstruction::Return { value: 1 },
+            ]),
+        ] {
+            program.functions.insert(definition, VmFunction { definition, parameters, registers, instructions,
+                safety: grandiose_stage0::Safety::Safe, unsafe_execution: false, captures: 0, nominal_copy_descriptors: vec![] });
+        }
+        program.fingerprint = program.computed_fingerprint();
+        for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+            assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { function, register: 3, .. }) if function == relay), "{result:?}");
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_disposes_local_label_without_revoking_incoming_memory() {
+    let relay = DefKey(Digest::of_bytes(b"tail-reference-relay"));
+    let mut program = tail_reference_program(vec![
+        VmInstruction::MakeLabel { dst: 7, brand_owner: relay, brand_label: 0, target: 4, destination: 1 },
+        VmInstruction::DestroyCallable { dst: 8, value: 7 },
+        VmInstruction::Copy { dst: 3, src: 0 },
+    ]);
+    program.functions.get_mut(&relay).unwrap().registers.extend([
+        VmType::Callable { safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() },
+        VmType::Unit,
+    ]);
+    program.fingerprint = program.computed_fingerprint();
+    for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+        assert_eq!(result.unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_invalidates_referent_proofs_when_borrowed_storage_is_replaced() {
+    let entry = DefKey(Digest::of_bytes(b"referent-entry"));
+    let relay = DefKey(Digest::of_bytes(b"referent-relay"));
+    let helper = DefKey(Digest::of_bytes(b"referent-helper"));
+    let finish = DefKey(Digest::of_bytes(b"referent-finish"));
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    let shared = VmType::Reference { unique: false, referent: Box::new(reference.clone()) };
+    let unique = VmType::Reference { unique: true, referent: Box::new(reference.clone()) };
+    let function = |definition, parameters, registers, instructions| VmFunction {
+        definition, parameters, registers, instructions, safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0,
+    };
+    for replace in [false, true] {
+        let mut body = vec![
+            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+            VmInstruction::DerefCopy { dst: 1, reference: 0 },
+            VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false },
+            VmInstruction::ConstI64 { dst: 3, value: 99 },
+            VmInstruction::Borrow { dst: 4, src: 3, fields: vec![], unique: false, reborrow: false },
+        ];
+        if replace { body.push(VmInstruction::Store { dst: 1, src: 4 }); }
+        body.extend([
+            VmInstruction::Borrow { dst: 5, src: 0, fields: vec![], unique: true, reborrow: true },
+            VmInstruction::CallOwned { dst: 6, callee: helper, arguments: vec![5, 2] },
+            VmInstruction::TailCallOwned { callee: finish, arguments: vec![0] },
+        ]);
+        let mut program = CandidateVmProgram {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+            fingerprint: Digest::of_bytes(b"unsealed-referent-proof"), entry,
+            host_capabilities: vec![], callable_environments: BTreeMap::new(),
+            functions: BTreeMap::from([
+                (entry, function(entry, 0, vec![VmType::I64, reference.clone(), unique.clone(), VmType::I64], vec![
+                    VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                    VmInstruction::ConstI64 { dst: 0, value: 42 },
+                    VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false },
+                    VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: true, reborrow: false },
+                    VmInstruction::CallOwned { dst: 3, callee: relay, arguments: vec![2] },
+                    VmInstruction::Return { value: 3 },
+                ])),
+                (relay, function(relay, 1, vec![unique.clone(), reference.clone(), shared.clone(),
+                    VmType::I64, reference.clone(), unique.clone(), VmType::Unit], body)),
+                (helper, function(helper, 2, vec![unique.clone(), shared.clone(), reference.clone(), VmType::Unit], vec![
+                    VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                    VmInstruction::DerefCopy { dst: 2, reference: 1 },
+                    VmInstruction::DerefStore { reference: 0, src: 2 },
+                    VmInstruction::ConstUnit { dst: 3 },
+                    VmInstruction::Return { value: 3 },
+                ])),
+                (finish, function(finish, 1, vec![unique.clone(), reference.clone(), VmType::I64], vec![
+                    VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                    VmInstruction::DerefCopy { dst: 1, reference: 0 },
+                    VmInstruction::DerefCopy { dst: 2, reference: 1 },
+                    VmInstruction::Return { value: 2 },
+                ])),
+            ]),
+        };
+        program.fingerprint = program.computed_fingerprint();
+        for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+            if replace {
+                assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { function, pc: 8, register: 0, .. }) if function == relay), "{result:?}");
+            } else {
+                assert_eq!(result.unwrap().run_i64().unwrap(), 42);
+            }
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_proves_incoming_reference_copies_aggregates_and_read_only_calls() {
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    for instructions in [
+        vec![VmInstruction::Copy { dst: 3, src: 0 }],
+        vec![VmInstruction::Borrow { dst: 3, src: 0, fields: vec![], unique: false, reborrow: true }],
+        vec![VmInstruction::MakeTuple { dst: 5, fields: vec![0] },
+            VmInstruction::ProjectTuple { dst: 3, base: 5, index: 0, field_count: 1, field_type: reference.clone() }],
+        vec![VmInstruction::Call { dst: 1, callee: DefKey(Digest::of_bytes(b"tail-reference-read")), arguments: vec![0] },
+            VmInstruction::Copy { dst: 3, src: 0 }],
+        vec![VmInstruction::ConstBool { dst: 4, value: false },
+            VmInstruction::BranchBool { condition: 4, then_target: 3, else_target: 5 },
+            VmInstruction::Copy { dst: 3, src: 0 }, VmInstruction::Jump { target: 6 },
+            VmInstruction::Borrow { dst: 3, src: 0, fields: vec![], unique: false, reborrow: true }],
+    ] {
+        let program = tail_reference_program(instructions);
+        let decoded = decode_and_verify_program(&encode_program(&program)).unwrap();
+        let verified = verify_vm_program(program).unwrap();
+        for program in [&verified, &decoded] {
+            assert_eq!(program.run_i64_with_limits(VmExecutionLimits {
+                max_call_depth: 3, ..VmExecutionLimits::default()
+            }).unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_checks_helper_results_instead_of_trusting_reference_return_types() {
+    let helper = DefKey(Digest::of_bytes(b"tail-reference-helper"));
+    let sibling = DefKey(Digest::of_bytes(b"tail-reference-helper-sibling"));
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    let function = |definition, parameters, registers, instructions| VmFunction {
+        definition, parameters, registers, instructions, safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0,
+    };
+    let mut good = tail_reference_program(vec![VmInstruction::CallOwned { dst: 3, callee: helper, arguments: vec![0] }]);
+    good.functions.insert(helper, function(helper, 1, vec![reference.clone()], vec![
+        VmInstruction::DeclareResult { result: reference.clone(), returns: true },
+        VmInstruction::Return { value: 0 },
+    ]));
+    good.fingerprint = good.computed_fingerprint();
+    assert_eq!(decode_and_verify_program(&encode_program(&good)).unwrap().run_i64().unwrap(), 42);
+
+    for recursive in [false, true] {
+        let mut bad = tail_reference_program(vec![VmInstruction::CallOwned { dst: 3, callee: helper, arguments: vec![] }]);
+        let local_body = vec![
+            VmInstruction::DeclareResult { result: reference.clone(), returns: true },
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false },
+            VmInstruction::Return { value: 1 },
+        ];
+        if recursive {
+            bad.functions.insert(helper, function(helper, 0, vec![reference.clone()], vec![
+                VmInstruction::DeclareResult { result: reference.clone(), returns: true },
+                VmInstruction::CallOwned { dst: 0, callee: sibling, arguments: vec![] },
+                VmInstruction::Return { value: 0 },
+            ]));
+            bad.functions.insert(sibling, function(sibling, 0, vec![VmType::I64, reference.clone(), VmType::Bool], vec![
+                VmInstruction::DeclareResult { result: reference.clone(), returns: true },
+                VmInstruction::ConstBool { dst: 2, value: false },
+                VmInstruction::BranchBool { condition: 2, then_target: 3, else_target: 5 },
+                VmInstruction::CallOwned { dst: 1, callee: helper, arguments: vec![] },
+                VmInstruction::Return { value: 1 },
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false },
+                VmInstruction::Return { value: 1 },
+            ]));
+        } else {
+            bad.functions.insert(helper, function(helper, 0, vec![VmType::I64, reference.clone()], local_body));
+        }
+        bad.fingerprint = bad.computed_fingerprint();
+        for result in [verify_vm_program(bad.clone()), decode_and_verify_program(&encode_program(&bad))] {
+            assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { message, .. })
+                if message == "mandatory tail carrier has no frame-independent provenance proof"), "{result:?}");
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_revokes_incoming_proof_after_direct_or_transitive_reference_mutation() {
+    let entry = DefKey(Digest::of_bytes(b"tail-mutation-entry"));
+    let relay = DefKey(Digest::of_bytes(b"tail-mutation-relay"));
+    let read = DefKey(Digest::of_bytes(b"tail-mutation-read"));
+    let set = DefKey(Digest::of_bytes(b"tail-mutation-set"));
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    let outer = VmType::Reference { unique: true, referent: Box::new(reference.clone()) };
+    let function = |definition, parameters, registers, instructions| VmFunction {
+        definition, parameters, registers, instructions, safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0,
+    };
+    let closure = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        relay.0.as_bytes().as_slice(), 0_u32.to_le_bytes().as_slice(),
+    ]));
+    let destructor = DefKey(Digest::of_parts([
+        b"grandiose-callable-environment-destruction-v1".as_slice(),
+        closure.0.as_bytes().as_slice(),
+    ]));
+    let drop_helper = DefKey(Digest::of_bytes(b"tail-mutation-drop-helper"));
+    let callable = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe, parameters: vec![],
+        result: Box::new(VmType::I64), effects: Box::default(),
+    };
+    let environment = VmCaptureEnvironment {
+        owner: relay, callable: 0, instance: None, destructor: Some(destructor),
+        captures: vec![VmCapture { mode: VmCaptureMode::Move, ty: outer.clone() }],
+    };
+    // Direct mutation, ordinary call, registered destructor, generic
+    // destruction helper, and raw writes/copies revoke the same proof.
+    for mutation in 0..9 {
+        let mut instructions = vec![
+            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+            VmInstruction::ConstI64 { dst: 1, value: 7 },
+            VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false },
+        ];
+        if (4..7).contains(&mutation) {
+            instructions.push(VmInstruction::MemoryIntrinsic {
+                dst: 6, primitive: grandiose_stage0::MemoryPrimitive::AsRawUnique,
+                types: vec![reference.clone()], arguments: vec![0],
+            });
+            if mutation == 4 {
+                instructions.push(VmInstruction::MemoryIntrinsic {
+                    dst: 4, primitive: grandiose_stage0::MemoryPrimitive::Write,
+                    types: vec![reference.clone()], arguments: vec![6, 2],
+                });
+            } else {
+                instructions.extend([
+                    VmInstruction::Borrow { dst: 8, src: 2, fields: vec![], unique: false, reborrow: false },
+                    VmInstruction::MemoryIntrinsic {
+                        dst: 7, primitive: grandiose_stage0::MemoryPrimitive::AsRawShared,
+                        types: vec![reference.clone()], arguments: vec![8],
+                    },
+                    VmInstruction::ConstUsize { dst: 9, value: 1 },
+                    VmInstruction::MemoryIntrinsic {
+                        dst: 4, primitive: if mutation == 5 { grandiose_stage0::MemoryPrimitive::Copy }
+                            else { grandiose_stage0::MemoryPrimitive::CopyNonoverlapping },
+                        types: vec![reference.clone()], arguments: vec![7, 6, 9],
+                    },
+                ]);
+            }
+        } else if mutation == 1 {
+            instructions.extend([
+                VmInstruction::Borrow { dst: 3, src: 0, fields: vec![], unique: true, reborrow: true },
+                VmInstruction::CallOwned { dst: 4, callee: set, arguments: vec![3, 2] },
+            ]);
+        } else if mutation >= 2 {
+            instructions.extend([
+                VmInstruction::Borrow { dst: 3, src: 0, fields: vec![], unique: true, reborrow: true },
+                VmInstruction::MakeCallable { dst: 5, callee: closure, captures: vec![3], environment: Some(environment.clone()) },
+            ]);
+            instructions.push(if mutation == 2 {
+                VmInstruction::DestroyCallable { dst: 4, value: 5 }
+            } else if mutation == 7 {
+                VmInstruction::CallIndirectOwned { dst: 10, callee: 5, arguments: vec![] }
+            } else if mutation == 8 {
+                VmInstruction::CallOwned { dst: 10, callee: drop_helper, arguments: vec![5] }
+            } else {
+                VmInstruction::CallOwned { dst: 4, callee: drop_helper, arguments: vec![5] }
+            });
+        } else {
+            instructions.push(VmInstruction::DerefStore { reference: 0, src: 2 });
+        }
+        instructions.push(VmInstruction::TailCallOwned { callee: read, arguments: vec![0] });
+        let mut program = CandidateVmProgram {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+            fingerprint: Digest::of_bytes(b"tail-mutation-unsealed"), entry,
+            host_capabilities: vec![], callable_environments: BTreeMap::new(),
+            functions: BTreeMap::from([
+                (entry, function(entry, 0, vec![VmType::I64, reference.clone(), outer.clone(), VmType::I64], vec![
+                    VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                    VmInstruction::ConstI64 { dst: 0, value: 42 },
+                    VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false },
+                    VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: true, reborrow: false },
+                    VmInstruction::CallOwned { dst: 3, callee: relay, arguments: vec![2] },
+                    VmInstruction::Return { value: 3 },
+                ])),
+                (relay, function(relay, 1, vec![outer.clone(), VmType::I64, reference.clone(), outer.clone(), VmType::Unit, callable.clone(),
+                    VmType::RawPointer { mutability: grandiose_stage0::PointerMutability::Mut, pointee: Box::new(reference.clone()) },
+                    VmType::RawPointer { mutability: grandiose_stage0::PointerMutability::Const, pointee: Box::new(reference.clone()) },
+                    VmType::Reference { unique: false, referent: Box::new(reference.clone()) }, VmType::Usize, VmType::I64], instructions)),
+                (read, function(read, 1, vec![outer.clone(), reference.clone(), VmType::I64], vec![
+                    VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                    VmInstruction::DerefCopy { dst: 1, reference: 0 },
+                    VmInstruction::DerefCopy { dst: 2, reference: 1 },
+                    VmInstruction::Return { value: 2 },
+                ])),
+                (set, function(set, 2, vec![outer.clone(), reference.clone(), VmType::Unit], vec![
+                    VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                    VmInstruction::DerefStore { reference: 0, src: 1 },
+                    VmInstruction::ConstUnit { dst: 2 },
+                    VmInstruction::Return { value: 2 },
+                ])),
+            ]),
+        };
+        if (2..4).contains(&mutation) || mutation >= 7 {
+            program.callable_environments.insert(closure, environment.clone());
+            let mut body = function(closure, 1, vec![outer.clone(), VmType::I64], vec![
+                VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                VmInstruction::ConstI64 { dst: 1, value: 42 },
+                VmInstruction::Return { value: 1 },
+            ]);
+            body.captures = 1;
+            if mutation >= 7 {
+                body.registers.push(reference.clone());
+                body.instructions.splice(2..2, [
+                    VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false },
+                    VmInstruction::DerefStore { reference: 0, src: 2 },
+                ]);
+            }
+            program.functions.insert(closure, body);
+            program.functions.insert(destructor, function(destructor, 1,
+                vec![outer.clone(), VmType::I64, reference.clone(), VmType::Unit], vec![
+                    VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                    VmInstruction::ConstI64 { dst: 1, value: 7 },
+                    VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false },
+                    VmInstruction::DerefStore { reference: 0, src: 2 },
+                    VmInstruction::ConstUnit { dst: 3 },
+                    VmInstruction::Return { value: 3 },
+                ]));
+            program.functions.insert(drop_helper, function(drop_helper, 1,
+                vec![callable.clone(), VmType::Unit], vec![
+                    VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                    VmInstruction::DestroyCallable { dst: 1, value: 0 },
+                    VmInstruction::Return { value: 1 },
+                ]));
+            if mutation >= 7 {
+                program.functions.get_mut(&destructor).unwrap().instructions.remove(3);
+                program.functions.insert(drop_helper, function(drop_helper, 1,
+                    vec![callable.clone(), VmType::I64, VmType::Unit], vec![
+                        VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                        VmInstruction::CallIndirectOwned { dst: 1, callee: 0, arguments: vec![] },
+                        VmInstruction::DestroyCallable { dst: 2, value: 0 },
+                        VmInstruction::Return { value: 1 },
+                    ]));
+            }
+        }
+        program.fingerprint = program.computed_fingerprint();
+        for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+            assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { message, .. })
+                if message == "mandatory tail carrier has no frame-independent provenance proof"), "{result:?}");
+        }
+        if (2..4).contains(&mutation) || mutation >= 7 {
+            // The same producer and helper are admissible when the executable
+            // destructor actually preserves memory; this is not a blanket ban.
+            program.functions.get_mut(&if mutation >= 7 { closure } else { destructor }).unwrap().instructions.remove(3);
+            program.fingerprint = program.computed_fingerprint();
+            let decoded = decode_and_verify_program(&encode_program(&program)).unwrap();
+            let verified = verify_vm_program(program).unwrap();
+            for program in [&verified, &decoded] {
+                assert_eq!(program.run_i64().unwrap(), 42);
+            }
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_does_not_trust_an_initialization_probe_bypassed_by_a_jump() {
+    let read = DefKey(Digest::of_bytes(b"tail-reference-read"));
+    let program = tail_reference_program(vec![
+        VmInstruction::StorageLive { binding: 0, local: 3 },
+        VmInstruction::ConstBool { dst: 4, value: true },
+        VmInstruction::Jump { target: 5 },
+        // This instruction is adjacent to the branch but never executes.
+        VmInstruction::IsInitialized { dst: 4, base: 3, fields: vec![] },
+        VmInstruction::BranchBool { condition: 4, then_target: 6, else_target: 9 },
+        VmInstruction::ConstI64 { dst: 1, value: 42 },
+        VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false },
+        VmInstruction::TailCallOwned { callee: read, arguments: vec![2] },
+        VmInstruction::Copy { dst: 3, src: 0 },
+    ]);
+    for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+        assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { message, .. })
+            if message == "mandatory tail carrier has no frame-independent provenance proof"), "{result:?}");
+    }
+}
+
+#[test]
+fn mandatory_tail_vm_rejects_local_reference_aliases_aggregate_hiding_and_mixed_joins() {
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    let local = VmInstruction::ConstI64 { dst: 1, value: 42 };
+    let borrow = VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false };
+    for instructions in [
+        vec![local.clone(), borrow.clone(), VmInstruction::Copy { dst: 3, src: 2 }],
+        vec![local.clone(), borrow.clone(), VmInstruction::Store { dst: 0, src: 2 }, VmInstruction::Copy { dst: 3, src: 0 }],
+        vec![local.clone(), borrow.clone(), VmInstruction::MakeTuple { dst: 5, fields: vec![2] },
+            VmInstruction::ProjectTuple { dst: 3, base: 5, index: 0, field_count: 1, field_type: reference }],
+        vec![VmInstruction::ConstBool { dst: 4, value: false },
+            VmInstruction::BranchBool { condition: 4, then_target: 3, else_target: 5 },
+            VmInstruction::Copy { dst: 3, src: 0 }, VmInstruction::Jump { target: 7 },
+            local, VmInstruction::Borrow { dst: 3, src: 1, fields: vec![], unique: false, reborrow: false }],
+    ] {
+        let program = tail_reference_program(instructions);
+        for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+            assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { message, .. })
+                if message == "mandatory tail carrier has no frame-independent provenance proof"), "{result:?}");
+        }
+    }
+}
+
 fn array_storage_candidate() -> CandidateVmArtifact {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
@@ -2234,13 +2762,13 @@ fn checked_u32_shifts_and_division_fail_deterministically() {
 
 #[test]
 fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols() {
-    use grandiose_stage0::{ConstKind, Quantity, StructuralU32Expr};
+    use grandiose_stage0::{ConstKind, Quantity, IntegerConstExpr};
 
     let nominal = DefKey(Digest::of_bytes(b"vm-symbolic-const-nominal"));
     let effect = DefKey(Digest::of_bytes(b"vm-symbolic-const-effect"));
-    let expression = StructuralU32Expr::Add(
-        Box::new(StructuralU32Expr::Literal(1)),
-        Box::new(StructuralU32Expr::Param(0)),
+    let expression = IntegerConstExpr::binary(grandiose_stage0::types::integer_const::IntegerConstOp::Add,
+        Box::new(IntegerConstExpr::Literal(1u32.into())),
+        Box::new(IntegerConstExpr::Param { index: 0, scalar: grandiose_stage0::ScalarType::U32 }),
     );
     let function = MirFunction {
         safety: grandiose_stage0::Safety::Safe,
@@ -2258,7 +2786,7 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
                 ty: Type::Nominal {
                     definition: nominal,
                     arguments: vec![
-                        GenericArgument::ConstU32Expr(expression.clone()),
+                        GenericArgument::ConstIntegerExpr(expression.clone()),
                         GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
                         GenericArgument::ConstGeneric {
                             index: 3,
@@ -2279,7 +2807,7 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
                 site: MirPerformSiteId::UNASSIGNED,
                 dst: MirLocal(0),
                 effect,
-                effect_arguments: vec![GenericArgument::ConstU32Expr(expression.clone())],
+                effect_arguments: vec![GenericArgument::ConstIntegerExpr(expression.clone())],
                 operation: 0,
                 arguments: vec![],
             }],
@@ -2292,15 +2820,15 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
         artifact.function.registers[1],
         VmType::Nominal { ref arguments, .. }
             if matches!(arguments.as_slice(), [
-                VmType::ConstU32Expr(found),
-                VmType::ConstQuantity { lower: 2, upper: Some(4) },
-                VmType::ConstGeneric { index: 3, kind: ConstKind::Quantity },
+                VmGenericArgument::ConstIntegerExpr(found),
+                VmGenericArgument::ConstQuantity { lower: 2, upper: Some(4) },
+                VmGenericArgument::ConstGeneric { index: 3, kind: ConstKind::Quantity },
             ] if *found == expression)
     ));
     assert!(matches!(
         artifact.function.instructions.as_slice(),
         [VmInstruction::DeclareResult { .. }, VmInstruction::Perform { effect_arguments, .. }, ..]
-            if effect_arguments == &[VmGenericArgument::ConstU32Expr(expression.clone())]
+            if effect_arguments == &[VmGenericArgument::ConstIntegerExpr(expression.clone())]
     ));
     let encoded = encode_artifact(&artifact);
     assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
@@ -2329,7 +2857,7 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
 
 #[test]
 fn vm_rejects_forged_noncanonical_structural_const_identity() {
-    use grandiose_stage0::StructuralU32Expr;
+    use grandiose_stage0::IntegerConstExpr;
 
     let function = VmFunction {
         safety: grandiose_stage0::Safety::Safe,
@@ -2345,9 +2873,9 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
                 // Addition is commutative and must be serialized in canonical
                 // order. A hostile candidate cannot make this alternate
                 // spelling observable through a separate layout fingerprint.
-                arguments: vec![VmType::ConstU32Expr(StructuralU32Expr::Add(
-                    Box::new(StructuralU32Expr::Param(0)),
-                    Box::new(StructuralU32Expr::Literal(1)),
+                arguments: vec![grandiose_stage0::vm_backend::VmGenericArgument::ConstIntegerExpr(IntegerConstExpr::binary(grandiose_stage0::types::integer_const::IntegerConstOp::Add,
+                    Box::new(IntegerConstExpr::Param { index: 0, scalar: grandiose_stage0::ScalarType::U32 }),
+                    Box::new(IntegerConstExpr::Literal(1u32.into())),
                 ))],
             },
         ],
@@ -2368,9 +2896,9 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
         Err(VmArtifactError::NonCanonicalEncoding)
     ));
 
-    let invalid_expression = StructuralU32Expr::Div(
-        Box::new(StructuralU32Expr::Literal(1)),
-        Box::new(StructuralU32Expr::Literal(0)),
+    let invalid_expression = IntegerConstExpr::binary(grandiose_stage0::types::integer_const::IntegerConstOp::Div,
+        Box::new(IntegerConstExpr::Literal(1u32.into())),
+        Box::new(IntegerConstExpr::Literal(0u32.into())),
     );
     let function = VmFunction {
         safety: grandiose_stage0::Safety::Safe,
@@ -2385,7 +2913,7 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
                 definition: DefKey(Digest::of_bytes(
                     b"vm-forged-invalid-symbolic-const-nominal",
                 )),
-                arguments: vec![VmType::ConstU32Expr(invalid_expression)],
+                arguments: vec![grandiose_stage0::vm_backend::VmGenericArgument::ConstIntegerExpr(invalid_expression)],
             },
         ],
         instructions: vec![
@@ -2403,7 +2931,7 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
     assert!(matches!(
         verify_vm(candidate),
         Err(VmArtifactError::MalformedEncoding { message })
-            if message.contains("invalid structural u32 expression")
+            if message.contains("invalid structural integer expression")
     ));
 
     let function = VmFunction {
@@ -2413,7 +2941,7 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
         definition: DefKey(Digest::of_bytes(b"vm-top-level-const-register")),
         captures: 0,
         parameters: 0,
-        registers: vec![VmType::ConstU32(7)],
+        registers: vec![VmType::ConstInteger(7u32.into())],
         instructions: vec![VmInstruction::Trap],
     };
     let mut candidate = CandidateVmArtifact {
@@ -2467,7 +2995,7 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
                 site: MirPerformSiteId::UNASSIGNED,
                 dst: MirLocal(0),
                 effect,
-                effect_arguments: vec![GenericArgument::ConstU32(1)],
+                effect_arguments: vec![GenericArgument::ConstInteger(1u32.into())],
                 operation: 0,
                 arguments: vec![],
             }],
@@ -2479,7 +3007,7 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     assert!(matches!(
         artifact.function.instructions.as_slice(),
         [VmInstruction::DeclareResult { .. }, VmInstruction::Perform { effect: found, effect_arguments, .. }, ..]
-            if *found == effect && effect_arguments == &[VmGenericArgument::ConstU32(1)]
+            if *found == effect && effect_arguments == &[VmGenericArgument::ConstInteger(1u32.into())]
     ));
     let encoded = encode_artifact(&artifact);
     assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
@@ -2532,7 +3060,7 @@ fn vm_rejects_higher_ranked_lifetime_leaks_in_nested_effect_identity_metadata() 
             name: "Escaped".into(),
             item_arguments: vec![],
         }],
-        tail: None,
+        tails: Default::default(),
     })];
     let function = VmFunction {
         safety: grandiose_stage0::Safety::Safe,
@@ -3798,7 +4326,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
         VmGenericArgument::EffectRow(VmEffectRow {
             effects: vec![VmEffectInstance {
                 definition: nested_effect,
-                arguments: vec![VmGenericArgument::ConstU32(7)],
+                arguments: vec![VmGenericArgument::ConstInteger(7u32.into())],
             }],
             projections: vec![VmEffectRowProjection {
                 subject: VmType::Generic(1),
@@ -3813,10 +4341,10 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
                     VmGenericArgument::EffectRow(VmEffectRow {
                         effects: vec![],
                         projections: vec![],
-                        tail: Some(EffectTail::Generic(4)),
+                        tails: [EffectTail::Generic(4), EffectTail::Generic(9)].into_iter().collect(),
                     }),
                     VmGenericArgument::Lifetime(Lifetime::Generic(1)),
-                    VmGenericArgument::ConstU32(13),
+                    VmGenericArgument::ConstInteger(13u32.into()),
                     VmGenericArgument::ConstQuantity {
                         lower: 1,
                         upper: Some(3),
@@ -3832,14 +4360,14 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
                     VmGenericArgument::EffectRow(VmEffectRow {
                         effects: vec![],
                         projections: vec![],
-                        tail: Some(EffectTail::Generic(6)),
+                        tails: [EffectTail::Generic(6)].into_iter().collect(),
                     }),
                 ],
             }],
-            tail: Some(EffectTail::Generic(2)),
+            tails: [EffectTail::Generic(2), EffectTail::Generic(7)].into_iter().collect(),
         }),
         VmGenericArgument::Lifetime(Lifetime::Generic(3)),
-        VmGenericArgument::ConstU32(11),
+        VmGenericArgument::ConstInteger(11u32.into()),
         VmGenericArgument::ConstQuantity {
             lower: 4,
             upper: Some(9),
@@ -3908,7 +4436,8 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
         Err(VmArtifactError::DecodeLimit { .. })
     ));
 
-    let projection_count = nested_effect_tag + 1 + 8 + 32 + 8 + 1 + 4;
+    // Schema 113 stores kind + sign + 128-bit magnitude for the integer.
+    let projection_count = nested_effect_tag + 1 + 8 + 32 + 8 + 1 + 18;
     let mut excessive_projections = encoded;
     excessive_projections[projection_count..projection_count + 8]
         .copy_from_slice(&u64::MAX.to_le_bytes());
@@ -3916,6 +4445,58 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
         decode_and_verify_artifact(&excessive_projections),
         Err(VmArtifactError::DecodeLimit { .. })
     ));
+}
+
+#[test]
+fn nominal_arguments_preserve_kinds_rows_and_descriptor_identity_on_wire() {
+    let definition = DefKey(Digest::of_bytes(b"mixed-kind-nominal"));
+    let row = VmEffectRow {
+        effects: vec![grandiose_stage0::VmEffectInstance {
+            definition: DefKey(Digest::of_bytes(b"nominal-row-effect")), arguments: vec![],
+        }], projections: vec![], tails: Default::default(),
+    };
+    let arguments = vec![VmGenericArgument::Type(VmType::I64),
+        VmGenericArgument::ConstInteger(7u32.into()), VmGenericArgument::EffectRow(row.clone())];
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        fingerprint: Digest::of_bytes(b"pending-nominal-kinds"),
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"nominal-kinds-function")),
+            safety: grandiose_stage0::Safety::Safe, unsafe_execution: false, captures: 0, parameters: 0,
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition, source_contract: Digest::of_bytes(b"nominal-kinds-layout"), is_enum: false,
+                arguments: arguments.clone(), variants: vec![vec![VmType::I64]],
+            }],
+            registers: vec![VmType::I64, VmType::Nominal { definition, arguments }],
+            instructions: vec![VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeRecord { dst: 1, definition, fields: vec![0], field_types: vec![VmType::I64] },
+                VmInstruction::Return { value: 0 }],
+        },
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(decode_and_verify_artifact(&bytes).unwrap().run_i64().unwrap(), 42);
+    for argument in [VmGenericArgument::EffectRow(VmEffectRow::default()),
+        VmGenericArgument::Type(VmType::I64), VmGenericArgument::ConstInteger(7u32.into())] {
+        let mut forged = candidate.clone();
+        forged.function.nominal_copy_descriptors[0].arguments[2] = argument;
+        forged.fingerprint = forged.computed_fingerprint();
+        assert_ne!(forged.fingerprint, candidate.fingerprint);
+        assert!(verify_vm(forged.clone()).is_err());
+        assert!(decode_and_verify_artifact(&encode_artifact(&forged)).is_err());
+    }
+    for argument in [VmGenericArgument::Lifetime(grandiose_stage0::Lifetime::Static),
+        VmGenericArgument::EffectRow(VmEffectRow { effects: vec![row.effects[0].clone(), row.effects[0].clone()], ..Default::default() }),
+        VmGenericArgument::Type(VmType::ConstInteger(7u32.into()))] {
+        let mut forged = candidate.clone();
+        let VmType::Nominal { arguments, .. } = &mut forged.function.registers[1] else { unreachable!() };
+        arguments[2] = argument.clone();
+        forged.function.nominal_copy_descriptors[0].arguments[2] = argument;
+        forged.fingerprint = forged.computed_fingerprint();
+        assert!(verify_vm(forged.clone()).is_err());
+        assert!(decode_and_verify_artifact(&encode_artifact(&forged)).is_err());
+    }
 }
 
 #[test]
@@ -3954,7 +4535,7 @@ fn vm_decoder_rejects_noncanonical_effect_row_instances() {
                             },
                         ],
                         projections: vec![],
-                        tail: None,
+                        tails: Default::default(),
                     })],
                     operation: 0,
                     arguments: vec![],
@@ -5098,7 +5679,7 @@ fn aggregate_and_handler_payload_allocation_limits_cover_both_vm_engines() {
 #[test]
 fn verified_stage_zero_vm_artifact_executes_lowered_mir() {
     let package = PackageKey("vm@0.1.0".into());
-    let source = "pub fn main() -> i64 { let value = 8; value * 5 + 2 }";
+    let source = "pub fn main() -> i64 { let value = 42; value }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -5305,6 +5886,69 @@ fn wide_integer_pattern_literals_are_contextually_typed_by_the_vm_payload() {
     let bytes = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
     assert!(decode_and_verify_artifact(&bytes).unwrap().run_bool().unwrap());
+}
+
+fn scalar_pattern_artifact(ty: VmType, constant: VmInstruction, literal: &str) -> CandidateVmArtifact {
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"checked-scalar-pattern")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![ty, VmType::Bool],
+            instructions: vec![constant,
+                VmInstruction::PatternTest { dst: 1, subject: 0, pattern: VmPattern::Literal(literal.into()) },
+                VmInstruction::Return { value: 1 }],
+        },
+        fingerprint: Digest::of_bytes(b"stale"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    artifact
+}
+
+#[test]
+fn integer_pattern_wire_validation_checks_sign_radix_separators_and_width() {
+    for literal in ["-128", "-0x80", "-0b1000_0000", "-0o200"] {
+        let artifact = scalar_pattern_artifact(VmType::I8, VmInstruction::ConstI8 { dst: 0, value: -128 }, literal);
+        assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).unwrap().run_bool().unwrap(), "{literal}");
+    }
+    for literal in ["128", "-129", "0x80", "-0x81", "_12", "12_", "1__2", "0x__c", "--12", "- 12", "+12", "0b102"] {
+        let artifact = scalar_pattern_artifact(VmType::I8, VmInstruction::ConstI8 { dst: 0, value: 12 }, literal);
+        assert!(verify_vm(artifact.clone()).is_err(), "{literal}");
+        assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).is_err(), "{literal}");
+    }
+}
+
+#[test]
+fn float_pattern_wire_validation_and_execution_use_the_selected_precision() {
+    // This is just above an f32 midpoint but rounds to the exact midpoint as
+    // f64. Parsing as f64 and then narrowing would choose the wrong f32.
+    let above_midpoint = "1.000000059604644775390625000001";
+    assert_eq!(above_midpoint.parse::<f32>().unwrap().to_bits(), 0x3f800001);
+    assert_eq!((above_midpoint.parse::<f64>().unwrap() as f32).to_bits(), 0x3f800000);
+    for literal in [above_midpoint, "-1.25", "-0.0", "1"] {
+        let artifact = scalar_pattern_artifact(VmType::F32,
+            VmInstruction::ConstF32 { dst: 0, bits: literal.parse::<f32>().unwrap().to_bits() }, literal);
+        assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).unwrap().run_bool().unwrap(), "{literal}");
+    }
+    for literal in ["1__2.0", "1.0_", "- 1.0", "3.5e38", "NaN", "-inf"] {
+        let artifact = scalar_pattern_artifact(VmType::F32, VmInstruction::ConstF32 { dst: 0, bits: 0 }, literal);
+        assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).is_err(), "{literal}");
+    }
+    let artifact = scalar_pattern_artifact(VmType::F64,
+        VmInstruction::ConstF64 { dst: 0, bits: (-1.25f64).to_bits() }, "-1.25");
+    assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).unwrap().run_bool().unwrap());
+    for (ty, constant) in [
+        (VmType::F32, VmInstruction::ConstF32 { dst: 0, bits: (-0.0f32).to_bits() }),
+        (VmType::F64, VmInstruction::ConstF64 { dst: 0, bits: (-0.0f64).to_bits() }),
+    ] {
+        let artifact = scalar_pattern_artifact(ty, constant, "0.0");
+        assert!(!decode_and_verify_artifact(&encode_artifact(&artifact)).unwrap().run_bool().unwrap(), "structural float patterns preserve the sign of zero");
+    }
 }
 
 #[test]
@@ -5536,6 +6180,7 @@ fn vm_decoder_verifier_rejects_forged_array_pattern_element_metadata() {
                     dst: 2,
                     subject: 1,
                     pattern: VmPattern::Array {
+                        rest: None,
                         element: VmType::Bool,
                         elements: vec![VmPattern::Any],
                     },
@@ -5718,7 +6363,7 @@ fn handlers_match_the_exact_non_type_effect_instance() {
     let effect = DefKey(Digest::of_bytes(b"exact-non-type-handler"));
     let nested = DefKey(Digest::of_bytes(b"exact-non-type-handler-nested"));
     let protocol = vec![
-        VmGenericArgument::ConstU32(1),
+        VmGenericArgument::ConstInteger(1u32.into()),
         VmGenericArgument::Lifetime(Lifetime::Generic(4)),
         VmGenericArgument::EffectRow(VmEffectRow {
             effects: vec![VmEffectInstance {
@@ -5729,7 +6374,7 @@ fn handlers_match_the_exact_non_type_effect_instance() {
                 }],
             }],
             projections: vec![],
-            tail: Some(EffectTail::Generic(3)),
+            tails: [EffectTail::Generic(3)].into_iter().collect(),
         }),
     ];
     let mut candidate = CandidateVmArtifact {
@@ -5777,12 +6422,12 @@ fn handlers_match_the_exact_non_type_effect_instance() {
     else {
         panic!("fixture changed")
     };
-    effect_arguments[0] = VmGenericArgument::ConstU32(2);
+    effect_arguments[0] = VmGenericArgument::ConstInteger(2u32.into());
     candidate.fingerprint = candidate.computed_fingerprint();
     assert!(matches!(
         verify_vm(candidate).unwrap().run_i64(),
         Err(VmArtifactError::UnhandledEffect { effect: found, effect_arguments, .. })
-            if found == effect && effect_arguments[0] == VmGenericArgument::ConstU32(2)
+            if found == effect && effect_arguments[0] == VmGenericArgument::ConstInteger(2u32.into())
     ));
 }
 
@@ -5992,7 +6637,7 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
                 arguments: vec![],
             }],
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         }),
     };
     let mut candidate = CandidateVmArtifact {
@@ -7408,7 +8053,7 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
                 arguments: vec![],
             }],
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         }),
     };
     let mut candidate = CandidateVmArtifact {
@@ -8697,7 +9342,7 @@ fn verifier_rejects_candidates_with_stale_schema_or_fingerprint() {
 #[test]
 fn stage_zero_artifact_envelope_round_trips_and_rejects_hostile_bytes() {
     let package = PackageKey("vm-envelope@0.1.0".into());
-    let source = "pub fn main() -> Text { \"hello, \" + \"world\" }";
+    let source = "pub fn main() -> Text { \"hello, world\" }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -9371,7 +10016,7 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
                 arguments: vec![],
             }],
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         }),
     };
     let expected = callable(effect_a);
@@ -9500,7 +10145,7 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
                 },
             ],
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         }),
     };
     let mut artifact = CandidateVmArtifact {
@@ -10991,91 +11636,6 @@ fn cleanup_leave_preserves_the_lexical_outer_handler_prefix() {
     let bytes = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
     assert_eq!(decode_and_verify_artifact(&bytes).unwrap().run_i64().unwrap(), 42);
-}
-
-#[test]
-fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
-    let package = PackageKey("vm-partial-move-cleanup@0.1.0".into());
-    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; label done { move pair.left; transfer done pair.right; 0 } }";
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let flow = PlaceFlow::analyze(&core);
-    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
-    assert_eq!(
-        flow.moved_places,
-        vec![grandiose_stage0::MoveFact {
-            root: "pair".into(),
-            fields: vec![0],
-        }]
-    );
-    let mut mir = MirLowering::lower(definition.key, &core, &flow)
-        .function
-        .expect("partial move with leave lowers");
-    let pair = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("Pair"))
-        .expect("Pair definition")
-        .key;
-    // This direct lowering test intentionally bypasses the package linker,
-    // which normally freezes declaration layouts onto every emitted body.
-    // Supply the same declaration-owned record layout before validating MIR,
-    // emitting, and independently verifying the raw artifact.
-    mir.nominal_copy_descriptors = vec![grandiose_stage0::MirNominalCopyDescriptor {
-        source_contract: Digest::of_bytes(b"test-nominal-source-contract"),
-        is_enum: false,
-        definition: pair,
-        arguments: vec![],
-        variants: vec![vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::I64)]],
-    }];
-    let mut artifact = emit_vm(&mir).expect("partial move cleanup emits");
-    artifact.fingerprint = artifact.computed_fingerprint();
-    let cleanup = artifact
-        .function
-        .instructions
-        .iter()
-        .find_map(|instruction| match instruction {
-            VmInstruction::Leave { cleanup, .. } => Some(cleanup),
-            _ => None,
-        })
-        .expect("label transfer retains cleanup proof");
-    assert!(cleanup.validate(), "{cleanup:#?}");
-    assert_eq!(
-        cleanup.moved_places,
-        vec![VmCleanupPlace {
-            path: 1,
-            binding: 0,
-            root: "pair".into(),
-            fields: vec![0],
-        }]
-    );
-    let bytes = encode_artifact(&artifact);
-    assert_eq!(
-        decode_and_verify_artifact(&bytes)
-            .unwrap()
-            .run_i64()
-            .unwrap(),
-        2
-    );
 }
 
 #[test]

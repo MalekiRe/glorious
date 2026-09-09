@@ -12,7 +12,7 @@ use super::{
 use crate::{
     identity::{DefKey, Digest},
     types::{
-        ConstKind, EffectTail, Lifetime, PointerMutability, Safety, ScalarType, StructuralU32Expr,
+        ConstKind, EffectTail, Lifetime, PointerMutability, Safety, ScalarType, IntegerConstExpr,
     },
 };
 use decode::Decoder;
@@ -26,7 +26,8 @@ pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Exact schema of this implementation-local envelope. Earlier schemas are
 /// rejected, never interpreted using the current instruction or type layout.
-pub const STAGE0_VM_SCHEMA: u32 = 108;
+// Schema 115 adds fixed arrays and explicit sparse array-pattern remainders.
+pub const STAGE0_VM_SCHEMA: u32 = 115;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -244,6 +245,7 @@ pub(super) fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Bytes => 18,
         VmType::Generic(_) => 9,
         VmType::Array(_) => 10,
+        VmType::FixedArray { .. } => 32,
         VmType::Callable {
             safety: Safety::Safe,
             ..
@@ -256,8 +258,8 @@ pub(super) fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Tuple(_) => 7,
         VmType::Nominal { .. } => 8,
         VmType::Reference { .. } => 11,
-        VmType::ConstU32(_) => 12,
-        VmType::ConstU32Expr(_) => 13,
+        VmType::ConstInteger(_) => 12,
+        VmType::ConstIntegerExpr(_) => 13,
         VmType::ConstQuantity { .. } => 14,
         VmType::ConstGeneric { .. } => 15,
         VmType::StaticData { .. } => 29,
@@ -289,7 +291,7 @@ pub(super) fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             output.extend_from_slice(&definition.0.as_bytes());
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments {
-                encode_type(argument, output);
+                encode_vm_generic_argument(argument, output);
             }
         }
         VmType::RawPointer {
@@ -300,8 +302,8 @@ pub(super) fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             encode_type(pointee, output);
         }
         VmType::Generic(index) => output.extend_from_slice(&index.to_le_bytes()),
-        VmType::ConstU32(value) => output.extend_from_slice(&value.to_le_bytes()),
-        VmType::ConstU32Expr(value) => encode_vm_structural_u32_expr(value, output),
+        VmType::ConstInteger(value) => output.extend_from_slice(&value.canonical_bytes()),
+        VmType::ConstIntegerExpr(value) => encode_vm_structural_integer_expr(value, output),
         VmType::ConstQuantity { lower, upper } => {
             output.extend_from_slice(&lower.to_le_bytes());
             match upper {
@@ -330,63 +332,26 @@ pub(super) fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             output.extend_from_slice(&alignment.to_le_bytes());
         }
         VmType::Array(element) => encode_type(element, output),
+        VmType::FixedArray { element, length } => {
+            encode_type(element, output);
+            output.extend_from_slice(&length.to_le_bytes());
+        }
         _ => {}
     }
 }
 
 fn encode_const_kind(kind: ConstKind) -> u8 {
-    match kind {
-        ConstKind::U32 => 0,
-        ConstKind::Quantity => 1,
-    }
+    kind.tag()
 }
 
 fn decode_const_kind(tag: u8) -> Result<ConstKind, VmArtifactError> {
-    match tag {
-        0 => Ok(ConstKind::U32),
-        1 => Ok(ConstKind::Quantity),
-        _ => Err(VmArtifactError::MalformedEncoding {
+    ConstKind::from_tag(tag).ok_or(VmArtifactError::MalformedEncoding {
             message: "invalid const generic kind",
-        }),
-    }
+        })
 }
 
-fn encode_vm_structural_u32_expr(value: &StructuralU32Expr, output: &mut Vec<u8>) {
-    match value {
-        StructuralU32Expr::Literal(value) => {
-            output.push(0);
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        StructuralU32Expr::Param(value) => {
-            output.push(1);
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        StructuralU32Expr::Add(left, right) => {
-            output.push(2);
-            encode_vm_structural_u32_expr(left, output);
-            encode_vm_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Sub(left, right) => {
-            output.push(3);
-            encode_vm_structural_u32_expr(left, output);
-            encode_vm_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Mul(left, right) => {
-            output.push(4);
-            encode_vm_structural_u32_expr(left, output);
-            encode_vm_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Div(left, right) => {
-            output.push(5);
-            encode_vm_structural_u32_expr(left, output);
-            encode_vm_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Rem(left, right) => {
-            output.push(6);
-            encode_vm_structural_u32_expr(left, output);
-            encode_vm_structural_u32_expr(right, output);
-        }
-    }
+fn encode_vm_structural_integer_expr(value: &IntegerConstExpr, output: &mut Vec<u8>) {
+    value.encode(output);
 }
 
 fn encode_capture_environment(value: Option<&VmCaptureEnvironment>, output: &mut Vec<u8>) {
@@ -442,15 +407,22 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
                     output.extend_from_slice(&index.to_le_bytes());
                 }
                 Lifetime::Elided => output.push(3),
+                Lifetime::Placeholder(region) => {
+                    // Reserved, like Infer above: neither the decoder nor
+                    // the validator admits proof-local regions to bytecode.
+                    output.push(5);
+                    output.extend_from_slice(&region.universe.to_le_bytes());
+                    output.extend_from_slice(&region.index.to_le_bytes());
+                }
             }
         }
-        VmGenericArgument::ConstU32(value) => {
+        VmGenericArgument::ConstInteger(value) => {
             output.push(3);
-            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&value.canonical_bytes());
         }
-        VmGenericArgument::ConstU32Expr(value) => {
+        VmGenericArgument::ConstIntegerExpr(value) => {
             output.push(6);
-            encode_vm_structural_u32_expr(value, output);
+            encode_vm_structural_integer_expr(value, output);
         }
         VmGenericArgument::ConstQuantity { lower, upper } => {
             output.push(4);
@@ -487,17 +459,17 @@ fn encode_vm_effect_row(value: &VmEffectRow, output: &mut Vec<u8>) {
         output.extend_from_slice(projection.name.as_bytes());
         encode_vm_generic_arguments(&projection.item_arguments, output);
     }
-    match value.tail {
-        Some(EffectTail::Infer(variable)) => {
+    output.extend_from_slice(&(value.tails.len() as u64).to_le_bytes());
+    for tail in &value.tails { match tail {
+        EffectTail::Infer(variable) => {
             output.push(0);
             output.extend_from_slice(&variable.0.to_le_bytes());
         }
-        Some(EffectTail::Generic(index)) => {
+        EffectTail::Generic(index) => {
             output.push(1);
             output.extend_from_slice(&index.to_le_bytes());
         }
-        None => output.push(2),
-    }
+    } }
 }
 
 fn encode_vm_generic_arguments(values: &[VmGenericArgument], output: &mut Vec<u8>) {
@@ -583,7 +555,7 @@ pub(super) fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
         output.push(u8::from(descriptor.is_enum));
         output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
         for argument in &descriptor.arguments {
-            encode_type(argument, output);
+            encode_vm_generic_argument(argument, output);
         }
         output.extend_from_slice(&(descriptor.variants.len() as u64).to_le_bytes());
         for variant in &descriptor.variants {
@@ -603,7 +575,7 @@ pub(crate) fn vm_nominal_copy_descriptor_key(descriptor: &VmNominalCopyDescripto
     let mut output = descriptor.definition.0.as_bytes().to_vec();
     output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
     for argument in &descriptor.arguments {
-        encode_type(argument, &mut output);
+        encode_vm_generic_argument(argument, &mut output);
     }
     output
 }

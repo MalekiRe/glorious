@@ -61,6 +61,8 @@ impl OwnershipMir {
         }
         let valid = match &instruction.operation {
             OwnershipOperation::Compute(computation) => match computation {
+                OwnershipComputation::ConstValue(argument) => crate::types::integer_const_argument_type(argument).as_ref() == Some(ty)
+                    && crate::types::is_canonical_generic_argument_identity(argument),
                 OwnershipComputation::Unit => ty == &Type::Unit,
                 OwnershipComputation::Literal(_) => {
                     !matches!(ty, Type::Never | Type::Infer(_) | Type::Error)
@@ -97,8 +99,8 @@ impl OwnershipMir {
                     matches!(ty, Type::Tuple(types) if types.len() == fields.len()
                     && types.iter().zip(fields).all(|(ty, field)| self.graph_type(field.value).ok() == Some(ty)))
                 }
-                OwnershipAggregate::Array => matches!(ty, Type::Array(element)
-                    if fields.iter().all(|field| self.graph_type(field.value).ok() == Some(element.as_ref()))),
+                OwnershipAggregate::Array => ty.array_accepts_count(fields.len()) && ty.array_element().is_some_and(|element|
+                    fields.iter().all(|field| self.graph_type(field.value).ok() == Some(element))),
                 OwnershipAggregate::Record(definition)
                 | OwnershipAggregate::Enum { definition, .. } => {
                     matches!(ty, Type::Nominal { definition: actual, .. } if actual == definition)
@@ -151,6 +153,7 @@ impl OwnershipMir {
                 arguments,
                 result,
                 continuation,
+                contract,
                 ..
             } => {
                 let mut ty = self.graph_type(*callee)?;
@@ -170,7 +173,7 @@ impl OwnershipMir {
                                 .is_ok_and(|actual| call_type_matches(ty, actual))
                         })
                         || !call_type_matches(result_ty, self.graph_type(*result)?)
-                        || continuation.is_none() != (**result_ty == Type::Never)
+                        || continuation.is_none() != (**result_ty == Type::Never || contract.mandatory_tail)
                     {
                         return Err(invalid(
                             "ownership invocation disagrees with callable contract",

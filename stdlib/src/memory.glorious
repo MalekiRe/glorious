@@ -1,0 +1,228 @@
+// General pointer scalar leaves required by §22. The source signatures are
+// exact; the canonical library root declares the manifest-bound leaves.
+// They are not collection, parser, budget, or compiler operations.
+
+pub fn ptr_eq<T>(left: *const T, right: *const T) -> Bool {
+    __g1_memory_pointer_eq(left, right) != 0
+}
+pub fn ptr_address<T>(value: *const T) -> usize { __g1_memory_pointer_address(value) }
+pub fn ptr_from_ref<T>(value: &T) -> *const T { unsafe { __g1_memory_as_raw_shared(value) } }
+pub fn ptr_from_mut<T>(value: &mut T) -> *mut T { unsafe { __g1_memory_as_raw_unique(value) } }
+pub fn ptr_cast<T,U>(source: *const T) -> *const U { unsafe { __g1_memory_cast_const(source) } }
+pub fn ptr_cast_mut<T,U>(source: *mut T) -> *mut U { unsafe { __g1_memory_cast(source) } }
+pub fn ptr_as_const<T>(source: *mut T) -> *const T { unsafe { __g1_memory_as_const(source) } }
+pub fn null<T>() -> *const T { unsafe { __g1_memory_as_const(__g1_memory_null<T>()) } }
+pub fn null_mut<T>() -> *mut T { unsafe { __g1_memory_null() } }
+pub fn dangling<T>() -> *mut T { unsafe { __g1_memory_dangling() } }
+pub fn ptr_is_null<T>(value: *const T) -> Bool { ptr_eq(value, null<T>()) }
+pub fn size_of<T>() -> usize { __g1_memory_size_of<T>() }
+pub fn align_of<T>() -> usize { __g1_memory_align_of<T>() }
+
+pub struct Layout { private size: usize, private align: usize }
+pub enum LayoutError { ZeroAlignment, NonPowerOfTwoAlignment, SizeOverflow }
+pub enum AllocError { Exhausted, UnsupportedAlignment, LimitExceeded }
+pub enum ReserveError { CapacityOverflow, Allocation(AllocError) }
+pub enum InsertError { OutOfBounds { index: usize, length: usize }, Reserve(ReserveError) }
+pub struct LengthError { pub expected: usize, pub actual: usize }
+pub enum ScratchError { NonEmpty, InsufficientCapacity, Reserve(ReserveError) }
+impl Layout {
+    pub fn from_size_align(size: usize, align: usize) -> Result<Self,LayoutError> {
+        handle align == 0 {
+            true => Result::Err(LayoutError::ZeroAlignment),
+            false => handle bit_and(align, align - 1) != 0 {
+                true => Result::Err(LayoutError::NonPowerOfTwoAlignment),
+                false => Result::Ok(Layout { size: size, align: align }),
+            },
+        }
+    }
+    pub fn of<T>() -> Self { Layout { size: size_of<T>(), align: align_of<T>() } }
+    pub fn array<T>(count: usize) -> Result<Self,LayoutError> {
+        let size = size_of<T>();
+        handle size == 0 {
+            true => Result::Ok(Layout { size: 0, align: align_of<T>() }),
+            false => handle count > bit_not<usize>(0) / size {
+                true => Result::Err(LayoutError::SizeOverflow),
+                false => Result::Ok(Layout { size: size * count, align: align_of<T>() }),
+            },
+        }
+    }
+    pub fn size(value: &Self) -> usize { value.size }
+    pub fn align(value: &Self) -> usize { value.align }
+    pub fn extend(value: Self, other: Self) -> Result<(Self,usize),LayoutError> {
+        let remainder = value.size % other.align;
+        let padding = handle remainder == 0 { true => 0, false => other.align - remainder };
+        handle padding > bit_not<usize>(0) - value.size {
+            true => Result::Err(LayoutError::SizeOverflow),
+            false => {
+                let offset = value.size + padding;
+                handle other.size > bit_not<usize>(0) - offset {
+                    true => Result::Err(LayoutError::SizeOverflow),
+                    false => Result::Ok((Layout { size: offset + other.size, align: max(value.align, other.align) }, offset)),
+                }
+            },
+        }
+    }
+    pub fn padded(value: Self) -> Result<Self,LayoutError> {
+        let remainder = value.size % value.align;
+        let padding = handle remainder == 0 { true => 0, false => value.align - remainder };
+        handle padding > bit_not<usize>(0) - value.size {
+            true => Result::Err(LayoutError::SizeOverflow),
+            false => Result::Ok(Layout { size: value.size + padding, align: value.align }),
+        }
+    }
+}
+pub struct AllocatorId(u64);
+pub struct Allocation { private pointer: *mut u8, private layout: Layout }
+pub impl Use<[1,1]> for Allocation {}
+pub fn allocate(layout: Layout) -> Result<Allocation,AllocError> {
+    let pointer = unsafe { __g1_memory_allocate(layout.size, layout.align) };
+    handle unsafe { __g1_memory_is_null(pointer) } != 0 {
+        true => Result::Err(AllocError::Exhausted),
+        false => Result::Ok(Allocation { pointer: pointer, layout: layout }),
+    }
+}
+impl Allocation {
+    pub fn layout(value: &Self) -> Layout { value.layout }
+    pub fn allocator(value: &Self) -> AllocatorId { AllocatorId(0) }
+    pub fn as_ptr(value: &Self) -> *mut u8 { value.pointer }
+    pub unsafe fn resize(value: &mut Self, new_layout: Layout) -> Result<(),AllocError> {
+        // Allocate first, preserving the complete old raw-storage owner on failure.
+        handle allocate(new_layout) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(replacement) => {
+                unsafe {
+                    __g1_memory_copy_nonoverlapping(__g1_memory_as_const(value.pointer), replacement.pointer,
+                        min(value.layout.size, new_layout.size));
+                };
+                let previous = replace(value, replacement);
+                unsafe { Self::release(previous) };
+                Result::Ok(())
+            },
+        }
+    }
+    pub unsafe fn release(value: Self) {
+        let Allocation { pointer: pointer, layout: layout } = value;
+        unsafe { __g1_memory_deallocate(pointer, layout.size, layout.align) }
+    }
+}
+
+// Refcounted identity retains its allocation until all marks/tickets are gone.
+// This prevents an allocator from recycling an address into a false match.
+// This internal token is single-threaded; no implicit Send/Sync is provided.
+struct IdentityHeader { references: usize }
+struct IdentityToken { pointer: *mut IdentityHeader }
+impl Use<[0,1]> for IdentityToken {}
+fn identity_new() -> IdentityToken {
+    let raw = unsafe { __g1_memory_allocate(size_of<IdentityHeader>(), align_of<IdentityHeader>()) };
+    handle unsafe { __g1_memory_is_null(raw) } != 0 { true => __g1_abort(), false => () };
+    let pointer = unsafe { __g1_memory_cast<u8,IdentityHeader>(raw) };
+    unsafe { __g1_memory_write(pointer, IdentityHeader { references: 1 }) };
+    IdentityToken { pointer: pointer }
+}
+fn identity_same(left: &IdentityToken, right: &IdentityToken) -> Bool {
+    ptr_eq(ptr_as_const(left.pointer), ptr_as_const(right.pointer))
+}
+impl Clone for IdentityToken {
+    fn clone(value: &Self) -> Self {
+        let header = unsafe { __g1_memory_borrow_unique(value.pointer) };
+        handle header.references == bit_not<usize>(0) { true => __g1_abort(), false => () };
+        (*header).references = header.references + 1;
+        IdentityToken { pointer: value.pointer }
+    }
+}
+impl Drop for IdentityToken {
+    drop(&mut self) -> {
+        let header = unsafe { __g1_memory_borrow_unique(self.pointer) };
+        let remaining = header.references - 1;
+        (*header).references = remaining;
+        handle remaining == 0 {
+            false => (),
+            true => unsafe { __g1_memory_deallocate(__g1_memory_cast<IdentityHeader,u8>(self.pointer),
+                size_of<IdentityHeader>(), align_of<IdentityHeader>()) },
+        }
+    }
+}
+
+impl<T> Vec<T> {
+    pub fn try_with_capacity(capacity: usize) -> Result<Self,ReserveError> {
+        let mut value = Self::new();
+        handle Self::try_reserve(&mut value, capacity) {
+            Result::Ok(_) => Result::Ok(value),
+            Result::Err(error) => {
+                handle Self::finish_empty(value) { Result::Ok(_) => (), Result::Err(_) => __g1_abort() };
+                Result::Err(error)
+            },
+        }
+    }
+    pub fn try_reserve(value: &mut Self, additional: usize) -> Result<(),ReserveError> {
+        handle additional > bit_not<usize>(0) - value.length {
+            true => Result::Err(ReserveError::CapacityOverflow),
+            false => {
+                let required = value.length + additional;
+                handle required <= value.capacity {
+                    true => Result::Ok(()),
+                    false => {
+                        let size = size_of<T>();
+                        handle size == 0 {
+                            true => { (*value).capacity = bit_not<usize>(0); Result::Ok(()) },
+                            false => {
+                                let maximum = bit_not<usize>(0) / size;
+                                handle required > maximum {
+                                    true => Result::Err(ReserveError::CapacityOverflow),
+                                    false => {
+                                        let doubled = handle value.capacity > maximum / 2 { true => maximum, false => value.capacity * 2 };
+                                        let capacity = max(required, doubled);
+                                        let pointer = unsafe { __g1_memory_reallocate(__g1_memory_cast<T,u8>(value.pointer),
+                                            value.capacity * size, align_of<T>(), capacity * size) };
+                                        handle unsafe { __g1_memory_is_null(pointer) } != 0 {
+                                            true => Result::Err(ReserveError::Allocation(AllocError::Exhausted)),
+                                            false => {
+                                                (*value).pointer = unsafe { __g1_memory_cast<u8,T>(pointer) };
+                                                (*value).capacity = capacity;
+                                                Result::Ok(())
+                                            },
+                                        }
+                                    },
+                                }
+                            },
+                        }
+                    },
+                }
+            },
+        }
+    }
+    pub fn try_push(value: &mut Self, item: T) -> Result<(),Rejected<T,ReserveError>> {
+        handle Self::try_reserve(&mut *value, 1) {
+            Result::Err(error) => Result::Err(Rejected { value: item, error: error }),
+            Result::Ok(_) => { Self::push(value, item); Result::Ok(()) },
+        }
+    }
+    pub fn try_insert(value: &mut Self, index: usize, item: T) -> Result<(),Rejected<T,InsertError>> {
+        handle index > value.length {
+            true => Result::Err(Rejected { value: item, error: InsertError::OutOfBounds { index: index, length: value.length } }),
+            false => handle Self::try_reserve(&mut *value, 1) {
+                Result::Err(error) => Result::Err(Rejected { value: item, error: InsertError::Reserve(error) }),
+                Result::Ok(_) => handle Self::insert(value, index, item) {
+                    Result::Ok(_) => Result::Ok(()), Result::Err(_) => __g1_abort(),
+                },
+            },
+        }
+    }
+    pub fn finish_empty(value: Self) -> Result<(),Self> {
+        handle value.length == 0 {
+            false => Result::Err(value),
+            true => {
+                let pointer = value.pointer;
+                let capacity = value.capacity;
+                // The checked empty owner has no resident obligations. Its
+                // allocation is released once, then the consumed header is
+                // forgotten without invoking a conditional Vec Drop hook.
+                unsafe {
+                    __g1_memory_deallocate(__g1_memory_cast<T,u8>(pointer), capacity * size_of<T>(), align_of<T>());
+                    __g1_memory_forget(value);
+                };
+                Result::Ok(())
+            },
+        }
+    }
+}

@@ -1,6 +1,8 @@
 //! Typed Core, the semantic boundary before ownership facts and MIR.
 
 mod fingerprint;
+pub(crate) mod tail;
+mod tuple_struct;
 
 use crate::{
     body::{BodySyntax, ClosureParameter, ExprId, ExprKind, HandlerClause},
@@ -8,7 +10,7 @@ use crate::{
     header::FixityForm,
     identity::{DefKey, Digest, ModuleKey, PackageKey},
     interface::{Definition, DefinitionNamespace},
-    pattern::{PatternDecision, PatternGenericScope, elaborate_pattern_with_scope},
+    pattern::{PatternDecision, PatternGenericScope, elaborate_pattern_in_context},
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{
         CallableSignature, ElaboratedEffect, ElaboratedHeader, ElaboratedInterface,
@@ -235,6 +237,7 @@ pub enum CorePattern {
     Array {
         element: Type,
         elements: Vec<CorePattern>,
+        rest: Option<crate::pattern::ArrayPatternRest>,
     },
     Record {
         definition: DefKey,
@@ -404,8 +407,12 @@ fn call_reference_shape(
 pub struct CallReferencePath {
     pub result_fields: Vec<u32>,
     pub argument: u32,
+    /// Structural field indices, with REFERENCE_PATH_DEREF separating a
+    /// reference handle from reference-bearing residents of its referent.
     pub argument_fields: Vec<u32>,
 }
+
+pub(crate) const REFERENCE_PATH_DEREF: u32 = u32::MAX;
 /// One branch-local view of a source `is` test.  The boolean result selects
 /// the completion arm; this record supplies the corresponding structural
 /// subject and frozen projection plan only to a proven-positive arm.
@@ -471,6 +478,13 @@ enum GroupedOperator {
 struct CallLifetimeSubstitution {
     generics: std::collections::BTreeMap<u32, Lifetime>,
     bounds: std::collections::BTreeMap<u32, Lifetime>,
+    /// Invocation retains caller-owned regions, including generic arguments
+    /// absent from every value parameter and result.
+    preserve_free_generics: bool,
+    /// Variance checking may replace an input type with its proven coerced
+    /// view. Do not lose inference equations from that discarded structure.
+    inference_equalities: Vec<(Lifetime, Lifetime)>,
+    outlives: Vec<crate::OutlivesPredicate>,
 }
 
 #[derive(Clone, Copy)]
@@ -478,9 +492,13 @@ enum LifetimeMode {
     /// A declared body contract is rigid: assigning or returning a shorter
     /// body loan through `&'a` cannot manufacture an outlives proof.
     Rigid,
-    /// A callee's own generic/bound lifetime is opened at the call site and
-    /// may be instantiated from a caller argument.
+    /// Align an unopened declaration/context contract, where generic and
+    /// bound regions belong to the contract being instantiated.
     Instantiate,
+    /// Invoke a callable: open only its bound regions. Omitted declaration
+    /// regions are already fresh inference cells; Generic regions are fixed
+    /// caller arguments or captures from the enclosing body.
+    InstantiateBound,
 }
 
 #[derive(Clone, Copy)]
@@ -534,6 +552,9 @@ impl CorePlace {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoreKind {
     Literal(String),
+    /// A compile-time integer term. Specialization must close it before any
+    /// runtime instruction is emitted; it is not a captured runtime local.
+    ConstValue(GenericArgument),
     Local(String),
     /// A first-class reference to one active handler snapshot.  It retains
     /// the lexical spelling solely so capture/diagnostic products can name
@@ -632,6 +653,8 @@ pub enum CoreKind {
     Call {
         callee: CoreId,
         arguments: Vec<CoreId>,
+        /// Requires a checked activation transfer at every optimization level.
+        mandatory_tail: bool,
         /// The declaration-level relation observed before generic/HRTB
         /// lifetimes are opened into caller-local regions.  This independently
         /// seals interface-aware nominal paths for Core validation.
@@ -694,6 +717,10 @@ pub enum CoreKind {
         operator: String,
         arguments: Vec<CoreId>,
     },
+    /// Consume compiler-issued availability only under the exact lexical
+    /// Environment and affine-erasure contracts. This is not an ordinary
+    /// discarded expression: its reserved environment still owes cleanup.
+    ReleaseAvailable(CoreId),
     Block(Vec<CoreId>),
     Borrow {
         unique: bool,
@@ -757,6 +784,23 @@ pub struct TypedBody {
     pub root: CoreId,
     pub diagnostics: Vec<CoreDiagnostic>,
     pub recovered: bool,
+}
+
+pub(crate) fn available_release_is_authorized(
+    witness: &Type,
+    bounds: &[(Type, ElaboratedTraitReference)],
+) -> bool {
+    let Type::Nominal { definition, arguments } = witness else { return false; };
+    if *definition != crate::intrinsic_available_type_definition() { return false; }
+    let [GenericArgument::Lifetime(lifetime), GenericArgument::Type(environment)] = arguments.as_slice()
+        else { return false; };
+    let environment_proven = bounds.iter().any(|(subject, relation)| subject == environment
+        && relation.definition == crate::intrinsic_environment_trait_definition()
+        && relation.arguments == [GenericArgument::Lifetime(*lifetime)]);
+    let affine_proven = bounds.iter().any(|(subject, relation)| subject == environment
+        && relation.definition == crate::resolution::language_use_trait_definition()
+        && relation.arguments == [GenericArgument::ConstQuantity(crate::Quantity::AFFINE)]);
+    environment_proven && affine_proven
 }
 
 impl TypedBody {
@@ -847,6 +891,13 @@ impl TypedBody {
             for child in core_children(&expression.kind) {
                 check(child);
             }
+            if let CoreKind::Field { base, index, field_count } = &expression.kind
+                && let Some(CoreExpr { ty: Type::Tuple(fields), .. }) = self.expressions.get(base.0 as usize)
+                && (fields.len() != *field_count as usize || fields.get(*index as usize) != Some(&expression.ty))
+            {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core tuple projection differs from its structural field layout".into() });
+            }
             if let CoreKind::Completion { computation, handles_operations: true, .. } = &expression.kind
                 && !self.expressions.get(computation.0 as usize)
                     .is_some_and(|expression| matches!(expression.kind, CoreKind::Handle { .. }))
@@ -867,6 +918,8 @@ impl TypedBody {
             }
             if !is_canonical_type_identity(&expression.ty)
                 || core_metadata_contains_noncanonical_type_identity(&expression.kind)
+                || matches!(&expression.kind, CoreKind::ConstValue(argument)
+                    if crate::types::integer_const_argument_type(argument).as_ref() != Some(&expression.ty))
             {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4186",
@@ -923,18 +976,30 @@ impl TypedBody {
                     message,
                 });
             }
+            if let CoreKind::ReleaseAvailable(value) = expression.kind {
+                let valid = expression.ty == Type::Unit && self.expressions.get(value.0 as usize)
+                    .is_some_and(|value| matches!(&value.ty, Type::Nominal { definition, arguments }
+                        if *definition == crate::intrinsic_available_type_definition()
+                            && matches!(arguments.as_slice(), [GenericArgument::Lifetime(_), GenericArgument::Type(_)])));
+                if !valid {
+                    diagnostics.push(CoreDiagnostic { code: "G4188", span: expression.span,
+                        message: "available release must consume the intrinsic witness and produce unit".into() });
+                }
+            }
         }
         if needs_unsafe_validation {
             self.validate_unsafe_scopes(&mut diagnostics);
         }
         self.validate_binding_pack_accesses(&mut diagnostics);
+        self.validate_mandatory_tails(&mut diagnostics);
         diagnostics
     }
 
     fn validate_binding_pack_accesses(&self, diagnostics: &mut Vec<CoreDiagnostic>) {
         fn is_pack(ty: &Type) -> bool {
             match ty {
-                Type::Nominal { definition, .. } => *definition == crate::refinement::bindings_definition(),
+                Type::Nominal { definition, .. } => *definition == crate::refinement::bindings_definition()
+                    || *definition == crate::intrinsic_available_type_definition(),
                 Type::Reference { referent, .. } => is_pack(referent),
                 _ => false,
             }
@@ -1141,6 +1206,20 @@ impl TypedBody {
         signatures: &ElaboratedInterface,
         ambient: &[(Type, crate::ElaboratedTraitReference)],
     ) -> Vec<CoreDiagnostic> {
+        self.validate_projection_obligations_with_outlives(signatures, ambient, &[])
+    }
+
+    pub(crate) fn validate_projection_obligations_with_outlives(
+        &self, signatures: &ElaboratedInterface, ambient: &[(Type, crate::ElaboratedTraitReference)],
+        outlives: &[crate::OutlivesPredicate],
+    ) -> Vec<CoreDiagnostic> {
+        self.validate_projection_obligations_in_environment(signatures, ambient, outlives, TraitSolver::new(signatures))
+    }
+
+    pub(crate) fn validate_projection_obligations_in_environment(
+        &self, signatures: &ElaboratedInterface, ambient: &[(Type, crate::ElaboratedTraitReference)],
+        outlives: &[crate::OutlivesPredicate], mut scoped: TraitSolver,
+    ) -> Vec<CoreDiagnostic> {
         let mut terms = FrozenProjectionTerms::default();
         for (_, ty) in &self.parameters {
             terms.types.push(ty);
@@ -1154,7 +1233,15 @@ impl TypedBody {
             .get(self.root.0 as usize)
             .map(|expression| expression.span)
             .unwrap_or_else(invalid_typed_core_span);
-        signatures
+        scoped.set_lexical_assumptions(ambient.iter().map(|(subject, relation)| TraitGoal { subject: subject.clone(), relation: relation.clone() }).collect());
+        let mut outlives = outlives.to_vec();
+        for (_, parameter) in &self.parameters { crate::OutlivesPredicate::implied_by_type(parameter, &mut outlives); }
+        outlives.extend(scoped.implied_outlives(self.parameters.iter().map(|(_, ty)| ty.clone())));
+        scoped.set_outlives_assumptions(outlives);
+        let invalid_domain = terms.types.iter().find(|ty| !scoped.type_domains_proven(ty)).map(|ty| format!("type {ty:?}"))
+            .or_else(|| terms.arguments.iter().find(|argument| !scoped.argument_domains_proven(argument)).map(|argument| format!("argument {argument:?}")))
+            .or_else(|| terms.effect_rows.iter().find(|row| !scoped.row_domains_proven(row)).map(|row| format!("effect row {row:?}")));
+        let mut diagnostics = signatures
             .projection_obligation_diagnostics_for_frozen_terms(
                 terms.types,
                 terms.arguments,
@@ -1170,7 +1257,11 @@ impl TypedBody {
                     diagnostic.message
                 ),
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(invalid) = invalid_domain {
+            diagnostics.push(CoreDiagnostic { code: "G4303", span, message: format!("Typed Core projection does not establish its declared domain requirements: {invalid}") });
+        }
+        diagnostics
     }
 
     fn contains(&self, id: CoreId) -> bool {
@@ -1191,6 +1282,7 @@ struct FrozenProjectionTerms<'a> {
 
 fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProjectionTerms<'a>) {
     match kind {
+        CoreKind::ConstValue(argument) => terms.arguments.push(argument),
         CoreKind::Closure {
             parameters,
             environment,
@@ -1279,6 +1371,7 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
+        | CoreKind::ReleaseAvailable(_)
         | CoreKind::Error => {}
     }
 }
@@ -1304,7 +1397,7 @@ fn collect_pattern_projection_terms<'a>(
                 collect_pattern_projection_terms(value, terms);
             }
         }
-        CorePattern::Array { element, elements } => {
+        CorePattern::Array { element, elements, .. } => {
             terms.types.push(element);
             for element in elements {
                 collect_pattern_projection_terms(element, terms);
@@ -1335,6 +1428,7 @@ fn collect_pattern_projection_terms<'a>(
 
 fn core_children(kind: &CoreKind) -> Vec<CoreId> {
     match kind {
+        CoreKind::ConstValue(_) => vec![],
         CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
             values.clone()
         }
@@ -1343,7 +1437,8 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         | CoreKind::PatternTest { subject: base, .. }
         | CoreKind::Borrow { value: base, .. }
         | CoreKind::Deref(base)
-        | CoreKind::Move(base) => vec![*base],
+        | CoreKind::Move(base)
+        | CoreKind::ReleaseAvailable(base) => vec![*base],
         CoreKind::Closure { body, .. }
         | CoreKind::Let { value: body, .. }
         | CoreKind::Label { body, .. }
@@ -1608,11 +1703,11 @@ pub(crate) fn collect_pattern_binding_types(
             }
             Some(())
         }
-        CorePattern::Array { element, elements } => {
-            let Type::Array(subject_element) = subject else {
+        CorePattern::Array { element, elements, rest } => {
+            let Some(subject_element) = subject.array_element() else {
                 return None;
             };
-            if **subject_element != *element {
+            if subject_element != element || !subject.array_accepts_pattern(elements.len(), *rest) {
                 return None;
             }
             for pattern in elements {
@@ -1965,7 +2060,14 @@ fn place_structural_error(place: &CorePlace) -> Option<String> {
         } if index >= field_count => Some(format!(
             "Typed Core assignment field index {index} is outside structural arity {field_count}"
         )),
-        CorePlace::Field { base, .. } => place_structural_error(base),
+        CorePlace::Field { base, index, field_count, ty } => {
+            if let Type::Tuple(fields) = base.ty()
+                && (fields.len() != *field_count as usize || fields.get(*index as usize) != Some(ty))
+            {
+                return Some("Typed Core tuple assignment differs from its structural field layout".into());
+            }
+            place_structural_error(base)
+        }
         CorePlace::Deref { .. } => None,
         CorePlace::Local { .. } | CorePlace::Error => None,
     }
@@ -2070,8 +2172,24 @@ fn pattern_is_recovered(pattern: &CorePattern) -> bool {
 /// Whether a semantic type tree still contains body-local uncertainty.  Core
 /// uses this before freezing a body, and MIR repeats the same check because a
 /// persisted or forged Core product must not get a weaker route to execution.
+fn type_has_unresolved_projection(ty: &Type) -> bool {
+    match ty {
+        Type::FixedArray { element, length } => type_has_unresolved_projection(element)
+            || matches!(length.as_ref(), GenericArgument::ConstProjection { .. }),
+        Type::Projection { .. } => type_contains_inference(ty),
+        Type::Tuple(values) => values.iter().any(type_has_unresolved_projection),
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| matches!(argument,
+            GenericArgument::Type(ty) if type_has_unresolved_projection(ty))),
+        Type::Array(element) | Type::StaticData { element, .. }
+        | Type::Reference { referent: element, .. } | Type::RawPointer { pointee: element, .. } => type_has_unresolved_projection(element),
+        Type::Callable { parameters, result, .. } => parameters.iter().any(type_has_unresolved_projection) || type_has_unresolved_projection(result),
+        _ => false,
+    }
+}
+
 pub(crate) fn type_contains_inference(ty: &Type) -> bool {
     match ty {
+        Type::FixedArray { element, length } => type_contains_inference(element) || generic_argument_contains_inference(length),
         Type::Infer(_) => true,
         Type::Nominal { arguments, .. } => {
             arguments.iter().any(generic_argument_contains_inference)
@@ -2111,7 +2229,7 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
                         .iter()
                         .any(generic_argument_contains_inference)
                 })
-                || matches!(effects.tail, Some(crate::types::EffectTail::Infer(_)))
+                || effects.tails.iter().any(|tail| matches!(tail, crate::types::EffectTail::Infer(_)))
                 || effects.projections.iter().any(|projection| {
                     type_contains_inference(&projection.subject)
                         || projection
@@ -2127,7 +2245,7 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
@@ -2167,6 +2285,8 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
                     generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
                 })
         }
+        Type::FixedArray { element, length } => type_contains_out_of_scope_bound_lifetime_in(element, binders)
+            || generic_argument_contains_out_of_scope_bound_lifetime(length, binders),
         Type::Array(element) | Type::StaticData { element, .. }
         | Type::RawPointer { pointee: element, .. } => {
             type_contains_out_of_scope_bound_lifetime_in(element, binders)
@@ -2195,7 +2315,7 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
@@ -2206,7 +2326,7 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
 
 fn lifetime_is_out_of_scope_bound(lifetime: Lifetime, binders: &[u32]) -> bool {
     match lifetime {
-        Lifetime::Infer(_) => true,
+        Lifetime::Infer(_) | Lifetime::Placeholder(_) => true,
         Lifetime::Bound { depth, index } => binders
             .get(depth as usize)
             .is_none_or(|binder_count| index >= *binder_count),
@@ -2214,7 +2334,7 @@ fn lifetime_is_out_of_scope_bound(lifetime: Lifetime, binders: &[u32]) -> bool {
     }
 }
 
-fn generic_argument_contains_out_of_scope_bound_lifetime(
+pub(crate) fn generic_argument_contains_out_of_scope_bound_lifetime(
     argument: &GenericArgument,
     binders: &[u32],
 ) -> bool {
@@ -2236,8 +2356,8 @@ fn generic_argument_contains_out_of_scope_bound_lifetime(
                 })
         }
         GenericArgument::Lifetime(value) => lifetime_is_out_of_scope_bound(*value, binders),
-        GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -2260,7 +2380,7 @@ fn effect_row_contains_out_of_scope_bound_lifetime(row: &EffectRow, binders: &[u
     })
 }
 
-fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
+pub(crate) fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
     match argument {
         GenericArgument::Type(value) => type_contains_inference(value),
         GenericArgument::EffectRow(value) => effect_row_contains_inference(value),
@@ -2277,8 +2397,8 @@ fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
                     .any(generic_argument_contains_inference)
         }
         GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => false,
     }
@@ -2286,6 +2406,7 @@ fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
 
 fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::ConstValue(argument) => generic_argument_contains_inference(argument),
         CoreKind::Closure {
             parameters,
             environment,
@@ -2373,6 +2494,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
+        | CoreKind::ReleaseAvailable(_)
         | CoreKind::Error => false,
     }
 }
@@ -2384,6 +2506,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
 /// caches, or fingerprints consume them.
 fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::ConstValue(argument) => !is_canonical_generic_argument_identity(argument),
         CoreKind::Closure {
             parameters,
             environment,
@@ -2491,6 +2614,7 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
+        | CoreKind::ReleaseAvailable(_)
         | CoreKind::Error => false,
     }
 }
@@ -2512,7 +2636,7 @@ fn pattern_contains_noncanonical_type_identity(pattern: &CorePattern) -> bool {
         CorePattern::Tuple(values) => values
             .iter()
             .any(pattern_contains_noncanonical_type_identity),
-        CorePattern::Array { element, elements } => {
+        CorePattern::Array { element, elements, .. } => {
             !is_canonical_type_identity(element)
                 || elements
                     .iter()
@@ -2543,6 +2667,7 @@ fn pattern_contains_noncanonical_type_identity(pattern: &CorePattern) -> bool {
 
 fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::ConstValue(argument) => generic_argument_contains_out_of_scope_bound_lifetime(argument, &[]),
         CoreKind::Closure {
             parameters,
             environment,
@@ -2643,6 +2768,7 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
+        | CoreKind::ReleaseAvailable(_)
         | CoreKind::Error => false,
     }
 }
@@ -2667,8 +2793,8 @@ fn generic_argument_contains_effect_row(argument: &GenericArgument) -> bool {
                     .any(generic_argument_contains_effect_row)
         }
         GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -2693,6 +2819,8 @@ fn type_contains_effect_row_argument(value: &Type) -> bool {
                     .any(generic_argument_contains_effect_row)
         }
         Type::Tuple(values) => values.iter().any(type_contains_effect_row_argument),
+        Type::FixedArray { element, length } => type_contains_effect_row_argument(element)
+            || generic_argument_contains_effect_row(length),
         Type::Array(value)
         | Type::RawPointer { pointee: value, .. }
         | Type::StaticData { element: value, .. }
@@ -2703,7 +2831,7 @@ fn type_contains_effect_row_argument(value: &Type) -> bool {
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
@@ -2718,7 +2846,7 @@ fn effect_row_contains_inference(row: &EffectRow) -> bool {
             .arguments
             .iter()
             .any(generic_argument_contains_inference)
-    }) || matches!(row.tail, Some(crate::types::EffectTail::Infer(_)))
+    }) || row.tails.iter().any(|tail| matches!(tail, crate::types::EffectTail::Infer(_)))
         || row.projections.iter().any(|projection| {
             type_contains_inference(&projection.subject)
                 || projection
@@ -2758,7 +2886,7 @@ fn place_contains_out_of_scope_bound_lifetime(place: &CorePlace) -> bool {
 fn pattern_contains_inference(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Tuple(values) => values.iter().any(pattern_contains_inference),
-        CorePattern::Array { element, elements } => {
+        CorePattern::Array { element, elements, .. } => {
             type_contains_inference(element) || elements.iter().any(pattern_contains_inference)
         }
         CorePattern::Record {
@@ -2788,7 +2916,7 @@ fn pattern_contains_out_of_scope_bound_lifetime(pattern: &CorePattern) -> bool {
         CorePattern::Tuple(values) => values
             .iter()
             .any(pattern_contains_out_of_scope_bound_lifetime),
-        CorePattern::Array { element, elements } => {
+        CorePattern::Array { element, elements, .. } => {
             type_contains_out_of_scope_bound_lifetime(element)
                 || elements
                     .iter()
@@ -2966,6 +3094,10 @@ impl TypedBody {
                 .and_then(callable)
                 .map(|signature| signature.where_bounds.clone())
                 .unwrap_or_default(),
+            ambient_outlives: signatures.definitions.get(&definition.key).and_then(callable)
+                .map(|signature| signature.outlives_environment()).unwrap_or_default(),
+            ambient_universal_bounds: signatures.definitions.get(&definition.key).and_then(callable)
+                .map(|signature| signature.universal_bounds.clone()).unwrap_or_default(),
             ambient_callable_type_bindings: signatures
                 .definitions
                 .get(&definition.key)
@@ -2981,11 +3113,19 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             pending_callable_bounds: vec![],
+            pending_where_bounds: vec![],
+            pending_outlives: vec![],
+            pending_universal: vec![],
+            pending_effect_checks: vec![],
+            pending_associated_checks: vec![],
+            pending_rigid_equalities: vec![],
+            pending_integer_defaults: vec![],
             allow_rigid_trait_arguments: false,
         };
         let expected_result = signatures
@@ -2993,6 +3133,9 @@ impl TypedBody {
             .get(&definition.key)
             .and_then(callable)
             .map(|signature| signature.result.clone());
+        if let Some(signature) = signatures.definitions.get(&definition.key).and_then(callable) {
+            elaborator.ambient_outlives.extend(elaborator.trait_solver.implied_outlives(signature.parameters.clone()));
+        }
         elaborator.declared_effects =
             elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
         // Ordinary callable interfaces are public contracts. Their generic
@@ -3036,66 +3179,17 @@ impl TypedBody {
         // target during MIR lowering.  Install it before elaborating the
         // body so `@function_name(value)` resolves exactly like a compact
         // lexical label, while nested closures remain unable to capture it.
-        let implicit_label = definition
+        let callable_name = definition
             .name
-            .clone()
-            .filter(|name| {
-                body.expressions.iter().any(|expression| {
-                    matches!(
-                        &expression.kind,
-                        ExprKind::Transfer { name: target, .. }
-                            | ExprKind::LabelValue { name: target }
-                            if target == name
-                    )
-                })
-            })
+            .as_deref()
             .map(|name| {
-                let result = expected_result
-                    .clone()
-                    .unwrap_or_else(|| elaborator.inference.fresh());
-                let brand = LabelBrand {
-                    owner: definition.key,
-                    label: elaborator.next_label,
-                };
-                elaborator.next_label += 1;
-                elaborator.active_labels.push(ActiveLabel {
-                    name,
-                    brand,
-                    result: result.clone(),
-                });
-                (brand, result)
+                // Inherent definitions have a qualified lookup name, but
+                // their implicit lexical label is the source method name.
+                if matches!(definition.syntax.header, crate::ParsedHeader::InherentMethod(_)) {
+                    name.rsplit("::").next().unwrap_or(name)
+                } else { name }
             });
-        let body_root = elaborator.expression_expected(body.root, expected_result.clone());
-        let root = if let Some((brand, result)) = implicit_label {
-            let _active = elaborator
-                .active_labels
-                .pop()
-                .expect("implicit callable label must outlive its body");
-            let body_type = elaborator.expressions[body_root.0 as usize].ty.clone();
-            let mut transfers = Vec::new();
-            collect_transfer_brands(&elaborator.expressions, body_root, &mut transfers);
-            let rejoined_by_own_transfer = transfers.into_iter().any(|target| target == brand);
-            let rejoined_by_own_value =
-                contains_label_value_brand(&elaborator.expressions, body_root, brand);
-            let label_type = if matches!(body_type, Type::Never)
-                && !rejoined_by_own_transfer
-                && !rejoined_by_own_value
-            {
-                Type::Never
-            } else {
-                result
-            };
-            elaborator.alloc(
-                CoreKind::Label {
-                    brand,
-                    body: body_root,
-                },
-                label_type,
-                definition.span,
-            )
-        } else {
-            body_root
-        };
+        let root = elaborator.named_body(callable_name, expected_result.clone(), definition.span);
         if let Some(expected) = expected_result {
             let actual = elaborator.expressions[root.0 as usize].ty.clone();
             if elaborator
@@ -3173,11 +3267,7 @@ impl TypedBody {
             signatures,
             trait_solver,
             fixities,
-            definition: DefKey(Digest::of_parts([
-                b"grandiose-stage0-implementation-method".as_slice(),
-                implementation.key.0.as_bytes().as_slice(),
-                context.method.name.as_bytes(),
-            ])),
+            definition: crate::implementation_method_key(implementation.key, &context.method.name),
             module: &implementation.module,
             inference: InferContext::for_body(),
             locals: ScopeMap::default(),
@@ -3251,26 +3341,45 @@ impl TypedBody {
                 .flatten()
                 .chain(context.signature.where_bounds.clone())
                 .collect(),
-            ambient_callable_type_bindings: context
-                .signature
-                .where_associated_type_bindings
-                .clone(),
-            ambient_callable_effect_bindings: context
-                .signature
-                .where_associated_effect_bindings
-                .clone(),
+            ambient_universal_bounds: signatures.definitions.get(&implementation.key).and_then(|header| match header {
+                ElaboratedHeader::Implementation(implementation) => Some(implementation.universal_bounds.clone()),
+                _ => None,
+            }).into_iter().flatten().chain(context.signature.universal_bounds.clone()).collect(),
+            ambient_outlives: signatures.definitions.get(&implementation.key).and_then(|header| match header {
+                ElaboratedHeader::Implementation(implementation) => Some(implementation.where_outlives.clone()),
+                _ => None,
+            }).into_iter().flatten().chain(context.signature.outlives_environment()).collect(),
+            ambient_callable_type_bindings: signatures.definitions.get(&implementation.key)
+                .and_then(|header| match header {
+                    ElaboratedHeader::Implementation(implementation) => Some(implementation.where_associated_type_bindings.clone()),
+                    _ => None,
+                }).into_iter().flatten().chain(context.signature.where_associated_type_bindings.clone()).collect(),
+            ambient_callable_effect_bindings: signatures.definitions.get(&implementation.key)
+                .and_then(|header| match header {
+                    ElaboratedHeader::Implementation(implementation) => Some(implementation.where_associated_effect_bindings.clone()),
+                    _ => None,
+                }).into_iter().flatten().chain(context.signature.where_associated_effect_bindings.clone()).collect(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             pending_callable_bounds: vec![],
+            pending_where_bounds: vec![],
+            pending_outlives: vec![],
+            pending_universal: vec![],
+            pending_effect_checks: vec![],
+            pending_associated_checks: vec![],
+            pending_rigid_equalities: vec![],
+            pending_integer_defaults: vec![],
             allow_rigid_trait_arguments: true,
         };
         elaborator.declared_effects =
             elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
+        elaborator.ambient_outlives.extend(elaborator.trait_solver.implied_outlives(context.signature.parameters.clone()));
         let mut parameters = vec![];
         for (parameter, ty) in context
             .method
@@ -3291,7 +3400,7 @@ impl TypedBody {
         // quantified by the method.
         let expected_result =
             elaborator.normalize_selectable_type_projections(context.signature.result.clone());
-        let root = elaborator.expression_expected(body.root, Some(expected_result.clone()));
+        let root = elaborator.named_body(Some(&context.method.name), Some(expected_result.clone()), context.method.span);
         let actual = elaborator.expressions[root.0 as usize].ty.clone();
         if elaborator
             .unify_rigid_lifetimes(
@@ -3375,16 +3484,26 @@ impl TypedBody {
             const_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             ambient_where_bounds: vec![],
+            ambient_outlives: vec![],
+            ambient_universal_bounds: vec![],
             ambient_callable_type_bindings: vec![],
             ambient_callable_effect_bindings: vec![],
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             pending_callable_bounds: vec![],
+            pending_where_bounds: vec![],
+            pending_outlives: vec![],
+            pending_universal: vec![],
+            pending_effect_checks: vec![],
+            pending_associated_checks: vec![],
+            pending_rigid_equalities: vec![],
+            pending_integer_defaults: vec![],
             allow_rigid_trait_arguments: false,
         };
         let expected = match signatures.definitions.get(&definition.key) {
@@ -3492,19 +3611,32 @@ impl TypedBody {
             const_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             ambient_where_bounds: vec![],
+            ambient_outlives: vec![],
+            ambient_universal_bounds: vec![],
             ambient_callable_type_bindings: vec![],
             ambient_callable_effect_bindings: vec![],
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             pending_callable_bounds: vec![],
+            pending_where_bounds: vec![],
+            pending_outlives: vec![],
+            pending_universal: vec![],
+            pending_effect_checks: vec![],
+            pending_associated_checks: vec![],
+            pending_rigid_equalities: vec![],
+            pending_integer_defaults: vec![],
             allow_rigid_trait_arguments: false,
         };
         let root = elaborator.expression_expected(body.root, None);
+        // Generalization defaults numeric roots. Give delayed non-defaultable
+        // obligations the same opportunity to constrain them as function bodies.
+        elaborator.propagate_pending_inference();
         let initializer_type = match elaborator
             .inference
             .generalize_result_type(elaborator.expressions[root.0 as usize].ty.clone())
@@ -3747,6 +3879,46 @@ struct PendingCallableBound {
     span: Span,
 }
 
+struct PendingWhereBound {
+    subject: Type,
+    relation: crate::ElaboratedTraitReference,
+    assumptions: Vec<TraitGoal>,
+    span: Span,
+}
+
+struct PendingEffectCheck {
+    effects: EffectRow,
+    declared: EffectRow,
+    handled: std::collections::BTreeSet<EffectInstance>,
+    operations: std::collections::BTreeSet<(EffectInstance, u32)>,
+    span: Span,
+}
+
+struct PendingAssociatedCheck {
+    types: Vec<crate::ElaboratedAssociatedTypeBinding>,
+    effects: Vec<crate::ElaboratedAssociatedEffectBinding>,
+    ambient_types: Vec<crate::ElaboratedAssociatedTypeBinding>,
+    ambient_effects: Vec<crate::ElaboratedAssociatedEffectBinding>,
+    span: Span,
+}
+
+struct PendingRigidEquality {
+    expected: Type,
+    actual: Type,
+    span: Span,
+}
+
+/// A nominal default containing integer arithmetic cannot embed body-local
+/// const holes in the declaration-binder expression vocabulary. Keep its
+/// equality in inference until the earlier arguments are resolved instead.
+struct PendingIntegerDefault {
+    default: GenericArgument,
+    earlier: Vec<GenericArgument>,
+    target: GenericArgument,
+    kind: crate::GenericKind,
+    span: Span,
+}
+
 struct Elaborator<'a> {
     unsafe_context: bool,
     unsafe_scopes: std::collections::BTreeSet<CoreId>,
@@ -3806,6 +3978,8 @@ struct Elaborator<'a> {
     /// rejecting a call which is valid precisely because its own `where`
     /// clause established the required evidence.
     ambient_where_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+    ambient_outlives: Vec<crate::OutlivesPredicate>,
+    ambient_universal_bounds: Vec<crate::QuantifiedWhereBound>,
     /// Associated equalities belonging to the lexical callable evidence.
     /// These give a generic `F: Fn<..., Output = R, Effects = E>` its actual
     /// indirect-call contract without manufacturing a nominal function type.
@@ -3827,6 +4001,9 @@ struct Elaborator<'a> {
     /// generated identity. Scope generations are never reused, so stale
     /// entries cannot make a shadowing local resumptive.
     resumption_bindings: std::collections::BTreeMap<(String, u64), ActiveResumption>,
+    /// Source binding permission keyed by non-reusable lexical identity.
+    /// Parameters and pattern binders are immutable unless shadowed by let mut.
+    binding_mutability: std::collections::BTreeMap<u64, (bool, Span)>,
     active_labels: Vec<ActiveLabel>,
     /// One tracker for each lexically active explicit handler arm. Nested
     /// arms keep enclosing trackers live: an outer continuation may be
@@ -3841,6 +4018,13 @@ struct Elaborator<'a> {
     /// Obligations whose subject has no shape yet remain live until the
     /// enclosing inference island is closed. Zonk alone proves no Fn bound.
     pending_callable_bounds: Vec<PendingCallableBound>,
+    pending_where_bounds: Vec<PendingWhereBound>,
+    pending_outlives: Vec<(crate::OutlivesPredicate, Span)>,
+    pending_universal: Vec<(crate::QuantifiedWhereBound, TraitSolver, Span)>,
+    pending_effect_checks: Vec<PendingEffectCheck>,
+    pending_associated_checks: Vec<PendingAssociatedCheck>,
+    pending_rigid_equalities: Vec<PendingRigidEquality>,
+    pending_integer_defaults: Vec<PendingIntegerDefault>,
     /// Only an implementation body may use its selected implementation
     /// evidence to reduce projections carrying rigid trait arguments.
     allow_rigid_trait_arguments: bool,
@@ -3857,6 +4041,9 @@ impl Elaborator<'_> {
 
     fn expression(&mut self, id: ExprId) -> CoreId {
         let expression = self.body.expression(id).clone();
+        if let Some(value) = self.tuple_struct_call(&expression.kind, None, expression.span) {
+            return value;
+        }
         if let ExprKind::GenericPath {
             path,
             effect_arguments,
@@ -3868,11 +4055,8 @@ impl Elaborator<'_> {
             return value;
         }
         match expression.kind {
-            ExprKind::Literal(text) => self.alloc(
-                CoreKind::Literal(text.clone()),
-                literal_type(&text),
-                expression.span,
-            ),
+            ExprKind::TailCall { call } => self.tail_call(call, None, expression.span),
+            ExprKind::Literal(text) => self.literal_expected(text, None, expression.span),
             ExprKind::Path(path) => self
                 .enum_constructor(path.clone(), vec![], vec![], None, expression.span)
                 .unwrap_or_else(|| self.path(path, expression.span)),
@@ -3904,10 +4088,21 @@ impl Elaborator<'_> {
                 "G4184",
                 "a qualified generic operation must be followed by a call",
             ),
-            ExprKind::Let { name, value } => {
-                let value = self.expression(value);
+            ExprKind::Let { name, mutable, annotation, value } => {
+                let expected = annotation.as_ref().map(|annotation| self.header_type(annotation));
+                let value = self.expression_expected(value, expected.clone());
                 let ty = self.expressions[value.0 as usize].ty.clone();
+                if let Some(expected) = expected
+                    && !matches!(ty, Type::Never)
+                    && self.unify_rigid_lifetimes(expected, ty.clone(), expression.span).is_err()
+                {
+                    self.error(expression.span, "G4221", "let initializer does not match its declared type");
+                    self.recovered = true;
+                }
                 self.locals.define(name.clone(), ty.clone());
+                if let Some(generation) = self.locals.binding_generation(&name) {
+                    self.binding_mutability.insert(generation, (mutable, expression.span));
+                }
                 if let Some(identity) = self.resumption_identity(value)
                     && let Some(generation) = self.locals.binding_generation(&name)
                 {
@@ -3928,6 +4123,9 @@ impl Elaborator<'_> {
                     statement_type,
                     expression.span,
                 )
+            }
+            ExprKind::PatternLet { pattern, mutable, annotation, value, body } => {
+                self.pattern_let(pattern, mutable, annotation, value, body, None, expression.span)
             }
             ExprKind::Label { name, result, body } => {
                 let brand = LabelBrand {
@@ -4102,12 +4300,11 @@ impl Elaborator<'_> {
             ExprKind::Field { base, name } => self.field(base, name, expression.span),
             ExprKind::Is { subject, pattern } => {
                 let subject = self.expression(subject);
-                let subject_type = self.zonk_type(
+                let subject_type = self.inference.resolve(
                     self.expressions[subject.0 as usize].ty.clone(),
-                    expression.span,
                 );
                 let scope = self.pattern_generic_scope();
-                let elaboration = elaborate_pattern_with_scope(
+                let elaboration = elaborate_pattern_in_context(
                     self.body,
                     pattern,
                     subject_type.clone(),
@@ -4115,6 +4312,7 @@ impl Elaborator<'_> {
                     self.signatures,
                     self.module,
                     &scope,
+                    Some(&mut self.inference),
                 );
                 for diagnostic in elaboration.diagnostics {
                     self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
@@ -4146,6 +4344,9 @@ impl Elaborator<'_> {
                 clauses,
             } => self.handle(computation, clauses, None, expression.span),
             ExprKind::Call { callee, arguments } => {
+                if matches!(self.body.expression(callee).kind, ExprKind::Closure { .. }) {
+                    return self.immediate_closure_call(callee, arguments, None, expression.span);
+                }
                 if matches!(self.body.expression(callee).kind, ExprKind::Path(ref path) if path.len() == 1 && path[0] == "available_to_unit")
                 {
                     return self.available_to_unit(arguments, expression.span);
@@ -4155,6 +4356,8 @@ impl Elaborator<'_> {
                 // before general call elaboration so both spellings receive
                 // identical quantity/effect contracts.
                 if matches!(self.body.expression(callee).kind, ExprKind::Path(ref path) if path.len() == 1 && path[0] == "resume")
+                    && self.locals.lookup(&"resume".to_owned()).is_none()
+                    && matches!(self.index.resolve_path(DefinitionNamespace::Value, self.module, &["resume".to_owned()]), ResolutionState::Unresolved)
                     && let [resumption, value] = arguments.as_slice()
                 {
                     let callee = self.expression(*resumption);
@@ -4284,39 +4487,7 @@ impl Elaborator<'_> {
                 operators,
             } => self.operators(operands, operators, expression.span),
             ExprKind::Borrow { unique, value } => {
-                let value = self.expression(value);
-                if unique && self.place_uses_shared_reference(value) {
-                    return self.fail(expression.span, "G4141",
-                        "a unique borrow cannot be derived through a shared reference");
-                }
-                let ty = self.expressions[value.0 as usize].ty.clone();
-                if matches!(&ty, Type::Never) {
-                    return self.alloc(
-                        CoreKind::Borrow { unique, value },
-                        Type::Never,
-                        expression.span,
-                    );
-                }
-                // A borrow of a projected dereference is a reborrow of the
-                // incoming loan, not a fresh body-local loan.  Preserve its
-                // lifetime in Core so `&value.0` can satisfy an outward
-                // `&'a T` contract and PlaceFlow/MIR retain the same owner.
-                let lifetime = self
-                    .projected_reborrow_lifetime(value)
-                    .unwrap_or(Lifetime::Elided);
-                self.alloc(
-                    CoreKind::Borrow { unique, value },
-                    Type::Reference {
-                        mutability: if unique {
-                            Mutability::Unique
-                        } else {
-                            Mutability::Shared
-                        },
-                        lifetime,
-                        referent: Box::new(ty),
-                    },
-                    expression.span,
-                )
+                self.borrow_expected(unique, value, None, expression.span)
             }
             ExprKind::Deref(value) => {
                 let value = self.expression(value);
@@ -4402,10 +4573,44 @@ impl Elaborator<'_> {
             }
         }
     }
+    /// Every named callable, including a trait implementation method, owns
+    /// the same lexical exit contract. Its declaration result contextualizes
+    /// first-class label payloads before generic call arguments are sealed.
+    fn named_body(&mut self, name: Option<&str>, expected_result: Option<Type>, span: Span) -> CoreId {
+        let implicit_label = name.filter(|name| self.body.expressions.iter().any(|expression| {
+            matches!(&expression.kind, ExprKind::Transfer { name: target, .. }
+                | ExprKind::LabelValue { name: target } if target == name)
+        })).map(|name| {
+            let result = expected_result.clone().unwrap_or_else(|| self.inference.fresh());
+            let brand = LabelBrand { owner: self.definition, label: self.next_label };
+            self.next_label += 1;
+            self.active_labels.push(ActiveLabel { name: name.to_owned(), brand, result: result.clone() });
+            (brand, result)
+        });
+        let body = self.expression_expected(self.body.root, expected_result);
+        let Some((brand, result)) = implicit_label else { return body; };
+        self.active_labels.pop().expect("implicit callable label must outlive its body");
+        let mut transfers = vec![];
+        collect_transfer_brands(&self.expressions, body, &mut transfers);
+        let rejoined = transfers.contains(&brand)
+            || contains_label_value_brand(&self.expressions, body, brand);
+        let ty = if matches!(self.expressions[body.0 as usize].ty, Type::Never) && !rejoined {
+            Type::Never
+        } else { result };
+        self.alloc(CoreKind::Label { brand, body }, ty, span)
+    }
+
     fn projected_reborrow_lifetime(&self, value: CoreId) -> Option<Lifetime> {
         match &self.expressions[value.0 as usize].kind {
             CoreKind::Field { base, .. } => self.projected_reborrow_lifetime(*base),
             CoreKind::Deref(reference) => match &self.expressions[reference.0 as usize].ty {
+                // Access to a stored unique handle borrows that handle
+                // through its carrier. Its child is valid only for that
+                // outer access region, even if the stored handle itself has
+                // a longer lifetime. A copied shared handle retains its own
+                // region independently of the carrier.
+                Type::Reference { lifetime, mutability: Mutability::Unique, .. } =>
+                    self.projected_reborrow_lifetime(*reference).or(Some(*lifetime)),
                 Type::Reference { lifetime, .. } => Some(*lifetime),
                 _ => None,
             },
@@ -4422,26 +4627,83 @@ impl Elaborator<'_> {
             _ => false,
         }
     }
+    fn owned_place_root(&self, value: CoreId) -> Option<String> {
+        match &self.expressions[value.0 as usize].kind {
+            CoreKind::Local(name) => Some(name.clone()),
+            CoreKind::Field { base, .. } => self.owned_place_root(*base),
+            // A reference binding can be immutable while its unique referent
+            // remains writable. Authority crosses the dereference boundary.
+            CoreKind::Deref(_) => None,
+            _ => None,
+        }
+    }
+
+    fn check_local_mutability(&mut self, name: &str, span: Span) -> bool {
+        let binding = self.locals.binding_generation(&name.to_owned())
+            .and_then(|generation| self.binding_mutability.get(&generation)).copied();
+        if binding.is_some_and(|(mutable, _)| mutable) { return true; }
+        self.error(binding.map_or(span, |(_, declaration)| declaration), "G4220",
+            &format!("local binding `{name}` is immutable; assignment or unique borrowing requires `let mut`"));
+        self.recovered = true;
+        false
+    }
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
         self.expression_expected_with_open_lifetimes(id, expected, false)
     }
 
     fn freshen_call_context_lifetimes(&mut self, expected: Type) -> Type {
-        let mut substitution = CallLifetimeSubstitution::default();
-        if align_lifetime_types(&expected, &expected, &mut substitution, LifetimeMode::Instantiate, 0).is_err() {
-            return expected;
-        }
-        for lifetime in substitution.generics.values_mut().chain(substitution.bounds.values_mut()) {
-            *lifetime = self.inference.fresh_lifetime();
-        }
-        substitute_call_lifetimes(expected.clone(), &substitution, 0).unwrap_or(expected)
+        let mut regions = std::collections::BTreeMap::new();
+        let opened = crate::types::regions::map_argument_regions(
+            GenericArgument::Type(expected), &mut |region, cutoff| {
+                let key = match region {
+                    Lifetime::Generic(_) | Lifetime::Infer(_) => region,
+                    Lifetime::Bound { depth, index } if depth == cutoff => Lifetime::Bound { depth: 0, index },
+                    Lifetime::Bound { depth, index } if depth > cutoff => return Some(Lifetime::Bound { depth: depth - 1, index }),
+                    region => return Some(region),
+                };
+                Some(*regions.entry(key).or_insert_with(|| self.inference.fresh_lifetime()))
+            }).expect("contextual region opening is total");
+        let GenericArgument::Type(opened) = opened else { unreachable!() };
+        opened
     }
 
     fn expression_expected_with_open_lifetimes(&mut self, id: ExprId, expected: Option<Type>, open_call_lifetimes: bool) -> CoreId {
+        let value = self.expression_expected_inner(id, expected.clone(), open_call_lifetimes);
+        expected.as_ref().map_or(value, |expected| self.reference_reborrow_expected(value, expected))
+    }
+
+    /// Expected reference context borrows the unique referent, not its
+    /// reference-holding slot. Keep both operations explicit so provenance,
+    /// suspension, cleanup, and VM lowering see an ordinary child loan.
+    fn reference_reborrow_expected(&mut self, value: CoreId, expected: &Type) -> CoreId {
+        let Type::Reference { mutability, .. } = self.inference.resolve_type_structure(expected.clone()) else {
+            return value;
+        };
+        if matches!(self.expressions[value.0 as usize].kind, CoreKind::Move(_))
+            || matches!(self.expressions[value.0 as usize].kind, CoreKind::Borrow { unique, .. }
+                if unique == matches!(mutability, Mutability::Unique)) {
+            return value;
+        }
+        let actual = self.inference.resolve_type_structure(self.expressions[value.0 as usize].ty.clone());
+        let Type::Reference { mutability: Mutability::Unique, lifetime, referent } = actual else {
+            return value;
+        };
+        let span = self.expressions[value.0 as usize].span;
+        if matches!(mutability, Mutability::Unique) && self.place_uses_shared_reference(value) {
+            return self.fail(span, "G4141", "a unique borrow cannot be derived through a shared reference");
+        }
+        let lifetime = self.projected_reborrow_lifetime(value).unwrap_or(lifetime);
+        let place = self.alloc(CoreKind::Deref(value), (*referent).clone(), span);
+        self.alloc(CoreKind::Borrow { unique: matches!(mutability, Mutability::Unique), value: place }, Type::Reference {
+            mutability, lifetime, referent,
+        }, span)
+    }
+
+    fn expression_expected_inner(&mut self, id: ExprId, expected: Option<Type>, open_call_lifetimes: bool) -> CoreId {
         // Context may already have solved a nominal's type parameter. Expose
         // that contract before selecting literal/callable elaboration rules.
         let expected = expected.map(|ty| {
-            let ty = self.inference.zonk(ty.clone()).unwrap_or(ty);
+            let ty = self.inference.zonk(ty.clone()).unwrap_or_else(|_| self.inference.resolve_type_structure(ty));
             // A callback's output may still be inferred from its body even
             // after earlier operands have solved its argument types. Preserve
             // those independently known shapes (including hidden Bindings)
@@ -4465,8 +4727,16 @@ impl Elaborator<'_> {
             expected.map(|expected| self.freshen_call_context_lifetimes(expected))
         } else { expected };
         let expression = self.body.expression(id).clone();
+        if let Some(value) = self.tuple_struct_call(&expression.kind, expected.clone(), expression.span) {
+            return value;
+        }
         match expression.kind {
+            ExprKind::TailCall { call } => self.tail_call(call, expected, expression.span),
+            ExprKind::PatternLet { pattern, mutable, annotation, value, body } => {
+                self.pattern_let(pattern, mutable, annotation, value, body, expected, expression.span)
+            }
             ExprKind::Literal(text) => self.literal_expected(text, expected, expression.span),
+            ExprKind::Borrow { unique, value } => self.borrow_expected(unique, value, expected, expression.span),
             ExprKind::Record { path, arguments, fields } => self.record(path, arguments, fields, expected, expression.span),
             ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
             ExprKind::UnsafeBlock(values) => self.unsafe_block(values, expected, expression.span),
@@ -4488,6 +4758,9 @@ impl Elaborator<'_> {
             // path only handles a frozen direct function once its exact
             // callable result is available.
             ExprKind::Call { callee, arguments } if expected.is_some() => {
+                if matches!(self.body.expression(callee).kind, ExprKind::Closure { .. }) {
+                    return self.immediate_closure_call(callee, arguments, expected, expression.span);
+                }
                 let path = match &self.body.expression(callee).kind {
                     ExprKind::Path(path) => path,
                     ExprKind::GenericPath { path, .. }
@@ -4559,6 +4832,7 @@ impl Elaborator<'_> {
                 let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
                 let call = self.call_with_expected(callee, arguments, expression.span,
                     if open_call_lifetimes { None } else { Some(&expected) });
+                let call = self.reference_reborrow_expected(call, &expected);
                 let actual = self.expressions[call.0 as usize].ty.clone();
                 // An outer call's parameter regions are not rigid regions of
                 // this body. A nested call may supply the region that opens
@@ -4568,7 +4842,10 @@ impl Elaborator<'_> {
                     let mut substitution = CallLifetimeSubstitution::default();
                     align_lifetime_types(&expected, &actual, &mut substitution, LifetimeMode::Instantiate, 0)
                         .map_err(|_| ())
-                        .and_then(|aligned| self.inference.unify(aligned, actual).map(|_| ()).map_err(|_| ()))
+                        .and_then(|aligned| {
+                            self.solve_call_lifetime_equalities(&mut substitution, expression.span)?;
+                            self.inference.unify(aligned, actual).map(|_| ()).map_err(|_| ())
+                        })
                 } else { self.unify_rigid_lifetimes(expected, actual, expression.span) };
                 if compatible.is_err() {
                     self.error(
@@ -4822,10 +5099,40 @@ impl Elaborator<'_> {
         }
     }
 
+    fn borrow_expected(&mut self, unique: bool, value: ExprId, expected: Option<Type>, span: Span) -> CoreId {
+        // Explicit borrowing supplies the reference constructor; only its
+        // referent supplies context to the operand. Never turn the expected
+        // outer lifetime into evidence that temporary storage is static.
+        let referent = match expected {
+            Some(Type::Reference { referent, .. }) => Some(*referent),
+            _ => None,
+        };
+        let value = self.expression_expected(value, referent);
+        if unique && self.place_uses_shared_reference(value) {
+            return self.fail(span, "G4141", "a unique borrow cannot be derived through a shared reference");
+        }
+        if unique && let Some(name) = self.owned_place_root(value)
+            && !self.check_local_mutability(&name, span) {
+            return self.alloc(CoreKind::Error, Type::Error, span);
+        }
+        let ty = self.expressions[value.0 as usize].ty.clone();
+        if matches!(&ty, Type::Never) {
+            return self.alloc(CoreKind::Borrow { unique, value }, Type::Never, span);
+        }
+        // A projected dereference retains the incoming loan's lifetime;
+        // a fresh local or temporary borrow does not acquire that authority.
+        let lifetime = self.projected_reborrow_lifetime(value).unwrap_or(Lifetime::Elided);
+        self.alloc(CoreKind::Borrow { unique, value }, Type::Reference {
+            mutability: if unique { Mutability::Unique } else { Mutability::Shared },
+            lifetime, referent: Box::new(ty),
+        }, span)
+    }
+
     /// Source literals are contextual. The distributed standard library keeps
     /// `Bool` as `Result<(), ()>`, so its ordinary `true` and `false`
     /// spellings must build that nominal carrier when a Bool is expected.
     fn literal_expected(&mut self, text: String, expected: Option<Type>, span: Span) -> CoreId {
+        let expected = expected.map(|ty| self.inference.zonk(ty.clone()).unwrap_or(ty));
         // A string literal is compiler-emitted immutable data, but `Str` is
         // intentionally an ordinary source-defined view rather than another
         // compiler scalar. When the expected type is the distributed
@@ -4894,6 +5201,21 @@ impl Elaborator<'_> {
             // rest of the generic body.
             (Some(Type::Generic(slot)), literal) if literal_is_numeric(literal) => {
                 Type::Generic(slot)
+            }
+            (Some(variable @ Type::Infer(_)), literal) if literal_is_numeric(literal) => {
+                let floating = literal_type(literal) == Type::Scalar(ScalarType::F64);
+                if self.inference.constrain_numeric(variable.clone(), floating).is_err() {
+                    self.error(span, "G4116", "numeric literal has an incompatible expected type");
+                    self.recovered = true;
+                }
+                variable
+            }
+            (_, literal) if literal_is_numeric(literal) => {
+                let variable = self.inference.fresh();
+                let floating = literal_type(literal) == Type::Scalar(ScalarType::F64);
+                self.inference.constrain_numeric(variable.clone(), floating)
+                    .expect("a fresh numeric variable admits its literal class");
+                variable
             }
             _ => literal_type(&text),
         };
@@ -5111,11 +5433,11 @@ impl Elaborator<'_> {
             return None;
         }
         // The source accessor now explicitly preserves its owner's lifetime.
-        // Open that declaration binder through `call`, just like an ordinary
+        // Infer that declaration binder through `call`, just like an ordinary
         // named generic function; do not erase it to Elided or manufacture a
         // static view. Retain support for the older elided library signature.
-        let arguments = signature.generic_kinds.iter().enumerate()
-            .map(|(index, _)| GenericArgument::Lifetime(Lifetime::Generic(index as u32)))
+        let arguments = signature.generic_kinds.iter()
+            .map(|_| GenericArgument::Lifetime(self.inference.fresh_lifetime()))
             .collect::<Vec<_>>();
         let signature = self.signatures.instantiate_callable_generic(definition, &arguments).ok()?;
         let Type::Nominal { definition: expected_str, .. } = expected else { return None; };
@@ -5250,8 +5572,9 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
     ) -> CoreId {
+        let fixed = matches!(&expected, Some(Type::FixedArray { .. }));
         let expected_element = match expected {
-            Some(Type::Array(element)) => Some(*element),
+            Some(Type::Array(element) | Type::FixedArray { element, .. }) => Some(*element),
             _ => None,
         };
         let element = expected_element
@@ -5269,16 +5592,18 @@ impl Elaborator<'_> {
                 value
             })
             .collect::<Vec<_>>();
-        let ty = self.strict_result(&values, Type::Array(Box::new(element)));
+        let ty = if fixed { Type::fixed_array(element, values.len() as u64) } else { Type::Array(Box::new(element)) };
+        let ty = self.strict_result(&values, ty);
         self.alloc(CoreKind::Array(values), ty, span)
     }
-    fn refinement_context_bindings(&self, parameter: &Type) -> Option<Vec<(String, Type)>> {
+    fn refinement_context_bindings(&mut self, parameter: &Type) -> Option<Vec<(String, Type)>> {
+        let parameter = self.inference.resolve(parameter.clone());
         let parameter = match parameter {
-            Type::Reference { mutability: Mutability::Shared, referent, .. } => referent.as_ref(),
+            Type::Reference { mutability: Mutability::Shared, referent, .. } => self.inference.resolve(*referent),
             parameter => parameter,
         };
-        let (brand, positive) = crate::refinement::binding_pack_brand(parameter)?;
-        let fields = crate::refinement::binding_pack_fields(parameter)?;
+        let (brand, positive) = crate::refinement::binding_pack_brand(&parameter)?;
+        let fields = crate::refinement::binding_pack_fields(&parameter)?;
         let environment = self.expressions.iter().find_map(|expression| match &expression.kind {
             CoreKind::Completion { refinement_test: Some(environment), .. } if environment.brand == brand => Some(environment),
             _ => None,
@@ -5588,6 +5913,11 @@ impl Elaborator<'_> {
     fn header_type(&mut self, value: &crate::header::HeaderType) -> Type {
         use crate::header::HeaderType;
         match value {
+            HeaderType::FixedArray { element, length } => Type::FixedArray {
+                element: Box::new(self.header_type(element)),
+                length: Box::new(self.body_structural_integer(length, crate::ConstKind::Usize,
+                    self.body.expression(self.body.root).span, "G4173")),
+            },
             HeaderType::Never => Type::Never,
             HeaderType::Recovered => Type::Error,
             HeaderType::Tuple(values) if values.is_empty() => Type::Unit,
@@ -5704,11 +6034,13 @@ impl Elaborator<'_> {
     }
 
     /// A method implementation owns its generic binders.  A projection whose
-    /// trait head is concrete may therefore be selected with those binders as
-    /// rigid arguments: the selected implementation proves its result for
+    /// trait head has a known structural shape may therefore be selected with
+    /// those binders as rigid arguments: the selected implementation proves its result for
     /// every possible instantiation, rather than asking this body to guess
     /// caller evidence.  This is intentionally narrower than general
-    /// normalization; projections with an abstract subject remain symbolic.
+    /// normalization; projections with an abstract subject remain symbolic,
+    /// and selection must still prove every implementation predicate using
+    /// only this declaration's lexical evidence.
     fn normalize_selectable_type_projections(&mut self, value: Type) -> Type {
         let value = self.normalize_concrete_type_projections(value);
         self.normalize_selectable_type_projections_inner(
@@ -5822,6 +6154,10 @@ impl Elaborator<'_> {
                     .map(|value| self.normalize_selectable_type_projections_inner(value, active, hrtb_binders))
                     .collect(),
             ),
+            Type::FixedArray { element, length } => Type::FixedArray {
+                element: Box::new(self.normalize_selectable_type_projections_inner(*element, active, hrtb_binders)),
+                length: Box::new(self.normalize_selectable_type_argument(*length, active, hrtb_binders)),
+            },
             Type::Array(value) => Type::Array(Box::new(
                 self.normalize_selectable_type_projections_inner(*value, active, hrtb_binders),
             )),
@@ -5960,6 +6296,10 @@ impl Elaborator<'_> {
             Type::Array(value) => {
                 Type::Array(Box::new(self.normalize_nested_callable_effect_rows(*value)))
             }
+            Type::FixedArray { element, length } => Type::FixedArray {
+                element: Box::new(self.normalize_nested_callable_effect_rows(*element)),
+                length: Box::new(self.normalize_nested_callable_effect_argument(*length)),
+            },
             Type::RawPointer { mutability, pointee } => Type::RawPointer {
                 mutability,
                 pointee: Box::new(self.normalize_nested_callable_effect_rows(*pointee)),
@@ -6055,18 +6395,19 @@ impl Elaborator<'_> {
             .unwrap_or(value)
     }
 
-    /// Reduce effect-row projections whose only symbolic terms are this
-    /// declaration's rigid lifetime parameters.  They are safe to select:
-    /// an impl generic over `'a` proves the row for every caller-supplied
-    /// lifetime, rather than guessing an inference variable.  Keep all other
-    /// symbolic rows intact so ordinary lexical forwarding stays symbolic.
+    /// Reduce effect-row projections on known structural heads with rigid
+    /// declaration parameters, requiring the selected implementation's exact
+    /// lexical predicates. Keep abstract subjects symbolic so ordinary
+    /// lexical forwarding does not choose caller-owned implementation evidence.
     fn normalize_selectable_effect_row(&mut self, value: EffectRow) -> EffectRow {
         let mut result = self.normalize_concrete_effect_row(value);
         let mut projections = std::mem::take(&mut result.projections);
         let mut unresolved = vec![];
         let mut expanded = std::collections::BTreeSet::new();
         while let Some(projection) = projections.pop() {
-            if !projection_is_concrete(&projection.subject)
+            if !projection_subject_is_selectable(
+                &projection.subject, &[], self.allow_rigid_trait_arguments,
+            )
                 || !projection
                     .trait_arguments
                     .iter()
@@ -6113,19 +6454,9 @@ impl Elaborator<'_> {
                     &projection.item_arguments,
                 ) {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
-                    let tails_compatible = match (&result.tail, &row.tail) {
-                        (None, _) | (_, None) => true,
-                        (Some(left), Some(right)) => left == right,
-                    };
-                    if !tails_compatible {
-                        unresolved.push(projection);
-                        continue;
-                    }
                     result.effects.extend(row.effects);
                     projections.extend(row.projections);
-                    if result.tail.is_none() {
-                        result.tail = row.tail;
-                    }
+                    result.tails.extend(row.tails);
                 }
                 answer => {
                     // Concrete selected rows are no longer lexical
@@ -6174,6 +6505,14 @@ impl Elaborator<'_> {
     /// reusing this elaborator's immutable frozen rule snapshot.
     fn trait_query(&mut self) -> &mut TraitSolver {
         self.trait_solver.reset_query();
+        self.trait_solver.set_outlives_assumptions(self.ambient_outlives.clone());
+        self.trait_solver.set_universal_assumptions(self.ambient_universal_bounds.clone());
+        self.trait_solver.set_lexical_assumptions(self.ambient_where_bounds.iter().map(|(subject, relation)| TraitGoal {
+            subject: subject.clone(), relation: relation.clone() }).collect());
+        self.trait_solver.set_associated_bindings(
+            self.ambient_callable_type_bindings.clone(),
+            self.ambient_callable_effect_bindings.clone(),
+        );
         &mut self.trait_solver
     }
     fn projection_normalization_error(&mut self, answer: TraitProjectionAnswer) -> Type {
@@ -6250,8 +6589,7 @@ impl Elaborator<'_> {
                 "selected implementation does not define this associated effect row",
             ),
             TraitEffectRowProjectionAnswer::NestedTypeProjection { .. }
-            | TraitEffectRowProjectionAnswer::RecursiveProjection
-            | TraitEffectRowProjectionAnswer::ConflictingRowTails => (
+            | TraitEffectRowProjectionAnswer::RecursiveProjection => (
                 "G4157",
                 "associated effect-row projection has no finite normal form",
             ),
@@ -6413,9 +6751,15 @@ impl Elaborator<'_> {
                         crate::GenericKind::Type,
                     ) => GenericArgument::Type(self.header_type(value)),
                     (
-                        crate::header::HeaderGenericArgument::U32(value),
-                        crate::GenericKind::Const(crate::ConstKind::U32),
-                    ) => GenericArgument::ConstU32(*value),
+                        crate::header::HeaderGenericArgument::Integer(value),
+                        crate::GenericKind::Const(kind),
+                    ) => self.body_structural_integer(
+                        &crate::header::HeaderStructuralConst::Integer(value.clone()), *kind,
+                        self.body.expression(self.body.root).span, "G4158",
+                    ),
+                    (crate::header::HeaderGenericArgument::StructuralConst(value), crate::GenericKind::Const(kind)) => {
+                        self.body_structural_integer(value, *kind, self.body.expression(self.body.root).span, "G4158")
+                    }
                     (
                         crate::header::HeaderGenericArgument::Quantity(value),
                         crate::GenericKind::Const(crate::ConstKind::Quantity),
@@ -6440,7 +6784,7 @@ impl Elaborator<'_> {
                     (
                         crate::header::HeaderGenericArgument::Lifetime(value),
                         crate::GenericKind::Lifetime,
-                    ) => GenericArgument::Lifetime(self.header_lifetime(Some(value))),
+                    ) => GenericArgument::Lifetime(self.generic_argument_lifetime(value)),
                     (
                         crate::header::HeaderGenericArgument::EffectRow(value),
                         crate::GenericKind::EffectRow,
@@ -6456,10 +6800,18 @@ impl Elaborator<'_> {
         )
     }
 
+    /// An explicit anonymous generic argument is an inference request, not
+    /// the fixed elided region used in a frozen reference annotation.
+    fn generic_argument_lifetime(&mut self, spelling: &str) -> Lifetime {
+        if spelling == "'_" {
+            self.inference.fresh_lifetime()
+        } else {
+            self.header_lifetime(Some(spelling))
+        }
+    }
+
     /// Elaborate body-local explicit generic arguments only after resolving
-    /// the callee declaration's slot kinds.  Unlike the legacy header helper
-    /// above, this retains a row, lifetime, or structural value as its own
-    /// `GenericArgument` all the way to the instantiation contract boundary.
+    /// the callee declaration's slot kinds. Preserve each argument's domain.
     fn body_generic_arguments(
         &mut self,
         arguments: &[crate::header::HeaderGenericArgument],
@@ -6501,7 +6853,7 @@ impl Elaborator<'_> {
                     Some(index) => GenericArgument::EffectRow(EffectRow {
                         effects: Default::default(),
                         projections: vec![],
-                        tail: Some(crate::EffectTail::Generic(index)),
+                        tails: [crate::EffectTail::Generic(index)].into_iter().collect(),
                     }),
                     None => GenericArgument::Type(
                         self.header_type(&crate::header::HeaderType::Path(path.clone())),
@@ -6529,25 +6881,25 @@ impl Elaborator<'_> {
                     GenericArgument::Type(self.header_type(value))
                 }
                 (crate::header::HeaderGenericArgument::Lifetime(value), _) => {
-                    GenericArgument::Lifetime(self.header_lifetime(Some(value)))
+                    GenericArgument::Lifetime(self.generic_argument_lifetime(value))
                 }
                 (crate::header::HeaderGenericArgument::EffectRow(value), _) => {
                     GenericArgument::EffectRow(self.closure_effects(value, span))
                 }
-                (crate::header::HeaderGenericArgument::U32(value), _) => {
-                    GenericArgument::ConstU32(*value)
+                (crate::header::HeaderGenericArgument::Integer(value), crate::GenericKind::Const(kind)) => {
+                    self.body_structural_integer(&crate::header::HeaderStructuralConst::Integer(value.clone()), *kind, span, code)
                 }
                 (
                     crate::header::HeaderGenericArgument::StructuralConst(value),
-                    crate::GenericKind::Const(crate::ConstKind::U32),
-                ) => self.body_structural_u32(value, span, code),
-                (crate::header::HeaderGenericArgument::StructuralConst(_), _) => {
+                    crate::GenericKind::Const(kind),
+                ) => self.body_structural_integer(value, *kind, span, code),
+                (crate::header::HeaderGenericArgument::StructuralConst(_) | crate::header::HeaderGenericArgument::Integer(_), _) => {
                     self.error(
                         span,
                         code,
-                        "structural u32 expression supplied to a non-u32 generic slot",
+                        "structural integer expression supplied to a non-const generic slot",
                     );
-                    GenericArgument::ConstU32(0)
+                    GenericArgument::Type(Type::Error)
                 }
                 (crate::header::HeaderGenericArgument::Quantity(value), _) => {
                     GenericArgument::ConstQuantity(*value)
@@ -6570,74 +6922,46 @@ impl Elaborator<'_> {
         Some(elaborated)
     }
 
-    fn body_structural_u32(
+    fn body_structural_integer(
         &mut self,
         value: &crate::header::HeaderStructuralConst,
+        expected: crate::ConstKind,
         span: Span,
         code: &'static str,
     ) -> GenericArgument {
-        fn elaborate(
-            elaborator: &mut Elaborator<'_>,
-            value: &crate::header::HeaderStructuralU32Expr,
-            span: Span,
-            code: &'static str,
-        ) -> Option<crate::StructuralU32Expr> {
-            use crate::StructuralU32Expr as Expr;
-            use crate::header::HeaderStructuralU32Expr as Source;
-            Some(match value {
-                Source::Literal(value) => Expr::Literal(*value),
-                Source::Param(name) => match elaborator.const_parameters.get(name).copied() {
-                    Some((index, crate::ConstKind::U32)) => Expr::Param(index),
-                    _ => {
-                        elaborator.error(span, code, &format!("structural u32 expression refers to undeclared or wrong-kind binder `{name}`"));
-                        return None;
-                    }
-                },
-                Source::Add(left, right) => Expr::Add(
-                    Box::new(elaborate(elaborator, left, span, code)?),
-                    Box::new(elaborate(elaborator, right, span, code)?),
-                ),
-                Source::Sub(left, right) => Expr::Sub(
-                    Box::new(elaborate(elaborator, left, span, code)?),
-                    Box::new(elaborate(elaborator, right, span, code)?),
-                ),
-                Source::Mul(left, right) => Expr::Mul(
-                    Box::new(elaborate(elaborator, left, span, code)?),
-                    Box::new(elaborate(elaborator, right, span, code)?),
-                ),
-                Source::Div(left, right) => Expr::Div(
-                    Box::new(elaborate(elaborator, left, span, code)?),
-                    Box::new(elaborate(elaborator, right, span, code)?),
-                ),
-                Source::Rem(left, right) => Expr::Rem(
-                    Box::new(elaborate(elaborator, left, span, code)?),
-                    Box::new(elaborate(elaborator, right, span, code)?),
-                ),
-            })
+        use crate::header::{HeaderIntegerExpr, HeaderStructuralConst};
+        if let HeaderStructuralConst::Projection(crate::HeaderType::Projection {
+            subject, trait_path, trait_arguments, name, item_arguments,
+        }) = value {
+            return self.associated_const_argument((subject, trait_path, trait_arguments, name, item_arguments), expected, (span, code));
         }
-        let value = match value {
-            crate::header::HeaderStructuralConst::U32(value) => {
-                crate::StructuralU32Expr::Literal(*value)
-            }
-            crate::header::HeaderStructuralConst::U32Expression(value) => {
-                match elaborate(self, value, span, code) {
-                    Some(value) => value,
-                    None => return GenericArgument::ConstU32(0),
-                }
-            }
+        let Some(scalar) = expected.integer_scalar() else {
+            self.error(span, code, "integer expression supplied to a non-integer const slot");
+            return GenericArgument::Type(Type::Error);
+        };
+        let source = match value {
+            HeaderStructuralConst::Integer(token) => HeaderIntegerExpr::Literal(token.clone()),
+            HeaderStructuralConst::IntegerExpression(value) => value.clone(),
+            HeaderStructuralConst::Generic(name) => HeaderIntegerExpr::Param(name.clone()),
             _ => {
-                self.error(span, code, "structural u32 expression has the wrong kind");
-                return GenericArgument::ConstU32(0);
+                self.error(span, code, "structural integer expression has the wrong kind");
+                return GenericArgument::Type(Type::Error);
             }
         };
-        match value.normalized() {
-            Ok(crate::StructuralU32Expr::Literal(value)) => GenericArgument::ConstU32(value),
-            Ok(value) => GenericArgument::ConstU32Expr(value),
-            Err(_) => {
-                self.error(span, code, "structural u32 arithmetic overflowed, divided by zero, or exceeded its resource limit");
-                GenericArgument::ConstU32(0)
+        let result = source.elaborate(scalar, &mut |name| {
+            match self.const_parameters.get(name).copied() {
+                Some((index, kind)) if kind == expected => Ok(crate::IntegerConstExpr::Param { index, scalar }),
+                _ => {
+                    self.error(span, code, "structural expression references an undeclared or differently kinded const binder");
+                    Err(crate::types::StructuralConstError::KindMismatch)
+                }
             }
+        });
+        if let Err(error) = result {
+            self.error(span, code, &format!("invalid structural {} constant: {error:?}", expected.name()));
+            return GenericArgument::Type(Type::Error);
         }
+        crate::types::integer_const_argument(result)
     }
 
     /// Elaborate `<S as Trait<Args>>::CONST` only in a structural const slot.
@@ -6777,16 +7101,15 @@ impl Elaborator<'_> {
     ) -> Vec<GenericArgument> {
         kinds
             .iter()
-            .enumerate()
-            .map(|(index, kind)| match kind {
+            .map(|kind| match kind {
                 crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
                 crate::GenericKind::EffectRow => {
                     GenericArgument::EffectRow(self.inference.fresh_effects())
                 }
-                // Preserve declaration-region identity until call lifetime
-                // opening relates it to the actual receiver or value.
+                // Omitted declaration regions are fresh inference cells,
+                // not rigid names belonging to the enclosing declaration.
                 crate::GenericKind::Lifetime => {
-                    GenericArgument::Lifetime(Lifetime::Generic(index as u32))
+                    GenericArgument::Lifetime(self.inference.fresh_lifetime())
                 }
                 crate::GenericKind::Const(kind) => self.inference.fresh_const(*kind),
             })
@@ -6954,7 +7277,7 @@ impl Elaborator<'_> {
         code: &'static str,
         arity_message: &'static str,
     ) -> Option<Vec<GenericArgument>> {
-        let defaults = self.index.type_generic_defaults(definition).unwrap_or(&[]);
+        let defaults = self.signatures.generic_defaults.get(&definition).map(Vec::as_slice).unwrap_or(&[]);
         if source.len() > kinds.len()
             || (source.len()..kinds.len())
                 .any(|index| defaults.get(index).is_none_or(Option::is_none))
@@ -6975,7 +7298,7 @@ impl Elaborator<'_> {
                 .get(index)
                 .and_then(Option::as_ref)
                 .expect("missing nominal default was rejected above");
-            arguments.push(instantiate_nominal_default(default, &arguments));
+            arguments.push(self.nominal_default_argument(default, &arguments, kinds[index], span));
         }
         Some(arguments)
     }
@@ -7166,7 +7489,7 @@ impl Elaborator<'_> {
                             &item_arguments,
                         ) {
                         TraitEffectRowProjectionAnswer::Normalized { row, .. }
-                            if row.tail.is_none() && row.projections.is_empty() =>
+                            if row.tails.is_empty() && row.projections.is_empty() =>
                         {
                             resolved.effects.extend(row.effects);
                         }
@@ -7186,9 +7509,9 @@ impl Elaborator<'_> {
                 }
             }
         }
-        if let Some(tail) = &effects.tail {
+        for tail in &effects.tails {
             match self.effect_row_parameters.get(tail).copied() {
-                Some(index) => resolved.tail = Some(crate::EffectTail::Generic(index)),
+                Some(index) => { resolved.tails.insert(crate::EffectTail::Generic(index)); }
                 None => {
                     self.error(
                         span,
@@ -7260,7 +7583,11 @@ impl Elaborator<'_> {
             binding_keys: (0..bindings.len()).map(|binder| RefinementBindingKey { environment: brand, binder: binder as u32 }).collect(),
             bindings,
             binding_types: binding_types.into_iter()
-                .map(|(name, ty)| (name, refinement_binding_type(ty))).collect(),
+                .map(|(name, ty)| {
+                    let ty = self.inference.resolve(ty);
+                    let ty = if self.inference.has_numeric_constraint(ty.clone()) { ty } else { refinement_binding_type(ty) };
+                    (name, ty)
+                }).collect(),
             sealed: true,
         }
     }
@@ -7273,14 +7600,33 @@ impl Elaborator<'_> {
         self.collect_captures(body, &mut parameter_names, &mut captures);
         captures
             .into_iter()
-            .map(|(name, (mode, ty))| ClosureCapture { name, mode, ty })
+            .map(|(name, (mode, mut ty))| {
+                // A use inside the closure may narrow a callable's invocation
+                // interval to a parameter contract. The captured resident is
+                // still the lexical binding, not that temporary use-site view.
+                // Preserve its exact ABI without inventing stronger authority.
+                if let Some(binding) = self.locals.lookup(&name)
+                    && let Type::Callable { invocation: resident, .. } = binding
+                    && let Type::Callable { invocation: requested, .. } = &ty
+                    && resident.contains(*requested)
+                {
+                    let mut resident_type = ty.clone();
+                    let Type::Callable { invocation, .. } = &mut resident_type else { unreachable!() };
+                    *invocation = *resident;
+                    if &resident_type == binding { ty = resident_type; }
+                }
+                ClosureCapture { name, mode, ty }
+            })
             .collect()
     }
 
     fn owned_capture_mode(&self, ty: &Type) -> CaptureMode {
-        if self
+        let ty = self.inference.resolve_type_structure(ty.clone());
+        if self.inference.has_numeric_constraint(ty.clone()) || self
             .signatures
-            .principal_use_interval_with_solver(ty, &self.trait_solver)
+            .principal_use_interval_with_solver(&ty, &self.trait_solver)
+            .or_else(|| self.signatures.principal_use_interval_with_bounds_and_solver(
+                &ty, &self.ambient_where_bounds, &self.trait_solver))
             .is_some_and(|quantity| quantity == crate::quantity::Quantity::UNRESTRICTED)
         {
             CaptureMode::Copy
@@ -7290,21 +7636,25 @@ impl Elaborator<'_> {
     }
 
     fn inferred_capture_mode(&self, ty: &Type) -> CaptureMode {
+        let ty = self.inference.resolve_type_structure(ty.clone());
+        if self.inference.has_numeric_constraint(ty.clone()) {
+            return CaptureMode::Copy;
+        }
         // Callable and reference capabilities retain their established
         // invocation/loan authorities when inferred. An explicit `move (...)`
         // remains available when a closure must own such a value; ordinary
-        // data captures use the default copy-or-move rule below.
+        // data captures use the default copy-or-move rule below. An opaque
+        // data parameter is not a callable capability merely because its
+        // type is generic: returning it consumes the captured owner too.
         if matches!(
             ty,
             Type::Callable { .. }
                 | Type::Reference { .. }
-                | Type::Generic(_)
-                | Type::Projection { .. }
                 | Type::Infer(_)
-        ) {
+        ) || self.callable_contract_from_ambient_fn_bound(&ty).is_some() {
             CaptureMode::SharedBorrow
         } else {
-            self.owned_capture_mode(ty)
+            self.owned_capture_mode(&ty)
         }
     }
 
@@ -7370,10 +7720,13 @@ impl Elaborator<'_> {
                     .map(|ty| (name.clone(), ty))
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        let mut aliases = resumption_types.keys().map(|name| (name.clone(), name.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
         let mut closures = Vec::new();
-        self.collect_refinement_capturing_closures(branch, &resumption_types, &mut closures);
+        self.collect_resumption_capturing_closures(branch, &mut aliases, &mut closures);
         for (closure, resumption) in closures {
             if self.refinement_closure_is_immediately_invoked(branch, closure) {
+                self.fuse_immediate_resumption_closure(branch, closure);
                 continue;
             }
             self.error(
@@ -7384,6 +7737,120 @@ impl Elaborator<'_> {
                 ),
             );
             self.recovered = true;
+        }
+    }
+    /// Fuse a proven single local invocation while the continuation's lexical
+    /// frame is still active. Only continuation-only environments qualify:
+    /// ordinary residents retain their capture/move/borrow representation.
+    /// Argument temporaries precede parameter bindings, preserving evaluation
+    /// order even when parameter names shadow the caller's argument locals.
+    fn fuse_immediate_resumption_closure(&mut self, branch: CoreId, closure: CoreId) -> bool {
+        let CoreKind::Closure { parameters, environment, body, .. } =
+            self.expressions[closure.0 as usize].kind.clone() else { return false; };
+        if environment.captures.is_empty() || environment.captures.iter().any(|capture| {
+            self.active_resumption(&capture.name).is_none()
+        }) { return false; }
+        let kind = self.expressions[branch.0 as usize].kind.clone();
+        let call = match &kind {
+            CoreKind::Call { callee, .. } if *callee == closure => Some((branch, None)),
+            CoreKind::Block(values) => values.windows(2).find_map(|pair| {
+                let CoreKind::Let { name, value } = &self.expressions[pair[0].0 as usize].kind else { return None; };
+                let CoreKind::Call { callee, .. } = &self.expressions[pair[1].0 as usize].kind else { return None; };
+                (*value == closure && matches!(&self.expressions[callee.0 as usize].kind,
+                    CoreKind::Local(actual) if actual == name)).then_some((pair[1], Some(pair[0])))
+            }),
+            CoreKind::Closure { .. } => return false,
+            _ => None,
+        };
+        if let Some((call, binding)) = call {
+            let CoreKind::Call { arguments, .. } = self.expressions[call.0 as usize].kind.clone() else { unreachable!() };
+            if parameters.len() != arguments.len() { return false; }
+            let span = self.expressions[call.0 as usize].span;
+            let mut sequence = Vec::new();
+            let mut temporaries = Vec::new();
+            for (index, argument) in arguments.into_iter().enumerate() {
+                let name = format!("$fused_{}_argument_{index}", closure.0);
+                let ty = self.expressions[argument.0 as usize].ty.clone();
+                sequence.push(self.alloc(CoreKind::Let { name: name.clone(), value: argument }, Type::Unit, span));
+                temporaries.push(self.alloc(CoreKind::Local(name), ty, span));
+            }
+            for ((name, _), value) in parameters.into_iter().zip(temporaries) {
+                sequence.push(self.alloc(CoreKind::Let { name, value }, Type::Unit, span));
+            }
+            sequence.push(body);
+            self.expressions[call.0 as usize].kind = CoreKind::Block(sequence);
+            // Remove the unused environment constructor from the frozen arena
+            // as well as the reachable graph; no backend may lift it later.
+            self.expressions[closure.0 as usize].kind = CoreKind::Tuple(vec![]);
+            self.expressions[closure.0 as usize].ty = Type::Unit;
+            if let Some(binding) = binding {
+                self.expressions[binding.0 as usize].kind = CoreKind::Tuple(vec![]);
+            }
+            return true;
+        }
+        core_children(&kind).into_iter().any(|child| self.fuse_immediate_resumption_closure(child, closure))
+    }
+    /// Follow direct lexical aliases before examining captures. A new binding
+    /// shadows its predecessor only after its initializer has been visited.
+    /// Clause payloads and closure parameters similarly establish fresh names.
+    fn collect_resumption_capturing_closures(
+        &self,
+        expression: CoreId,
+        aliases: &mut std::collections::BTreeMap<String, String>,
+        closures: &mut Vec<(CoreId, String)>,
+    ) -> Option<String> {
+        match &self.expressions[expression.0 as usize].kind {
+            CoreKind::Local(name) | CoreKind::Resumption { name, .. } => aliases.get(name).cloned(),
+            CoreKind::Move(value) => self.collect_resumption_capturing_closures(*value, aliases, closures),
+            CoreKind::Let { name, value } => {
+                let origin = self.collect_resumption_capturing_closures(*value, aliases, closures);
+                aliases.remove(name);
+                if let Some(origin) = origin { aliases.insert(name.clone(), origin); }
+                None
+            }
+            CoreKind::Block(values) => {
+                let mut nested = aliases.clone();
+                let mut result = None;
+                for value in values {
+                    result = self.collect_resumption_capturing_closures(*value, &mut nested, closures);
+                }
+                result
+            }
+            CoreKind::Closure { environment, parameters, body, .. } => {
+                let mut captured = environment.captures.iter().filter_map(|capture|
+                    aliases.get(&capture.name).map(|origin| (capture.name.clone(), origin.clone())))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                let origin = captured.values().next().cloned();
+                if let Some(origin) = &origin { closures.push((expression, origin.clone())); }
+                for (name, _) in parameters { captured.remove(name); }
+                self.collect_resumption_capturing_closures(*body, &mut captured, closures);
+                origin
+            }
+            CoreKind::Handle { computation, clauses } => {
+                self.collect_resumption_capturing_closures(*computation, &mut aliases.clone(), closures);
+                for clause in clauses {
+                    let mut nested = aliases.clone();
+                    for (name, _) in &clause.bindings { nested.remove(name); }
+                    if let CoreHandlerResumption::Explicit { name, .. } = &clause.resumption { nested.remove(name); }
+                    self.collect_resumption_capturing_closures(clause.body, &mut nested, closures);
+                }
+                None
+            }
+            CoreKind::Completion { computation, clauses, .. } => {
+                self.collect_resumption_capturing_closures(*computation, &mut aliases.clone(), closures);
+                for clause in clauses {
+                    let mut nested = aliases.clone();
+                    for (name, _) in &clause.bindings { nested.remove(name); }
+                    self.collect_resumption_capturing_closures(clause.body, &mut nested, closures);
+                }
+                None
+            }
+            kind => {
+                for child in core_children(kind) {
+                    self.collect_resumption_capturing_closures(child, &mut aliases.clone(), closures);
+                }
+                None
+            }
         }
     }
     /// A refinement binder is a branch-local proof-backed projection.  A
@@ -7572,6 +8039,7 @@ impl Elaborator<'_> {
     ) {
         let expression = &self.expressions[id.0 as usize];
         match &expression.kind {
+            CoreKind::ConstValue(_) => {},
             CoreKind::Local(name) if !locals.contains(name) => {
                 record_capture(
                     captures,
@@ -7588,7 +8056,7 @@ impl Elaborator<'_> {
                     expression.ty.clone(),
                 );
             }
-            CoreKind::Move(value) => {
+            CoreKind::Move(value) | CoreKind::ReleaseAvailable(value) => {
                 if let Some((name, ty)) = self.capture_root_local(*value) {
                     let mode = self.owned_capture_mode(&ty);
                     record_capture(captures, &name, mode, ty);
@@ -7747,13 +8215,24 @@ impl Elaborator<'_> {
             _ => None,
         }
     }
-    /// Typed Core is a frozen semantic boundary: body-local inference holes
-    /// can help elaboration but cannot escape to PlaceFlow, MIR, or caches.
-    fn seal_types(&mut self) {
-        self.inference.finish_body_lifetimes();
+    /// Propagate non-defaultable obligations without freezing or generalizing
+    /// the result. Both executable bodies and value boundaries use this phase.
+    fn propagate_pending_inference(&mut self) {
         let mut pending = std::mem::take(&mut self.pending_callable_bounds);
-        while !pending.is_empty() {
-            let previous = pending.len();
+        let mut associated = std::mem::take(&mut self.pending_associated_checks);
+        let mut equalities = std::mem::take(&mut self.pending_rigid_equalities);
+        let mut where_bounds = std::mem::take(&mut self.pending_where_bounds);
+        let mut defaults = std::mem::take(&mut self.pending_integer_defaults);
+        while !pending.is_empty() || !associated.is_empty() || !equalities.is_empty() || !where_bounds.is_empty() || !defaults.is_empty() {
+            let previous = defaults.len() + pending.len() + equalities.len() + where_bounds.len() + associated.iter().map(|check| check.types.len() + check.effects.len()).sum::<usize>();
+            for default in defaults {
+                self.retry_integer_default(default, true);
+            }
+            for bound in where_bounds {
+                self.check_where_bounds_with_assumptions(
+                    vec![(bound.subject, bound.relation)], bound.assumptions, bound.span, true,
+                );
+            }
             for bound in pending {
                 self.check_intrinsic_callable_bindings(
                     vec![(bound.subject, bound.relation)],
@@ -7763,22 +8242,117 @@ impl Elaborator<'_> {
                     true,
                 );
             }
+            for check in associated {
+                self.retry_associated_check(check, true);
+            }
+            for equality in equalities {
+                self.retry_rigid_equality(equality, true);
+            }
             pending = std::mem::take(&mut self.pending_callable_bounds);
+            associated = std::mem::take(&mut self.pending_associated_checks);
+            equalities = std::mem::take(&mut self.pending_rigid_equalities);
+            where_bounds = std::mem::take(&mut self.pending_where_bounds);
+            defaults = std::mem::take(&mut self.pending_integer_defaults);
             // A solved Output/input equality can expose the shape needed by
             // an earlier obligation. Retry while at least one was discharged;
             // no-progress subjects are ambiguous, never guessed callables.
-            if pending.len() == previous {
-                for bound in pending {
-                    self.check_intrinsic_callable_bindings(
-                        vec![(bound.subject, bound.relation)],
-                        bound.type_bindings,
-                        bound.effect_bindings,
-                        bound.span,
-                        false,
-                    );
-                }
+            if defaults.len() + pending.len() + equalities.len() + where_bounds.len() + associated.iter().map(|check| check.types.len() + check.effects.len()).sum::<usize>() == previous {
                 break;
             }
+        }
+        self.pending_callable_bounds = pending;
+        self.pending_associated_checks = associated;
+        self.pending_rigid_equalities = equalities;
+        self.pending_where_bounds = where_bounds;
+        self.pending_integer_defaults = defaults;
+    }
+
+    /// Typed Core is a frozen semantic boundary: body-local inference holes
+    /// can help elaboration but cannot escape to PlaceFlow, MIR, or caches.
+    fn seal_types(&mut self) {
+        // A plain first-class callable type currently has no place to retain
+        // a quantified where contract. Do not let storing/passing a named
+        // function erase that contract before an indirect invocation.
+        let quantified = self.expressions.iter().enumerate().filter_map(|(index, expression)| {
+            let CoreKind::Function { definition, .. } = &expression.kind else { return None; };
+            self.signatures.definitions.get(definition).and_then(callable)
+                .is_some_and(|signature| !signature.universal_bounds.is_empty() || !signature.where_outlives.is_empty())
+                .then_some((CoreId(index as u32), expression.span))
+        }).collect::<Vec<_>>();
+        let mut uses = quantified.iter().map(|(id, _)| (*id, (false, false))).collect::<std::collections::BTreeMap<_, _>>();
+        for expression in &self.expressions {
+            for child in core_children(&expression.kind) {
+                if let Some((seen, escapes)) = uses.get_mut(&child) {
+                    *seen = true;
+                    *escapes |= !matches!(&expression.kind, CoreKind::Call { callee, arguments, .. }
+                        if *callee == child && !arguments.contains(&child));
+                }
+            }
+        }
+        for (id, span) in quantified {
+            let (seen, escapes) = uses[&id];
+            if !seen || escapes {
+                self.error(span, "G4198", "a first-class function value cannot yet retain a universally quantified where contract");
+                self.recovered = true;
+            }
+        }
+        self.inference.finish_body_lifetimes();
+        self.propagate_pending_inference();
+        let pending = std::mem::take(&mut self.pending_callable_bounds);
+        let associated = std::mem::take(&mut self.pending_associated_checks);
+        let equalities = std::mem::take(&mut self.pending_rigid_equalities);
+        if self.inference.finish_numeric_defaults().is_err() {
+            let span = self.body.expression(self.body.root).span;
+            self.error(span, "G4116", "numeric literal constraints are incompatible");
+            self.recovered = true;
+        }
+        for default in std::mem::take(&mut self.pending_integer_defaults) {
+            self.retry_integer_default(default, false);
+        }
+        for equality in equalities {
+            self.retry_rigid_equality(equality, false);
+        }
+        for bound in pending {
+            self.check_intrinsic_callable_bindings(
+                vec![(bound.subject, bound.relation)], bound.type_bindings,
+                bound.effect_bindings, bound.span, false,
+            );
+        }
+        for check in associated {
+            self.retry_associated_check(check, false);
+        }
+        for bound in std::mem::take(&mut self.pending_where_bounds) {
+            self.check_where_bounds_with_assumptions(
+                vec![(bound.subject, bound.relation)], bound.assumptions, bound.span, false,
+            );
+        }
+        for (bound, span) in std::mem::take(&mut self.pending_outlives) { self.check_outlives_bound(bound, span, false); }
+        for (bound, mut solver, span) in std::mem::take(&mut self.pending_universal) {
+            let mut invalid = false;
+            let bound = bound.map_terms(|argument| {
+                self.inference.zonk_generic_argument(argument.clone()).unwrap_or_else(|_| { invalid = true; argument })
+            });
+            if invalid || !solver.proves_universal(&bound) {
+                self.error(span, "G4140", "call does not establish its predicate for every quantified lifetime");
+                self.recovered = true;
+            }
+        }
+        for check in std::mem::take(&mut self.pending_effect_checks) {
+            let declared = self.zonk_effect_row(check.declared, check.span);
+            let mut resolve_effect = |mut effect: EffectInstance| {
+                effect.arguments = effect.arguments.into_iter()
+                    .map(|argument| self.zonk_generic_argument(argument, check.span)).collect();
+                effect
+            };
+            let handled = check.handled.into_iter().map(&mut resolve_effect).collect();
+            let operations = check.operations.into_iter().map(|(effect, operation)| (resolve_effect(effect), operation)).collect();
+            let old_declared = std::mem::replace(&mut self.declared_effects, declared);
+            let old_handled = std::mem::replace(&mut self.handled_effects, handled);
+            let old_operations = std::mem::replace(&mut self.handled_operations, operations);
+            self.check_effects_after_inference(&check.effects, check.span, false);
+            self.declared_effects = old_declared;
+            self.handled_effects = old_handled;
+            self.handled_operations = old_operations;
         }
         for index in 0..self.expressions.len() {
             let span = self.expressions[index].span;
@@ -7792,6 +8366,32 @@ impl Elaborator<'_> {
 
     fn zonk_core_metadata(&mut self, mut kind: CoreKind, span: Span, result: &Type) -> CoreKind {
         match &mut kind {
+            CoreKind::ConstValue(argument) => *argument = self.zonk_generic_argument(argument.clone(), span),
+            CoreKind::Literal(text) => {
+                // Check after contextual type selection, directly at the
+                // selected precision. Overflow is a source error, not a
+                // missing runtime representation discovered during lowering.
+                let finite = match result {
+                    Type::Scalar(ScalarType::F32) => text.replace('_', "")
+                        .parse::<f32>().is_ok_and(f32::is_finite),
+                    Type::Scalar(ScalarType::F64) => text.replace('_', "")
+                        .parse::<f64>().is_ok_and(f64::is_finite),
+                    _ => true,
+                };
+                if !finite {
+                    self.error(span, "G6003", "floating-point literal is invalid or overflows its selected width");
+                    self.recovered = true;
+                }
+                if let Type::Scalar(scalar) = result
+                    && crate::ConstKind::from_integer_scalar(*scalar).is_some()
+                {
+                    let (negative, token) = text.strip_prefix('-').map_or((false, text.as_str()), |token| (true, token));
+                    if crate::IntegerConst::from_literal(*scalar, token, negative, 64).is_err() {
+                        self.error(span, "G6003", "integer literal is invalid or overflows its selected width");
+                        self.recovered = true;
+                    }
+                }
+            }
             CoreKind::Closure {
                 parameters,
                 environment,
@@ -7820,10 +8420,11 @@ impl Elaborator<'_> {
                     .collect();
             }
             CoreKind::TraitMethod {
+                evidence,
+                method,
                 trait_arguments,
                 method_arguments,
                 deferred,
-                ..
             } => {
                 *trait_arguments = trait_arguments
                     .iter()
@@ -7835,15 +8436,42 @@ impl Elaborator<'_> {
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
-                if let Some(deferred) = deferred {
-                    deferred.relation.arguments = deferred
+                if let Some(request) = deferred {
+                    request.relation.arguments = request
                         .relation
                         .arguments
                         .iter()
                         .cloned()
                         .map(|argument| self.zonk_generic_argument(argument, span))
                         .collect();
-                    deferred.subject = self.zonk_type(deferred.subject.clone(), span);
+                    request.subject = self.zonk_type(request.subject.clone(), span);
+                    if projection_is_concrete(&request.subject)
+                        && request.relation.arguments.iter().all(generic_argument_is_concrete)
+                    {
+                        match self.trait_query().select_method_with_assumptions(
+                            TraitGoal { relation: request.relation.clone(), subject: request.subject.clone() },
+                            &request.name, method_arguments, &[],
+                        ) {
+                            TraitMethodAnswer::Selected { evidence: selected_evidence, method: selected_method, .. } => {
+                                *evidence = selected_evidence;
+                                *method = selected_method;
+                                *deferred = None;
+                            }
+                            answer => {
+                                let message = match answer {
+                                    TraitMethodAnswer::NoSolution => "no implementation provides the qualified trait method",
+                                    TraitMethodAnswer::Refuted { .. } => "qualified trait method is refuted by a negative implementation",
+                                    TraitMethodAnswer::Ambiguous => "qualified trait method implementation is ambiguous",
+                                    TraitMethodAnswer::Overflow => "qualified trait method selection exceeded the solver limit",
+                                    TraitMethodAnswer::MissingMethod { .. } => "selected implementation omits the qualified trait method",
+                                    TraitMethodAnswer::MethodArity { .. } => "qualified trait method generic arguments could not be inferred",
+                                    TraitMethodAnswer::Selected { .. } => unreachable!(),
+                                };
+                                self.error(span, "G4169", message);
+                                self.recovered = true;
+                            }
+                        }
+                    }
                 }
             }
             CoreKind::Perform {
@@ -7958,8 +8586,7 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            CoreKind::Literal(_)
-            | CoreKind::Local(_)
+            CoreKind::Local(_)
             | CoreKind::Resumption { .. }
             | CoreKind::Tuple(_)
             | CoreKind::Array(_)
@@ -7972,6 +8599,7 @@ impl Elaborator<'_> {
             | CoreKind::Borrow { .. }
             | CoreKind::Deref(_)
             | CoreKind::Move(_)
+            | CoreKind::ReleaseAvailable(_)
             | CoreKind::Error => {}
         }
         kind
@@ -7996,7 +8624,7 @@ impl Elaborator<'_> {
                     self.zonk_pattern(value, span);
                 }
             }
-            CorePattern::Array { element, elements } => {
+            CorePattern::Array { element, elements, .. } => {
                 *element = self.zonk_type(element.clone(), span);
                 for value in elements {
                     self.zonk_pattern(value, span);
@@ -8043,7 +8671,7 @@ impl Elaborator<'_> {
     }
     fn zonk_type(&mut self, ty: Type, span: Span) -> Type {
         match self.inference.zonk(ty) {
-            Ok(ty) => ty,
+            Ok(ty) => self.normalize_concrete_type_projections(ty),
             Err(_) => {
                 self.error(span, "G4116", "cannot infer a complete closure type");
                 self.recovered = true;
@@ -8082,13 +8710,38 @@ impl Elaborator<'_> {
         actual: Type,
         span: Span,
     ) -> Result<(), ()> {
+        self.unify_rigid_lifetimes_after_inference(expected, actual, span, true)
+    }
+
+    fn retry_rigid_equality(&mut self, equality: PendingRigidEquality, defer: bool) {
+        if self.unify_rigid_lifetimes_after_inference(equality.expected, equality.actual, equality.span, defer).is_err() {
+            self.error(equality.span, "G4110", "deferred type constraint does not match its required type");
+            self.recovered = true;
+        }
+    }
+
+    fn unify_rigid_lifetimes_after_inference(
+        &mut self,
+        expected: Type,
+        actual: Type,
+        span: Span,
+        defer: bool,
+    ) -> Result<(), ()> {
         // Equality inference may solve constructor-owned holes, but never a
         // declared region. The directional lifetime proof below still owns
         // all outlives/coercion checks when rigid lifetimes differ.
         let _ = self.inference.unify(expected.clone(), actual.clone());
         let expected = self.inference.zonk(expected.clone()).unwrap_or(expected);
         let actual = self.inference.zonk(actual.clone()).unwrap_or(actual);
-        let mut substitution = CallLifetimeSubstitution::default();
+        let expected = self.inference.resolve_type_structure(expected);
+        let actual = self.inference.resolve_type_structure(actual);
+        let expected = self.normalize_concrete_type_projections(expected);
+        let actual = self.normalize_concrete_type_projections(actual);
+        if defer && (type_has_unresolved_projection(&expected) || type_has_unresolved_projection(&actual)) {
+            self.pending_rigid_equalities.push(PendingRigidEquality { expected, actual, span });
+            return Ok(());
+        }
+        let mut substitution = CallLifetimeSubstitution { outlives: self.ambient_outlives.clone(), ..Default::default() };
         let aligned = match align_lifetime_types(
             &expected,
             &actual,
@@ -8102,6 +8755,7 @@ impl Elaborator<'_> {
                 return Err(());
             }
         };
+        self.solve_call_lifetime_equalities(&mut substitution, span)?;
         if self.inference.unify(aligned, actual).is_err() {
             Err(())
         } else {
@@ -8111,9 +8765,9 @@ impl Elaborator<'_> {
 
     /// Open one callable's lifetime binders, prove each reference argument
     /// against the parameter it enters, then substitute the resulting region
-    /// evidence into its result/effect contract. This is the sole point where
-    /// declaration generic lifetimes and HRTB depth-zero binders become caller
-    /// lifetimes.
+    /// evidence into its result/effect contract. Omitted declaration regions
+    /// have distinct inference cells; only HRTB depth-zero binders are opened
+    /// here. A caller-owned Generic region is never a new callee binder.
     fn instantiate_call_lifetimes(
         &mut self,
         parameters: Vec<Type>,
@@ -8122,15 +8776,21 @@ impl Elaborator<'_> {
         arguments: &[CoreId],
         span: Span,
         unsafe_reference_result: Option<Lifetime>,
+        mode: LifetimeMode,
     ) -> Result<(
         Vec<Type>,
         Type,
         crate::types::EffectRow,
         CallLifetimeSubstitution,
     ), ()> {
-        let mut substitution = CallLifetimeSubstitution::default();
+        let mut substitution = CallLifetimeSubstitution {
+            preserve_free_generics: matches!(mode, LifetimeMode::InstantiateBound),
+            outlives: self.ambient_outlives.clone(),
+            ..CallLifetimeSubstitution::default()
+        };
         let mut aligned_parameters = Vec::with_capacity(parameters.len());
         for (parameter, argument) in parameters.iter().zip(arguments) {
+            let parameter = self.inference.zonk(parameter.clone()).unwrap_or_else(|_| parameter.clone());
             let raw_actual = self.expressions[argument.0 as usize].ty.clone();
             // A local can retain a solved inference variable in an otherwise
             // structural nominal application until Typed Core is sealed. The
@@ -8144,10 +8804,10 @@ impl Elaborator<'_> {
                 .zonk(raw_actual.clone())
                 .unwrap_or(raw_actual);
             let aligned = match align_lifetime_types(
-                parameter,
+                &parameter,
                 &actual,
                 &mut substitution,
-                LifetimeMode::Instantiate,
+                mode,
                 0,
             ) {
                 Ok(value) => value,
@@ -8156,6 +8816,7 @@ impl Elaborator<'_> {
                     return Err(());
                 }
             };
+            self.solve_call_lifetime_equalities(&mut substitution, span)?;
             aligned_parameters.push(aligned);
         }
         // Only an explicitly unsafe direct-reference result may choose a
@@ -8163,8 +8824,14 @@ impl Elaborator<'_> {
         // bindings always win; this does not lengthen an ordinary caller loan.
         if let (Some(selected), Type::Reference { lifetime, .. }) = (unsafe_reference_result, &result) {
             match lifetime {
-                Lifetime::Generic(index) => { substitution.generics.entry(*index).or_insert(selected); }
+                Lifetime::Generic(index) if !substitution.preserve_free_generics => { substitution.generics.entry(*index).or_insert(selected); }
                 Lifetime::Bound { depth: 0, index } => { substitution.bounds.entry(*index).or_insert(selected); }
+                Lifetime::Infer(_) => {
+                    if self.inference.unify_lifetimes(*lifetime, selected).is_err() {
+                        self.lifetime_error(span, LifetimeError::UnsatisfiedOutlives);
+                        return Err(());
+                    }
+                }
                 _ => {}
             }
         }
@@ -8183,6 +8850,20 @@ impl Elaborator<'_> {
             }
         };
         Ok((aligned_parameters, result, effects, substitution))
+    }
+
+    fn solve_call_lifetime_equalities(
+        &mut self,
+        substitution: &mut CallLifetimeSubstitution,
+        span: Span,
+    ) -> Result<(), ()> {
+        for (left, right) in std::mem::take(&mut substitution.inference_equalities) {
+            if self.inference.unify_lifetimes(left, right).is_err() {
+                self.lifetime_error(span, LifetimeError::UnsatisfiedOutlives);
+                return Err(());
+            }
+        }
+        Ok(())
     }
 
     fn lifetime_error(&mut self, span: Span, error: LifetimeError) {
@@ -8210,6 +8891,7 @@ impl Elaborator<'_> {
         span: Span,
         bindings: Option<&std::collections::BTreeMap<crate::pattern::BinderKey, String>>,
     ) -> CorePattern {
+        let subject = self.inference.resolve(subject);
         match decision {
             PatternDecision::Any => CorePattern::Any,
             PatternDecision::Bind(key) => bindings
@@ -8244,8 +8926,8 @@ impl Elaborator<'_> {
                         .collect(),
                 )
             }
-            PatternDecision::Array(values) => {
-                let Type::Array(element) = subject else {
+            PatternDecision::Array { elements: values, rest } => {
+                let Some(element) = subject.array_element().cloned() else {
                     self.error(
                         span,
                         "G4146",
@@ -8255,10 +8937,11 @@ impl Elaborator<'_> {
                     return CorePattern::Error;
                 };
                 CorePattern::Array {
-                    element: (*element).clone(),
+                    rest,
+                    element: element.clone(),
                     elements: values
                         .into_iter()
-                        .map(|value| self.core_pattern(value, (*element).clone(), span, bindings))
+                        .map(|value| self.core_pattern(value, element.clone(), span, bindings))
                         .collect(),
                 }
             }
@@ -8412,6 +9095,12 @@ impl Elaborator<'_> {
             }
             return self.alloc(CoreKind::Local(path[0].clone()), ty, span);
         }
+        if path.len() == 1 && let Some((index, kind)) = self.const_parameters.get(&path[0]).copied() {
+            let Some(scalar) = kind.integer_scalar() else {
+                return self.fail(span, "G4104", "this const domain has no scalar runtime value");
+            };
+            return self.alloc(CoreKind::ConstValue(GenericArgument::ConstGeneric { index, kind }), Type::Scalar(scalar), span);
+        }
         match self
             .index
             .resolve_path(DefinitionNamespace::Value, self.module, &path)
@@ -8447,14 +9136,12 @@ impl Elaborator<'_> {
                                 (_, crate::GenericKind::EffectRow) => {
                                     GenericArgument::EffectRow(self.inference.fresh_effects())
                                 }
-                                // Preserve declaration-region identity in the
-                                // unopened callable contract. `call` opens it
-                                // against the actual arguments after freezing
-                                // reference provenance; replacing it with
-                                // `Elided` here would make two distinct generic
-                                // lifetimes indistinguishable before that proof.
-                                (index, crate::GenericKind::Lifetime) => {
-                                    GenericArgument::Lifetime(Lifetime::Generic(index as u32))
+                                // Keep each omitted region distinct while
+                                // input/result constraints infer its value.
+                                // A rigid Generic here would be indistinguishable
+                                // from an explicit enclosing lifetime argument.
+                                (_, crate::GenericKind::Lifetime) => {
+                                    GenericArgument::Lifetime(self.inference.fresh_lifetime())
                                 }
                                 (_, crate::GenericKind::Const(kind)) => {
                                     self.inference.fresh_const(*kind)
@@ -8521,8 +9208,7 @@ impl Elaborator<'_> {
                         }) => {
                             let arguments = generic_kinds
                                 .iter()
-                                .enumerate()
-                                .map(|(index, kind)| match kind {
+                                .map(|kind| match kind {
                                     crate::GenericKind::Type => {
                                         GenericArgument::Type(self.inference.fresh())
                                     }
@@ -8530,7 +9216,7 @@ impl Elaborator<'_> {
                                         GenericArgument::EffectRow(self.inference.fresh_effects())
                                     }
                                     crate::GenericKind::Lifetime => {
-                                        GenericArgument::Lifetime(Lifetime::Generic(index as u32))
+                                        GenericArgument::Lifetime(self.inference.fresh_lifetime())
                                     }
                                     crate::GenericKind::Const(kind) => {
                                         self.inference.fresh_const(*kind)
@@ -8762,7 +9448,8 @@ impl Elaborator<'_> {
                     *argument = GenericArgument::Lifetime(*lifetime);
                 }
             }
-            if self.inference.unify(declared, provided).is_err() {
+            if self.solve_call_lifetime_equalities(&mut lifetimes, span).is_err()
+                || self.inference.unify(declared, provided).is_err() {
                 return Some(self.fail(
                     span,
                     "G4184",
@@ -9027,13 +9714,29 @@ impl Elaborator<'_> {
                     self.recovered = true;
                     return CorePlace::Error;
                 };
+                if !self.check_local_mutability(name, span) {
+                    return CorePlace::Error;
+                }
                 CorePlace::Local {
                     name: name.clone(),
-                    ty,
+                    ty: self.inference.resolve_type_structure(ty),
                 }
             }
             ExprKind::Field { base, name } => {
                 let base = self.assignment_place(*base, expression.span);
+                if let Type::Tuple(fields) = base.ty() {
+                    let Some((index, ty)) = name.parse::<usize>().ok()
+                        .and_then(|index| fields.get(index).cloned().map(|ty| (index, ty)))
+                    else {
+                        self.error(span, "G4139", "tuple does not declare the assigned field index");
+                        self.recovered = true;
+                        return CorePlace::Error;
+                    };
+                    return CorePlace::Field {
+                        base: Box::new(base), index: index as u32,
+                        field_count: fields.len() as u32, ty,
+                    };
+                }
                 let Type::Nominal {
                     definition,
                     arguments,
@@ -9070,7 +9773,7 @@ impl Elaborator<'_> {
                     self.error(
                         span,
                         "G4140",
-                        "assignment accesses a private field outside its declaring source entry",
+                        "assignment accesses a private field outside its declaring module",
                     );
                     self.recovered = true;
                     return CorePlace::Error;
@@ -9159,25 +9862,76 @@ impl Elaborator<'_> {
             self.recovered = true;
             return None;
         }
-        let defaults = self.index.type_generic_defaults(definition).unwrap_or(&[]);
+        let defaults = self.signatures.generic_defaults.get(&definition).map(Vec::as_slice).unwrap_or(&[]);
         let mut arguments = Vec::with_capacity(kinds.len());
         for (index, kind) in kinds.into_iter().enumerate() {
             if let Some(default) = defaults.get(index).and_then(Option::as_ref) {
-                arguments.push(instantiate_nominal_default(default, &arguments));
+                arguments.push(self.nominal_default_argument(default, &arguments, kind, span));
                 continue;
             }
             arguments.push(match kind {
                 crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
-                crate::GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow::empty()),
+                crate::GenericKind::EffectRow => GenericArgument::EffectRow(self.inference.fresh_effects()),
                 crate::GenericKind::Lifetime => GenericArgument::Lifetime(self.inference.fresh_lifetime()),
-                crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
-                    index: index as u32,
-                    kind,
-                },
+                crate::GenericKind::Const(kind) => self.inference.fresh_const(kind),
             });
         }
         Some(arguments)
     }
+    fn nominal_default_argument(
+        &mut self,
+        default: &GenericArgument,
+        earlier: &[GenericArgument],
+        kind: crate::GenericKind,
+        span: Span,
+    ) -> GenericArgument {
+        if integer_default_flags(default).0 {
+            let resolved = earlier.iter().cloned()
+                .map(|argument| self.inference.zonk_generic_argument(argument))
+                .collect::<Result<Vec<_>, _>>();
+            if let Ok(earlier) = resolved {
+                let value = instantiate_nominal_default(default, &earlier);
+                if integer_default_flags(&value).1 {
+                    self.error(span, "G4185", "nominal integer default is invalid after substitution");
+                    self.recovered = true;
+                }
+                return value;
+            }
+            let target = match kind {
+                crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
+                crate::GenericKind::EffectRow => GenericArgument::EffectRow(self.inference.fresh_effects()),
+                crate::GenericKind::Lifetime => GenericArgument::Lifetime(self.inference.fresh_lifetime()),
+                crate::GenericKind::Const(kind) => self.inference.fresh_const(kind),
+            };
+            self.pending_integer_defaults.push(PendingIntegerDefault {
+                default: default.clone(), earlier: earlier.to_vec(), target: target.clone(), kind, span,
+            });
+            return target;
+        }
+        instantiate_nominal_default(default, earlier)
+    }
+
+    fn retry_integer_default(&mut self, check: PendingIntegerDefault, allow_defer: bool) {
+        let earlier = check.earlier.iter().cloned()
+            .map(|argument| self.inference.zonk_generic_argument(argument))
+            .collect::<Result<Vec<_>, _>>();
+        let earlier = match earlier {
+            Ok(earlier) => earlier,
+            Err(_) if allow_defer => { self.pending_integer_defaults.push(check); return; }
+            Err(_) => {
+                self.error(check.span, "G4116", "cannot resolve earlier arguments of a structural integer default");
+                self.recovered = true;
+                return;
+            }
+        };
+        let value = instantiate_nominal_default(&check.default, &earlier);
+        if integer_default_flags(&value).1 || !generic_argument_matches_kind(&value, check.kind)
+            || self.inference.unify_generic_arguments(vec![check.target], vec![value]).is_err() {
+            self.error(check.span, "G4185", "nominal integer default is invalid or differs from its required argument");
+            self.recovered = true;
+        }
+    }
+
     /// A replayed continuation may use an enclosing label in its clause
     /// *after* all resumed activations have returned. What is unsound is a
     /// transfer in the residual region itself: replaying that continuation
@@ -9254,6 +10008,11 @@ impl Elaborator<'_> {
                     return self.fail(span, "G4122", "unresolved record constructor type");
                 }
             };
+        if matches!(self.signatures.definitions.get(&definition), Some(ElaboratedHeader::Nominal {
+            layout: crate::signature::ElaboratedNominalLayout::TupleStruct(_), ..
+        })) {
+            return self.fail(span, "G4410", "tuple struct construction requires parentheses");
+        }
         let Some(arguments) = self.nominal_arguments(definition, &source_arguments, span) else {
             return self.fail(
                 span,
@@ -9294,7 +10053,7 @@ impl Elaborator<'_> {
                 self.error(
                     span,
                     "G4140",
-                    "record construction names a private field outside its declaring source entry",
+                    "record construction names a private field outside its declaring module",
                 );
                 self.recovered = true;
                 continue;
@@ -9445,7 +10204,7 @@ impl Elaborator<'_> {
                 return Some(self.fail(
                     span,
                     "G4140",
-                    "enum record construction names a private field outside its declaring source entry",
+                    "enum record construction names a private field outside its declaring module",
                 ));
             }
             let value = self.expression_expected(value, Some(field.ty.clone()));
@@ -9485,14 +10244,31 @@ impl Elaborator<'_> {
     }
     fn field(&mut self, base: ExprId, name: String, span: Span) -> CoreId {
         let base = self.expression(base);
+        // Handler result inference can already have solved this local's
+        // type while its Core node still carries the original variable.
+        let base_ty = self.expressions[base.0 as usize].ty.clone();
+        let base_ty = self.inference.zonk(base_ty.clone()).unwrap_or(base_ty);
         // Field syntax automatically projects through a reference, but keep
         // the explicit Core dereference so MIR can reborrow the selected
         // payload rather than materializing or moving the whole enum.
-        let base = match self.expressions[base.0 as usize].ty.clone() {
+        let base = match base_ty.clone() {
             Type::Reference { referent, .. } => self.alloc(CoreKind::Deref(base), *referent, span),
             _ => base,
         };
-        let base_ty = self.expressions[base.0 as usize].ty.clone();
+        let base_ty = match base_ty {
+            Type::Reference { referent, .. } => *referent,
+            ty => ty,
+        };
+        if let Type::Tuple(fields) = &base_ty {
+            let Some((index, ty)) = name.parse::<usize>().ok()
+                .and_then(|index| fields.get(index).cloned().map(|ty| (index, ty)))
+            else {
+                return self.fail(span, "G4129", "tuple does not declare the requested field index");
+            };
+            return self.alloc(CoreKind::Field {
+                base, index: index as u32, field_count: fields.len() as u32,
+            }, ty, span);
+        }
         let Type::Nominal {
             definition,
             arguments,
@@ -9532,7 +10308,7 @@ impl Elaborator<'_> {
             return self.fail(
                 span,
                 "G4140",
-                "field projection accesses a private field outside its declaring source entry",
+                "field projection accesses a private field outside its declaring module",
             );
         }
         // Layout instantiation can turn an interface-owned projection into a
@@ -9555,6 +10331,11 @@ impl Elaborator<'_> {
     /// run after a field has been moved out, so safe source may only transfer
     /// such a value as a whole (or use a legal zero-use destruction path).
     fn type_has_custom_drop(&mut self, ty: &Type) -> bool {
+        let ty = self.inference.zonk(ty.clone()).unwrap_or_else(|_| ty.clone());
+        // Numeric/contextual inference has not selected a concrete owner yet.
+        // PlaceFlow repeats this check on every owned projection and pattern
+        // after Core types are frozen, so postponement cannot admit a move.
+        if type_contains_inference(&ty) { return false; }
         // A destructor is not a nominal declaration property: an impl with a
         // `where` clause applies only to the instantiations for which trait
         // selection proves that clause.  Match cleanup lowering's selected
@@ -9563,19 +10344,8 @@ impl Elaborator<'_> {
         // Keep unknown selection conservative: moving a field would make a
         // subsequently selected destructor observe an incomplete aggregate.
         let assumptions = self.ambient_trait_solver_assumptions();
-        !matches!(
-            self.trait_query().solve_with_assumptions(
-                TraitGoal {
-                    relation: crate::ElaboratedTraitReference {
-                        definition: crate::resolution::language_drop_trait_definition(),
-                        arguments: Vec::new(),
-                    },
-                    subject: ty.clone(),
-                },
-                &assumptions,
-            ),
-            TraitAnswer::NoSolution | TraitAnswer::Refuted { .. }
-        )
+        let signatures = self.signatures;
+        crate::destruction::custom_drop_may_apply(signatures, self.trait_query(), &ty, &assumptions)
     }
     /// Return the payload layout of a selected enum variant only while the
     /// enclosing positive refinement proves that this exact Core place has
@@ -9631,7 +10401,7 @@ impl Elaborator<'_> {
                                     .unwrap_or_else(|| index.to_string()),
                                 ty: ty.clone(),
                                 private_authority: declared
-                                    .and_then(|field| field.private_authority),
+                                    .and_then(|field| field.private_authority.clone()),
                             }
                         })
                         .collect(),
@@ -9962,7 +10732,43 @@ impl Elaborator<'_> {
         let Some(receiver) = values.first().copied() else {
             return self.fail(span, "G4117", "operator has no receiver operand");
         };
-        let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
+        let raw_subject = self.expressions[receiver.0 as usize].ty.clone();
+        if self.inference.has_numeric_constraint(raw_subject.clone()) {
+            let subject = self.inference.resolve(raw_subject.clone());
+            let candidates = self.index.visible_definitions(DefinitionNamespace::Trait, self.module)
+                .into_iter().filter(|definition| matches!(
+                    self.signatures.definitions.get(definition),
+                    Some(ElaboratedHeader::Trait(header))
+                        if header.methods.get(&operator).is_some_and(|method| method.parameters.len() == values.len())
+                )).collect::<Vec<_>>();
+            if let [definition] = candidates.as_slice() {
+                let Some(ElaboratedHeader::Trait(header)) = self.signatures.definitions.get(definition) else { unreachable!() };
+                let trait_kinds = header.generic_kinds.clone();
+                let trait_arguments = self.inferred_method_generic_arguments(&trait_kinds);
+                let relation = crate::ElaboratedTraitReference { definition: *definition, arguments: trait_arguments.clone() };
+                let kinds = self.trait_query().method_generic_kinds(&relation, &operator).unwrap_or_default();
+                let method_arguments = self.inferred_method_generic_arguments(&kinds);
+                if let Some(signature) = self.trait_query().declared_method_signature(
+                    TraitGoal { relation: relation.clone(), subject: subject.clone() },
+                    &operator, &method_arguments,
+                ) {
+                    let deferred = DeferredTraitMethod { relation, subject, name: operator.clone() };
+                    let placeholder = Self::deferred_trait_method_placeholder(&deferred);
+                    let callee = self.alloc(CoreKind::TraitMethod {
+                        evidence: placeholder, method: placeholder, trait_arguments,
+                        method_arguments, deferred: Some(deferred),
+                    }, Type::Callable {
+                        safety: signature.safety, lifetime_binders: 0,
+                        parameters: signature.parameters.clone(), result: Box::new(signature.result.clone()),
+                        effects: signature.effects.clone(), invocation: signature.invocation,
+                    }, span);
+                    let call = self.call(callee, values, span);
+                    self.check_callable_contract_bounds(signature, None, span);
+                    return call;
+                }
+            }
+        }
+        let subject = self.zonk_type(raw_subject, span);
         let mut selected = Vec::new();
         let mut solver_ambiguous = false;
         let mut solver_overflow = false;
@@ -10243,16 +11049,40 @@ impl Elaborator<'_> {
         })
     }
 
+    fn immediate_closure_call(&mut self, callee: ExprId, arguments: Vec<ExprId>, result: Option<Type>, span: Span) -> CoreId {
+        // Compact callees have no parameter annotations. Their supplied
+        // arguments must constrain those parameters before operator/trait
+        // selection checks the body. This is elaboration order only: the
+        // resulting Call still evaluates its callee before its arguments.
+        let arguments = arguments.into_iter().map(|argument| self.expression(argument)).collect::<Vec<_>>();
+        let parameters = arguments.iter().map(|argument| self.expressions[argument.0 as usize].ty.clone()).collect();
+        let result = result.unwrap_or_else(|| self.inference.fresh());
+        let contract = Type::Callable {
+            safety: crate::Safety::Safe, lifetime_binders: 0, parameters,
+            result: Box::new(result), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
+        };
+        let callee = self.expression_expected(callee, Some(contract));
+        self.call(callee, arguments, span)
+    }
+
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
         self.call_with_expected(callee, arguments, span, None)
     }
 
     fn call_with_expected(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span, expected: Option<&Type>) -> CoreId {
         let callable = self.expressions[callee.0 as usize].ty.clone();
-        let callable = match callable {
-            callable @ Type::Callable { .. } => callable,
+        // The application and the callee's frozen contract must retain the
+        // same selected associated types, including recursive generic tails.
+        // Normalizing only the result would leave a later invoke boundary
+        // comparing Wrapper<I>::Item with the already selected I::Item.
+        let callable = self.normalize_selectable_type_projections(callable);
+        if matches!(callable, Type::Callable { .. }) {
+            self.expressions[callee.0 as usize].ty = callable.clone();
+        }
+        let (callable, lifetime_mode) = match callable {
+            callable @ Type::Callable { .. } => (callable, LifetimeMode::InstantiateBound),
             value => match self.callable_contract_from_ambient_fn_bound(&value) {
-                Some(callable) => callable,
+                Some(callable) => (callable, LifetimeMode::InstantiateBound),
                 None => return self.fail(span, "G4105", "called expression is not callable"),
             },
         };
@@ -10280,6 +11110,11 @@ impl Elaborator<'_> {
                 "call argument count does not match callable signature",
             );
         }
+        // Some lowered calls (operators and selected methods) already have
+        // Core operands and bypass expression-level contextual elaboration.
+        let arguments = arguments.into_iter().zip(&parameters)
+            .map(|(argument, parameter)| self.reference_reborrow_expected(argument, parameter))
+            .collect::<Vec<_>>();
         // Preserve the declaration-owned lifetime relation before opening the
         // callable into caller-local (usually elided) regions.  Two distinct
         // generic or higher-ranked regions can legitimately both become
@@ -10296,7 +11131,7 @@ impl Elaborator<'_> {
             } else { None }
         } else { None };
         let Ok((parameters, result, effects, lifetime_substitution)) =
-            self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span, unsafe_reference_result)
+            self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span, unsafe_reference_result, lifetime_mode)
         else {
             return self.fail(
                 span,
@@ -10304,20 +11139,13 @@ impl Elaborator<'_> {
                 "call cannot satisfy its reference lifetime contract",
             );
         };
-        // A named callee lifetime is part of the callee's frozen generic
-        // application as well as its parameter/result contract.  Preserve
-        // the region inferred from the actual argument in that application;
-        // otherwise an ordinary call such as `HashMap::get(&map, &key)`
-        // retains a synthetic `Lifetime::Generic(0)` after its result has
-        // already become `&'elided V`. Instance discovery then sees a false
-        // non-concrete substitution and links the generic template instead
-        // of its executable specialization.
-        // A selected trait method carries its own method application too.
-        // Leaving that application in declaration-region coordinates has
-        // the same failure: its body and nested generic calls cannot be
-        // materialized even though the invocation's borrow contract passed.
-        // Trait relation arguments remain the solver-selected identity;
-        // only the invoked method's arguments are opened here.
+        // A callee's application and value contract share the same omitted
+        // lifetime inference cells, so sealing also closes function aliases
+        // whose arguments are learned only through later local invocation.
+        // Apply any opened bound-region substitution while preserving fixed
+        // caller regions in explicit applications. A selected trait method
+        // carries a method application too; its relation arguments remain
+        // the solver-selected identity, not declaration-owned call binders.
         let callee_arguments = match &mut self.expressions[callee.0 as usize].kind {
             CoreKind::Function { arguments, .. } => Some(arguments),
             CoreKind::TraitMethod { method_arguments, .. } => Some(method_arguments),
@@ -10394,14 +11222,15 @@ impl Elaborator<'_> {
                     (&parameter, &actual),
                     (Type::Callable { .. }, Type::Callable { .. })
                 );
+                let mismatch_message = if callable_lifetime_mismatch {
+                    "callable argument does not satisfy its reference lifetime contract".to_owned()
+                } else {
+                    format!("call argument type does not match parameter: expected {parameter:?}, found {actual:?}")
+                };
                 self.error(
                     span,
                     if callable_lifetime_mismatch { "G5017" } else { "G4107" },
-                    if callable_lifetime_mismatch {
-                        "callable argument does not satisfy its reference lifetime contract"
-                    } else {
-                        "call argument type does not match parameter"
-                    },
+                    &mismatch_message,
                 );
                 self.recovered = true;
             }
@@ -10419,6 +11248,7 @@ impl Elaborator<'_> {
         // subsequent scalar operator observes a stale inference variable and
         // incorrectly falls through to trait selection.
         let result = self.inference.zonk(result.clone()).unwrap_or(result);
+        let result = self.normalize_selectable_type_projections(result);
         let strict_operands = std::iter::once(callee)
             .chain(arguments.iter().copied())
             .collect::<Vec<_>>();
@@ -10429,8 +11259,11 @@ impl Elaborator<'_> {
             .all(|value| self.expressions[value.0 as usize].ty != Type::Never);
         let result = self.strict_result(&strict_operands, result);
         if reaches_call {
-            self.check_effects(&effects, span);
+            // Associated equalities can determine a row solely from an
+            // actual callback. Do not minimize an unconstrained outward row
+            // against permissions before those ordinary constraints exist.
             self.check_call_where_bounds(callee, &arguments, span);
+            self.check_effects(&effects, span);
         }
         let reference_shape = call_reference_shape(self.signatures, &result, &reference_contract);
         self.alloc(
@@ -10440,6 +11273,7 @@ impl Elaborator<'_> {
                 reference_contract: reference_contract.clone(),
                 reference_origin: reference_contract,
                 reference_shape,
+                mandatory_tail: false,
             },
             result,
             span,
@@ -10461,43 +11295,17 @@ impl Elaborator<'_> {
             );
         };
         let argument = self.expression(*argument);
-        let witness = self.expressions[argument.0 as usize].ty.clone();
-        let Type::Nominal {
-            definition,
-            arguments,
-        } = witness
-        else {
+        let witness = self.inference.resolve_type_structure(self.expressions[argument.0 as usize].ty.clone());
+        let bounds = self.ambient_where_bounds.iter().map(|(subject, relation)|
+            (self.inference.resolve_type_structure(subject.clone()), relation.clone())).collect::<Vec<_>>();
+        if !available_release_is_authorized(&witness, &bounds) {
             return self.fail(
                 span,
                 "G4188",
-                "intrinsic `available_to_unit` requires compiler-generated `Available` evidence",
-            );
-        };
-        let Some(GenericArgument::Type(environment)) = arguments.get(1) else {
-            return self.fail(
-                span,
-                "G4188",
-                "intrinsic `available_to_unit` requires compiler-generated `Available` evidence",
-            );
-        };
-        let has_affine_erasure_proof = definition == crate::intrinsic_available_type_definition()
-            && self.ambient_where_bounds.iter().any(|(subject, relation)| {
-                self.inference.zonk(subject.clone()).is_ok_and(|subject| {
-                    subject == *environment
-                        && relation.definition == crate::resolution::language_use_trait_definition()
-                        && relation.arguments
-                            == [GenericArgument::ConstQuantity(crate::Quantity::AFFINE)]
-                })
-            });
-        if !has_affine_erasure_proof {
-            return self.fail(
-                span,
-                "G4188",
-                "releasing `Available<E>` requires an affine `E: Use<[0,1]>` proof",
+                "releasing compiler-generated `Available<'e,E>` requires exact `E: Environment<'e>` and affine `E: Use<[0,1]>` proofs",
             );
         }
-        let unit = self.alloc(CoreKind::Tuple(vec![]), Type::Unit, span);
-        self.alloc(CoreKind::Block(vec![argument, unit]), Type::Unit, span)
+        self.alloc(CoreKind::ReleaseAvailable(argument), Type::Unit, span)
     }
 
     /// Elaborate direct-call operands left-to-right while carrying each
@@ -10546,7 +11354,18 @@ impl Elaborator<'_> {
                     .unwrap_or(argument);
                 if let Some(parameter) = parameter {
                     let actual = self.expressions[argument.0 as usize].ty.clone();
-                    let _ = self.inference.unify(parameter, actual);
+                    // A declared elided region is a call-site relation, not
+                    // an equality with the caller's named region. Align it
+                    // before propagating element/type evidence to the next
+                    // operand; otherwise the first region mismatch prevents
+                    // `Slice<'a, u8>` from fixing T in `compare<T>(a, b".")`.
+                    // The final call still checks all operands jointly.
+                    let mut regions = CallLifetimeSubstitution::default();
+                    if let Ok(aligned) = align_lifetime_types(&parameter, &actual, &mut regions, LifetimeMode::Instantiate, 0) {
+                        if self.solve_call_lifetime_equalities(&mut regions, self.body.expression(value).span).is_ok() {
+                            let _ = self.inference.unify(aligned, actual);
+                        }
+                    }
                 }
                 argument
             })
@@ -10618,6 +11437,33 @@ impl Elaborator<'_> {
                 result: Box::new(output.value.clone()),
                 effects,
                 invocation: crate::Quantity::ONCE,
+            });
+        }
+        for bound in &self.ambient_universal_bounds {
+            if !crate::is_intrinsic_callable_trait(&bound.relation) || bound.subject != *value {
+                continue;
+            }
+            // When the receiver is independent of the quantified regions,
+            // universal Fn evidence is a higher-ranked callable contract.
+            // Keep the binder on that contract: each invocation opens it
+            // independently using the ordinary call-lifetime checker.
+            if crate::types::regions::open_argument(GenericArgument::Type(bound.subject.clone()), |_| None).is_none() {
+                continue;
+            }
+            let parameters = match bound.relation.arguments.as_slice() {
+                [GenericArgument::Type(Type::Tuple(parameters))] => parameters.clone(),
+                [GenericArgument::Type(Type::Unit)] => vec![],
+                _ => continue,
+            };
+            let [output] = bound.type_bindings.as_slice() else { continue; };
+            let effects = match bound.effect_bindings.as_slice() {
+                [] => EffectRow::empty(),
+                [binding] => binding.value.clone(),
+                _ => continue,
+            };
+            return Some(Type::Callable {
+                safety: crate::Safety::Safe, lifetime_binders: bound.lifetime_binders,
+                parameters, result: Box::new(output.value.clone()), effects, invocation: crate::Quantity::ONCE,
             });
         }
         None
@@ -11024,7 +11870,7 @@ impl Elaborator<'_> {
             Some((receiver_source, remaining_arguments)) => {
                 let receiver = self.expression(*receiver_source);
                 let receiver_type =
-                    self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
+                    self.inference.resolve(self.expressions[receiver.0 as usize].ty.clone());
                 // Retain the legacy first-argument fallback for declarations
                 // whose first parameter does not mention Self. For Self and
                 // borrowed Self, the declaration determines the subject below.
@@ -11042,7 +11888,7 @@ impl Elaborator<'_> {
                         "receiver-less qualified trait method calls require an expected result type",
                     ));
                 };
-                (None, self.zonk_type(expected_result, span), None, &[] as &[ExprId])
+                (None, self.inference.resolve(expected_result), None, &[] as &[ExprId])
             }
         };
         let method_arguments = if operation_arguments.is_empty() {
@@ -11084,6 +11930,26 @@ impl Elaborator<'_> {
             selected_subject = inferred;
             peeled_subject = None;
         }
+        // A first parameter independent of Self can still constrain the
+        // numeric fallback receiver (for example `Trait<i64>::f(value: T)`).
+        // Apply that declaration constraint before implementation selection.
+        if receiver.is_some()
+            && let Some(declaration) = self.trait_query().declared_method_signature(
+                TraitGoal { relation: relation.clone(), subject: selected_subject.clone() },
+                name, &method_arguments,
+            )
+            && let Some(parameter) = declaration.parameters.first()
+        {
+            let _ = self.inference.unify(parameter.clone(), subject.clone());
+        }
+        selected_subject = self.inference.resolve_type_structure(selected_subject);
+        if self.inference.zonk(selected_subject.clone()).is_err() {
+            self.trait_solver.constrain_unique_implementation_head(
+                &TraitGoal { relation: relation.clone(), subject: selected_subject.clone() },
+                &mut self.inference,
+            );
+            selected_subject = self.inference.resolve_type_structure(selected_subject);
+        }
         let mut answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
                 relation: relation.clone(),
@@ -11113,12 +11979,20 @@ impl Elaborator<'_> {
         // a concrete implementation.  Keep that request deferred exactly as
         // generic operator dispatch does; instance materialization supplies
         // the eventual implementation evidence.
-        if matches!(answer, TraitMethodAnswer::NoSolution) {
+        let unresolved_subject = self.inference.zonk(selected_subject.clone()).is_err();
+        if unresolved_subject || matches!(answer, TraitMethodAnswer::NoSolution) {
             let goal = TraitGoal {
                 relation: relation.clone(),
                 subject: selected_subject.clone(),
             };
-            if assumptions.contains(&goal)
+            // A lexical Child bound proves its inherited Parent methods too.
+            // Ask the solver for that entailment; an exact-list membership
+            // check loses instantiated supertrait edges. The callable stays
+            // deferred until specialization selects the actual implementation.
+            if (unresolved_subject || matches!(
+                self.trait_query().solve_with_assumptions(goal.clone(), &assumptions),
+                TraitAnswer::Proven { .. },
+            ))
                 && let Some(signature) = self.trait_query().declared_method_signature(
                     goal.clone(),
                     name,
@@ -11546,13 +12420,13 @@ impl Elaborator<'_> {
         // `Bool` carrier (`Result<(), ()>`): a terminal arm written as
         // `true`/`false` otherwise falls back to the legacy scalar literal
         // and only fails at the outer function boundary.
-        let result = expected.clone().unwrap_or_else(|| self.inference.fresh());
+        let mut result = expected.clone().unwrap_or_else(|| self.inference.fresh());
         let computation = self.expression(computation);
         let computation_ty = self.expressions[computation.0 as usize].ty.clone();
-        if !matches!(computation_ty, Type::Never)
+        if completion_clauses.is_empty() && !matches!(computation_ty, Type::Never)
             && self
                 .inference
-                .unify(result.clone(), computation_ty)
+                .unify(result.clone(), computation_ty.clone())
                 .is_err()
         {
             self.error(
@@ -11562,6 +12436,32 @@ impl Elaborator<'_> {
             );
             self.recovered = true;
         }
+
+        // Infer the final result from normal completion before opening any
+        // explicit continuation's callable type. Otherwise an unannotated
+        // mixed handler tries to freeze `k` while its result is still unknown.
+        // The temporary direct handler is filled before publishing this body.
+        let normal_result = if !completion_clauses.is_empty() && computation_ty != Type::Never {
+            computation_ty
+        } else { result.clone() };
+        let handler = self.alloc(CoreKind::Handle { computation, clauses: vec![] }, normal_result, span);
+        let completion = if completion_clauses.is_empty() {
+            None
+        } else {
+            let active = std::mem::replace(&mut self.handled_effects, previous.clone());
+            let active_operations = std::mem::replace(&mut self.handled_operations, previous_operations.clone());
+            let completion = self.completion_handle_core(handler, &completion_clauses, Some(result.clone()), span, true, None);
+            self.handled_effects = active;
+            self.handled_operations = active_operations;
+            if self.expressions[completion.0 as usize].ty == Type::Never
+                && resolved.iter().all(|clause| !clause.operation.terminal
+                    && clause.source.resumption.is_none() && !clause.source.discard_resumption) {
+                // Bottom unification deliberately does not solve an inference
+                // variable. This continuation has no normal result at all.
+                result = Type::Never;
+            }
+            Some(completion)
+        };
 
         let mut core_clauses = Vec::with_capacity(resolved.len());
         for (clause_index, clause) in resolved.into_iter().enumerate() {
@@ -11833,25 +12733,55 @@ impl Elaborator<'_> {
         }
         self.handled_effects = previous;
         self.handled_operations = previous_operations;
-        let handler = self.alloc(
-            CoreKind::Handle {
-                computation,
-                clauses: core_clauses,
-            },
-            result,
-            span,
-        );
+        let operation_can_finish = core_clauses.iter().any(|clause|
+            !matches!(clause.resumption, CoreHandlerResumption::Tail { .. })
+                && self.expressions[clause.body.0 as usize].ty != Type::Never);
+        self.expressions[handler.0 as usize].kind = CoreKind::Handle { computation, clauses: core_clauses };
         self.check_handler_label_transfer_escape(handler, span);
-        if completion_clauses.is_empty() {
-            handler
+        if let Some(completion) = completion {
+            if operation_can_finish && self.expressions[completion.0 as usize].ty == Type::Never {
+                self.expressions[completion.0 as usize].ty = result;
+            }
+            completion
         } else {
-            self.completion_handle_core(handler, &completion_clauses, expected, span, true)
+            handler
         }
     }
     /// Normal-completion dispatch is a distinct Core node.  Keeping its
     /// structural patterns intact lets the MIR boundary compile an ordered
     /// decision chain, rather than conflating completion with effect operation
     /// dispatch or desugaring binders into an insufficiently expressive `let`.
+    fn pattern_let(
+        &mut self,
+        pattern: crate::body::PatternId,
+        mutable: bool,
+        annotation: Option<crate::HeaderType>,
+        value: ExprId,
+        body: Option<ExprId>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> CoreId {
+        let Some(body) = body else {
+            return self.fail(span, "G4222", "destructuring let requires a lexical block continuation");
+        };
+        let annotation = annotation.as_ref().map(|annotation| self.header_type(annotation));
+        let subject = self.expression_expected(value, annotation.clone());
+        let ty = self.expressions[subject.0 as usize].ty.clone();
+        if let Some(annotation) = annotation
+            && !matches!(ty, Type::Never)
+            && self.unify_rigid_lifetimes(annotation, ty, span).is_err()
+        {
+            self.error(span, "G4221", "let initializer does not match its declared type");
+            self.recovered = true;
+        }
+        let clause = HandlerClause {
+            completion: Some(pattern), operation_candidate: false,
+            path: vec![], effect_arguments: vec![], operation_arguments: vec![],
+            patterns: vec![], resumption: None, discard_resumption: false, body, span,
+        };
+        self.completion_handle_core(subject, &[clause], expected, span, false, Some(mutable))
+    }
+
     fn completion_handle(
         &mut self,
         computation: ExprId,
@@ -11860,7 +12790,7 @@ impl Elaborator<'_> {
         span: Span,
     ) -> CoreId {
         let subject = self.expression(computation);
-        self.completion_handle_core(subject, clauses, expected, span, false)
+        self.completion_handle_core(subject, clauses, expected, span, false, None)
     }
 
     fn completion_handle_core(
@@ -11870,6 +12800,7 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
         handles_operations: bool,
+        binding_mutability: Option<bool>,
     ) -> CoreId {
         // Structural value patterns contribute ordinary type constraints.
         // A polymorphic initializer may leave an uninhabited variant's type
@@ -11879,13 +12810,9 @@ impl Elaborator<'_> {
         for pattern in clauses.iter().filter_map(|clause| clause.completion) {
             self.constrain_constant_pattern_type(pattern, &subject_context);
         }
-        // Operation-arm inference has already established the handler result
-        // by the time normal-completion dispatch is built.  Resolve that
-        // result before elaborating literal or structural patterns: the
-        // pattern elaborator deliberately compares concrete subjects and
-        // would otherwise reject a valid refutable arm against an unresolved
-        // inference variable.
-        let subject_ty = self.zonk_type(self.expressions[subject.0 as usize].ty.clone(), span);
+        // Patterns and their bodies share the subject's inference variables;
+        // numeric widths are finalized only after all body constraints arrive.
+        let subject_ty = self.inference.resolve(self.expressions[subject.0 as usize].ty.clone());
         let refinement = match self.expressions[subject.0 as usize].kind.clone() {
             CoreKind::PatternTest {
                 subject,
@@ -11905,7 +12832,7 @@ impl Elaborator<'_> {
                 );
             };
             let scope = self.pattern_generic_scope();
-            let elaboration = elaborate_pattern_with_scope(
+            let elaboration = elaborate_pattern_in_context(
                 self.body,
                 pattern,
                 subject_ty.clone(),
@@ -11913,12 +12840,25 @@ impl Elaborator<'_> {
                 self.signatures,
                 self.module,
                 &scope,
+                Some(&mut self.inference),
             );
             for diagnostic in &elaboration.diagnostics {
                 self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
             }
             if elaboration.recovered {
                 self.recovered = true;
+            }
+            if binding_mutability.is_some() {
+                for discarded in &elaboration.plan.discarded {
+                    if self.inference.has_numeric_constraint(discarded.clone()) { continue; }
+                    let permission = self.signatures.principal_use_interval_with_solver(discarded, &self.trait_solver)
+                        .or_else(|| self.signatures.principal_use_interval_with_bounds_and_solver(
+                            discarded, &self.ambient_where_bounds, &self.trait_solver));
+                    if !permission.is_some_and(|quantity| quantity.contains(crate::Quantity::ZERO)) {
+                        self.error(clause.span, "G4223", "discarded let-pattern value requires zero-use permission");
+                        self.recovered = true;
+                    }
+                }
             }
             let names = elaboration
                 .plan
@@ -12016,6 +12956,11 @@ impl Elaborator<'_> {
             self.locals.enter();
             for (name, ty) in &bindings {
                 self.locals.define(name.clone(), ty.clone());
+                if let Some(mutable) = binding_mutability
+                    && let Some(generation) = self.locals.binding_generation(name)
+                {
+                    self.binding_mutability.insert(generation, (mutable, clause.span));
+                }
             }
             let previous_refinement_bindings = self.active_refinement_bindings.clone();
             let previous_refinement_patterns = self.active_refinement_patterns.clone();
@@ -12042,8 +12987,17 @@ impl Elaborator<'_> {
                         .push((subject, refinement.pattern.clone()));
                 }
             }
-            let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
+            // A let suffix is the same lexical unsafe scope, whereas an
+            // explicit handler arm establishes its own callable boundary.
+            let arm_unsafe = binding_mutability.is_some() && self.unsafe_context;
+            let previous_unsafe = std::mem::replace(&mut self.unsafe_context, arm_unsafe);
             let body = self.expression_expected(clause.body, Some(result.clone()));
+            if arm_unsafe {
+                // The continuation is a parser-created lexical block. Record
+                // its inherited authority for independent Core validation,
+                // which deliberately resets authority at completion arms.
+                self.unsafe_scopes.insert(body);
+            }
             self.unsafe_context = previous_unsafe;
             self.check_refinement_capture_escapes(body, &self.active_refinement_bindings.clone());
             self.active_refinement_bindings = previous_refinement_bindings;
@@ -12085,8 +13039,12 @@ impl Elaborator<'_> {
         if !coverage.exhaustive {
             return self.fail(
                 span,
-                "G4166",
-                "completion arms do not cover every value; add a fallback or cover every finite constructor",
+                if binding_mutability.is_some() { "G4222" } else { "G4166" },
+                if binding_mutability.is_some() {
+                    "let pattern is refutable; use an exhaustive handle expression to select alternatives"
+                } else {
+                    "completion arms do not cover every value; add a fallback or cover every finite constructor"
+                },
             );
         }
         let operation_can_finish = handles_operations && matches!(
@@ -12157,7 +13115,9 @@ impl Elaborator<'_> {
             if covered_by_catch_all {
                 analysis.unreachable.push(index);
             }
-            if core_pattern_irrefutable(pattern) {
+            if core_pattern_irrefutable(pattern) || matches!((pattern, subject),
+                (CorePattern::Array { elements, rest, .. }, Type::FixedArray { .. })
+                if subject.array_accepts_pattern(elements.len(), *rest) && elements.iter().all(core_pattern_irrefutable)) {
                 covered_by_catch_all = true;
             }
         }
@@ -12250,99 +13210,7 @@ impl Elaborator<'_> {
         depth: u8,
         fuel: &mut usize,
     ) -> Option<Vec<FinitePatternValue>> {
-        const MAX_VALUES: usize = 4096;
-        const MAX_DEPTH: u8 = 16;
-        if *fuel == 0 {
-            return None;
-        }
-        *fuel -= 1;
-        if depth >= MAX_DEPTH {
-            return Some(vec![FinitePatternValue::Unknown]);
-        }
-        let values = match subject {
-            Type::Unit => Some(vec![FinitePatternValue::Unit]),
-            Type::Scalar(ScalarType::Bool) => Some(vec![
-                FinitePatternValue::Bool(false),
-                FinitePatternValue::Bool(true),
-            ]),
-            Type::Tuple(fields) => {
-                let fields = fields
-                    .iter()
-                    .map(|field| self.finite_pattern_values(field, depth + 1, fuel))
-                    .collect::<Option<Vec<_>>>()?;
-                finite_pattern_products(fields, MAX_VALUES)
-                    .map(|values| values.into_iter().map(FinitePatternValue::Tuple).collect())
-            }
-            Type::Nominal {
-                definition,
-                arguments,
-            } => match self.signatures.definitions.get(definition)? {
-                ElaboratedHeader::Nominal {
-                    layout: crate::signature::ElaboratedNominalLayout::Struct(_),
-                    ..
-                } => {
-                    let fields = self
-                        .signatures
-                        .instantiate_struct_fields_generic(*definition, arguments)
-                        .ok()?;
-                    let values = fields
-                        .iter()
-                        .map(|field| self.finite_pattern_values(&field.ty, depth + 1, fuel))
-                        .collect::<Option<Vec<_>>>()?;
-                    finite_pattern_products(values, MAX_VALUES).map(|values| {
-                        values
-                            .into_iter()
-                            .map(|fields| FinitePatternValue::Record {
-                                definition: *definition,
-                                fields,
-                            })
-                            .collect()
-                    })
-                }
-                ElaboratedHeader::Nominal {
-                    layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
-                    ..
-                } => {
-                    let mut values = vec![];
-                    let mut nodes = 0usize;
-                    for (variant, _) in variants.iter().enumerate() {
-                        let fields = self
-                            .signatures
-                            .instantiate_enum_fields_generic(*definition, arguments, variant as u32)
-                            .ok()?;
-                        let fields = fields
-                            .iter()
-                            .map(|field| self.finite_pattern_values(&field.ty, depth + 1, fuel))
-                            .collect::<Option<Vec<_>>>()?;
-                        let products = finite_pattern_products(fields, MAX_VALUES)?;
-                        if values.len().checked_add(products.len())? > MAX_VALUES {
-                            return None;
-                        }
-                        nodes = nodes.checked_add(products.len())?
-                            .checked_add(products.iter().flatten().map(finite_pattern_weight).sum())?;
-                        if nodes > 65_536 {
-                            return None;
-                        }
-                        values.extend(products.into_iter().map(|fields| {
-                            FinitePatternValue::Enum {
-                                definition: *definition,
-                                variant: variant as u32,
-                                fields,
-                            }
-                        }));
-                    }
-                    Some(values)
-                }
-                ElaboratedHeader::Nominal {
-                    layout: crate::signature::ElaboratedNominalLayout::Opaque,
-                    ..
-                } => Some(vec![FinitePatternValue::Unknown]),
-                _ => None,
-            },
-            _ => Some(vec![FinitePatternValue::Unknown]),
-        }?;
-        *fuel = fuel.checked_sub(values.iter().map(finite_pattern_weight).sum())?;
-        Some(values)
+        finite_pattern_values(self.signatures, subject, depth, fuel)
     }
     fn residual_effects(&self) -> EffectRow {
         let mut effects = self.declared_effects.clone();
@@ -12603,7 +13471,7 @@ impl Elaborator<'_> {
             .zip(operation.parameters.iter().cloned())
             .map(|(pattern, subject)| {
                 let scope = self.pattern_generic_scope();
-                let elaboration = elaborate_pattern_with_scope(
+                let elaboration = elaborate_pattern_in_context(
                     self.body,
                     pattern,
                     subject,
@@ -12611,6 +13479,7 @@ impl Elaborator<'_> {
                     self.signatures,
                     self.module,
                     &scope,
+                    Some(&mut self.inference),
                 );
                 for diagnostic in &elaboration.diagnostics {
                     self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
@@ -12885,6 +13754,22 @@ impl Elaborator<'_> {
     }
 
     fn check_effects(&mut self, effects: &EffectRow, span: Span) {
+        self.check_effects_after_inference(effects, span, true);
+    }
+
+    fn check_effects_after_inference(&mut self, effects: &EffectRow, span: Span, defer: bool) {
+        if defer && self.inference.zonk_effects_allowing_generic_tail(effects.clone()).is_err() {
+            // Keep the lexical handler authority: a handler installed later
+            // must never retroactively authorize this call.
+            let _ = self.inference.constrain_effect_subset(effects.clone(), self.declared_effects.clone());
+            if self.inference.zonk_effects_allowing_generic_tail(effects.clone()).is_err() {
+                self.pending_effect_checks.push(PendingEffectCheck {
+                    effects: effects.clone(), declared: self.declared_effects.clone(),
+                    handled: self.handled_effects.clone(), operations: self.handled_operations.clone(), span,
+                });
+                return;
+            }
+        }
         let effects = match self
             .inference
             .zonk_effects_allowing_generic_tail(effects.clone())
@@ -12919,22 +13804,12 @@ impl Elaborator<'_> {
             }
         };
         let mut effects = effects;
-        // A callable's row binder is instantiated at this call site.  This
-        // compact frontend has no explicit row argument syntax, so the
-        // caller's declared residual is the contextual argument; a closed
-        // caller selects the empty residual.  This also keeps binder slot
-        // numbers local to their declarations rather than accidentally
-        // requiring a callee's `e` to share the caller's numeric index.
-        if matches!(effects.tail, Some(crate::EffectTail::Generic(_))) {
-            effects.tail = self.declared_effects.tail;
-        }
-        if let Some(tail) = effects.tail
-            && self
-                .inference
-                .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
-                .ok()
-                .and_then(|declared| declared.tail)
-                != Some(tail)
+        // Instantiation has already mapped callee operands into the caller's
+        // binder space. Permission checking must never replace their exact
+        // row with the caller's (possibly wider) declaration.
+        if !self.inference
+            .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
+            .is_ok_and(|declared| effects.tails.is_subset(&declared.tails))
         {
             self.error(
                 span,
@@ -12955,7 +13830,7 @@ impl Elaborator<'_> {
         // an implementation for `T`.  Requiring concrete normalization here
         // would reject valid effect polymorphism (and tempt a later phase to
         // guess an impl).  `constrain_effect_subset` compares named members,
-        // delayed associated projections, and the one permitted tail with the
+        // delayed associated projections, and every row operand with the
         // same inference discipline as ordinary generic arguments.  A
         // concrete projection which is only compatible after selection simply
         // falls through to the normalization path below; executable instance
@@ -13003,27 +13878,10 @@ impl Elaborator<'_> {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                     effects.effects.extend(row.effects);
                     projections.extend(row.projections);
-                    match (effects.tail, row.tail) {
-                        (None, tail) => effects.tail = tail,
-                        (Some(left), Some(right)) if left == right => {}
-                        (Some(_), None) => {}
-                        (Some(_), Some(_)) => {
-                            self.error(
-                                span,
-                                "G4155",
-                                "normalized effect row has a conflicting outward tail",
-                            );
-                            self.recovered = true;
-                            return;
-                        }
-                    }
-                    if let Some(tail) = effects.tail
-                        && self
-                            .inference
-                            .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
-                            .ok()
-                            .and_then(|declared| declared.tail)
-                            != Some(tail)
+                    effects.tails.extend(row.tails);
+                    if !self.inference
+                        .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
+                        .is_ok_and(|declared| effects.tails.is_subset(&declared.tails))
                     {
                         self.error(span, "G4155", "normalized effect row remains open");
                         self.recovered = true;
@@ -13276,6 +14134,8 @@ impl Elaborator<'_> {
         arguments: Option<&[CoreId]>,
         span: Span,
     ) {
+        for bound in &signature.where_outlives { self.check_outlives_bound(bound.clone(), span, true); }
+        self.check_universal_callable_bounds(&signature, arguments, span);
         // RunsIn is not an ordinary globally-selectable trait.  Its concrete
         // environment type is minted by the closure elaborator, so bind that
         // evidence before attempting to zonk the rest of this call contract.
@@ -13298,21 +14158,141 @@ impl Elaborator<'_> {
         );
     }
 
+    fn check_outlives_bound(&mut self, bound: crate::OutlivesPredicate, span: Span, defer: bool) {
+        let mut unresolved = false;
+        let bound = bound.map_terms(|argument| match self.inference.zonk_generic_argument(argument.clone()) {
+            Ok(argument) => argument,
+            Err(_) => { unresolved = true; argument },
+        });
+        if unresolved && defer { self.pending_outlives.push((bound, span)); return; }
+        if unresolved || !self.trait_query().outlives_proven(&bound) {
+            self.error(span, "G4304", "call does not establish its required outlives predicate");
+            self.recovered = true;
+        }
+    }
+
+    fn check_universal_callable_bounds(
+        &mut self,
+        signature: &CallableSignature,
+        arguments: Option<&[CoreId]>,
+        span: Span,
+    ) {
+        for bound in &signature.universal_bounds {
+            if !crate::is_intrinsic_callable_trait(&bound.relation) && !crate::is_intrinsic_runs_in_trait(&bound.relation) {
+                let solver = self.trait_query().fresh_query();
+                self.pending_universal.push((bound.clone(), solver, span));
+                continue;
+            }
+            let Ok(scope) = self.inference.begin_universal_scope(bound.lifetime_binders) else {
+                self.error(span, "G5017", "invalid or exhausted universal region scope");
+                self.recovered = true;
+                continue;
+            };
+            let proof = (|| -> Result<(), (&'static str, &'static str)> {
+                let opened = bound.open(&scope).ok_or(("G5017", "universal predicate contains an out-of-scope region"))?;
+                if !crate::is_intrinsic_callable_trait(&opened.relation) {
+                    return Err(("G4198", "universal checking for this relation is not yet implemented"));
+                }
+                let subject = self.inference.resolve(opened.subject.clone());
+                let callable = match subject {
+                    Type::Reference { referent, .. } => {
+                        let referent = self.inference.resolve(*referent);
+                        // A named function has no captured receiver state.
+                        // Other borrowed receiver forms need their exact
+                        // closure Fn/RunsIn access evidence, not just a
+                        // structurally equal parameter/result type.
+                        let Some(arguments) = arguments else {
+                            return Err(("G4198", "borrowed universal Fn evidence needs a known receiver"));
+                        };
+                        let candidates = signature.parameters.iter().zip(arguments).filter_map(|(parameter, argument)| {
+                            (self.inference.resolve(parameter.clone()) == referent).then_some(*argument)
+                        }).collect::<Vec<_>>();
+                        if candidates.is_empty() || candidates.iter().any(|argument| !matches!(
+                            self.expressions[argument.0 as usize].kind, CoreKind::Function { .. }
+                        )) {
+                            return Err(("G4198", "universal borrowed Fn checking for this receiver is not yet implemented"));
+                        }
+                        referent
+                    }
+                    value => value,
+                };
+                let Type::Callable { safety, lifetime_binders, parameters, result, effects, .. } = callable else {
+                    return Err(("G4166", "universal Fn bound requires callable evidence"));
+                };
+                if safety != crate::Safety::Safe {
+                    return Err(("G4200", "unsafe callable cannot supply safe universal Fn evidence"));
+                }
+                // A higher-ranked actual callable can be instantiated anew
+                // for each rigid region chosen by the universal predicate.
+                let lifetimes = (0..lifetime_binders).map(|_| self.inference.fresh_lifetime()).collect::<Vec<_>>();
+                let open = |value| crate::types::regions::open_argument(value, |index| lifetimes.get(index as usize).copied())
+                    .ok_or(("G5017", "callable evidence has an invalid lifetime binder"));
+                let parameters = parameters.into_iter().map(|parameter| {
+                    let GenericArgument::Type(parameter) = open(GenericArgument::Type(parameter))? else { unreachable!() };
+                    Ok(parameter)
+                }).collect::<Result<Vec<_>, (&'static str, &'static str)>>()?;
+                let GenericArgument::Type(result) = open(GenericArgument::Type(*result))? else { unreachable!() };
+                let GenericArgument::EffectRow(effects) = open(GenericArgument::EffectRow(effects))? else { unreachable!() };
+                let inputs = match opened.relation.arguments.as_slice() {
+                    [GenericArgument::Type(Type::Tuple(inputs))] => inputs.clone(),
+                    [GenericArgument::Type(Type::Unit)] => vec![],
+                    _ => return Err(("G4164", "universal Fn requires exactly one tuple input argument")),
+                };
+                self.inference.unify(Type::Tuple(inputs), Type::Tuple(parameters))
+                    .map_err(|_| ("G4166", "callable inputs do not satisfy Fn for every quantified lifetime"))?;
+                for binding in opened.type_bindings {
+                    self.inference.unify(binding.value, result.clone())
+                        .map_err(|_| ("G4167", "callable output does not satisfy the universal Fn equality"))?;
+                }
+                for binding in opened.effect_bindings {
+                    self.inference.unify_effect_rows(binding.value, effects.clone())
+                        .map_err(|_| ("G4168", "callable effects do not satisfy the universal Fn equality"))?;
+                }
+                Ok(())
+            })();
+            if let Err((code, message)) = proof {
+                self.inference.abort_universal_scope(scope);
+                self.error(span, code, message);
+                self.recovered = true;
+            } else if self.inference.finish_universal_scope(scope).is_err() {
+                self.error(span, "G5017", "universal proof would leak a fresh region into outer inference");
+                self.recovered = true;
+            }
+        }
+    }
+
     fn check_nonintrinsic_associated_bindings(
         &mut self,
         type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
         effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
         span: Span,
     ) {
+        self.check_nonintrinsic_associated_bindings_after_inference(type_bindings, effect_bindings, span, true);
+    }
+
+    fn check_nonintrinsic_associated_bindings_after_inference(
+        &mut self,
+        type_bindings: Vec<crate::ElaboratedAssociatedTypeBinding>,
+        effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+        span: Span,
+        defer: bool,
+    ) {
+        let mut pending_types = vec![];
+        let mut pending_effects = vec![];
         for binding in type_bindings {
             if crate::is_intrinsic_callable_trait(&binding.relation)
                 || crate::is_intrinsic_runs_in_trait(&binding.relation)
             {
                 continue;
             }
+            self.seed_associated_type_binding(&binding);
             let Some((subject, relation, item_arguments, value)) =
                 self.zonk_associated_type_binding(&binding)
             else {
+                if defer {
+                    pending_types.push(binding);
+                    continue;
+                }
                 self.error(
                     span,
                     "G4141",
@@ -13350,9 +14330,14 @@ impl Elaborator<'_> {
             {
                 continue;
             }
+            self.seed_associated_effect_binding(&binding);
             let Some((subject, relation, item_arguments, value)) =
                 self.zonk_associated_effect_binding(&binding)
             else {
+                if defer {
+                    pending_effects.push(binding);
+                    continue;
+                }
                 self.error(
                     span,
                     "G4141",
@@ -13400,6 +14385,80 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
+        if !pending_types.is_empty() || !pending_effects.is_empty() {
+            self.pending_associated_checks.push(PendingAssociatedCheck {
+                types: pending_types, effects: pending_effects,
+                ambient_types: self.ambient_callable_type_bindings.clone(),
+                ambient_effects: self.ambient_callable_effect_bindings.clone(), span,
+            });
+        }
+    }
+
+    fn associated_binding_head(
+        &mut self,
+        subject: Type,
+        relation: crate::ElaboratedTraitReference,
+        arguments: Vec<GenericArgument>,
+    ) -> Option<(Type, crate::ElaboratedTraitReference, Vec<GenericArgument>)> {
+        let subject = self.inference.resolve_type_structure(subject);
+        let mut resolve_argument = |argument: GenericArgument| self.inference.zonk_generic_argument(argument.clone())
+            .unwrap_or_else(|_| match argument {
+                GenericArgument::Type(ty) => GenericArgument::Type(self.inference.resolve_type_structure(ty)),
+                argument => argument,
+            });
+        Some((subject, crate::ElaboratedTraitReference {
+            definition: relation.definition,
+            arguments: relation.arguments.into_iter().map(&mut resolve_argument).collect(),
+        }, arguments.into_iter().map(resolve_argument).collect()))
+    }
+
+    // A known projection is a non-defaultable constraint on its equality's
+    // value. Do not default that value just to ask whether equality holds.
+    // The ordinary proof below still checks the resulting complete binding.
+    fn seed_associated_type_binding(&mut self, binding: &crate::ElaboratedAssociatedTypeBinding) {
+        if self.inference.zonk(binding.value.clone()).is_ok() { return; }
+        let Some(head) = self.associated_binding_head(binding.subject.clone(), binding.relation.clone(), binding.item_arguments.clone()) else { return; };
+        for ambient in self.ambient_callable_type_bindings.clone() {
+            if ambient.name == binding.name && ambient.item_generic_kinds == binding.item_generic_kinds
+                && self.associated_binding_head(ambient.subject, ambient.relation, ambient.item_arguments).as_ref() == Some(&head)
+            {
+                let _ = self.inference.unify(binding.value.clone(), ambient.value);
+            }
+        }
+        if self.inference.zonk(binding.value.clone()).is_ok() { return; }
+        let (subject, relation, arguments) = head;
+        if let TraitProjectionAnswer::Normalized { ty, .. } = self.trait_query().normalize_associated_type_application(
+            TraitGoal { subject, relation }, &binding.name, &arguments,
+        ) {
+            let _ = self.inference.unify(binding.value.clone(), ty);
+        }
+    }
+
+    fn seed_associated_effect_binding(&mut self, binding: &crate::ElaboratedAssociatedEffectBinding) {
+        if self.inference.zonk_effects_allowing_generic_tail(binding.value.clone()).is_ok() { return; }
+        let Some(head) = self.associated_binding_head(binding.subject.clone(), binding.relation.clone(), binding.item_arguments.clone()) else { return; };
+        for ambient in self.ambient_callable_effect_bindings.clone() {
+            if ambient.name == binding.name && ambient.item_generic_kinds == binding.item_generic_kinds
+                && self.associated_binding_head(ambient.subject, ambient.relation, ambient.item_arguments).as_ref() == Some(&head)
+            {
+                let _ = self.inference.unify_effect_rows(binding.value.clone(), ambient.value);
+            }
+        }
+        if self.inference.zonk_effects_allowing_generic_tail(binding.value.clone()).is_ok() { return; }
+        let (subject, relation, arguments) = head;
+        if let TraitEffectRowProjectionAnswer::Normalized { row, .. } = self.trait_query().normalize_associated_effect_row_application(
+            TraitGoal { subject, relation }, &binding.name, &arguments,
+        ) {
+            let _ = self.inference.unify_effect_rows(binding.value.clone(), row);
+        }
+    }
+
+    fn retry_associated_check(&mut self, check: PendingAssociatedCheck, defer: bool) {
+        let old_types = std::mem::replace(&mut self.ambient_callable_type_bindings, check.ambient_types);
+        let old_effects = std::mem::replace(&mut self.ambient_callable_effect_bindings, check.ambient_effects);
+        self.check_nonintrinsic_associated_bindings_after_inference(check.types, check.effects, check.span, defer);
+        self.ambient_callable_type_bindings = old_types;
+        self.ambient_callable_effect_bindings = old_effects;
     }
 
     fn zonk_associated_type_binding(
@@ -13466,8 +14525,11 @@ impl Elaborator<'_> {
         item_arguments: &[GenericArgument],
         value: &Type,
     ) -> bool {
-        self.ambient_callable_type_bindings
-            .clone()
+        let goal = TraitGoal { subject: subject.clone(), relation: relation.clone() };
+        let bindings = self.ambient_callable_type_bindings.iter().cloned()
+            .chain(self.ambient_universal_bounds.iter().filter_map(|bound| bound.for_goal(&goal))
+                .flat_map(|bound| bound.type_bindings)).collect::<Vec<_>>();
+        bindings
             .iter()
             .any(|ambient| {
                 ambient.name == binding.name
@@ -13491,8 +14553,11 @@ impl Elaborator<'_> {
         item_arguments: &[GenericArgument],
         value: &EffectRow,
     ) -> bool {
-        self.ambient_callable_effect_bindings
-            .clone()
+        let goal = TraitGoal { subject: subject.clone(), relation: relation.clone() };
+        let bindings = self.ambient_callable_effect_bindings.iter().cloned()
+            .chain(self.ambient_universal_bounds.iter().filter_map(|bound| bound.for_goal(&goal))
+                .flat_map(|bound| bound.effect_bindings)).collect::<Vec<_>>();
+        bindings
             .iter()
             .any(|ambient| {
                 ambient.name == binding.name
@@ -13513,6 +14578,23 @@ impl Elaborator<'_> {
         span: Span,
     ) {
         let assumptions = self.ambient_trait_solver_assumptions();
+        self.check_where_bounds_with_assumptions(bounds, assumptions, span, true);
+    }
+
+    fn check_where_bounds_with_assumptions(
+        &mut self,
+        bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+        assumptions: Vec<TraitGoal>,
+        span: Span,
+        defer_unresolved: bool,
+    ) {
+        // Captured assumptions retain lexical authority, but their body-local
+        // variables may have acquired bindings since the obligation was queued.
+        let assumptions = assumptions.into_iter().map(|mut goal| {
+                goal.subject = self.inference.zonk(goal.subject.clone()).unwrap_or(goal.subject);
+                goal.relation = self.zonk_trait_reference(goal.relation.clone()).unwrap_or(goal.relation);
+                goal
+            }).collect::<Vec<_>>();
         let mut failed = false;
         for (subject, relation) in bounds {
             // `RunsIn` is compiler-generated evidence carried by a concrete
@@ -13532,8 +14614,24 @@ impl Elaborator<'_> {
             if crate::is_intrinsic_callable_trait(&relation) {
                 continue;
             }
+            let original_subject = subject.clone();
+            let original_relation = relation.clone();
+            if defer_unresolved && (self.inference.zonk(subject.clone()).is_err()
+                || relation.arguments.iter().any(|argument| self.inference.zonk_generic_argument(argument.clone()).is_err())) {
+                self.trait_solver.constrain_unique_implementation_head(
+                    &TraitGoal { subject: subject.clone(), relation: relation.clone() },
+                    &mut self.inference,
+                );
+            }
             let subject = match self.inference.zonk(subject) {
                 Ok(subject) => subject,
+                Err(_) if defer_unresolved => {
+                    self.pending_where_bounds.push(PendingWhereBound {
+                        subject: original_subject, relation: original_relation,
+                        assumptions: assumptions.clone(), span,
+                    });
+                    continue;
+                }
                 Err(_) => {
                     self.error(
                         span,
@@ -13548,15 +14646,16 @@ impl Elaborator<'_> {
             let arguments = relation
                 .arguments
                 .into_iter()
-                .map(|argument| match argument {
-                    crate::GenericArgument::Type(argument) => self
-                        .inference
-                        .zonk(argument)
-                        .map(crate::GenericArgument::Type),
-                    argument => Ok(argument),
-                })
+                .map(|argument| self.inference.zonk_generic_argument(argument))
                 .collect::<Result<Vec<_>, _>>();
             let Ok(arguments) = arguments else {
+                if defer_unresolved {
+                    self.pending_where_bounds.push(PendingWhereBound {
+                        subject: original_subject, relation: original_relation,
+                        assumptions: assumptions.clone(), span,
+                    });
+                    continue;
+                }
                 self.error(
                     span,
                     "G4141",
@@ -13732,15 +14831,14 @@ impl Elaborator<'_> {
                         && binding.item_arguments.is_empty()
                 })
                 .collect::<Vec<_>>();
+            // This is equality, not two independently solved permissions.
+            // Solving `?e <= concrete` first can choose the empty row and
+            // then spuriously reject `concrete <= ?e` for an effectful body.
             if let [binding] = rows.as_slice()
-                && (self
+                && self
                     .inference
-                    .constrain_effect_subset(binding.value.clone(), effects.clone())
+                    .unify_effect_rows(binding.value.clone(), effects.clone())
                     .is_err()
-                    || self
-                        .inference
-                        .constrain_effect_subset(effects.clone(), binding.value.clone())
-                        .is_err())
             {
                 self.error(
                     span,
@@ -14155,6 +15253,26 @@ impl Elaborator<'_> {
                 return self.call(callee, arguments, span);
             }
         }
+        // The numeric literal range rule admits the signed minimum only
+        // when an immediate `-` has a directly known signed width. Its
+        // positive magnitude is not a runtime value of that width. Do not
+        // materialize that invalid intermediate or turn it into a wrapping
+        // negation. Representable operands still use ordinary dispatch, and
+        // an explicitly resolved function binding above keeps its own
+        // semantics rather than inheriting this numeric-prefix exception.
+        if name == "-"
+            && let [GroupedOperator::Operand(operand)] = operands.as_slice()
+            && let ExprKind::Literal(token) = &self.body.expression(*operand).kind
+            && let Some(Type::Scalar(scalar)) = &expected
+        {
+            use crate::types::integer_const::{IntegerConst, IntegerConstError};
+            if matches!(IntegerConst::from_literal(*scalar, token, false, 64), Err(IntegerConstError::Overflow))
+                && let Ok(value) = IntegerConst::from_literal(*scalar, token, true, 64)
+                && self.has_unique_pure_integer_prefix(*scalar, span)
+            {
+                return self.alloc(CoreKind::Literal(value.to_string()), Type::Scalar(*scalar), span);
+            }
+        }
         let contextual_receiver = matches!(operands.first(), Some(GroupedOperator::Operand(id))
             if matches!(&self.body.expression(*id).kind, ExprKind::Literal(text) if literal_is_numeric(text)))
             && !expected.as_ref().is_some_and(|ty| matches!(ty, Type::Scalar(scalar) if scalar_is_numeric(*scalar)));
@@ -14162,11 +15280,9 @@ impl Elaborator<'_> {
         for operand in operands {
             // A source numeric literal is contextual, independent of which
             // operator name selected this ordinary receiver-based call.
-            let context = match (&operand, arguments.first().copied()) {
-                (GroupedOperator::Operand(id), None) if matches!(&self.body.expression(*id).kind,
-                    ExprKind::Literal(text) if literal_is_numeric(text)) => expected.clone().filter(|ty| matches!(ty, Type::Scalar(scalar) if scalar_is_numeric(*scalar))),
-                (GroupedOperator::Operand(id), Some(receiver)) if matches!(&self.body.expression(*id).kind,
-                    ExprKind::Literal(text) if literal_is_numeric(text)) => Some(self.expressions[receiver as usize].ty.clone()),
+            let context = match arguments.first().copied() {
+                None if self.grouped_operand_is_numeric_literal(&operand) => expected.clone().filter(|ty| matches!(ty, Type::Scalar(scalar) if scalar_is_numeric(*scalar))),
+                Some(receiver) if self.grouped_operand_is_numeric_literal(&operand) => Some(self.expressions[receiver as usize].ty.clone()),
                 _ => None,
             };
             let argument = self.grouped_operator(operand, context, span);
@@ -14184,7 +15300,56 @@ impl Elaborator<'_> {
         self.operator_trait_call(name, arguments.into_iter().map(CoreId).collect(), span)
     }
 
+    fn grouped_operand_is_numeric_literal(&self, operand: &GroupedOperator) -> bool {
+        let literal = |id| matches!(&self.body.expression(id).kind, ExprKind::Literal(text) if literal_is_numeric(text));
+        match operand {
+            GroupedOperator::Operand(id) => match &self.body.expression(*id).kind {
+                ExprKind::Literal(text) => literal_is_numeric(text),
+                ExprKind::Prefix { operator, value } if matches!(operator.as_str(), "-" | "+") => literal(*value),
+                _ => false,
+            },
+            GroupedOperator::Apply { name, operands } if matches!(name.as_str(), "-" | "+") => {
+                matches!(operands.as_slice(), [GroupedOperator::Operand(id)] if literal(*id))
+            }
+            _ => false,
+        }
+    }
+
+    // Literal range elaboration cannot invent an operator from its fixity or
+    // bypass ambiguous selection, callable obligations, safety, or effects.
+    fn has_unique_pure_integer_prefix(&mut self, scalar: ScalarType, span: Span) -> bool {
+        let subject = Type::Scalar(scalar);
+        let mut selected = vec![];
+        for definition in self.index.visible_definitions(DefinitionNamespace::Trait, self.module) {
+            let Some(ElaboratedHeader::Trait(header)) = self.signatures.definitions.get(&definition) else { continue };
+            if !header.methods.get("-").is_some_and(|signature| signature.parameters.len() == 1) { continue }
+            for relation in self.trait_query().relations_for_subject(definition, &subject) {
+                let Some(kinds) = self.trait_query().method_generic_kinds(&relation, "-") else { continue };
+                if !kinds.is_empty() { return false }
+                match self.trait_query().select_method(TraitGoal { relation, subject: subject.clone() }, "-", &[]) {
+                    TraitMethodAnswer::Selected { signature, .. } if signature.parameters.len() == 1 => selected.push(signature),
+                    TraitMethodAnswer::Ambiguous | TraitMethodAnswer::Overflow => return false,
+                    _ => {}
+                }
+            }
+        }
+        let [signature] = selected.as_slice() else { return false };
+        if signature.parameters != [subject.clone()] || signature.result != subject
+            || signature.safety != crate::Safety::Safe || signature.effects != EffectRow::empty()
+        {
+            return false;
+        }
+        self.check_callable_contract_bounds((**signature).clone(), None, span);
+        true
+    }
+
     fn alloc(&mut self, kind: CoreKind, ty: Type, span: Span) -> CoreId {
+        // Publish structure already established by inference before another
+        // expression consumes it. In particular, a completion/handler result
+        // may have just solved its result cell to a reference or callable.
+        // This is not zonking/defaulting: unresolved cells, regions and rows
+        // remain open, and ordinary lifetime/ownership checks still apply.
+        let ty = self.inference.resolve_type_structure(ty);
         let id = CoreId(self.expressions.len() as u32);
         self.expressions.push(CoreExpr { kind, ty, span });
         id
@@ -14194,10 +15359,11 @@ impl Elaborator<'_> {
         self.recovered = true;
         self.alloc(CoreKind::Error, Type::Error, span)
     }
-    fn field_is_accessible(&self, field: &crate::signature::NominalField, span: Span) -> bool {
+    fn field_is_accessible(&self, field: &crate::signature::NominalField, _span: Span) -> bool {
         field
             .private_authority
-            .is_none_or(|authority| authority == span.file)
+            .as_ref()
+            .is_none_or(|authority| authority.allows(self.module))
     }
     fn error(&mut self, span: Span, code: &'static str, message: &str) {
         self.diagnostics.push(CoreDiagnostic {
@@ -14251,6 +15417,7 @@ fn type_generic_arity(value: &Type) -> u32 {
             .unwrap_or(0),
         Type::Tuple(values) => values.iter().map(type_generic_arity).max().unwrap_or(0),
         Type::Array(value) => type_generic_arity(value),
+        Type::FixedArray { element, length } => type_generic_arity(element).max(argument_arity(length)),
         Type::Reference { referent, .. }
         | Type::RawPointer { pointee: referent, .. } => type_generic_arity(referent),
         Type::Callable {
@@ -14389,6 +15556,10 @@ fn align_lifetime_types(
                     .collect::<Result<_, _>>()?,
             ))
         }
+        (Type::FixedArray { element: expected, length: en }, Type::FixedArray { element: actual, length: an }) => Ok(Type::FixedArray {
+            element: Box::new(align_lifetime_types(expected, actual, substitution, mode, depth)?),
+            length: Box::new(align_lifetime_generic_argument(en, an, substitution, mode, depth)?),
+        }),
         (Type::Array(expected), Type::Array(actual)) => Ok(Type::Array(Box::new(
             align_lifetime_types(expected, actual, substitution, mode, depth)?,
         ))),
@@ -14551,7 +15722,7 @@ fn check_invariant_lifetimes(
     // Use the original contract, not the aligned type (which already contains
     // coercions), so fixed nested regions still enforce real invariance.
     let expected = match mode {
-        LifetimeMode::Instantiate => substitute_call_lifetimes(expected.clone(), substitution, depth)?,
+        LifetimeMode::Instantiate | LifetimeMode::InstantiateBound => substitute_call_lifetimes(expected.clone(), substitution, depth)?,
         LifetimeMode::Rigid => expected.clone(),
     };
     align_lifetime_types(actual, &expected, substitution, LifetimeMode::Rigid, depth).map(|_| ())
@@ -14561,8 +15732,12 @@ fn check_invariant_lifetimes(
 /// own body. The callable value retains the original universally quantified
 /// type; only body-local Core terms use `Elided` regions, which are erased
 /// after ordinary lifetime/escape checking during VM lowering.
-fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
+pub(crate) fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
     match value {
+        Type::Nominal { definition, arguments } => Type::Nominal {
+            definition,
+            arguments: arguments.into_iter().map(|argument| open_hrtb_callable_body_generic_argument(argument, binder_depth)).collect(),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -14585,6 +15760,10 @@ fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
                 .map(|value| open_hrtb_callable_body_type(value, binder_depth))
                 .collect(),
         ),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(open_hrtb_callable_body_type(*element, binder_depth)),
+            length: Box::new(open_hrtb_callable_body_generic_argument(*length, binder_depth)),
+        },
         Type::Array(value) => Type::Array(Box::new(open_hrtb_callable_body_type(
             *value,
             binder_depth,
@@ -14608,7 +15787,7 @@ fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
                 .map(|parameter| open_hrtb_callable_body_type(parameter, binder_depth + 1))
                 .collect(),
             result: Box::new(open_hrtb_callable_body_type(*result, binder_depth + 1)),
-            effects,
+            effects: open_hrtb_callable_body_effect_row(effects, binder_depth + 1),
             invocation,
         },
         value => value,
@@ -14663,7 +15842,7 @@ pub(crate) fn open_hrtb_callable_body_effect_row(
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
+        tails: value.tails.clone(),
     }
     .canonicalized()
 }
@@ -14740,63 +15919,17 @@ fn align_lifetime_generic_argument(
             },
             actual,
         ) if generic_argument_matches_const_kind(actual, *expected_kind) => Ok(expected.clone()),
+        // Reverse-variance traversal can put the same unsolved const hole on
+        // the actual side. Const equality remains the ordinary unifier's job.
+        (expected, GenericArgument::ConstInfer { kind, .. })
+            if generic_argument_matches_const_kind(expected, *kind) => Ok(expected.clone()),
         (expected, actual) if expected == actual => Ok(expected.clone()),
         _ => Err(LifetimeError::UnsatisfiedOutlives),
     }
 }
 
 fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: crate::ConstKind) -> bool {
-    matches!(
-        (argument, kind),
-        (GenericArgument::ConstU32(_), crate::ConstKind::U32)
-            | (GenericArgument::ConstU32Expr(_), crate::ConstKind::U32)
-            | (
-                GenericArgument::ConstQuantity(_),
-                crate::ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstInfer {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstInfer {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::ConstKind::Quantity
-            )
-    )
+    crate::types::generic_argument_matches_const_kind(argument, kind)
 }
 
 fn align_lifetime_effect_row(
@@ -14814,7 +15947,7 @@ fn align_lifetime_effect_row(
     // difference afterwards.  Treating this as an outlives failure made an
     // implicit `fn id<e: EffectRow>(Token<e>)` call reject before `e` could
     // learn the row carried by its argument.
-    if expected.tail != actual.tail || expected.effects.len() != actual.effects.len() {
+    if expected.tails != actual.tails || expected.effects.len() != actual.effects.len() {
         return Ok(expected.clone());
     }
     let mut unmatched = actual.effects.iter().cloned().collect::<Vec<_>>();
@@ -14889,15 +16022,15 @@ fn align_lifetime_effect_row(
     Ok(EffectRow {
         effects,
         projections,
-        tail: expected.tail,
+        tails: expected.tails.clone(),
     }
     .canonicalized())
 }
 
 fn opens_call_lifetime(value: Lifetime, mode: LifetimeMode, depth: u32) -> bool {
-    matches!(mode, LifetimeMode::Instantiate)
-        && (matches!(value, Lifetime::Generic(_))
-            || matches!(value, Lifetime::Bound { depth: binder, .. } if binder == depth))
+    (matches!(mode, LifetimeMode::Instantiate) && matches!(value, Lifetime::Generic(_)))
+        || (matches!(mode, LifetimeMode::Instantiate | LifetimeMode::InstantiateBound)
+            && matches!(value, Lifetime::Bound { depth: binder, .. } if binder == depth))
 }
 
 fn aligned_lifetime(expected: Lifetime, actual: Lifetime, mode: LifetimeMode, depth: u32) -> Lifetime {
@@ -14919,19 +16052,23 @@ fn bind_lifetime(
     // declaration's Generic/Bound name back into unification would instead
     // capture the hole and poison earlier generic instances sharing it.
     if matches!(actual, Lifetime::Infer(_)) && !opens_call_lifetime(expected, mode, depth) {
+        substitution.inference_equalities.push((expected, actual));
         return Ok(());
     }
     match expected {
-        Lifetime::Infer(_) => Ok(()),
+        Lifetime::Infer(_) => {
+            substitution.inference_equalities.push((expected, actual));
+            Ok(())
+        }
         Lifetime::Static => (actual == Lifetime::Static)
             .then_some(())
             .ok_or(LifetimeError::UnsatisfiedOutlives),
-        Lifetime::Elided if matches!(mode, LifetimeMode::Instantiate) => Ok(()),
+        Lifetime::Elided if matches!(mode, LifetimeMode::Instantiate | LifetimeMode::InstantiateBound) => Ok(()),
         Lifetime::Elided => matches!(actual, Lifetime::Elided | Lifetime::Static)
             .then_some(())
             .ok_or(LifetimeError::UnsatisfiedOutlives),
         Lifetime::Generic(index) => match mode {
-            LifetimeMode::Rigid => (actual == expected || actual == Lifetime::Static)
+            LifetimeMode::Rigid | LifetimeMode::InstantiateBound => (crate::OutlivesPredicate::Region { longer: actual, shorter: expected }.proven_by(&substitution.outlives))
                 .then_some(())
                 .ok_or(LifetimeError::UnsatisfiedOutlives),
             LifetimeMode::Instantiate => match substitution.generics.get(&index) {
@@ -14946,7 +16083,7 @@ fn bind_lifetime(
         Lifetime::Bound {
             depth: bound_depth,
             index,
-        } if matches!(mode, LifetimeMode::Instantiate) && bound_depth == depth => {
+        } if matches!(mode, LifetimeMode::Instantiate | LifetimeMode::InstantiateBound) && bound_depth == depth => {
             match substitution.bounds.get(&index) {
                 Some(previous) if *previous != actual => Err(LifetimeError::UnsatisfiedOutlives),
                 Some(_) => Ok(()),
@@ -14956,7 +16093,7 @@ fn bind_lifetime(
                 }
             }
         }
-        Lifetime::Bound { .. } => (actual == expected)
+        Lifetime::Bound { .. } | Lifetime::Placeholder(_) => (actual == expected)
             .then_some(())
             .ok_or(LifetimeError::UnsatisfiedOutlives),
     }
@@ -15005,6 +16142,10 @@ fn substitute_call_lifetimes(
                 .map(|value| substitute_call_lifetimes(value, substitution, depth))
                 .collect::<Result<_, _>>()?,
         )),
+        Type::FixedArray { element, length } => Ok(Type::FixedArray {
+            element: Box::new(substitute_call_lifetimes(*element, substitution, depth)?),
+            length: Box::new(substitute_call_generic_argument(*length, substitution, depth)?),
+        }),
         Type::Array(value) => Ok(Type::Array(Box::new(substitute_call_lifetimes(
             *value,
             substitution,
@@ -15055,6 +16196,7 @@ fn substitute_call_lifetime(
             .generics
             .get(&index)
             .copied()
+            .or_else(|| substitution.preserve_free_generics.then_some(lifetime))
             .ok_or(LifetimeError::UnresolvedGeneric),
         Lifetime::Bound {
             depth: bound_depth,
@@ -15083,7 +16225,7 @@ fn substitute_call_effects(
     let crate::types::EffectRow {
         effects,
         projections,
-        tail,
+        tails,
     } = effects;
     let effects = effects
         .into_iter()
@@ -15126,7 +16268,7 @@ fn substitute_call_effects(
     Ok(crate::types::EffectRow {
         effects,
         projections,
-        tail,
+        tails,
     })
 }
 
@@ -15151,6 +16293,7 @@ fn substitute_call_generic_argument(
 
 fn projection_is_concrete(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => projection_is_concrete(element) && generic_argument_is_concrete(length),
         Type::Generic(_) | Type::Infer(_) => false,
         Type::Nominal { arguments, .. } => arguments.iter().all(generic_argument_is_concrete),
         Type::Tuple(arguments) => arguments.iter().all(projection_is_concrete),
@@ -15176,7 +16319,7 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Error => true,
@@ -15187,7 +16330,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
     match value {
         GenericArgument::Type(value) => projection_is_concrete(value),
         GenericArgument::EffectRow(value) => {
-            value.tail.is_none()
+            value.tails.is_empty()
                 && value
                     .effects
                     .iter()
@@ -15195,10 +16338,10 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
                 && value.projections.is_empty()
         }
         GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided)
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_) => true,
-        GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. } | Lifetime::Infer(_))
+        GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. } | Lifetime::Infer(_) | Lifetime::Placeholder(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -15225,8 +16368,9 @@ fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> 
             GenericArgument::EffectRow(EffectRow {
                 effects,
                 projections,
-                tail: Some(crate::EffectTail::Generic(_)),
-            }) if projections.is_empty()
+                tails,
+            }) if tails.iter().all(|tail| matches!(tail, crate::EffectTail::Generic(_)))
+                && projections.is_empty()
                 && effects.iter().all(|effect| {
                     effect
                         .arguments
@@ -15236,10 +16380,11 @@ fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> 
         )
 }
 
-/// A selected associated type may carry a declaration-owned generic item
-/// argument.  The trait head still has to be concrete, so this does not let a
-/// body select an implementation for an abstract `Self`; it only lets the
-/// selected implementation substitute a rigid parameter into its item value.
+/// A selected associated type may carry declaration-owned generic arguments.
+/// A known structural subject can use those parameters rigidly: `Wrapper<I>`
+/// matches a generic wrapper implementation only when the lexical environment
+/// proves that implementation's predicates. Bare abstract subjects and
+/// unresolved projections cannot use this structural selection path.
 ///
 /// Keep unresolved associated projections and inference variables out of this
 /// set.  Treating either as rigid would allow a concrete head to choose an
@@ -15259,9 +16404,9 @@ fn projection_is_selectable_type_projection(
     else {
         return false;
     };
-    projection_is_concrete(subject)
-        // An implementation body owns its declaration generics. Once the
-        // subject is concrete, those rigid trait arguments select the same
+    projection_subject_is_selectable(subject, hrtb_binders, allow_rigid_trait_arguments)
+        // An implementation body owns its declaration generics. With a
+        // selectable subject, those rigid trait arguments select the same
         // generic impl evidence for every instantiation; requiring them to
         // be fully concrete leaves `<i64 as Parent<T>>::Item<'a>` opaque in
         // precisely the body that establishes `Parent<T> for i64`.
@@ -15275,6 +16420,17 @@ fn projection_is_selectable_type_projection(
             .all(|argument| {
                 generic_argument_is_selectable_type_projection(argument, hrtb_binders)
             })
+}
+
+fn projection_subject_is_selectable(
+    subject: &Type,
+    hrtb_binders: &[u32],
+    allow_rigid_arguments: bool,
+) -> bool {
+    projection_is_concrete(subject)
+        || allow_rigid_arguments
+            && !matches!(subject, Type::Generic(_) | Type::Projection { .. })
+            && type_is_selectable_type_projection_argument(subject, hrtb_binders)
 }
 
 fn generic_argument_is_selectable_type_projection(
@@ -15295,17 +16451,17 @@ fn generic_argument_is_selectable_type_projection(
                             generic_argument_is_selectable_type_projection(argument, hrtb_binders)
                         })
                 })
-                && matches!(value.tail, None | Some(crate::EffectTail::Generic(_)))
+                && value.tails.iter().all(|tail| matches!(tail, crate::EffectTail::Generic(_)))
         }
         GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => true,
         GenericArgument::Lifetime(Lifetime::Bound { depth, index }) => hrtb_binders
             .get(*depth as usize)
             .is_some_and(|count| *index < *count),
-        GenericArgument::Lifetime(Lifetime::Infer(_))
+        GenericArgument::Lifetime(Lifetime::Infer(_) | Lifetime::Placeholder(_))
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
@@ -15313,6 +16469,8 @@ fn generic_argument_is_selectable_type_projection(
 
 fn type_is_selectable_type_projection_argument(value: &Type, hrtb_binders: &[u32]) -> bool {
     match value {
+        Type::FixedArray { element, length } => type_is_selectable_type_projection_argument(element, hrtb_binders)
+            && generic_argument_is_selectable_type_projection(length, hrtb_binders),
         Type::Generic(_) | Type::ConstGeneric { .. } => true,
         Type::Infer(_) | Type::Error => false,
         Type::Nominal { arguments, .. } => arguments
@@ -15347,7 +16505,7 @@ fn type_is_selectable_type_projection_argument(value: &Type, hrtb_binders: &[u32
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_) => true,
     }
 }
@@ -15361,7 +16519,9 @@ fn literal_type(text: &str) -> Type {
         Type::Scalar(ScalarType::Bytes)
     } else if text.starts_with('\'') {
         Type::Scalar(ScalarType::Char)
-    } else if text.contains('.') || text.contains('e') || text.contains('E') {
+    } else if !["0x", "0X", "0b", "0B", "0o", "0O"].iter()
+        .any(|prefix| text.trim_start_matches(['-', '+']).starts_with(*prefix))
+        && (text.contains('.') || text.contains('e') || text.contains('E')) {
         Type::Scalar(ScalarType::F64)
     } else {
         Type::Scalar(ScalarType::I64)
@@ -15455,6 +16615,7 @@ enum FinitePatternValue {
     Unit,
     Bool(bool),
     Tuple(Vec<FinitePatternValue>),
+    Array(Vec<FinitePatternValue>),
     Record {
         definition: DefKey,
         fields: Vec<FinitePatternValue>,
@@ -15466,9 +16627,134 @@ enum FinitePatternValue {
     },
 }
 
+fn finite_pattern_values(
+    signatures: &ElaboratedInterface,
+    subject: &Type,
+    depth: u8,
+    fuel: &mut usize,
+) -> Option<Vec<FinitePatternValue>> {
+    const MAX_VALUES: usize = 4096;
+    const MAX_DEPTH: u8 = 16;
+    if *fuel == 0 {
+        return None;
+    }
+    *fuel -= 1;
+    if depth >= MAX_DEPTH {
+        return Some(vec![FinitePatternValue::Unknown]);
+    }
+    let values = match subject {
+        Type::Unit => Some(vec![FinitePatternValue::Unit]),
+        Type::Scalar(ScalarType::Bool) => Some(vec![
+            FinitePatternValue::Bool(false),
+            FinitePatternValue::Bool(true),
+        ]),
+        Type::FixedArray { element, .. } => {
+            let count = usize::try_from(subject.fixed_array_length()?).ok()?;
+            if count > MAX_VALUES { return None; }
+            let domain = finite_pattern_values(signatures, element, depth + 1, fuel)?;
+            finite_pattern_products(vec![domain; count], MAX_VALUES)
+                .map(|values| values.into_iter().map(FinitePatternValue::Array).collect())
+        }
+        Type::Tuple(fields) => {
+            let fields = fields
+                .iter()
+                .map(|field| finite_pattern_values(signatures, field, depth + 1, fuel))
+                .collect::<Option<Vec<_>>>()?;
+            finite_pattern_products(fields, MAX_VALUES)
+                .map(|values| values.into_iter().map(FinitePatternValue::Tuple).collect())
+        }
+        Type::Nominal {
+            definition,
+            arguments,
+        } => match signatures.definitions.get(definition)? {
+            ElaboratedHeader::Nominal {
+                layout: crate::signature::ElaboratedNominalLayout::Struct(_) | crate::signature::ElaboratedNominalLayout::TupleStruct(_),
+                ..
+            } => {
+                let fields = signatures
+                    .instantiate_struct_fields_generic(*definition, arguments)
+                    .ok()?;
+                let values = fields
+                    .iter()
+                    .map(|field| finite_pattern_values(signatures, &field.ty, depth + 1, fuel))
+                    .collect::<Option<Vec<_>>>()?;
+                finite_pattern_products(values, MAX_VALUES).map(|values| {
+                    values
+                        .into_iter()
+                        .map(|fields| FinitePatternValue::Record {
+                            definition: *definition,
+                            fields,
+                        })
+                        .collect()
+                })
+            }
+            ElaboratedHeader::Nominal {
+                layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
+                ..
+            } => {
+                let mut values = vec![];
+                let mut nodes = 0usize;
+                for (variant, _) in variants.iter().enumerate() {
+                    let fields = signatures
+                        .instantiate_enum_fields_generic(*definition, arguments, variant as u32)
+                        .ok()?;
+                    let fields = fields
+                        .iter()
+                        .map(|field| finite_pattern_values(signatures, &field.ty, depth + 1, fuel))
+                        .collect::<Option<Vec<_>>>()?;
+                    let products = finite_pattern_products(fields, MAX_VALUES)?;
+                    if values.len().checked_add(products.len())? > MAX_VALUES {
+                        return None;
+                    }
+                    nodes = nodes.checked_add(products.len())?
+                        .checked_add(products.iter().flatten().map(finite_pattern_weight).sum())?;
+                    if nodes > 65_536 {
+                        return None;
+                    }
+                    values.extend(products.into_iter().map(|fields| {
+                        FinitePatternValue::Enum {
+                            definition: *definition,
+                            variant: variant as u32,
+                            fields,
+                        }
+                    }));
+                }
+                Some(values)
+            }
+            ElaboratedHeader::Nominal {
+                layout: crate::signature::ElaboratedNominalLayout::Opaque,
+                ..
+            } => Some(vec![FinitePatternValue::Unknown]),
+            _ => None,
+        },
+        _ => Some(vec![FinitePatternValue::Unknown]),
+    }?;
+    *fuel = fuel.checked_sub(values.iter().map(finite_pattern_weight).sum())?;
+    Some(values)
+}
+
+/// Conservative totality proof over frozen Core rows, shared with use analysis.
+/// Open leaves and exhausted proof budgets never establish coverage.
+pub(crate) fn core_pattern_rows_exhaustive(
+    signatures: &ElaboratedInterface,
+    subjects: &[Type],
+    rows: &[&[CorePattern]],
+) -> bool {
+    let mut fuel = 131_072;
+    let Some(domains) = subjects.iter()
+        .map(|subject| finite_pattern_values(signatures, subject, 0, &mut fuel))
+        .collect::<Option<Vec<_>>>() else { return false; };
+    let Some(assignments) = finite_pattern_products(domains, 4096) else { return false; };
+    assignments.iter().all(|assignment| rows.iter().any(|row| {
+        row.len() == assignment.len() && row.iter().zip(assignment)
+            .all(|(pattern, value)| core_pattern_matches_value(pattern, value) == Some(true))
+    }))
+}
+
 fn finite_pattern_weight(value: &FinitePatternValue) -> usize {
     1 + match value {
         FinitePatternValue::Tuple(fields)
+        | FinitePatternValue::Array(fields)
         | FinitePatternValue::Record { fields, .. }
         | FinitePatternValue::Enum { fields, .. } => fields.iter().map(finite_pattern_weight).sum(),
         _ => 0,
@@ -15532,6 +16818,11 @@ fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue)
             Some(matches!((literal.as_str(), value), ("true", true) | ("false", false)))
         }
         (CorePattern::Tuple(patterns), FinitePatternValue::Unit) => Some(patterns.is_empty()),
+        (CorePattern::Array { elements: patterns, rest, .. }, FinitePatternValue::Array(values)) => {
+            if crate::pattern::ArrayPatternRest::length(*rest, patterns.len()) != Some(values.len()) { return Some(false); }
+            pattern_matches_all(patterns.iter().enumerate().map(|(index, pattern)|
+                core_pattern_matches_value(pattern, &values[crate::pattern::ArrayPatternRest::index(*rest, index)])))
+        }
         (CorePattern::Tuple(patterns), FinitePatternValue::Tuple(values)) => {
             if patterns.len() != values.len() {
                 return Some(false);
@@ -15604,16 +16895,15 @@ fn core_pattern_subsumes(left: &CorePattern, right: &CorePattern) -> bool {
         // array arms escaped the common decision-DAG proof merely because
         // their element domain was unbounded.
         (
-            CorePattern::Array { elements: left, .. },
-            CorePattern::Array {
-                elements: right, ..
-            },
+            CorePattern::Array { elements: left, rest: left_rest, .. },
+            CorePattern::Array { elements: right, rest: right_rest, .. },
         ) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| core_pattern_subsumes(left, right))
+            crate::pattern::ArrayPatternRest::length(*left_rest, left.len()) == crate::pattern::ArrayPatternRest::length(*right_rest, right.len())
+                && left.iter().enumerate().all(|(index, left)| {
+                    let index = crate::pattern::ArrayPatternRest::index(*left_rest, index);
+                    right.iter().enumerate().find(|(other, _)| crate::pattern::ArrayPatternRest::index(*right_rest, *other) == index)
+                        .map_or_else(|| core_pattern_irrefutable(left), |(_, right)| core_pattern_subsumes(left, right))
+                })
         }
         (
             CorePattern::Record {
@@ -15691,12 +16981,13 @@ fn pattern_decision_subsumes(
         // as normal completion arms.  Keep their source-free proof in lock
         // step with `core_pattern_subsumes` so an unreachable array handler
         // arm cannot remain live merely because its payload type is open.
-        (PatternDecision::Array(left), PatternDecision::Array(right)) => {
-            left.len() == right.len()
-                && left
-                    .iter()
-                    .zip(right)
-                    .all(|(left, right)| pattern_decision_subsumes(left, right))
+        (PatternDecision::Array { elements: left, rest: left_rest }, PatternDecision::Array { elements: right, rest: right_rest }) => {
+            crate::pattern::ArrayPatternRest::length(*left_rest, left.len()) == crate::pattern::ArrayPatternRest::length(*right_rest, right.len())
+                && left.iter().enumerate().all(|(index, left)| {
+                    let index = crate::pattern::ArrayPatternRest::index(*left_rest, index);
+                    right.iter().enumerate().find(|(other, _)| crate::pattern::ArrayPatternRest::index(*right_rest, *other) == index)
+                        .map_or_else(|| matches!(left, PatternDecision::Any | PatternDecision::Bind(_)), |(_, right)| pattern_decision_subsumes(left, right))
+                })
         }
         (
             PatternDecision::Record {
@@ -15750,7 +17041,7 @@ fn pattern_decision_irrefutable(decision: &crate::pattern::PatternDecision) -> b
             .iter()
             .all(|(_, pattern)| pattern_decision_irrefutable(pattern)),
         PatternDecision::Literal(_)
-        | PatternDecision::Array(_)
+        | PatternDecision::Array { .. }
         | PatternDecision::Enum { .. }
         | PatternDecision::Error => false,
     }
@@ -15788,6 +17079,11 @@ fn pattern_decision_matches_value(
             Some(matches!((literal.as_str(), value), ("true", true) | ("false", false)))
         }
         (crate::pattern::PatternDecision::Tuple(patterns), FinitePatternValue::Unit) => Some(patterns.is_empty()),
+        (crate::pattern::PatternDecision::Array { elements: patterns, rest }, FinitePatternValue::Array(values)) => {
+            if crate::pattern::ArrayPatternRest::length(*rest, patterns.len()) != Some(values.len()) { return Some(false); }
+            pattern_matches_all(patterns.iter().enumerate().map(|(index, pattern)|
+                pattern_decision_matches_value(pattern, &values[crate::pattern::ArrayPatternRest::index(*rest, index)])))
+        }
         (crate::pattern::PatternDecision::Tuple(patterns), FinitePatternValue::Tuple(values)) => {
             if patterns.len() != values.len() {
                 return Some(false);
@@ -15845,34 +17141,16 @@ fn nominal_parts(subject: &Type) -> Option<(DefKey, Vec<GenericArgument>)> {
 }
 
 fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::GenericKind) -> bool {
-    matches!(
-        (argument, kind),
+    match (argument, kind) {
         (GenericArgument::Type(_), crate::GenericKind::Type)
-            | (GenericArgument::EffectRow(_), crate::GenericKind::EffectRow)
-            | (GenericArgument::Lifetime(_), crate::GenericKind::Lifetime)
-            | (
-                GenericArgument::ConstU32(_),
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            )
-            | (
-                GenericArgument::ConstQuantity(_),
-                crate::GenericKind::Const(crate::ConstKind::Quantity)
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::U32,
-                    ..
-                },
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: crate::ConstKind::Quantity,
-                    ..
-                },
-                crate::GenericKind::Const(crate::ConstKind::Quantity)
-            )
-    )
+        | (GenericArgument::EffectRow(_), crate::GenericKind::EffectRow)
+        | (GenericArgument::Lifetime(_), crate::GenericKind::Lifetime)
+        | (GenericArgument::ConstQuantity(_), crate::GenericKind::Const(crate::ConstKind::Quantity)) => true,
+        (GenericArgument::ConstInteger(value), crate::GenericKind::Const(kind)) => value.kind() == kind,
+        (GenericArgument::ConstIntegerExpr(value), crate::GenericKind::Const(kind)) => value.scalar().ok() == kind.integer_scalar(),
+        (GenericArgument::ConstGeneric { kind: found, .. }, crate::GenericKind::Const(kind)) => *found == kind,
+        _ => false,
+    }
 }
 
 fn call_reference_origin(
@@ -15905,7 +17183,7 @@ fn call_reference_origin(
             return CallReferenceOrigin::Opaque;
         };
         let mut leaves = vec![];
-        if reference_leaf_paths(signatures, &expression.ty, &mut vec![], &mut leaves).is_err() {
+        if input_reference_leaf_paths(signatures, &expression.ty, &mut leaves).is_err() {
             return CallReferenceOrigin::Opaque;
         }
         argument_leaves.extend(
@@ -15987,7 +17265,7 @@ pub(crate) fn callable_reference_origin_from_contract(
     let mut argument_leaves = vec![];
     for (argument, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
-        if reference_leaf_paths(signatures, parameter, &mut vec![], &mut leaves).is_err() {
+        if input_reference_leaf_paths(signatures, parameter, &mut leaves).is_err() {
             return CallReferenceOrigin::Opaque;
         }
         argument_leaves.extend(
@@ -16040,6 +17318,40 @@ pub(crate) fn callable_reference_origin_from_contract(
     CallReferenceOrigin::Paths(paths)
 }
 
+/// Input provenance can follow a stored reference through a shorter borrow of
+/// its carrier. Keep the dereference explicit: that stored reference names
+/// its own region, not the region of the outer handle. Open referents do not
+/// invalidate the already-known outer reference, and recursive layouts stop
+/// at the repeated type rather than inventing an unbounded projection.
+pub(crate) fn input_reference_leaf_paths(
+    signatures: &ElaboratedInterface,
+    ty: &Type,
+    leaves: &mut Vec<(Vec<u32>, Type)>,
+) -> Result<(), ()> {
+    fn visit(signatures: &ElaboratedInterface, ty: &Type, prefix: &[u32],
+        active: &mut Vec<Type>, leaves: &mut Vec<(Vec<u32>, Type)>) -> Result<(), ()> {
+        if active.contains(ty) { return Ok(()); }
+        active.push(ty.clone());
+        let mut direct = vec![];
+        if reference_leaf_paths(signatures, ty, &mut vec![], &mut direct).is_err() {
+            active.pop();
+            return Err(());
+        }
+        for (fields, leaf) in direct {
+            let mut path = prefix.to_vec();
+            path.extend(fields);
+            leaves.push((path.clone(), leaf.clone()));
+            if let Type::Reference { referent, .. } = leaf {
+                path.push(REFERENCE_PATH_DEREF);
+                let _ = visit(signatures, &referent, &path, active, leaves);
+            }
+        }
+        active.pop();
+        Ok(())
+    }
+    visit(signatures, ty, &[], &mut vec![], leaves)
+}
+
 /// Discover direct reference leaves through the sealed structural shapes that
 /// Typed Core can project. Nominal layouts are read from the frozen interface
 /// and instantiated with their canonical application arguments; an enum or
@@ -16073,7 +17385,7 @@ pub(crate) fn reference_leaf_paths(
             arguments,
         } => match signatures.definitions.get(definition) {
             Some(ElaboratedHeader::Nominal {
-                layout: ElaboratedNominalLayout::Struct(fields),
+                layout: ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields),
                 ..
             }) => {
                 for (index, field) in fields.iter().enumerate() {
@@ -16141,7 +17453,7 @@ pub(crate) fn reference_leaf_paths(
             | None => return Err(()),
             _ => return Err(()),
         },
-        Type::Array(element) | Type::StaticData { element, .. } => {
+        Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => {
             if type_may_contain_reference(signatures, element) {
                 return Err(());
             }
@@ -16155,7 +17467,7 @@ pub(crate) fn reference_leaf_paths(
         | Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Error => {}
@@ -16178,7 +17490,7 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
         match ty {
             Type::Reference { .. } => true,
             Type::Tuple(fields) => fields.iter().any(|field| visit(signatures, field, active)),
-            Type::Array(element) | Type::StaticData { element, .. } => {
+            Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => {
                 visit(signatures, element, active)
             }
             Type::Nominal {
@@ -16194,7 +17506,7 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
                 }
                 let result = match signatures.definitions.get(definition) {
                     Some(ElaboratedHeader::Nominal {
-                        layout: ElaboratedNominalLayout::Struct(fields),
+                        layout: ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields),
                         ..
                     }) => fields.iter().any(|field| {
                         instantiate_nominal_field_type(&field.ty, arguments)
@@ -16236,7 +17548,7 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
             | Type::Unit
             | Type::Never
             | Type::Scalar(_)
-            | Type::ConstU32(_)
+            | Type::ConstInteger(_)
             | Type::ConstQuantity(_)
             | Type::ConstGeneric { .. }
             | Type::Error => false,
@@ -16260,6 +17572,10 @@ pub(crate) fn instantiate_nominal_field_type(
             .map(|field| instantiate_nominal_field_type(field, arguments))
             .collect::<Result<Vec<_>, _>>()
             .map(Type::Tuple),
+        Type::FixedArray { element, length } => Ok(Type::FixedArray {
+            element: Box::new(instantiate_nominal_field_type(element, arguments)?),
+            length: Box::new(crate::service::specialize_generic_argument(length, arguments)),
+        }),
         Type::Array(element) => Ok(Type::Array(Box::new(instantiate_nominal_field_type(
             element, arguments,
         )?))),
@@ -16323,29 +17639,61 @@ fn instantiate_nominal_generic_argument(
     }
 }
 
+/// Detect arithmetic that must wait for const inference, including defaults
+/// nested inside a type or effect row. The second flag marks recovery errors
+/// so a failed substitution cannot silently bind a defaulted type hole.
+fn integer_default_flags(argument: &GenericArgument) -> (bool, bool) {
+    fn merge(values: impl IntoIterator<Item = (bool, bool)>) -> (bool, bool) {
+        values.into_iter().fold((false, false), |a, b| (a.0 || b.0, a.1 || b.1))
+    }
+    fn row(row: &EffectRow) -> (bool, bool) {
+        merge(row.effects.iter().flat_map(|effect| effect.arguments.iter().map(integer_default_flags))
+            .chain(row.projections.iter().map(|projection| merge(
+                std::iter::once(ty(&projection.subject)).chain(projection.trait_arguments.iter()
+                    .chain(&projection.item_arguments).map(integer_default_flags))
+            ))))
+    }
+    fn ty(value: &Type) -> (bool, bool) {
+        match value {
+            Type::Nominal { arguments, .. } => merge(arguments.iter().map(integer_default_flags)),
+            Type::Projection { subject, trait_arguments, item_arguments, .. } => merge(
+                std::iter::once(ty(subject)).chain(trait_arguments.iter().chain(item_arguments).map(integer_default_flags))
+            ),
+            Type::Tuple(values) => merge(values.iter().map(ty)),
+            Type::FixedArray { element, length } => merge([ty(element), integer_default_flags(length)]),
+            Type::Array(value) | Type::StaticData { element: value, .. }
+            | Type::Reference { referent: value, .. } | Type::RawPointer { pointee: value, .. } => ty(value),
+            Type::Callable { parameters, result, effects, .. } => merge(parameters.iter().map(ty)
+                .chain([ty(result), row(effects)])),
+            Type::Error => (false, true),
+            _ => (false, false),
+        }
+    }
+    match argument {
+        GenericArgument::ConstIntegerExpr(_) => (true, false),
+        GenericArgument::Type(value) => ty(value),
+        GenericArgument::EffectRow(value) => row(value),
+        GenericArgument::ConstProjection { subject, trait_arguments, .. } => merge(
+            std::iter::once(ty(subject)).chain(trait_arguments.iter().map(integer_default_flags))
+        ),
+        _ => (false, false),
+    }
+}
+
 fn instantiate_nominal_default(
     default: &GenericArgument,
     arguments: &[GenericArgument],
 ) -> GenericArgument {
-    match default {
-        GenericArgument::ConstGeneric { index, .. } => arguments
-            .get(*index as usize)
-            .cloned()
-            .unwrap_or_else(|| default.clone()),
-        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
-            crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
-            value => GenericArgument::ConstU32Expr(value),
-        },
-        value => value.clone(),
-    }
+    crate::signature::instantiate_nominal_default(default, arguments)
 }
 
 fn structural_const_error(kind: crate::ConstKind) -> GenericArgument {
     match kind {
-        crate::ConstKind::U32 => GenericArgument::ConstU32(0),
+        crate::ConstKind::U32 => GenericArgument::ConstInteger(0u32.into()),
         crate::ConstKind::Quantity => {
             GenericArgument::ConstQuantity(crate::quantity::Quantity::ONCE)
         }
+        _ => GenericArgument::Type(Type::Error),
     }
 }
 
@@ -16437,11 +17785,27 @@ mod invariant_call_lifetime_tests {
                 (Lifetime::Static, Lifetime::Elided, LifetimeMode::Instantiate),
                 (Lifetime::Elided, Lifetime::Static, LifetimeMode::Instantiate),
                 (Lifetime::Generic(0), Lifetime::Generic(1), LifetimeMode::Rigid),
+                (Lifetime::Generic(0), Lifetime::Generic(1), LifetimeMode::InstantiateBound),
             ] {
                 let result = align_lifetime_types(&storage(expected, pointer), &storage(actual, pointer),
                     &mut CallLifetimeSubstitution::default(), mode, 0);
                 assert!(matches!(result, Err(LifetimeError::UnsatisfiedOutlives)), "{expected:?}, {actual:?}, pointer={pointer}");
             }
+        }
+    }
+
+    #[test]
+    fn lexical_instantiation_opens_only_the_owned_bound_region() {
+        for pointer in [false, true] {
+            let mut substitution = CallLifetimeSubstitution::default();
+            substitution.generics.insert(0, Lifetime::Generic(0));
+            let found = align_lifetime_types(
+                &storage(Lifetime::Bound { depth: 0, index: 0 }, pointer),
+                &storage(Lifetime::Generic(7), pointer),
+                &mut substitution, LifetimeMode::InstantiateBound, 0);
+            assert!(found.is_ok());
+            assert_eq!(substitution.bounds[&0], Lifetime::Generic(7));
+            assert_eq!(substitution.generics[&0], Lifetime::Generic(0));
         }
     }
 }

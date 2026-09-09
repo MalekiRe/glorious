@@ -1,0 +1,38 @@
+use std::*;
+
+pub fn main() -> i64 {
+    // Alias equality is the single structural Result policy, including unit
+    // payloads; no Bool- or Option-specific overlapping implementation.
+    assert_true(Eq::eq(&true, &true));
+    assert_true(!Eq::eq(&true, &false));
+    let empty: Option<i64> = None;
+    assert_true(Eq::eq(&empty, &empty));
+    let left = Result<String,u8>::Ok(owned("retained"));
+    let right = Result<String,u8>::Ok(owned("retained"));
+    assert_true(Eq::eq(&left, &right));
+    assert_true(Eq::eq(&left, &right));
+    assert_true(!Eq::eq(&Result<i64,u8>::Ok(1), &Result<i64,u8>::Err(1)));
+    let parsed = Bool::parse("false");
+    let score = handle parsed {
+        Result::Ok(value) => handle value { true => 0, false => 10 },
+        Result::Err(_) => 0,
+    };
+    let pair = zip_option_lossless(Some(7), Result<i64,()>::Err(()));
+    let score = score + handle pair {
+        Result::Err((Result::Ok(item), Result::Err(_))) => item,
+        _ => 0,
+    };
+    let transposed = Result::transpose(Result<Result<i64,u16>,u8>::Err(3));
+    let score = score + handle transposed {
+        Result::Ok(Result::Err(error)) => as<i64>(error),
+        _ => 0,
+    };
+    let score = score + handle Range::split_at(Range { start: 5, end: 12 }, 2) {
+        Result::Ok((left, right)) => as<i64>(left.end + right.start),
+        _ => 0,
+    };
+    let score = score + handle Range::checked(Range { start: 9, end: 2 }, 1) {
+        Result::Err(RangeError::Reversed) => 8, _ => 0,
+    };
+    score
+}

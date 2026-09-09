@@ -1154,9 +1154,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Never,
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BranchBool => {
             let result = Type::Generic(0);
@@ -1176,9 +1176,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 result,
                 effects: EffectRow::empty(),
                 invocation: Quantity::ONCE,
-                where_bounds: vec![],
+                where_bounds: vec![], where_outlives: vec![],
                 where_associated_type_bindings: vec![],
-                where_associated_effect_bindings: vec![],
+                where_associated_effect_bindings: vec![], universal_bounds: vec![],
             }
         }
         PrimitiveRole::TextByteLen => crate::CallableSignature {
@@ -1189,9 +1189,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Usize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::TextConcat => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1204,9 +1204,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Text),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::TextEq => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1219,9 +1219,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::U32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::TextFromUtf8Checked => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1231,9 +1231,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Text),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::TextAsBytes => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1243,9 +1243,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Bytes),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::CharFromU32Checked => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1255,9 +1255,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Char),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::CharToU32 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1267,9 +1267,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::U32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BytesLen | PrimitiveRole::BytesUtf8ValidUpTo => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1279,9 +1279,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Usize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::Blake3 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1291,9 +1291,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Bytes),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BytesConcat => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1306,9 +1306,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Bytes),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BytesGet => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1321,9 +1321,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::U8),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BytesSlice => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1337,9 +1337,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Bytes),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BytesFromArrayMove => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1349,9 +1349,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Bytes),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::BytesToArray => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1361,9 +1361,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Array(Box::new(Type::Scalar(ScalarType::U8))),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::U32CheckedAdd
         | PrimitiveRole::U32CheckedSub
@@ -1384,9 +1384,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::U32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::U32Eq | PrimitiveRole::U32Lt | PrimitiveRole::U32Le => {
             crate::CallableSignature {
@@ -1397,9 +1397,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 result: Type::Scalar(ScalarType::Bool),
                 effects: EffectRow::empty(),
                 invocation: Quantity::ONCE,
-                where_bounds: vec![],
+                where_bounds: vec![], where_outlives: vec![],
                 where_associated_type_bindings: vec![],
-                where_associated_effect_bindings: vec![],
+                where_associated_effect_bindings: vec![], universal_bounds: vec![],
             }
         }
         PrimitiveRole::U32ToUsize => crate::CallableSignature {
@@ -1410,9 +1410,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Usize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::UsizeToU32Checked => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1422,9 +1422,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::U32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntCheckedAdd
         | PrimitiveRole::IntCheckedDiv
@@ -1441,9 +1441,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Generic(0),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntWrappingNeg => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1453,9 +1453,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Generic(0),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI64 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1465,9 +1465,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I64),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI64 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1477,9 +1477,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I64),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU32 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1489,9 +1489,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU32 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1501,9 +1501,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToUsize => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1513,9 +1513,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::Usize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU8 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1525,9 +1525,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U8),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU16 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1537,9 +1537,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U16),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI16 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1549,9 +1549,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I16),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI32 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1561,9 +1561,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI32 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1573,9 +1573,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I32),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI8 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1585,9 +1585,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I8),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI8 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1597,9 +1597,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I8),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU64 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1609,9 +1609,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U64),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU64 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1621,9 +1621,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U64),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToIsize => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1633,9 +1633,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::Isize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToU128 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1645,9 +1645,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U128),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU128 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1657,9 +1657,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U128),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertCheckedToI128 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1669,9 +1669,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I128),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI128 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1681,9 +1681,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I128),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToIsize => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1693,9 +1693,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::Isize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToUsize => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1705,9 +1705,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::Usize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU8 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1717,9 +1717,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U8),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToU16 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1729,9 +1729,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::U16),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntConvertWrappingToI16 => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1741,9 +1741,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(crate::ScalarType::I16),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntBitNot => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1753,9 +1753,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Generic(0),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntShl => crate::CallableSignature {
             safety: crate::Safety::Safe,
@@ -1765,9 +1765,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Generic(0),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
             crate::CallableSignature {
@@ -1778,9 +1778,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 result: Type::Scalar(crate::ScalarType::U32),
                 effects: EffectRow::empty(),
                 invocation: Quantity::ONCE,
-                where_bounds: vec![],
+                where_bounds: vec![], where_outlives: vec![],
                 where_associated_type_bindings: vec![],
-                where_associated_effect_bindings: vec![],
+                where_associated_effect_bindings: vec![], universal_bounds: vec![],
             }
         }
         PrimitiveRole::IntShr => crate::CallableSignature {
@@ -1791,9 +1791,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Generic(0),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::ArrayGetBorrowShared => array_borrow_signature(
             vec![
@@ -1821,9 +1821,9 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             result: Type::Scalar(ScalarType::Usize),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         },
         PrimitiveRole::Float(_) | PrimitiveRole::Memory(_) => unreachable!("handled before the legacy signature table"),
     }
@@ -1847,9 +1847,9 @@ fn expected_float_signature(primitive: FloatPrimitive) -> crate::CallableSignatu
         result: Type::Scalar(result),
         effects: EffectRow::empty(),
         invocation: Quantity::ONCE,
-        where_bounds: vec![],
+        where_bounds: vec![], where_outlives: vec![],
         where_associated_type_bindings: vec![],
-        where_associated_effect_bindings: vec![],
+        where_associated_effect_bindings: vec![], universal_bounds: vec![],
     }
 }
 
@@ -1878,9 +1878,9 @@ fn array_borrow_signature(parameters: Vec<Type>, result: Type) -> crate::Callabl
         result,
         effects: EffectRow::empty(),
         invocation: Quantity::ONCE,
-        where_bounds: vec![],
+        where_bounds: vec![], where_outlives: vec![],
         where_associated_type_bindings: vec![],
-        where_associated_effect_bindings: vec![],
+        where_associated_effect_bindings: vec![], universal_bounds: vec![],
     }
 }
 
@@ -1893,9 +1893,9 @@ fn array_signature(parameters: Vec<Type>, result: Type) -> crate::CallableSignat
         result,
         effects: EffectRow::empty(),
         invocation: Quantity::ONCE,
-        where_bounds: vec![],
+        where_bounds: vec![], where_outlives: vec![],
         where_associated_type_bindings: vec![],
-        where_associated_effect_bindings: vec![],
+        where_associated_effect_bindings: vec![], universal_bounds: vec![],
     }
 }
 
@@ -2080,8 +2080,8 @@ mod tests {
             }
         }
         roles.extend(MemoryPrimitive::ALL.into_iter().map(PrimitiveRole::Memory));
-        assert_eq!(roles.len(), 180);
-        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 180);
+        assert_eq!(roles.len(), 182);
+        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 182);
         let mut tags = BTreeMap::new();
         for role in roles {
             assert_eq!(PrimitiveRole::parse_selector_name(role.selector_name()), Some(role));

@@ -240,6 +240,27 @@ fn core_pattern_is_irrefutable(pattern: &CorePattern) -> bool {
     }
 }
 
+/// A normally completing straight-line computation must pass through one of
+/// these direct performances. An effectful callable contract alone does not
+/// establish this fact: its callee may return without performing anything.
+fn computation_must_dispatch(body: &TypedBody, id: CoreId, clauses: &[CoreHandlerClause], signatures: Option<&ElaboratedInterface>) -> bool {
+    match &body.expression(id).kind {
+        CoreKind::Perform { effect, operation, arguments, .. } => {
+            let rows = clauses.iter().filter(|clause| clause.effect == *effect && clause.operation == *operation)
+                .map(|clause| clause.patterns.as_slice()).collect::<Vec<_>>();
+            rows.iter().any(|row| row.len() == arguments.len() && row.iter().all(core_pattern_is_irrefutable))
+                || signatures.is_some_and(|signatures| crate::core::core_pattern_rows_exhaustive(
+                    signatures,
+                    &arguments.iter().map(|argument| body.expression(*argument).ty.clone()).collect::<Vec<_>>(),
+                    &rows,
+                ))
+        }
+        CoreKind::Let { value, .. } => computation_must_dispatch(body, *value, clauses, signatures),
+        CoreKind::Block(values) => values.iter().any(|value| computation_must_dispatch(body, *value, clauses, signatures)),
+        _ => false,
+    }
+}
+
 fn direct_replay_split(
     body: &TypedBody,
     computation: CoreId,
@@ -541,6 +562,7 @@ impl Analyzer<'_> {
     fn expression(&mut self, id: CoreId, environment: &mut Environment) -> Summary {
         let expression = self.body.expression(id).clone();
         match expression.kind {
+            CoreKind::ConstValue(_) => Summary::default(),
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
@@ -662,6 +684,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Deref(value) => self.expression(value, environment),
             CoreKind::Move(value)
+            | CoreKind::ReleaseAvailable(value)
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. } => self.expression(value, environment),
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
@@ -711,6 +734,7 @@ impl Analyzer<'_> {
                 computation,
                 clauses,
             } => {
+                let normal_completion_possible = !computation_must_dispatch(self.body, computation, &clauses, self.signatures);
                 // A full-control `_` arm abandons the suspended suffix. The
                 // ordinary expression walker is intentionally sequencing
                 // oriented, so using its whole computation summary here
@@ -758,8 +782,11 @@ impl Analyzer<'_> {
                 // is deliberately conservative for unknown dispatch: an arm
                 // may happen, but two sibling arms never happen in sequence.
                 let computation_escapes = self.take_escapes();
-                let mut arms = None::<Summary>;
-                let mut arm_escapes = None::<EscapeSummary>;
+                // Unless direct dispatch is proved, normal completion skips
+                // every operation clause. Include that zero-use path for
+                // capabilities owned outside this handler.
+                let mut arms = normal_completion_possible.then(Summary::default);
+                let mut arm_escapes = normal_completion_possible.then(EscapeSummary::default);
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
                     // Payload binders own fresh capabilities for the one
@@ -965,8 +992,9 @@ impl Analyzer<'_> {
                 // An effectful call is not an eager invocation of its
                 // callable arguments.  A handler can intercept an operation
                 // performed by that callee before it reaches a callback, so
-                // only evaluation of the callee and its arguments belongs to
-                // the live prefix.  In particular, do not use
+                // evaluation of the callee and its arguments, plus the
+                // callee's own invocation, belongs to the live prefix.
+                // In particular, do not use
                 // `self.call` here: its ordinary outgoing-boundary rule is
                 // correct on a normal return, but would incorrectly
                 // discharge a captured callable's lower-use obligation on
@@ -977,11 +1005,22 @@ impl Analyzer<'_> {
                 // facade names.  An opaque/imported forwarding function has
                 // exactly the same potential cancellation boundary as a
                 // local function with the same callable interface.
-                Some(self.sequence(
-                    std::iter::once(callee).chain(arguments.into_iter()),
+                let prefix = self.sequence(
+                    std::iter::once(callee).chain(arguments.iter().copied()),
                     environment,
                     expression.span,
-                ))
+                );
+                if strict_expression_abrupt(self.body, callee)
+                    || arguments.iter().any(|argument| strict_expression_abrupt(self.body, *argument)) {
+                    return Some(prefix);
+                }
+                // The operation can only be intercepted after entering the
+                // callee. This does not imply that any callable argument was
+                // invoked before cancellation.
+                Some(match self.binding_for_value(callee, environment) {
+                    Binding::Contract(key) => self.compose(expression.span, prefix, Summary::one(key)),
+                    _ => prefix,
+                })
             }
             CoreKind::Block(values) => {
                 let mut prefix = Summary::default();
@@ -1025,7 +1064,7 @@ impl Analyzer<'_> {
         // An open or projected row has no complete operation inventory at
         // this boundary.  Preserve the existing conservative walker until
         // its row evidence is normalized into resolved effect instances.
-        if !effects.projections.is_empty() || effects.tail.is_some() {
+        if !effects.projections.is_empty() || !effects.tails.is_empty() {
             return false;
         }
         effects.effects.iter().any(|effect| {
@@ -1248,7 +1287,7 @@ impl Analyzer<'_> {
         span: Span,
     ) -> Binding {
         let Some(ElaboratedHeader::Nominal {
-            layout: ElaboratedNominalLayout::Struct(fields),
+            layout: ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields),
             ..
         }) = self
             .signatures
@@ -1354,8 +1393,9 @@ impl Analyzer<'_> {
                     Self::pattern_bindings(pattern, &field, bindings);
                 }
             }
-            CorePattern::Array { elements, .. } => {
+            CorePattern::Array { elements, rest, .. } => {
                 for (index, pattern) in elements.iter().enumerate() {
+                    let index = crate::pattern::ArrayPatternRest::index(*rest, index);
                     let field = match source {
                         Binding::Aggregate(fields) => fields
                             .get(&(index as u32))
@@ -2010,6 +2050,7 @@ impl Analyzer<'_> {
         match expected {
             Type::Tuple(fields) => fields.get(index as usize).cloned(),
             Type::Array(element) => Some((**element).clone()),
+            Type::FixedArray { element, .. } if expected.fixed_array_length().is_some_and(|n| u64::from(index) < n) => Some((**element).clone()),
             Type::Nominal {
                 definition,
                 arguments,
@@ -2342,6 +2383,7 @@ mod tests {
                 },
                 CoreExpr {
                     kind: CoreKind::Call {
+                        mandatory_tail: false,
                         callee: CoreId(0),
                         arguments: vec![CoreId(1)],
                         reference_contract: crate::core::CallReferenceOrigin::None,
@@ -2391,6 +2433,7 @@ mod tests {
                 },
                 CoreExpr {
                     kind: CoreKind::Call {
+                        mandatory_tail: false,
                         callee: CoreId(3),
                         arguments: vec![],
                         reference_contract: crate::core::CallReferenceOrigin::None,
@@ -2434,6 +2477,7 @@ mod tests {
         let i64 = Type::Scalar(crate::types::ScalarType::I64);
         let call = |callee, callback, value| CoreExpr {
             kind: CoreKind::Call {
+                mandatory_tail: false,
                 callee,
                 arguments: vec![callback, value],
                 reference_contract: crate::core::CallReferenceOrigin::None,
@@ -2538,6 +2582,7 @@ mod tests {
         let bool = Type::Scalar(crate::types::ScalarType::Bool);
         let call = |callee, callback, value| CoreExpr {
             kind: CoreKind::Call {
+                mandatory_tail: false,
                 callee,
                 arguments: vec![callback, value],
                 reference_contract: crate::core::CallReferenceOrigin::None,
@@ -2677,6 +2722,7 @@ mod tests {
                 },
                 CoreExpr {
                     kind: CoreKind::Call {
+                        mandatory_tail: false,
                         callee: CoreId(0),
                         arguments: vec![CoreId(1)],
                         reference_contract: crate::core::CallReferenceOrigin::None,
@@ -2707,6 +2753,7 @@ mod tests {
                 },
                 CoreExpr {
                     kind: CoreKind::Call {
+                        mandatory_tail: false,
                         callee: CoreId(3),
                         arguments: vec![CoreId(4), CoreId(5)],
                         reference_contract: crate::core::CallReferenceOrigin::None,

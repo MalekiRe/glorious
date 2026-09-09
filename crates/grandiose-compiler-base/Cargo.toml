@@ -1,0 +1,9 @@
+[package]
+name = "grandiose-compiler-base"
+version = "0.1.0"
+edition = "2024"
+description = "Stable identities, quantities, and diagnostics shared by the Grandiose compiler"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+blake3 = "1"

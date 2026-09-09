@@ -1,0 +1,69 @@
+// Byte-string portion of the FFI boundary. C scalar aliases and pointer-facing
+// members await the selected C ABI descriptor; do not assume host Rust/C sizes.
+pub mod ffi {
+    use crate::*;
+    pub struct CStr<'a> { private terminated: Slice<'a,u8> }
+    pub struct CString { private terminated: Vec<u8> }
+    pub struct NulError { pub position: usize }
+    pub enum CStrError { MissingTerminator, InteriorNul(NulError) }
+    fn first_nul(bytes: Slice<u8>, index: usize, end: usize) -> Option<usize> {
+        handle index == end {
+            true => None,
+            false => handle *Slice::get_unchecked(bytes, index) == 0 { true => Some(index), false => tail first_nul(bytes, index + 1, end) },
+        }
+    }
+    impl<'a> CStr<'a> {
+        pub fn from_bytes_with_nul(value: Slice<'a,u8>) -> Result<Self,CStrError> {
+            let length = Slice::len(&value);
+            handle length == 0 {
+                true => Result::Err(CStrError::MissingTerminator),
+                false => handle *Slice::get_unchecked(value, length - 1) == 0 {
+                    false => Result::Err(CStrError::MissingTerminator),
+                    true => handle first_nul(value, 0, length - 1) {
+                        Result::Ok(position) => Result::Err(CStrError::InteriorNul(NulError { position: position })),
+                        Result::Err(_) => Result::Ok(CStr { terminated: value }),
+                    },
+                },
+            }
+        }
+        pub fn bytes(value: Self) -> Slice<'a,u8> {
+            handle Slice::slice(value.terminated, Range { start: 0, end: Slice::len(&value.terminated) - 1 }) {
+                Result::Ok(bytes) => bytes, Result::Err(_) => crate::__g1_abort(),
+            }
+        }
+        pub fn bytes_with_nul(value: Self) -> Slice<'a,u8> { value.terminated }
+        pub fn to_str(value: Self) -> Result<Str<'a>,utf8::Utf8Error> {
+            let bytes = Self::bytes(value);
+            handle utf8::validate_utf8(bytes) {
+                Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(Str { bytes: bytes }),
+            }
+        }
+    }
+    impl CString {
+        pub fn from_vec(value: Vec<u8>) -> Result<Self,Rejected<Vec<u8>,NulError>> {
+            handle first_nul(Vec::as_slice(&value), 0, Vec::len(&value)) {
+                Result::Ok(position) => Result::Err(Rejected { value: value, error: NulError { position: position } }),
+                Result::Err(_) => {
+                    let mut value = value;
+                    Vec::push(&mut value, 0);
+                    Result::Ok(CString { terminated: value })
+                },
+            }
+        }
+        pub fn from_str(value: Str) -> Result<Self,NulError> {
+            let mut bytes = Vec::with_capacity(Str::len(value));
+            Vec::extend_from_slice(&mut bytes, Str::as_bytes(value));
+            handle Self::from_vec(bytes) {
+                Result::Ok(text) => Result::Ok(text), Result::Err(rejected) => Result::Err(rejected.error),
+            }
+        }
+        pub fn as_c_str<'a>(value: &'a Self) -> CStr<'a> { CStr { terminated: Vec::as_slice(&value.terminated) } }
+        pub fn into_bytes(value: Self) -> Vec<u8> {
+            let CString { terminated: terminated } = value;
+            let mut terminated = terminated;
+            handle Vec::pop(&mut terminated) { Result::Ok(0) => (), _ => crate::__g1_abort() };
+            terminated
+        }
+        pub fn into_bytes_with_nul(value: Self) -> Vec<u8> { value.terminated }
+    }
+}

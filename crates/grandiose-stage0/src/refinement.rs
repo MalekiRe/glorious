@@ -40,8 +40,8 @@ impl RefinementEnvironment {
                     definition: self.brand.owner,
                     arguments: vec![],
                 }),
-                GenericArgument::ConstU32(self.brand.refinement),
-                GenericArgument::ConstU32(u32::from(positive)),
+                GenericArgument::ConstInteger(self.brand.refinement.into()),
+                GenericArgument::ConstInteger(u32::from(positive).into()),
                 GenericArgument::Type(Type::Tuple(fields)),
             ],
         };
@@ -83,23 +83,25 @@ pub(crate) fn binding_pack_fields(ty: &Type) -> Option<&[Type]> {
             definition: owner,
             arguments: owner_arguments,
         }),
-        GenericArgument::ConstU32(refinement),
-        GenericArgument::ConstU32(positive),
+        GenericArgument::ConstInteger(refinement),
+        GenericArgument::ConstInteger(positive),
         GenericArgument::Type(Type::Tuple(fields)),
     ] = arguments.as_slice()
     else {
         return None;
     };
+    let refinement = refinement.as_u32()?;
+    let positive = positive.as_u32()?;
     if !owner_arguments.is_empty()
-        || *positive > 1
-        || (*positive == 0 && !fields.is_empty())
+        || positive > 1
+        || (positive == 0 && !fields.is_empty())
         || *environment
             != environment_definition(
                 RefinementBrand {
                     owner: *owner,
-                    refinement: *refinement,
+                    refinement,
                 },
-                *positive == 1,
+                positive == 1,
             )
     {
         return None;
@@ -117,9 +119,9 @@ pub(crate) fn binding_pack_brand(ty: &Type) -> Option<(RefinementBrand, bool)> {
     let Type::Nominal { arguments, .. } = ty else { return None; };
     let GenericArgument::Type(Type::Nominal { arguments, .. }) = &arguments[1] else { return None; };
     let [GenericArgument::Type(Type::Nominal { definition: owner, .. }),
-        GenericArgument::ConstU32(refinement), GenericArgument::ConstU32(positive), _] = arguments.as_slice()
+        GenericArgument::ConstInteger(refinement), GenericArgument::ConstInteger(positive), _] = arguments.as_slice()
         else { return None; };
-    Some((RefinementBrand { owner: *owner, refinement: *refinement }, *positive == 1))
+    Some((RefinementBrand { owner: *owner, refinement: refinement.as_u32()? }, positive.as_u32()? == 1))
 }
 
 pub(crate) fn bindings_layout_contract() -> Digest {
@@ -128,6 +130,7 @@ pub(crate) fn bindings_layout_contract() -> Digest {
 
 pub(crate) fn vm_binding_pack_fields(ty: &crate::VmType) -> Option<&[crate::VmType]> {
     use crate::VmType as V;
+    use crate::vm_backend::VmGenericArgument as A;
     let V::Nominal {
         definition,
         arguments,
@@ -139,36 +142,38 @@ pub(crate) fn vm_binding_pack_fields(ty: &crate::VmType) -> Option<&[crate::VmTy
         return None;
     }
     let [
-        V::Nominal {
+        A::Type(V::Nominal {
             definition: environment,
             arguments,
-        },
+        }),
     ] = arguments.as_slice()
     else {
         return None;
     };
     let [
-        V::Nominal {
+        A::Type(V::Nominal {
             definition: owner,
             arguments: owner_arguments,
-        },
-        V::ConstU32(refinement),
-        V::ConstU32(positive),
-        V::Tuple(fields),
+        }),
+        A::ConstInteger(refinement),
+        A::ConstInteger(positive),
+        A::Type(V::Tuple(fields)),
     ] = arguments.as_slice()
     else {
         return None;
     };
+    let refinement = refinement.as_u32()?;
+    let positive = positive.as_u32()?;
     if !owner_arguments.is_empty()
-        || *positive > 1
-        || (*positive == 0 && !fields.is_empty())
+        || positive > 1
+        || (positive == 0 && !fields.is_empty())
         || *environment
             != environment_definition(
                 RefinementBrand {
                     owner: *owner,
-                    refinement: *refinement,
+                    refinement,
                 },
-                *positive == 1,
+                positive == 1,
             )
     {
         return None;

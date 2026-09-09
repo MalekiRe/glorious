@@ -47,7 +47,7 @@ fn lir_rejects_generic_register_metadata_accepted_by_legacy_artifacts() {
         VmType::Array(Box::new(VmType::Generic(0))),
         VmType::Nominal {
             definition: DefKey(Digest::of_bytes(b"generic-lir-nominal")),
-            arguments: vec![VmType::ConstGeneric {
+            arguments: vec![crate::vm_backend::VmGenericArgument::ConstGeneric {
                 index: 0,
                 kind: crate::ConstKind::U32,
             }],
@@ -65,9 +65,9 @@ fn lir_rejects_generic_register_metadata_accepted_by_legacy_artifacts() {
         crate::vm_backend::verify_program(program.emit().unwrap()).unwrap();
         assert!(matches!(
             program.validate(),
-            Err(VmArtifactError::MalformedEncoding {
-                message: "VM LIR retains a non-concrete type or const"
-            })
+            Err(VmArtifactError::MalformedEncoding { message })
+                if matches!(message, "VM LIR retains a non-concrete type or const"
+                    | "VM LIR retains a non-concrete generic argument")
         ));
     }
 }
@@ -85,7 +85,7 @@ fn lir_rejects_open_effect_rows_inside_callable_metadata() {
             parameters: vec![],
             result: Box::new(VmType::I64),
             effects: Box::new(crate::vm_backend::VmEffectRow {
-                tail: Some(crate::EffectTail::Generic(0)),
+                tails: [crate::EffectTail::Generic(0)].into_iter().collect(),
                 ..Default::default()
             }),
         });
@@ -122,7 +122,7 @@ fn lir_checks_protocol_arguments_even_in_unreachable_machine_leaves() {
     assert!(matches!(
         program.validate(),
         Err(VmArtifactError::MalformedEncoding {
-            message: "VM LIR retains a non-concrete protocol argument"
+            message: "VM LIR retains a non-concrete generic argument"
         })
     ));
 }

@@ -1,0 +1,92 @@
+// A max heap backed by source-owned Vec. No element clone or discard is
+// required by insertion, removal, construction, or ascending extraction.
+pub struct BinaryHeap<T> { private values: Vec<T> }
+fn heap_sift_up<T>(values: &mut Vec<T>, child: usize) where T: Ord {
+    handle child == 0 {
+        true => (),
+        false => {
+            let parent = (child - 1) / 2;
+            handle Ord::compare(Vec::get_unchecked(values, parent), Vec::get_unchecked(values, child)) {
+                Ordering::Less => { Vec::swap(&mut *values, parent, child); tail heap_sift_up(values, parent) },
+                _ => (),
+            }
+        },
+    }
+}
+fn heap_sift_down<T>(values: &mut Vec<T>, parent: usize) where T: Ord {
+    let length = Vec::len(values);
+    // This guard proves both the child-index arithmetic and its bounds.
+    handle parent < length / 2 {
+        false => (),
+        true => {
+            let left = parent * 2 + 1;
+            let right = left + 1;
+            let child = handle right < length {
+                false => left,
+                true => handle Ord::compare(Vec::get_unchecked(values, left), Vec::get_unchecked(values, right)) {
+                    Ordering::Less => right, _ => left,
+                },
+            };
+            handle Ord::compare(Vec::get_unchecked(values, parent), Vec::get_unchecked(values, child)) {
+                Ordering::Less => { Vec::swap(&mut *values, parent, child); tail heap_sift_down(values, child) },
+                _ => (),
+            }
+        },
+    }
+}
+fn heap_build<T>(values: &mut Vec<T>, remaining: usize) where T: Ord {
+    handle remaining == 0 {
+        true => (),
+        false => { heap_sift_down(&mut *values, remaining - 1); tail heap_build(values, remaining - 1) },
+    }
+}
+fn heap_extract<T>(heap: &mut BinaryHeap<T>, output: &mut Vec<T>) where T: Ord {
+    handle BinaryHeap::pop(&mut *heap) {
+        Result::Err(_) => (),
+        Result::Ok(item) => { Vec::push(&mut *output, item); tail heap_extract(heap, output) },
+    }
+}
+impl<T> BinaryHeap<T> where T: Ord {
+    pub fn new() -> Self { BinaryHeap { values: Vec::new() } }
+    pub fn with_capacity(capacity: usize) -> Self { BinaryHeap { values: Vec::with_capacity(capacity) } }
+    pub fn len(value: &Self) -> usize { Vec::len(&value.values) }
+    pub fn is_empty(value: &Self) -> Bool { Vec::len(&value.values) == 0 }
+    pub fn peek<'a>(value: &'a Self) -> Option<&'a T> { Vec::first(&value.values) }
+    pub fn push(value: &mut Self, item: T) {
+        Vec::push(&mut value.values, item);
+        let child = Vec::len(&value.values) - 1;
+        heap_sift_up(&mut value.values, child)
+    }
+    pub fn pop(value: &mut Self) -> Option<T> {
+        let maximum = Vec::swap_remove(&mut value.values, 0);
+        heap_sift_down(&mut value.values, 0);
+        maximum
+    }
+    pub fn replace_top(value: &mut Self, item: T) -> Option<T> {
+        handle Vec::get_mut(&mut value.values, 0) {
+            Result::Err(_) => { Vec::push(&mut value.values, item); None },
+            Result::Ok(top) => {
+                let previous = replace(top, item);
+                heap_sift_down(&mut value.values, 0);
+                Some(previous)
+            },
+        }
+    }
+    pub fn from_vec(value: Vec<T>) -> Self {
+        let mut value = value;
+        let parents = Vec::len(&value) / 2;
+        heap_build(&mut value, parents);
+        BinaryHeap { values: value }
+    }
+    pub fn into_vec(value: Self) -> Vec<T> { value.values }
+    pub fn into_sorted_vec(value: Self) -> Vec<T> {
+        let mut value = value;
+        let mut output = Vec::with_capacity(BinaryHeap::len(&value));
+        heap_extract(&mut value, &mut output);
+        let BinaryHeap { values: empty } = value;
+        handle Vec::finish_empty(empty) { Result::Ok(_) => (), Result::Err(_) => __g1_abort() };
+        Vec::reverse(&mut output);
+        output
+    }
+    pub fn clear(value: &mut Self) where T: Use<[0,1]> { Vec::clear(&mut value.values) }
+}

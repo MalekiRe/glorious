@@ -5,7 +5,7 @@ use grandiose_stage0::{
     EffectTail, ElaboratedAssociatedTypeBinding, ElaboratedHeader, ElaboratedImplementation,
     ElaboratedInterface, ElaboratedNominalLayout, ElaboratedTraitReference, FileKey,
     GenericArgument, GenericKind, InstantiationError, InterfaceSet, LexedFile, Lifetime,
-    LogicalPath, NominalField, PackageKey, Quantity, ScalarType, StructuralU32Expr, TraitSolver,
+    LogicalPath, NominalField, PackageKey, Quantity, ScalarType, IntegerConstExpr, TraitSolver,
     Type, intrinsic_callable_trait_definition, intrinsic_label_trait_definition,
 };
 
@@ -23,6 +23,265 @@ fn ownership_fixture(source: &str) -> (ElaboratedInterface, BTreeMap<String, Def
 }
 
 #[test]
+fn associated_item_contracts_preserve_domains_and_prove_guarantees() {
+    let (signatures, names) = ownership_fixture(r#"
+        trait Eq {} trait Hash {}
+        impl Eq for i64 {} impl Hash for i64 {}
+        trait Graph { type Node: Eq + Hash + Use<[0,*]>; }
+        struct Value {} impl Graph for Value { type Node = i64; }
+        trait Lending { type Item<'a> where Self: 'a; }
+        struct Owner<T> { value: T }
+        impl<T> Lending for Owner<T> { type Item<'a> = &'a T where Self: 'a; }
+        fn lend<'a,I>(value: &'a mut I) -> <I as Lending>::Item<'a> where I: Lending;
+        fn lend_array<'a,I,const N: usize>(value: &'a [I;N]) -> <I as Lending>::Item<'a> where I: Lending;
+        fn constrained<'a,'b,T>(value: &'a T) -> &'b T where 'a: 'b, T: 'a;
+    "#);
+    let ElaboratedHeader::Trait(lending) = &signatures.definitions[&names["Lending"]] else { panic!(); };
+    assert!(matches!(&lending.associated_types["Item"].domain.where_outlives[..],
+        [grandiose_stage0::OutlivesPredicate::Type { subject: Type::Generic(_), lifetime: Lifetime::Generic(0) }]));
+    let instantiated = signatures.instantiate_callable_generic(names["constrained"], &[
+        GenericArgument::Lifetime(Lifetime::Static), GenericArgument::Lifetime(Lifetime::Generic(9)),
+        GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+    ]).unwrap();
+    assert!(matches!(&instantiated.where_outlives[0], grandiose_stage0::OutlivesPredicate::Region { longer: Lifetime::Static, shorter: Lifetime::Generic(9) }));
+}
+
+#[test]
+fn associated_item_contracts_reject_stronger_domains_and_missing_guarantees() {
+    for (source, code) in [
+        ("trait Need {} trait Family { type Item<'a> where Self: 'a; } struct Owner<T> {} impl<T> Family for Owner<T> { type Item<'a> = T where T: Need; }", "G4301"),
+        ("trait Eq {} trait Graph { type Node: Eq; } struct Value {} impl Graph for Value { type Node = i64; }", "G4302"),
+        ("trait Eq {} trait Graph { type Node: Eq = i64; }", "G4302"),
+        ("trait Family { type Item<'a> where Self: 'a; } fn escape<'a,I>() -> <I as Family>::Item<'a> where I: Family;", "G4303"),
+        ("trait Family { type Item<'a> where Self: 'a; } fn escape<'a,I>() -> [<I as Family>::Item<'a>;1] where I: Family;", "G4303"),
+        ("trait Family { type Item<'a> where Self: 'a; } struct Owner<T> {} impl<T> Family for Owner<T> { type Item<'a> = T where Self: 'static; }", "G4301"),
+        ("trait Family { type Item<'a> where Self: 'a; } fn bypass<'a,I>() where I: Family<Item<'a> = i64>;", "G4303"),
+        ("trait Family { type Item<'a> where Self: 'a; } fn bypass<'a,I,F>() where I: Family, F: Fn<(), Output=<I as Family>::Item<'a>>;", "G4303"),
+        ("trait Family { type Item<'a> where Self: 'a; } trait Other { type Value<'a> = <Self as Family>::Item<'a>; }", "G4305"),
+    ] {
+        let package = PackageKey("associated-contract-negative@0.1.0".into());
+        let lexed = LexedFile::lex(FileKey::new(&package, "lib.glorious"), source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        let collected = InterfaceSet::collect(package, "crate", &lexed, source, &scan);
+        assert!(collected.diagnostics.is_empty(), "{source}: {:?}", collected.diagnostics);
+        let signatures = ElaboratedInterface::elaborate(&collected.interface);
+        assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == code), "{source}: {:?}", signatures.diagnostics);
+    }
+}
+
+#[test]
+fn nominal_input_wellformedness_and_impl_outlives_are_lexical_evidence() {
+    ownership_fixture(r#"
+        trait Iterator { type Item; }
+        struct Iter<'a,T> { value: &'a T }
+        impl<'a,T> Iterator for Iter<'a,T> { type Item = &'a T; }
+        trait Base {} trait Child: Base {}
+        struct Owner<T> { value: T }
+        impl<T> Base for Owner<T> where T: 'static {}
+        impl<T> Child for Owner<T> where T: 'static {}
+        trait Source { type Value; }
+        impl Source for i64 { type Value = i64; }
+        trait Family { type Item<'a> where Self: 'a; }
+        impl Family for i64 { type Item<'a> = &'a <i64 as Source>::Value; }
+    "#);
+}
+
+#[test]
+fn inherited_projection_ambiguity_survives_early_domain_validation() {
+    let declarations = "trait Left { type Item; type Effects: EffectRow; const Width: usize; }
+        trait Right { type Item; type Effects: EffectRow; const Width: usize; }
+        trait Both: Left + Right {}
+        impl Left for i64 { type Item = i64; type Effects = {}; const Width = 1; }
+        impl Right for i64 { type Item = u64; type Effects = {}; const Width = 2; }
+        impl Both for i64 {}";
+    for projection in [
+        "fn selected() -> <i64 as Both>::Item;",
+        "fn selected() / { <i64 as Both>::Effects };",
+        "fn selected() -> [i64; <i64 as Both>::Width];",
+    ] {
+        let source = format!("{declarations} {projection}");
+        let package = PackageKey("inherited-projection-ambiguity@0.1.0".into());
+        let lexed = LexedFile::lex(FileKey::new(&package, "lib.glorious"), &source);
+        let scan = DeclarationScan::scan(&lexed, &source);
+        let collected = InterfaceSet::collect(package, "crate", &lexed, &source, &scan);
+        assert!(collected.diagnostics.is_empty(), "{projection}: {:?}", collected.diagnostics);
+        let signatures = ElaboratedInterface::elaborate(&collected.interface);
+        assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4153"),
+            "{projection}: {:?}", signatures.diagnostics);
+    }
+}
+
+#[test]
+fn concrete_outlives_tautologies_do_not_change_implementation_contracts() {
+    ownership_fixture("trait Family<T> { fn take<'a>(value: &'a T) -> &'a T where T: 'a; } impl Family<i64> for i64 { fn take<'a>(value: &'a i64) -> &'a i64 { value } }");
+    let source = "trait Family { fn take<'a,'b>(value: &'a i64) -> &'a i64; } impl Family for i64 { fn take<'a,'b>(value: &'a i64) -> &'a i64 where 'a: 'b { value } }";
+    let package = PackageKey("nontrivial-outlives-contract@0.1.0".into());
+    let lexed = LexedFile::lex(FileKey::new(&package, "lib.glorious"), source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let collected = InterfaceSet::collect(package, "crate", &lexed, source, &scan);
+    assert!(collected.diagnostics.is_empty(), "{:?}", collected.diagnostics);
+    let signatures = ElaboratedInterface::elaborate(&collected.interface);
+    assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4147"),
+        "a nontrivial strengthening must remain rejected: {:?}", signatures.diagnostics);
+}
+
+#[test]
+fn frozen_outlives_predicates_reject_escaping_regions() {
+    for lifetime in [Lifetime::Infer(grandiose_stage0::types::LifetimeInferVar(0)), Lifetime::Bound { depth: 0, index: 0 }, Lifetime::Elided] {
+        let (mut signatures, names) = ownership_fixture("fn valid<'a,T>() where T: 'a;");
+        let ElaboratedHeader::Callable(signature) = signatures.definitions.get_mut(&names["valid"]).unwrap() else { panic!(); };
+        signature.where_outlives = vec![grandiose_stage0::OutlivesPredicate::Type { subject: Type::Generic(1), lifetime }];
+        signatures.validate_projection_obligations();
+        assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4306"), "{lifetime:?}: {:?}", signatures.diagnostics);
+    }
+}
+
+#[test]
+fn implementation_contracts_normalize_projections_under_lexical_bounds() {
+    ownership_fixture(r#"
+        trait Read {
+            type Effects: EffectRow;
+            fn read(value: &mut Self) -> i64 / { | <Self as Read>::Effects };
+        }
+        trait Buffered: Read {
+            fn peek(value: &Self) -> i64 / { | <Self as Read>::Effects };
+        }
+        struct Wrapper<R> { reader: R }
+        impl<R> Read for Wrapper<R> where R: Read {
+            type Effects = <R as Read>::Effects;
+            fn read(value: &mut Self) -> i64 / { | <R as Read>::Effects } { 0 }
+        }
+        impl<R> Buffered for Wrapper<R> where R: Read {
+            fn peek(value: &Self) -> i64 / { | <R as Read>::Effects } { 0 }
+        }
+        trait Source {
+            type Item;
+            fn item(value: &Self) -> <Self as Source>::Item;
+        }
+        impl<R> Source for Wrapper<R> where R: Source<Item = i64> {
+            type Item = <R as Source>::Item;
+            fn item(value: &Self) -> i64 { 0 }
+        }
+    "#);
+}
+
+#[test]
+fn implementation_contract_normalization_does_not_erase_unproven_rows() {
+    let package = PackageKey("implementation-contract-negative@0.1.0".into());
+    let source = r#"
+        trait Read {
+            type Effects: EffectRow;
+            fn read(value: &mut Self) -> i64 / { | <Self as Read>::Effects };
+        }
+        struct Wrapper<R> { reader: R }
+        impl<R> Read for Wrapper<R> where R: Read {
+            type Effects = <R as Read>::Effects;
+            fn read(value: &mut Self) -> i64 { 0 }
+        }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4147"), "{:?}", signatures.diagnostics);
+}
+
+#[test]
+fn callable_specialization_does_not_capture_argument_regions() {
+    let (signatures, names) = ownership_fixture(
+        "fn capture<'outer, T, e: EffectRow>(body: for<'inner> (&'outer T, &'inner T) -> T / {|e});",
+    );
+    let reference = |depth, index| Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared,
+        lifetime: Lifetime::Bound { depth, index },
+        referent: Box::new(Type::Unit),
+    };
+    let effect = DefKey(Digest::of_bytes(b"capture-avoiding-effect"));
+    let signature = signatures.instantiate_callable_generic(names["capture"], &[
+        GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 7 }),
+        GenericArgument::Type(reference(0, 8)),
+        GenericArgument::EffectRow(EffectRow::closed_instances([grandiose_stage0::EffectInstance {
+            definition: effect,
+            arguments: vec![GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 9 })],
+        }])),
+    ]).unwrap();
+    let Type::Callable { parameters, result, effects, .. } = &signature.parameters[0] else { panic!("callable") };
+    assert!(matches!(&parameters[0], Type::Reference { lifetime: Lifetime::Bound { depth: 1, index: 7 }, referent, .. }
+        if referent.as_ref() == &reference(1, 8)), "{signature:#?}");
+    assert!(matches!(&parameters[1], Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, referent, .. }
+        if referent.as_ref() == &reference(1, 8)));
+    assert_eq!(result.as_ref(), &reference(1, 8));
+    assert_eq!(effects.effects.iter().next().unwrap().arguments,
+        [GenericArgument::Lifetime(Lifetime::Bound { depth: 1, index: 9 })]);
+}
+
+#[test]
+fn higher_ranked_alias_expansion_matches_explicit_nested_scope() {
+    let (signatures, names) = ownership_fixture(r#"
+        type Borrower<T> = for<'b> (&'b T) -> T;
+        fn aliased(body: for<'a> (Borrower<&'a i64>) -> ());
+        fn explicit(body: for<'a> (for<'b> (&'b &'a i64) -> &'a i64) -> ());
+    "#);
+    let ElaboratedHeader::Callable(aliased) = &signatures.definitions[&names["aliased"]] else { panic!("callable") };
+    let ElaboratedHeader::Callable(explicit) = &signatures.definitions[&names["explicit"]] else { panic!("callable") };
+    assert_eq!(aliased.parameters, explicit.parameters);
+}
+
+#[test]
+fn quantified_where_contracts_retain_scope_and_stay_separate_from_ordinary_evidence() {
+    let source = r#"
+        fn first<F, e: EffectRow>() where F: Use<[0,1]>,
+            for<'a> &'a F: Fn<(&'a i64,), Output = &'a i64, Effects=e>;
+        fn second<F, e: EffectRow>() where F: Use<[0,1]>,
+            for<'renamed> &'renamed F: Fn<(&'renamed i64,), Output = &'renamed i64, Effects=e>;
+    "#;
+    let package = PackageKey("quantified-contract@0.1.0".into());
+    let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    let find = |name| interface.definitions.iter().find(|definition| definition.name.as_deref() == Some(name)).unwrap().key;
+    let ElaboratedHeader::Callable(first) = &signatures.definitions[&find("first")] else { panic!("callable") };
+    let ElaboratedHeader::Callable(second) = &signatures.definitions[&find("second")] else { panic!("callable") };
+    assert_eq!(first.universal_bounds, second.universal_bounds, "binder spelling is not semantic identity");
+    assert_eq!(first.where_bounds.len(), 1);
+    assert!(first.where_associated_type_bindings.is_empty());
+    assert!(first.where_associated_effect_bindings.is_empty());
+    let [bound] = first.universal_bounds.as_slice() else { panic!("one universal") };
+    assert_eq!(bound.lifetime_binders, 1);
+    assert_eq!(bound.type_bindings.len(), 1);
+    assert_eq!(bound.effect_bindings.len(), 1);
+    assert_eq!(bound.type_bindings[0].subject, bound.subject);
+    assert_eq!(bound.type_bindings[0].relation, bound.relation);
+    assert_eq!(bound.effect_bindings[0].subject, bound.subject);
+    assert_eq!(bound.effect_bindings[0].relation, bound.relation);
+    assert!(matches!(&bound.subject, Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. }));
+    assert!(matches!(&bound.type_bindings[0].value, Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, .. }));
+
+    let caller_type = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Shared,
+        lifetime: Lifetime::Bound { depth: 0, index: 9 },
+        referent: Box::new(Type::Unit),
+    };
+    let instance = signatures.instantiate_callable_generic(find("first"), &[
+        GenericArgument::Type(caller_type),
+        GenericArgument::EffectRow(EffectRow::closed_instances([grandiose_stage0::EffectInstance {
+            definition: DefKey(Digest::of_bytes(b"quantified-effect")),
+            arguments: vec![GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 10 })],
+        }])),
+    ]).unwrap();
+    let bound = &instance.universal_bounds[0];
+    assert!(matches!(&bound.subject, Type::Reference { lifetime: Lifetime::Bound { depth: 0, index: 0 }, referent, .. }
+        if matches!(referent.as_ref(), Type::Reference { lifetime: Lifetime::Bound { depth: 1, index: 9 }, .. })));
+    assert_eq!(bound.effect_bindings[0].value.effects.iter().next().unwrap().arguments,
+        [GenericArgument::Lifetime(Lifetime::Bound { depth: 1, index: 10 })]);
+    assert_eq!(bound.type_bindings[0].subject, bound.subject);
+    assert_eq!(bound.effect_bindings[0].subject, bound.subject);
+}
+
+#[test]
 fn bindings_signatures_are_intrinsic_but_source_cannot_replace_their_evidence() {
     let (mut signatures, names) = ownership_fixture("pub fn carry<'a, P>(value: Bindings<'a, P>) -> Bindings<'a, P>;");
     let ElaboratedHeader::Callable(signature) = &signatures.definitions[&names["carry"]] else { unreachable!() };
@@ -30,6 +289,7 @@ fn bindings_signatures_are_intrinsic_but_source_cannot_replace_their_evidence() 
         if *definition == grandiose_stage0::refinement::bindings_definition() && arguments.len() == 2));
     signatures.definitions.insert(grandiose_stage0::refinement::bindings_definition(), ElaboratedHeader::Nominal {
         generics: 0, generic_kinds: vec![], layout: ElaboratedNominalLayout::Struct(vec![]),
+        contract: Default::default(), universal_bounds: vec![],
     });
     signatures.validate_projection_obligations();
     assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.message.contains("intrinsic `Bindings` identity")));
@@ -37,10 +297,11 @@ fn bindings_signatures_are_intrinsic_but_source_cannot_replace_their_evidence() 
     let mut interface = ElaboratedInterface::default();
     interface.definitions.insert(DefKey(Digest::of_bytes(b"forged-binding-pack-implementation")),
         ElaboratedHeader::Implementation(ElaboratedImplementation {
+            universal_bounds: vec![],
             safety: grandiose_stage0::Safety::Safe, generics: 0, generic_kinds: vec![], negative: false,
             relation: ElaboratedTraitReference { definition: grandiose_stage0::intrinsic_environment_trait_definition(), arguments: vec![] },
             self_ty: Type::Nominal { definition: grandiose_stage0::refinement::bindings_definition(), arguments: vec![GenericArgument::Lifetime(Lifetime::Static), GenericArgument::Type(Type::Unit)] },
-            where_bounds: vec![], associated_types: BTreeMap::new(), associated_effect_rows: BTreeMap::new(), associated_consts: BTreeMap::new(), methods: BTreeMap::new(),
+            where_bounds: vec![], where_outlives: vec![], where_associated_type_bindings: vec![], where_associated_effect_bindings: vec![], associated_types: BTreeMap::new(), associated_effect_rows: BTreeMap::new(), associated_consts: BTreeMap::new(), methods: BTreeMap::new(),
         }));
     interface.validate_projection_obligations();
     assert!(interface.diagnostics.iter().any(|diagnostic| diagnostic.message.contains("binding-pack evidence is compiler-owned")));
@@ -221,7 +482,7 @@ fn frozen_public_signatures_retain_symbolic_associated_const_projection_identity
     assert!(matches!(
         normalized,
         Type::Nominal { arguments, .. }
-            if arguments == vec![GenericArgument::ConstU32(7)]
+            if arguments == vec![GenericArgument::ConstInteger(7u32.into())]
     ));
 }
 
@@ -267,6 +528,58 @@ fn frozen_callable_signatures_retain_named_associated_item_equalities() {
 }
 
 #[test]
+fn associated_effect_equalities_follow_declared_item_kind_without_braces() {
+    for (source, name) in [
+        ("pub fn apply<F,e: EffectRow>(body: F) -> i64 / { | e } where F: Fn<(),Output=i64,Effects=e> { 0 }", "Effects"),
+        ("trait Call { type Rows: EffectRow; } pub fn apply<F,e: EffectRow>() -> i64 where F: Call<Rows=e> { 0 }", "Rows"),
+        ("trait Parent { type Rows: EffectRow; } trait Child: Parent {} pub fn apply<F,e: EffectRow>() -> i64 where F: Child<Rows=e> { 0 }", "Rows"),
+    ] {
+        let (interface, names) = ownership_fixture(source);
+        let ElaboratedHeader::Callable(signature) = &interface.definitions[&names["apply"]] else { panic!() };
+        let rows = &signature.where_associated_effect_bindings;
+        assert_eq!(rows.len(), 1, "{signature:#?}");
+        assert_eq!(rows[0].name, name);
+        assert_eq!(rows[0].value.tails, std::collections::BTreeSet::from([EffectTail::Generic(1)]));
+        assert!(signature.where_associated_type_bindings.iter().all(|binding| binding.name != name));
+    }
+}
+
+#[test]
+fn associated_equality_kind_is_not_selected_by_a_source_spelling() {
+    let (interface, names) = ownership_fixture("trait Fn { type Effects; } pub fn apply<F>() -> i64 where F: Fn<Effects=i64> { 0 }");
+    let ElaboratedHeader::Callable(signature) = &interface.definitions[&names["apply"]] else { panic!() };
+    assert!(signature.where_associated_effect_bindings.is_empty());
+    assert_eq!(signature.where_associated_type_bindings.len(), 1);
+    assert_eq!(signature.where_associated_type_bindings[0].value, Type::Scalar(ScalarType::I64));
+    for source in [
+        "trait Call { type Rows: EffectRow; } pub fn apply<F,T>() -> i64 where F: Call<Rows=T> { 0 }",
+        "trait Call { type Rows; } pub fn apply<F>() -> i64 where F: Call<Rows={}> { 0 }",
+        "trait Call { type Rows: EffectRow; type Item; } pub fn apply<F,G>() -> i64 where F: Call<Rows = <G as Call>::Item>, G: Call { 0 }",
+    ] {
+        let package = PackageKey("wrong-associated-equality-kind@0.1.0".into());
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(!signatures.diagnostics.is_empty(), "wrong-kind equality was accepted: {source}");
+    }
+}
+
+#[test]
+fn bare_associated_row_projection_retains_its_exact_relation() {
+    let source = "trait Call { type Rows: EffectRow; } pub fn apply<F,G>() -> i64 where F: Call<Rows = <G as Call>::Rows>, G: Call { 0 }";
+    let (interface, names) = ownership_fixture(source);
+    let ElaboratedHeader::Callable(signature) = &interface.definitions[&names["apply"]] else { panic!() };
+    let binding = &signature.where_associated_effect_bindings[0];
+    assert_eq!(binding.value.projections.len(), 1);
+    let projection = &binding.value.projections[0];
+    assert_eq!(*projection.subject, Type::Generic(1));
+    assert_eq!(projection.trait_definition, names["Call"]);
+    assert_eq!(projection.name, "Rows");
+    assert!(binding.value.effects.is_empty() && binding.value.tails.is_empty());
+}
+
+#[test]
 fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
     let intrinsic = intrinsic_callable_trait_definition();
     let callable = Type::Callable {
@@ -285,6 +598,7 @@ fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
     interface.definitions.insert(
         DefKey(Digest::of_bytes(b"forged-intrinsic-fn-signature")),
         ElaboratedHeader::Callable(CallableSignature {
+            where_outlives: vec![],
             safety: grandiose_stage0::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
@@ -301,7 +615,7 @@ fn frozen_interfaces_reject_forged_intrinsic_fn_output_contracts() {
                 item_arguments: vec![],
                 value: Type::Scalar(ScalarType::Bool),
             }],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         }),
     );
     interface.validate_projection_obligations();
@@ -389,6 +703,7 @@ fn frozen_interfaces_reject_forged_intrinsic_runs_in_implementations() {
     interface.definitions.insert(
         DefKey(Digest::of_bytes(b"forged-intrinsic-runs-in-implementation")),
         ElaboratedHeader::Implementation(ElaboratedImplementation {
+            universal_bounds: vec![],
             safety: grandiose_stage0::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
@@ -398,7 +713,9 @@ fn frozen_interfaces_reject_forged_intrinsic_runs_in_implementations() {
                 arguments: vec![],
             },
             self_ty: Type::Scalar(ScalarType::I64),
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
             associated_types: BTreeMap::new(),
             associated_effect_rows: BTreeMap::new(),
             associated_consts: BTreeMap::new(),
@@ -423,6 +740,7 @@ fn frozen_interfaces_reject_forged_intrinsic_label_contracts() {
     interface.definitions.insert(
         DefKey(Digest::of_bytes(b"forged-intrinsic-label-signature")),
         ElaboratedHeader::Callable(CallableSignature {
+            where_outlives: vec![],
             safety: grandiose_stage0::Safety::Safe,
             generics: 0,
             generic_kinds: vec![],
@@ -445,7 +763,7 @@ fn frozen_interfaces_reject_forged_intrinsic_label_contracts() {
                 },
             )],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         }),
     );
     interface.validate_projection_obligations();
@@ -487,7 +805,7 @@ fn generic_instantiation_preserves_all_source_kinds_before_runtime_lowering() {
     for (name, argument) in [
         ("region", GenericArgument::Lifetime(Lifetime::Static)),
         ("row", GenericArgument::EffectRow(EffectRow::empty())),
-        ("count", GenericArgument::ConstU32(3)),
+        ("count", GenericArgument::ConstInteger(3u32.into())),
         (
             "quota",
             GenericArgument::ConstQuantity(Quantity::new(1, Some(2)).unwrap()),
@@ -697,7 +1015,7 @@ fn nominal_const_applications_preserve_literals_and_binder_identity() {
     };
     assert!(matches!(
         lookup("literal"),
-        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstU32(7)]
+        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstInteger(7u32.into())]
     ));
     assert!(matches!(
         lookup("inherited"),
@@ -706,7 +1024,7 @@ fn nominal_const_applications_preserve_literals_and_binder_identity() {
     ));
     assert!(matches!(
         lookup("through_alias"),
-        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstU32(9)]
+        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstInteger(9u32.into())]
     ));
 }
 
@@ -741,7 +1059,7 @@ fn nominal_const_applications_normalize_literal_arithmetic() {
     };
     assert!(matches!(
         result("tag"),
-        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstU32(7)]
+        Type::Nominal { arguments, .. } if arguments == vec![GenericArgument::ConstInteger(7u32.into())]
     ));
     assert!(matches!(
         result("budget"),
@@ -779,7 +1097,7 @@ fn effect_quantity_arguments_and_resumption_bounds_preserve_kind_and_normal_form
     assert!(matches!(
         signatures.instantiate_effect_operation_generic(
             retry,
-            &[GenericArgument::ConstU32(2)],
+            &[GenericArgument::ConstInteger(2u32.into())],
             &[],
             "retry"
         ),
@@ -888,10 +1206,10 @@ fn nominal_headers_preserve_mixed_kind_argument_identity() {
             if matches!(arguments.as_slice(), [
                 GenericArgument::Lifetime(Lifetime::Static),
                 GenericArgument::EffectRow(row),
-                GenericArgument::ConstU32(7),
+                GenericArgument::ConstInteger(integer),
                 GenericArgument::ConstQuantity(quantity),
                 GenericArgument::Type(Type::Scalar(ScalarType::I64)),
-            ] if row.effects.len() == 1 && row.tail.is_none()
+            ] if integer.as_u32() == Some(7) && row.effects.len() == 1 && row.tails.is_empty()
                 && *quantity == Quantity::new(1, Some(2)).unwrap())
     ));
 }
@@ -931,7 +1249,7 @@ fn generic_aliases_substitute_every_nominal_argument_kind() {
                 GenericArgument::ConstGeneric { index: 2, kind: ConstKind::U32 },
                 GenericArgument::ConstGeneric { index: 3, kind: ConstKind::Quantity },
                 GenericArgument::Type(Type::Generic(4)),
-            ] if row.tail == Some(EffectTail::Generic(1)))
+            ] if row.tails == std::collections::BTreeSet::from([EffectTail::Generic(1)]))
     ));
 }
 
@@ -998,7 +1316,7 @@ fn trait_references_elaborate_structural_const_arguments_by_declared_kind() {
     };
     assert_eq!(
         signature.where_bounds[0].1.arguments,
-        vec![GenericArgument::ConstU32(7)]
+        vec![GenericArgument::ConstInteger(7u32.into())]
     );
     assert_eq!(
         signatures
@@ -1041,7 +1359,7 @@ fn associated_type_projections_preserve_structural_const_item_arguments() {
     assert!(matches!(
         target,
         Type::Projection { item_arguments, .. }
-            if item_arguments == &vec![GenericArgument::ConstU32(7)]
+            if item_arguments == &vec![GenericArgument::ConstInteger(7u32.into())]
     ));
 }
 
@@ -1242,7 +1560,7 @@ fn trait_and_effect_references_elaborate_explicit_effect_row_arguments() {
         .into_iter()
         .collect(),
         projections: vec![],
-        tail: Some(EffectTail::Generic(0)),
+        tails: [EffectTail::Generic(0)].into_iter().collect(),
     };
     assert_eq!(
         signature.where_bounds[0].1.arguments,
@@ -1478,6 +1796,69 @@ fn implementation_trait_methods_rebase_lifetime_binders_after_impl_generics() {
             ..
         }] if **referent == Type::Generic(2)
     ));
+}
+
+#[test]
+fn trait_method_substitution_preserves_owner_and_argument_lifetimes() {
+    ownership_fixture(r#"
+        struct View<'a> { value: &'a i64 }
+        trait CopyView { fn copy(value: &Self) -> Self; }
+        impl<'owner> CopyView for View<'owner> {
+            fn copy(value: &View<'owner>) -> View<'owner> { *value }
+        }
+        trait Inspect<'bound> {
+            fn inspect<'short>(owner: Self, bound: View<'bound>, short: &'short i64)
+                -> (Self, View<'bound>, &'short i64);
+        }
+        impl<'owner, 'argument> Inspect<'argument> for View<'owner> {
+            fn inspect<'method>(owner: View<'owner>, bound: View<'argument>, short: &'method i64)
+                -> (View<'owner>, View<'argument>, &'method i64) { (owner, bound, short) }
+        }
+    "#);
+}
+
+#[test]
+fn trait_method_lifetimes_substitute_through_effects_projections_and_bound_callables() {
+    ownership_fixture(r#"
+        struct View<'a> { value: &'a i64 }
+        effect Trace<'a> { emit() -> i64 }
+        trait Family { type Item<'a>; }
+        trait Inspect<'bound> {
+            fn inspect<'short, F>(owner: Self,
+                item: <F as Family>::Item<'bound>,
+                callback: for<'inner> (&'inner i64, &'short i64) -> &'inner i64)
+                -> Self / Trace<'bound> where F: Family;
+        }
+        impl<'owner, 'argument> Inspect<'argument> for View<'owner> {
+            fn inspect<'method, G>(owner: View<'owner>,
+                item: <G as Family>::Item<'argument>,
+                callback: for<'local> (&'local i64, &'method i64) -> &'local i64)
+                -> View<'owner> / Trace<'argument> where G: Family { owner }
+        }
+    "#);
+}
+
+#[test]
+fn trait_method_substitution_rejects_swapped_owner_and_argument_lifetimes() {
+    let package = PackageKey("signature-trait-lifetime-swapped@0.1.0".into());
+    let source = r#"
+        struct View<'a> { value: &'a i64 }
+        trait Inspect<'bound> {
+            fn inspect<'short>(owner: Self, bound: View<'bound>, short: &'short i64)
+                -> (Self, View<'bound>, &'short i64);
+        }
+        impl<'owner, 'argument> Inspect<'argument> for View<'owner> {
+            fn inspect<'method>(owner: View<'argument>, bound: View<'owner>, short: &'method i64)
+                -> (View<'argument>, View<'owner>, &'method i64) { (owner, bound, short) }
+        }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4147"),
+        "{:#?}", signatures.diagnostics);
 }
 
 #[test]
@@ -2137,7 +2518,7 @@ fn mixed_kind_trait_heads_are_preserved_in_associated_type_projections() {
                     GenericArgument::Lifetime(Lifetime::Generic(0)),
                     GenericArgument::EffectRow(grandiose_stage0::EffectRow {
                         effects: Default::default(), projections: vec![],
-                        tail: Some(grandiose_stage0::EffectTail::Generic(1)),
+                        tails: [grandiose_stage0::EffectTail::Generic(1)].into_iter().collect(),
                     }),
                     GenericArgument::ConstGeneric { index: 2, kind: ConstKind::U32 },
                 ]
@@ -2260,7 +2641,7 @@ fn generic_associated_type_applications_preserve_lifetime_type_and_const_argumen
                 && item_arguments == &[
                     GenericArgument::Lifetime(Lifetime::Static),
                     GenericArgument::Type(Type::Generic(1)),
-                    GenericArgument::ConstU32(7),
+                    GenericArgument::ConstInteger(7u32.into()),
                 ]
     ));
 }
@@ -2393,7 +2774,7 @@ fn kinded_effect_row_binders_preserve_open_row_tails() {
     let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&relay).unwrap() else {
         panic!("expected callable")
     };
-    assert_eq!(signature.effects.tail, Some(EffectTail::Generic(0)));
+    assert_eq!(signature.effects.tails, std::collections::BTreeSet::from([EffectTail::Generic(0)]));
 }
 
 #[test]
@@ -2707,7 +3088,7 @@ fn associated_const_contracts_preserve_defaults_and_reject_missing_or_wrong_over
     assert_eq!(shape.associated_consts["Width"].kind, ConstKind::U32);
     assert_eq!(
         shape.associated_consts["Width"].default,
-        Some(GenericArgument::ConstU32(4))
+        Some(GenericArgument::ConstInteger(4u32.into()))
     );
     assert!(
         signatures
@@ -2746,9 +3127,9 @@ fn symbolic_u32_arithmetic_is_canonical_in_nominal_and_associated_const_contract
     else {
         panic!("expected callable")
     };
-    let expected = GenericArgument::ConstU32Expr(StructuralU32Expr::Add(
-        Box::new(StructuralU32Expr::Literal(1)),
-        Box::new(StructuralU32Expr::Param(0)),
+    let expected = GenericArgument::ConstIntegerExpr(IntegerConstExpr::binary(grandiose_stage0::types::integer_const::IntegerConstOp::Add,
+        Box::new(IntegerConstExpr::Literal(1u32.into())),
+        Box::new(IntegerConstExpr::Param { index: 0, scalar: grandiose_stage0::ScalarType::U32 }),
     ));
     let Type::Nominal { arguments, .. } = &advance.parameters[0] else {
         panic!("expected nominal parameter")
@@ -2790,21 +3171,17 @@ fn structural_u32_arithmetic_folds_closed_terms_and_rejects_checked_errors() {
     let Type::Nominal { arguments, .. } = &folded.parameters[0] else {
         panic!("expected nominal")
     };
-    assert_eq!(arguments, &vec![GenericArgument::ConstU32(20)]);
+    assert_eq!(arguments, &vec![GenericArgument::ConstInteger(20u32.into())]);
     let invalid = interface
         .definitions
         .iter()
         .find(|definition| definition.name.as_deref() == Some("invalid"))
         .unwrap();
-    assert!(
-        invalid
-            .syntax
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G3228"),
-        "{:#?}",
-        invalid.syntax.diagnostics
-    );
+    assert!(invalid.syntax.diagnostics.is_empty());
+    assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4134"), "{:#?}", signatures.diagnostics);
+    let ElaboratedHeader::Callable(invalid) = signatures.definitions.get(&invalid.key).unwrap() else { panic!("callable") };
+    let Type::Nominal { arguments, .. } = &invalid.parameters[0] else { panic!("nominal") };
+    assert_eq!(arguments, &vec![GenericArgument::Type(Type::Error)], "invalid arithmetic must not become zero");
 }
 
 #[test]
@@ -2874,6 +3251,7 @@ fn source_nominal_layouts_accept_distinct_finite_generic_instantiations() {
 fn forged_interface_nominal_layout_cycle_is_rejected_before_core_or_mir() {
     let node = DefKey(Digest::of_bytes(b"forged-owned-layout-node"));
     let forged = ElaboratedInterface {
+        generic_defaults: BTreeMap::new(),
         pattern_values: BTreeMap::new(),
         inherent_self_types: BTreeMap::new(),
         definitions: BTreeMap::from([(
@@ -2881,6 +3259,7 @@ fn forged_interface_nominal_layout_cycle_is_rejected_before_core_or_mir() {
             ElaboratedHeader::Nominal {
                 generics: 0,
                 generic_kinds: vec![],
+                contract: Default::default(), universal_bounds: vec![],
                 layout: ElaboratedNominalLayout::Struct(vec![NominalField {
                     name: "next".into(),
                     ty: Type::Nominal {

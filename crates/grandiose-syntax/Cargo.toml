@@ -1,0 +1,9 @@
+[package]
+name = "grandiose-syntax"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless source lexing and declaration scanning for Grandiose"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+grandiose-compiler-base = { path = "../grandiose-compiler-base" }

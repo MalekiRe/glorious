@@ -15,7 +15,7 @@ use crate::{
         ElaboratedNominalLayout,
     },
     types::{
-        GenericArgument, Mutability, StructuralU32Expr, Type,
+        GenericArgument, Mutability, Type,
         is_canonical_generic_argument_identity, is_canonical_type_identity,
         projection_item_arguments_match_kinds,
     },
@@ -421,6 +421,7 @@ pub enum MirPattern {
     Array {
         element: Type,
         elements: Vec<MirPattern>,
+        rest: Option<crate::pattern::ArrayPatternRest>,
     },
     Record {
         definition: DefKey,
@@ -4095,12 +4096,12 @@ fn literal_pattern_matches_constant(value: &Constant, pattern: &MirPattern) -> O
     Some(match value {
         Constant::I64(value) => parse_i64_literal(pattern).is_ok_and(|pattern| pattern == *value),
         Constant::F32(bits) => {
-            parse_f32_literal(pattern).is_ok_and(|pattern| pattern == f32::from_bits(*bits))
+            parse_f32_literal(pattern).is_ok_and(|pattern| canonical_f32_bits(pattern.to_bits()) == canonical_f32_bits(*bits))
         }
-        // Match the VM's IEEE equality rather than comparing bit patterns:
-        // `-0.0` and `0.0` compare equal, while NaN never matches itself.
+        // Structural scalar equality preserves signed zero and uses the
+        // same canonical-bit policy at optimized and interpreted boundaries.
         Constant::F64(bits) => {
-            parse_f64_literal(pattern).is_ok_and(|pattern| pattern == f64::from_bits(*bits))
+            parse_f64_literal(pattern).is_ok_and(|pattern| canonical_f64_bits(pattern.to_bits()) == canonical_f64_bits(*bits))
         }
         Constant::Bool(value) => {
             matches!((pattern.as_str(), value), ("true", true) | ("false", false))
@@ -4683,7 +4684,8 @@ impl MirFunction {
                     .iter()
                     .position(|local| local.source == expression)
                     .map(|index| MirLocal(index as u32)),
-                PlaceBindingOrigin::HandlerBinder { .. }
+                PlaceBindingOrigin::Temporary { .. }
+                | PlaceBindingOrigin::HandlerBinder { .. }
                 | PlaceBindingOrigin::HandlerResumption { .. }
                 | PlaceBindingOrigin::CompletionBinder { .. } => bindings.get(&binding.origin).copied(),
             };
@@ -6287,19 +6289,19 @@ impl MirFunction {
                 }
             }
             MirInstruction::ArrayLen { dst, value } => {
-                if !matches!(self.local_type(*value)?, Type::Array(_)) {
+                if self.local_type(*value)?.array_element().is_none() {
                     return Err("array length requires owned array storage".into());
                 }
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "array length")?;
             }
             MirInstruction::ArrayElementIsInitialized { dst, value, index }
             | MirInstruction::TakeArrayElement { dst, value, index } => {
-                let Type::Array(element) = self.local_type(*value)? else {
+                let Some(element) = self.local_type(*value)?.array_element() else {
                     return Err("dynamic array projection requires owned array storage".into());
                 };
                 self.require_scalar_locals(&[*index], ScalarType::Usize, "array index")?;
                 if matches!(instruction, MirInstruction::TakeArrayElement { .. }) {
-                    if dst == value || self.local_type(*dst)? != element.as_ref() {
+                    if dst == value || self.local_type(*dst)? != element {
                         return Err("array move result does not match element type".into());
                     }
                 } else {
@@ -6522,6 +6524,7 @@ impl MirFunction {
                         match ty {
                             Type::Tuple(fields) => projected.extend(fields.get(*index as usize).cloned()),
                             Type::Array(element) => projected.push((**element).clone()),
+                            Type::FixedArray { element, .. } if ty.fixed_array_length().is_some_and(|n| u64::from(*index) < n) => projected.push((**element).clone()),
                             Type::Nominal { definition, arguments } => {
                                 let descriptor = self.nominal_copy_descriptors.iter().find(|descriptor|
                                     descriptor.definition == *definition && descriptor.arguments == *arguments)
@@ -6752,7 +6755,8 @@ impl MirFunction {
             element_type,
         } = instruction
         {
-            if self.local_type(*dst)? != &Type::Array(Box::new(element_type.clone())) {
+            if self.local_type(*dst)?.array_element() != Some(element_type)
+                || !self.local_type(*dst)?.array_accepts_count(fields.len()) {
                 return Err("MIR array destination does not have its array type".into());
             }
             for field in fields {
@@ -6856,10 +6860,11 @@ impl MirFunction {
             element_type,
         } = instruction
         {
-            let Type::Array(actual) = self.local_type(*base)? else {
+            let Some(actual) = self.local_type(*base)?.array_element() else {
                 return Err("MIR array projection base is not an array".into());
             };
-            if *index >= *field_count || actual.as_ref() != element_type {
+            if *index >= *field_count || actual != element_type
+                || !self.local_type(*base)?.array_accepts_count(*field_count as usize) {
                 return Err("MIR array projection has inconsistent structural metadata".into());
             }
             if self.local_type(*dst)? != element_type {
@@ -7411,6 +7416,10 @@ pub(crate) fn native_contract_residents(
                 nominals.push(ty.clone());
                 children.extend(fields.iter().cloned());
             }
+            Type::FixedArray { element, .. } => {
+                nominals.push(ty.clone());
+                children.push((**element).clone());
+            }
             Type::Array(element)
             | Type::StaticData { element, .. }
             | Type::RawPointer {
@@ -7447,7 +7456,7 @@ pub(crate) fn instantiate_nominal_copy_layout(
             .collect()
     };
     match layout {
-        ElaboratedNominalLayout::Struct(fields) => Some(vec![instantiate_fields(fields)]),
+        ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields) => Some(vec![instantiate_fields(fields)]),
         ElaboratedNominalLayout::Enum(variants) => Some(
             variants
                 .iter()
@@ -7483,6 +7492,10 @@ fn substitute_nominal_copy_type(value: &Type, arguments: &[GenericArgument]) -> 
         Type::Array(element) => {
             Type::Array(Box::new(substitute_nominal_copy_type(element, arguments)))
         }
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(substitute_nominal_copy_type(element, arguments)),
+            length: Box::new(crate::service::specialize_generic_argument(length, arguments)),
+        },
         Type::RawPointer { mutability, pointee } => Type::RawPointer {
             mutability: *mutability,
             pointee: Box::new(substitute_nominal_copy_type(pointee, arguments)),
@@ -7514,8 +7527,8 @@ fn substitute_nominal_copy_type(value: &Type, arguments: &[GenericArgument]) -> 
         Type::ConstGeneric { index, kind } => arguments
             .get(*index as usize)
             .and_then(|argument| match (kind, argument) {
-                (crate::types::ConstKind::U32, GenericArgument::ConstU32(value)) => {
-                    Some(Type::ConstU32(*value))
+                (expected, GenericArgument::ConstInteger(value)) if *expected == value.kind() => {
+                    Some(Type::ConstInteger(*value))
                 }
                 (crate::types::ConstKind::Quantity, GenericArgument::ConstQuantity(value)) => {
                     Some(Type::ConstQuantity(*value))
@@ -7550,17 +7563,14 @@ fn substitute_nominal_copy_argument(
         GenericArgument::ConstGeneric { index, kind } => arguments
             .get(*index as usize)
             .filter(|argument| match (kind, argument) {
-                (crate::types::ConstKind::U32, GenericArgument::ConstU32(_))
-                | (crate::types::ConstKind::Quantity, GenericArgument::ConstQuantity(_)) => true,
+                (expected, GenericArgument::ConstInteger(value)) => *expected == value.kind(),
+                (crate::types::ConstKind::Quantity, GenericArgument::ConstQuantity(_)) => true,
                 (expected, GenericArgument::ConstGeneric { kind, .. }) => expected == kind,
                 _ => false,
             })
             .cloned()
             .unwrap_or_else(|| value.clone()),
-        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
-            StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
-            value => GenericArgument::ConstU32Expr(value),
-        },
+        GenericArgument::ConstIntegerExpr(value) => crate::types::integer_const_argument(value.substitute_arguments(arguments)),
         value => value.clone(),
     }
 }
@@ -7576,7 +7586,7 @@ pub(crate) fn mir_type_is_duplicable(ty: &Type, descriptors: &[MirNominalCopyDes
             Type::Tuple(elements) => elements
                 .iter()
                 .all(|element| visit(element, descriptors, active)),
-            Type::Array(element) => visit(element, descriptors, active),
+            Type::Array(element) | Type::FixedArray { element, .. } => visit(element, descriptors, active),
             Type::Nominal {
                 definition,
                 arguments,
@@ -7635,6 +7645,10 @@ pub(crate) fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> R
     }
     match ty {
         Type::Infer(_) => Err("MIR semantic type retains an unresolved inference variable".into()),
+        Type::FixedArray { element, length } => {
+            validate_mir_type(element, lifetime_binders)?;
+            validate_mir_generic_argument(length, lifetime_binders)
+        }
         Type::Error => Err("MIR semantic type retains recovered error poison".into()),
         Type::Nominal { arguments, .. } => arguments
             .iter()
@@ -7689,7 +7703,7 @@ pub(crate) fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> R
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_) => Ok(()),
@@ -7710,8 +7724,8 @@ fn validate_mir_generic_argument(
         GenericArgument::Type(ty) => validate_mir_type(ty, lifetime_binders),
         GenericArgument::EffectRow(effects) => validate_mir_effect_row(effects, lifetime_binders),
         GenericArgument::Lifetime(lifetime) => validate_mir_lifetime(*lifetime, lifetime_binders),
-        GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => Ok(()),
         GenericArgument::ConstProjection {
@@ -7731,7 +7745,7 @@ fn validate_mir_effect_row(
     effects: &crate::EffectRow,
     lifetime_binders: &mut Vec<u32>,
 ) -> Result<(), String> {
-    if matches!(effects.tail, Some(crate::EffectTail::Infer(_))) {
+    if effects.tails.iter().any(|tail| matches!(tail, crate::EffectTail::Infer(_))) {
         return Err("MIR effect row retains an unresolved inference tail".into());
     }
     for effect in &effects.effects {
@@ -8037,7 +8051,7 @@ fn validate_mir_pattern_semantic_types(
         MirPattern::Tuple(patterns) => patterns
             .iter()
             .try_for_each(|pattern| validate_mir_pattern_semantic_types(pattern, lifetime_binders)),
-        MirPattern::Array { element, elements } => {
+        MirPattern::Array { element, elements, .. } => {
             validate_mir_type(element, lifetime_binders)?;
             elements.iter().try_for_each(|pattern| {
                 validate_mir_pattern_semantic_types(pattern, lifetime_binders)
@@ -8318,6 +8332,8 @@ fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> 
 
 fn type_retains_generic_placeholder(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => type_retains_generic_placeholder(element)
+            || generic_argument_retains_generic_placeholder(length),
         Type::Generic(_) | Type::ConstGeneric { .. } | Type::Infer(_) | Type::Error => true,
         Type::Nominal { arguments, .. } => arguments
             .iter()
@@ -8344,7 +8360,7 @@ fn type_retains_generic_placeholder(value: &Type) -> bool {
         Type::Reference {
             lifetime, referent, ..
         } => {
-            matches!(lifetime, crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_))
+            matches!(lifetime, crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_) | crate::Lifetime::Placeholder(_))
                 || type_retains_generic_placeholder(referent)
         }
         Type::Callable {
@@ -8357,7 +8373,7 @@ fn type_retains_generic_placeholder(value: &Type) -> bool {
                 || type_retains_generic_placeholder(result)
                 || effect_row_retains_generic_placeholder(effects)
         }
-        Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstU32(_) | Type::ConstQuantity(_) => {
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstInteger(_) | Type::ConstQuantity(_) => {
             false
         }
     }
@@ -8367,24 +8383,21 @@ fn generic_argument_retains_generic_placeholder(value: &GenericArgument) -> bool
     match value {
         GenericArgument::Type(value) => type_retains_generic_placeholder(value),
         GenericArgument::EffectRow(value) => effect_row_retains_generic_placeholder(value),
-        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_))
-        | GenericArgument::ConstU32Expr(_)
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Infer(_) | crate::Lifetime::Placeholder(_))
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => true,
         GenericArgument::Lifetime(
             crate::Lifetime::Static | crate::Lifetime::Elided | crate::Lifetime::Bound { .. },
         )
-        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_) => false,
     }
 }
 
 fn effect_row_retains_generic_placeholder(value: &crate::EffectRow) -> bool {
-    matches!(
-        value.tail,
-        Some(crate::EffectTail::Generic(_) | crate::EffectTail::Infer(_))
-    ) || value.effects.iter().any(|effect| {
+    !value.tails.is_empty() || value.effects.iter().any(|effect| {
         effect
             .arguments
             .iter()
@@ -8466,7 +8479,7 @@ fn pattern_retains_generic_placeholder(pattern: &MirPattern) -> bool {
     match pattern {
         MirPattern::Any | MirPattern::Literal(_) => false,
         MirPattern::Tuple(patterns) => patterns.iter().any(pattern_retains_generic_placeholder),
-        MirPattern::Array { element, elements } => {
+        MirPattern::Array { element, elements, .. } => {
             type_retains_generic_placeholder(element)
                 || elements.iter().any(pattern_retains_generic_placeholder)
         }
@@ -8724,11 +8737,11 @@ pub(crate) fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
             .map(lower_pattern)
             .collect::<Option<Vec<_>>>()
             .map(MirPattern::Tuple),
-        CorePattern::Array { element, elements } => elements
+        CorePattern::Array { element, elements, rest } => elements
             .into_iter()
             .map(lower_pattern)
             .collect::<Option<Vec<_>>>()
-            .map(|elements| MirPattern::Array { element, elements }),
+            .map(|elements| MirPattern::Array { element, elements, rest }),
         CorePattern::Record {
             definition,
             field_types,
@@ -8800,8 +8813,8 @@ pub(crate) fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(
                 .try_for_each(|(pattern, ty)| validate_pattern(pattern, ty)),
             _ => Err("MIR tuple pattern has an incompatible subject type".into()),
         },
-        MirPattern::Array { element, elements } => match subject {
-            Type::Array(actual) if actual.as_ref() == element => elements
+        MirPattern::Array { element, elements, rest } => match subject {
+            actual if actual.array_element() == Some(element) && actual.array_accepts_pattern(elements.len(), *rest) => elements
                 .iter()
                 .try_for_each(|pattern| validate_pattern(pattern, element)),
             _ => Err("MIR array pattern has an incompatible subject type".into()),
@@ -8853,6 +8866,10 @@ fn numeric_literal_matches_subject(text: &str, subject: &Type) -> bool {
         ScalarType::I32 => parse_i32_literal(text).is_ok(),
         ScalarType::I64 | ScalarType::Isize => parse_i64_literal(text).is_ok(),
         ScalarType::I128 => parse_i128_literal(text).is_ok(),
+        ScalarType::F32 => matches!(crate::source::exact_scalar_literal_kind(text), Some(crate::TokenKind::Integer | crate::TokenKind::Float))
+            && parse_f32_literal(text).is_ok(),
+        ScalarType::F64 => matches!(crate::source::exact_scalar_literal_kind(text), Some(crate::TokenKind::Integer | crate::TokenKind::Float))
+            && parse_f64_literal(text).is_ok(),
         _ => false,
     }
 }
@@ -8976,53 +8993,43 @@ pub(crate) fn materialize_numeric_literal(
 }
 
 fn parse_i64_literal(text: &str) -> Result<i64, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    i64::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::I64)?.parse().map_err(|_| ())
 }
 
 fn parse_u32_literal(text: &str) -> Result<u32, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    u32::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::U32)?.parse().map_err(|_| ())
 }
 
 fn parse_u8_literal(text: &str) -> Result<u8, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    u8::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::U8)?.parse().map_err(|_| ())
 }
 
 fn parse_u16_literal(text: &str) -> Result<u16, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    u16::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::U16)?.parse().map_err(|_| ())
 }
 
 fn parse_u64_literal(text: &str) -> Result<u64, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    u64::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::U64)?.parse().map_err(|_| ())
 }
 
 fn parse_u128_literal(text: &str) -> Result<u128, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    u128::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::U128)?.parse().map_err(|_| ())
 }
 
 fn parse_i8_literal(text: &str) -> Result<i8, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    i8::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::I8)?.parse().map_err(|_| ())
 }
 
 fn parse_i16_literal(text: &str) -> Result<i16, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    i16::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::I16)?.parse().map_err(|_| ())
 }
 
 fn parse_i32_literal(text: &str) -> Result<i32, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    i32::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::I32)?.parse().map_err(|_| ())
 }
 
 fn parse_i128_literal(text: &str) -> Result<i128, ()> {
-    let (radix, digits) = normalized_integer_literal(text);
-    i128::from_str_radix(&digits, radix).map_err(|_| ())
+    normalized_integer_literal(text, crate::ScalarType::I128)?.parse().map_err(|_| ())
 }
 
 fn integer_scalar_type(ty: &Type) -> Option<crate::types::ScalarType> {
@@ -9139,17 +9146,10 @@ fn generic_integer_runtime_result(role: PrimitiveRole, source: Type) -> Option<T
     })
 }
 
-fn normalized_integer_literal(text: &str) -> (u32, String) {
-    let digits = text.replace('_', "");
-    if let Some(value) = digits.strip_prefix("0b") {
-        (2, value.into())
-    } else if let Some(value) = digits.strip_prefix("0o") {
-        (8, value.into())
-    } else if let Some(value) = digits.strip_prefix("0x") {
-        (16, value.into())
-    } else {
-        (10, digits)
-    }
+pub(crate) fn normalized_integer_literal(text: &str, scalar: crate::ScalarType) -> Result<String, ()> {
+    let (negative, token) = text.strip_prefix('-').map_or((false, text), |token| (true, token));
+    crate::IntegerConst::from_literal(scalar, token, negative, 64)
+        .map(|value| value.to_string()).map_err(|_| ())
 }
 
 pub(crate) fn parse_f64_literal(text: &str) -> Result<f64, ()> {

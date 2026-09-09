@@ -2335,7 +2335,7 @@ impl<L: AtomicLocals> AtomicEmitter<'_, L> {
                     self.register_nominal_copy_descriptors(element);
                 }
             }
-            Type::Array(element) => self.register_nominal_copy_descriptors(element),
+            Type::Array(element) | Type::FixedArray { element, .. } => self.register_nominal_copy_descriptors(element),
             // References are independently duplicable/affine according to
             // their mutability; the referent is not inline storage.
             Type::Reference { .. } | Type::RawPointer { .. } => {}
@@ -2346,9 +2346,12 @@ impl<L: AtomicLocals> AtomicEmitter<'_, L> {
                 ..
             } => {
                 for parameter in parameters {
-                    self.register_nominal_copy_descriptors(parameter);
+                    self.register_nominal_copy_descriptors(&crate::core::open_hrtb_callable_body_type(parameter.clone(), 0));
                 }
-                self.register_nominal_copy_descriptors(result);
+                self.register_nominal_copy_descriptors(&crate::core::open_hrtb_callable_body_type((**result).clone(), 0));
+                // Descriptor fields live outside the callable's binder.
+                // Open its regions without changing the callable contract.
+                let effects = crate::core::open_hrtb_callable_body_effect_row(effects.clone(), 0);
                 for effect in &effects.effects {
                     for argument in &effect.arguments {
                         if let GenericArgument::Type(argument) = argument {
@@ -2373,7 +2376,7 @@ impl<L: AtomicLocals> AtomicEmitter<'_, L> {
                 };
                 let variants = match signatures.definitions.get(definition) {
                     Some(ElaboratedHeader::Nominal {
-                        layout: ElaboratedNominalLayout::Struct(_),
+                        layout: ElaboratedNominalLayout::Struct(_) | ElaboratedNominalLayout::TupleStruct(_),
                         ..
                     }) => signatures
                         .instantiate_struct_fields_generic(*definition, arguments)

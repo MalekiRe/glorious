@@ -266,7 +266,8 @@ impl CleanupMir {
             }
             check_plan(block.terminator.cleanup)?;
             check_plan(block.terminator.cancellation)?;
-            if matches!(block.terminator.control, CleanupControl::Return(_)) {
+            if matches!(block.terminator.control, CleanupControl::Return(_)) || matches!(&block.terminator.control,
+                CleanupControl::Invoke { contract, .. } if contract.mandatory_tail) {
                 let plan = &self.plans[block.terminator.cleanup.0 as usize];
                 let protected = block
                     .terminator

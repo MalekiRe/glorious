@@ -24,7 +24,7 @@ use crate::{
     runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
     source::{TokenKind, exact_scalar_literal_kind},
     types::{
-        ConstKind, EffectTail, GenericArgument, Lifetime, PointerMutability, Safety, ScalarType, StructuralU32Expr, Type,
+        ConstKind, EffectTail, GenericArgument, Lifetime, PointerMutability, Safety, ScalarType, IntegerConstExpr, Type,
     },
 };
 
@@ -48,6 +48,11 @@ mod native_bridge;
 mod native_storage;
 mod replay;
 mod coverage;
+mod tail_provenance;
+mod label_dispatch;
+pub mod llvm;
+mod reference_origins;
+use reference_origins::ReferenceOriginSet;
 pub use native_bridge::{
     VmNativeAbi, VmNativeCall, VmNativeCallback, VmNativeImport, VmNativeImports,
     VmNativeLayout, VmNativeLayoutField, VmNativeLayoutShape, VmNativeResidentContract, VmNativeStatus,
@@ -85,8 +90,8 @@ pub enum VmType {
     /// A checked structural constant in a nominal layout.  Const kinds are
     /// retained as VM types solely because nominal layout identity is typed;
     /// they never become independently executable values.
-    ConstU32(u32),
-    ConstU32Expr(StructuralU32Expr),
+    ConstInteger(crate::types::integer_const::IntegerConst),
+    ConstIntegerExpr(IntegerConstExpr),
     ConstQuantity {
         lower: u64,
         upper: Option<u64>,
@@ -96,6 +101,8 @@ pub enum VmType {
         kind: ConstKind,
     },
     Array(Box<VmType>),
+    /// A sealed inline homogeneous product; unlike Array it has no resize ABI.
+    FixedArray { element: Box<VmType>, length: u64 },
     /// Sealed artifact-backed data. This is deliberately distinct from both
     /// `Bytes` and an ordinary array: it carries the verifier-owned type tag
     /// and alignment needed to prevent reinterpreting embedded assets.
@@ -107,7 +114,7 @@ pub enum VmType {
     Tuple(Vec<VmType>),
     Nominal {
         definition: DefKey,
-        arguments: Vec<VmType>,
+        arguments: Vec<VmGenericArgument>,
     },
     Callable {
         safety: Safety,
@@ -127,6 +134,28 @@ pub enum VmType {
         mutability: PointerMutability,
         pointee: Box<VmType>,
     },
+}
+
+impl VmType {
+    fn array_element(&self) -> Option<&VmType> {
+        match self {
+            Self::Array(element) | Self::FixedArray { element, .. } => Some(element),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn array_accepts_pattern(&self, count: usize, rest: Option<crate::pattern::ArrayPatternRest>) -> bool {
+        (rest.is_none() || matches!(self, Self::FixedArray { .. }))
+            && crate::pattern::ArrayPatternRest::length(rest, count).is_some_and(|count| self.array_accepts_count(count))
+    }
+
+    fn array_accepts_count(&self, count: usize) -> bool {
+        match self {
+            Self::Array(_) => true,
+            Self::FixedArray { length, .. } => u64::try_from(count).ok() == Some(*length),
+            _ => false,
+        }
+    }
 }
 
 /// Source-free capture authority carried by a verified callable value.  It is
@@ -172,11 +201,11 @@ pub enum VmGenericArgument {
     Type(VmType),
     EffectRow(VmEffectRow),
     Lifetime(Lifetime),
-    ConstU32(u32),
+    ConstInteger(crate::types::integer_const::IntegerConst),
     /// Symbolic arithmetic remains a frozen, canonical const identity until
     /// the declaration binder is instantiated.  Do not replace it with an
     /// error type: handlers select on this full protocol identity.
-    ConstU32Expr(StructuralU32Expr),
+    ConstIntegerExpr(IntegerConstExpr),
     ConstQuantity {
         lower: u64,
         upper: Option<u64>,
@@ -195,7 +224,7 @@ pub enum VmGenericArgument {
 pub struct VmEffectRow {
     pub effects: Vec<VmEffectInstance>,
     pub projections: Vec<VmEffectRowProjection>,
-    pub tail: Option<EffectTail>,
+    pub tails: std::collections::BTreeSet<EffectTail>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,6 +296,7 @@ pub enum VmPattern {
     Array {
         element: VmType,
         elements: Vec<VmPattern>,
+        rest: Option<crate::pattern::ArrayPatternRest>,
     },
     Record {
         definition: DefKey,
@@ -698,6 +728,10 @@ pub enum VmInstruction {
         dst: u32,
         fields: Vec<u32>,
     },
+    MakeTupleOwned { dst: u32, fields: Vec<u32> },
+    MakeArrayOwned { dst: u32, fields: Vec<u32>, element_type: VmType },
+    MakeRecordOwned { dst: u32, definition: DefKey, fields: Vec<u32>, field_types: Vec<VmType> },
+    MakeEnumOwned { dst: u32, definition: DefKey, variant: u32, fields: Vec<u32>, field_types: Vec<VmType> },
     MakeArray {
         dst: u32,
         fields: Vec<u32>,
@@ -1108,6 +1142,11 @@ pub enum VmInstruction {
     },
     /// Consuming Runtime ABI. Legacy Call remains a test-compatibility opcode.
     CallOwned { dst: u32, callee: DefKey, arguments: Vec<u32> },
+    /// Mandatory activation transfer. No result register or local continuation.
+    TailCallOwned { callee: DefKey, arguments: Vec<u32> },
+    /// Publish a prepared owner into source storage, consuming its carrier.
+    /// Legacy Store is retained only for in-memory compatibility fixtures.
+    StoreOwned { dst: u32, src: u32 },
     CallIndirectOwned { dst: u32, callee: u32, arguments: Vec<u32> },
     HostCallOwned {
         dst: u32,
@@ -1190,6 +1229,15 @@ pub enum VmInstruction {
     Trap,
 }
 impl VmInstruction {
+    pub(crate) fn with_owned_aggregate(self) -> Self {
+        match self {
+            Self::MakeTuple { dst, fields } => Self::MakeTupleOwned { dst, fields },
+            Self::MakeArray { dst, fields, element_type } => Self::MakeArrayOwned { dst, fields, element_type },
+            Self::MakeRecord { dst, definition, fields, field_types } => Self::MakeRecordOwned { dst, definition, fields, field_types },
+            Self::MakeEnum { dst, definition, variant, fields, field_types } => Self::MakeEnumOwned { dst, definition, variant, fields, field_types },
+            _ => unreachable!("only an aggregate constructor owns its prepared fields"),
+        }
+    }
     pub(crate) fn with_owned_effect_payloads(self) -> Self {
         match self {
             Self::Perform { dst, effect, effect_arguments, operation, arguments } =>
@@ -1211,7 +1259,10 @@ impl VmInstruction {
     fn consumed_arguments(&self) -> Option<&[u32]> {
         match self {
             Self::CallOwned { arguments, .. } | Self::CallIndirectOwned { arguments, .. }
-            | Self::HostCallOwned { arguments, .. } => Some(arguments),
+            | Self::HostCallOwned { arguments, .. } | Self::TailCallOwned { arguments, .. } => Some(arguments),
+            Self::StoreOwned { src, .. } => Some(std::slice::from_ref(src)),
+            Self::MakeTupleOwned { fields, .. } | Self::MakeArrayOwned { fields, .. }
+            | Self::MakeRecordOwned { fields, .. } | Self::MakeEnumOwned { fields, .. } => Some(fields),
             _ => None,
         }
     }
@@ -1721,7 +1772,7 @@ pub struct VmNominalCopyDescriptor {
     /// Source declaration identity retained across VM region erasure.
     pub source_contract: Digest,
     pub is_enum: bool,
-    pub arguments: Vec<VmType>,
+    pub arguments: Vec<VmGenericArgument>,
     pub variants: Vec<Vec<VmType>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1777,6 +1828,12 @@ pub enum VmArtifactError {
     },
     MalformedEncoding {
         message: &'static str,
+    },
+    UnprovenTailCarrier {
+        message: &'static str,
+        function: DefKey,
+        pc: u32,
+        register: u32,
     },
     NonCanonicalEncoding,
     DecodeLimit {
@@ -3039,6 +3096,7 @@ fn reachable_return_values(instructions: &[VmInstruction]) -> Vec<u32> {
                 values.insert(*value);
             }
             VmInstruction::Trap
+            | VmInstruction::TailCallOwned { .. }
             | VmInstruction::Resume { .. }
             | VmInstruction::ResumeSnapshot { .. }
             | VmInstruction::Forward => {}
@@ -3366,7 +3424,7 @@ pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         Type::Scalar(ScalarType::Text) => Ok(VmType::Text),
         Type::Scalar(ScalarType::Bytes) => Ok(VmType::Bytes),
         Type::Generic(index) => Ok(VmType::Generic(*index)),
-        Type::ConstU32(value) => Ok(VmType::ConstU32(*value)),
+        Type::ConstInteger(value) => Ok(VmType::ConstInteger((*value).into())),
         Type::ConstQuantity(value) => Ok(VmType::ConstQuantity {
             lower: value.lower,
             upper: value.upper,
@@ -3376,6 +3434,10 @@ pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
             kind: *kind,
         }),
         Type::Array(element) => Ok(VmType::Array(Box::new(vm_type(element)?))),
+        Type::FixedArray { element, .. } => Ok(VmType::FixedArray {
+            element: Box::new(vm_type(element)?),
+            length: value.fixed_array_length().ok_or_else(|| Box::new(value.clone()))?,
+        }),
         Type::StaticData {
             element,
             tag,
@@ -3543,7 +3605,7 @@ fn vm_effect_row(value: &crate::types::EffectRow) -> Result<VmEffectRow, Box<Typ
                 })
             })
             .collect::<Result<_, _>>()?,
-        tail: value.tail,
+        tails: value.tails.clone(),
     })
 }
 
@@ -3556,8 +3618,8 @@ fn vm_effect_generic_argument(
         GenericArgument::Type(value) => VmGenericArgument::Type(vm_type(value)?),
         GenericArgument::EffectRow(value) => VmGenericArgument::EffectRow(vm_effect_row(value)?),
         GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
-        GenericArgument::ConstU32(value) => VmGenericArgument::ConstU32(*value),
-        GenericArgument::ConstU32Expr(value) => VmGenericArgument::ConstU32Expr(value.clone()),
+        GenericArgument::ConstInteger(value) => VmGenericArgument::ConstInteger((*value).into()),
+        GenericArgument::ConstIntegerExpr(value) => VmGenericArgument::ConstIntegerExpr(value.clone()),
         GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
             lower: value.lower,
             upper: value.upper,
@@ -3572,24 +3634,10 @@ fn vm_effect_generic_argument(
     })
 }
 
-/// VM nominal layouts remain type-shaped. Mixed-kind nominal identity is
-/// retained in Core/instance products, but a row or lifetime must never be
-/// coerced into a layout slot while emitting an executable artifact.
-fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Box<Type>> {
-    match value {
-        GenericArgument::Type(value) => vm_type(value),
-        GenericArgument::ConstU32(value) => vm_type(&Type::ConstU32(*value)),
-        GenericArgument::ConstU32Expr(value) => Ok(VmType::ConstU32Expr(value.clone())),
-        GenericArgument::ConstQuantity(value) => vm_type(&Type::ConstQuantity(*value)),
-        GenericArgument::ConstGeneric { index, kind } => vm_type(&Type::ConstGeneric {
-            index: *index,
-            kind: *kind,
-        }),
-        GenericArgument::ConstProjection { .. } => Err(Box::new(Type::Error)),
-        GenericArgument::EffectRow(_)
-        | GenericArgument::Lifetime(_)
-        | GenericArgument::ConstInfer { .. } => Err(Box::new(Type::Error)),
-    }
+/// Preserve type/row/const kinds in nominal identity. The caller erases
+/// lifetime slots only after source field substitution has checked them.
+fn vm_nominal_argument(value: &GenericArgument) -> Result<VmGenericArgument, Box<Type>> {
+    vm_effect_generic_argument(value)
 }
 
 fn vm_effect_argument(
@@ -3643,12 +3691,12 @@ fn vm_effect_argument(
                         })
                     })
                     .collect::<Result<_, _>>()?,
-                tail: value.tail,
+                tails: value.tails.clone(),
             })
         }
         GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
-        GenericArgument::ConstU32(value) => VmGenericArgument::ConstU32(*value),
-        GenericArgument::ConstU32Expr(value) => VmGenericArgument::ConstU32Expr(value.clone()),
+        GenericArgument::ConstInteger(value) => VmGenericArgument::ConstInteger((*value).into()),
+        GenericArgument::ConstIntegerExpr(value) => VmGenericArgument::ConstIntegerExpr(value.clone()),
         GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
             lower: value.lower,
             upper: value.upper,
@@ -3825,8 +3873,9 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             }
         }
     }
+    let transfer_proofs = tail_provenance::summaries(&program.functions)?;
     for function in program.functions.values() {
-        verify_function(function)?;
+        verify_function_control(function, true, false, &transfer_proofs)?;
         for action in declared_frame_cleanup(function)? {
             let target = program.functions.get(&action.destructor)
                 .ok_or(VmArtifactError::MissingFunction { definition: action.destructor })?;
@@ -3844,6 +3893,24 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
     verify_program_effect_operation_abis(&program.functions)?;
     for function in program.functions.values() {
         for instruction in &function.instructions {
+            if let VmInstruction::TailCallOwned { callee, arguments } = instruction {
+                let target = program.functions.get(callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: *callee })?;
+                let source_result = declared_result(function)?;
+                let target_result = declared_result(target)?;
+                let compatible_result = match (source_result, target_result) {
+                    (Some((_, _)), Some((_, false))) => true,
+                    (Some((source, true)), Some((target, true))) => source == target,
+                    _ => false,
+                };
+                if target.captures != 0 || target.parameters as usize != arguments.len()
+                    || !compatible_result
+                    || (target.safety == Safety::Unsafe && !function.unsafe_execution)
+                    || arguments.iter().enumerate().any(|(index, argument)|
+                        function.registers.get(*argument as usize) != target.registers.get(index)) {
+                    return Err(VmArtifactError::MalformedEncoding { message: "mandatory tail target has an incompatible activation-transfer ABI" });
+                }
+            }
             if let VmInstruction::CallOwned { dst, callee, arguments }
             | VmInstruction::Call {
                 dst,
@@ -4275,7 +4342,8 @@ pub(crate) fn reachable_host_capabilities(
                     pending.push(*callee);
                     pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
                 }
-                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. } => {
+                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. }
+                | VmInstruction::TailCallOwned { callee, .. } => {
                     pending.push(*callee)
                 }
                 VmInstruction::DeclareFrameCleanup { actions } => {
@@ -4310,6 +4378,10 @@ fn unify_call_type(
                 .iter()
                 .zip(found)
                 .all(|(expected, found)| unify_call_type(expected, found, bindings)),
+            _ => false,
+        },
+        VmType::FixedArray { element, length } => match found {
+            VmType::FixedArray { element: found, length: count } if length == count => unify_call_type(element, found, bindings),
             _ => false,
         },
         VmType::Array(expected) => match found {
@@ -4355,7 +4427,7 @@ fn unify_call_type(
                 expected_arguments
                     .iter()
                     .zip(found_arguments)
-                    .all(|(expected, found)| unify_call_type(expected, found, bindings))
+                    .all(|(expected, found)| unify_vm_generic_argument(expected, found, bindings))
             }
             _ => false,
         },
@@ -4402,6 +4474,9 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
                 .collect(),
         ),
         VmType::Array(element) => VmType::Array(Box::new(instantiate_vm_type(element, bindings))),
+        VmType::FixedArray { element, length } => VmType::FixedArray {
+            element: Box::new(instantiate_vm_type(element, bindings)), length: *length,
+        },
         VmType::StaticData {
             element,
             tag,
@@ -4418,7 +4493,7 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
             definition: *definition,
             arguments: arguments
                 .iter()
-                .map(|argument| instantiate_vm_type(argument, bindings))
+                .map(|argument| instantiate_vm_generic_argument(argument, bindings))
                 .collect(),
         },
         VmType::Callable {
@@ -4452,7 +4527,7 @@ fn unify_vm_effect_row(
     found: &VmEffectRow,
     bindings: &mut BTreeMap<u32, VmType>,
 ) -> bool {
-    expected.tail == found.tail
+    expected.tails == found.tails
         && expected.effects.len() == found.effects.len()
         && expected.projections.len() == found.projections.len()
         && expected
@@ -4546,7 +4621,7 @@ fn instantiate_vm_effect_row(value: &VmEffectRow, bindings: &BTreeMap<u32, VmTyp
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
+        tails: value.tails.clone(),
     }
 }
 
@@ -5656,7 +5731,8 @@ fn lower_pattern(value: &MirPattern) -> VmPattern {
         MirPattern::Any => VmPattern::Any,
         MirPattern::Literal(value) => VmPattern::Literal(value.clone()),
         MirPattern::Tuple(values) => VmPattern::Tuple(values.iter().map(lower_pattern).collect()),
-        MirPattern::Array { element, elements } => VmPattern::Array {
+        MirPattern::Array { element, elements, rest } => VmPattern::Array {
+            rest: *rest,
             element: vm_type(element)
                 .expect("validated MIR has VM-representable array pattern element"),
             elements: elements.iter().map(lower_pattern).collect(),
@@ -5781,8 +5857,8 @@ fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifac
                 found: subject.clone(),
             }),
         },
-        VmPattern::Array { element, elements } => match subject {
-            VmType::Array(actual) if actual.as_ref() == element => elements
+        VmPattern::Array { element, elements, rest } => match subject {
+            actual if actual.array_element() == Some(element) && actual.array_accepts_pattern(elements.len(), *rest) => elements
                 .iter()
                 .try_for_each(|pattern| verify_pattern(pattern, element)),
             _ => Err(VmArtifactError::TypeMismatch {
@@ -5882,6 +5958,10 @@ fn numeric_literal_matches_vm_type(value: &str, subject: &VmType) -> bool {
         VmType::U32 => unsigned().and_then(|value| u32::try_from(value).ok()).is_some(),
         VmType::U16 => unsigned().and_then(|value| u16::try_from(value).ok()).is_some(),
         VmType::U8 => unsigned().and_then(|value| u8::try_from(value).ok()).is_some(),
+        VmType::F32 => matches!(exact_scalar_literal_kind(value), Some(TokenKind::Integer | TokenKind::Float))
+            && crate::mir::parse_f32_literal(value).is_ok(),
+        VmType::F64 => matches!(exact_scalar_literal_kind(value), Some(TokenKind::Integer | TokenKind::Float))
+            && parse_f64_literal(value).is_ok(),
         _ => false,
     }
 }
@@ -5915,6 +5995,7 @@ struct VerifierContinuation {
     target: u32,
     dst: u32,
     registers: Vec<Option<bool>>,
+    may_initialized: Vec<bool>,
     /// The continuation resumes the exact source-storage lifetime state at
     /// the performance site.  Register initialization alone cannot recover
     /// this fact: `Some(false)` means either a moved SSA value or a live,
@@ -5924,7 +6005,12 @@ struct VerifierContinuation {
     /// two references with distinct roots must retain both possibilities:
     /// preserving only the predecessor that happened to arrive first would
     /// permit `StorageDead` to erase the other live loan.
-    reference_origins: Vec<BTreeSet<u32>>,
+    reference_origins: Vec<ReferenceOriginSet>,
+    frame_independent: Vec<bool>,
+    referent_independent: Vec<bool>,
+    local_labels: Vec<Option<label_dispatch::LocalLabel>>,
+    destruction_preserves_frames: Vec<bool>,
+    invocation_preserves_frames: Vec<bool>,
     snapshots: Vec<Option<u32>>,
     labels: Vec<bool>,
     /// Whether a value contains a frame-branded resumption token.  This is
@@ -5949,7 +6035,13 @@ struct VerifierPerformed {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
+    /// Exact immediate CFG predecessor, when all paths agree. Adjacency in
+    /// the instruction vector alone does not authenticate a runtime probe.
+    last_instruction: Option<usize>,
     registers: Vec<Option<bool>>,
+    /// A may fact, distinct from readability's must fact. A branch-local
+    /// carrier is unreadable after a join but can still owe destruction.
+    may_initialized: Vec<bool>,
     /// Addressable source slots have a lifetime independent from their
     /// resident value.  A live-but-uninitialized slot is a valid target for a
     /// first definition, whereas an emptied SSA register remains unavailable
@@ -5964,7 +6056,16 @@ struct VerifierState {
     /// separate from its type: a reference remains a live loan after its
     /// owner has been moved, so StorageDead must inspect every possible root
     /// rather than only the owner's resident-value state.
-    reference_origins: Vec<BTreeSet<u32>>,
+    reference_origins: Vec<ReferenceOriginSet>,
+    /// Positive must evidence that every embedded address/control carrier
+    /// survives replacement of this activation. Unknown producers are false.
+    frame_independent: Vec<bool>,
+    /// A reference can address a local slot whose resident graph contains no
+    /// activation address. This does not certify the reference itself.
+    referent_independent: Vec<bool>,
+    local_labels: Vec<Option<label_dispatch::LocalLabel>>,
+    destruction_preserves_frames: Vec<bool>,
+    invocation_preserves_frames: Vec<bool>,
     /// Provenance for first-class continuation values. `Some(frame)` means
     /// this register was produced by `CaptureResumption` for that exact live
     /// frame. The type system still sees a callable; this parallel proof fact
@@ -6122,7 +6223,8 @@ fn verify_source_storage_identity_contracts(function: &VmFunction) -> Result<(),
 }
 
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
-    verify_function_control(function, true).map(|_| ())
+    let proofs = tail_provenance::summaries(&BTreeMap::from([(function.definition, function.clone())]))?;
+    verify_function_control(function, true, false, &proofs).map(|_| ())
 }
 
 /// Infer the normal-return half of the ABI using the machine verifier's full
@@ -6133,16 +6235,30 @@ pub(crate) fn infer_function_returns(function: &VmFunction) -> Result<bool, VmAr
     // A lexical label can be invoked by a descendant ordinary call. Its
     // destination is therefore an externally enterable continuation, even
     // when the local verifier worklist has no ordinary predecessor for it.
-    Ok(verify_function_control(function, false)? || vm_instructions_may_return(&function.instructions))
+    Ok(verify_function_control(function, false, false, &tail_provenance::TransferProofs::default())?.returns
+        || vm_instructions_may_return(&function.instructions))
 }
 
-fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Result<bool, VmArtifactError> {
+struct VerifiedFunctionControl {
+    returns: bool,
+    result_independent: bool,
+    result_destruction_preserving: bool,
+    preserves_frame_memory: bool,
+    preserves_independent_frame_memory: bool,
+}
+
+fn verify_function_control(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
+    verify_function_control_with_reference_inputs(function, check_return_flag, assume_parameter_destructors, false, false, transfer_proofs)
+}
+
+fn verify_function_control_with_reference_inputs(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, reference_contents_only: bool, assume_parameter_invocations: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
     // identity cannot receive distinct executable fingerprints.
+    let layouts = &function.nominal_copy_descriptors;
     for register in &function.registers {
-        validate_vm_type(register)?;
+        validate_vm_type_with_layouts(register, &layouts)?;
     }
     let declared_result = declared_result(function)?;
     if check_return_flag && declared_result.is_some() {
@@ -6153,6 +6269,9 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
     }
     declared_frame_cleanup(function)?;
     validate_vm_nominal_copy_descriptors(&function.nominal_copy_descriptors)?;
+    for field in function.nominal_copy_descriptors.iter().flat_map(|layout| &layout.variants).flatten() {
+        validate_vm_type_with_layouts(field, &layouts)?;
+    }
     for instruction in &function.instructions {
         match instruction {
             VmInstruction::PerformOwned {
@@ -6220,12 +6339,23 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
         *state = true;
     }
     let mut incoming: VerifierIncoming = vec![BTreeMap::new(); function.instructions.len()];
+    let exposed_storage = tail_provenance::exposed_storage(function);
     if let Some(entry) = incoming.first_mut() {
         entry.insert(VerifierContext::default(), VerifierState {
+            last_instruction: None,
+            may_initialized: initial.iter().map(|state| *state == Some(true)).collect(),
             registers: initial,
             storage_live: initial_storage_live,
             source_storage,
-            reference_origins: vec![BTreeSet::new(); function.registers.len()],
+            reference_origins: vec![ReferenceOriginSet::Empty; function.registers.len()],
+            frame_independent: (0..function.registers.len()).map(|index| index < function.parameters as usize
+                && !(reference_contents_only && matches!(function.registers[index], VmType::Reference { .. }))).collect(),
+            referent_independent: (0..function.registers.len()).map(|index| index < function.parameters as usize).collect(),
+            local_labels: vec![None; function.registers.len()],
+            destruction_preserves_frames: (0..function.registers.len())
+                .map(|index| assume_parameter_destructors && index < function.parameters as usize).collect(),
+            invocation_preserves_frames: (0..function.registers.len())
+                .map(|index| assume_parameter_invocations && index < function.parameters as usize).collect(),
             snapshots: vec![None; function.registers.len()],
             labels: vec![false; function.registers.len()],
             resumptions: vec![false; function.registers.len()],
@@ -6242,6 +6372,11 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
         vec![(0usize, VerifierContext::default())]
     };
     let mut returned: Option<VmType> = None;
+    let mut result_independent = true;
+    let mut result_destruction_preserving = true;
+    let mut preserves_frame_memory = true;
+    let mut preserves_independent_frame_memory = true;
+    let mut opaque_label_targets = BTreeSet::new();
     // A verified VM function may be intentionally terminal: `Trap` is the
     // executable representation of the trusted source `!` abort leaf. Such
     // a function has no return edge, but it is still a complete control-flow
@@ -6258,8 +6393,20 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
             continue;
         };
         let mut states = incoming[pc].get(&context).cloned().expect("scheduled verifier state");
+        let previous_instruction = states.last_instruction;
+        states.last_instruction = Some(pc);
         let mut advances = true;
         let instruction = &function.instructions[pc];
+        if let Some((target, transferred)) = label_dispatch::transfer(function, instruction, &states, &transfer_proofs.label_dispatches)? {
+            propagate_state(&mut incoming, &mut worklist, target, &transferred)?;
+            continue;
+        }
+        let local_label_update = label_dispatch::produced(function, instruction, &states);
+        let possible_label_targets = label_dispatch::opaque_targets(function, instruction, &states);
+        let (tail_update, preserves_memory, preserves_independent_memory) = tail_provenance::before_instruction(function, instruction, &mut states, transfer_proofs);
+        if !preserves_independent_memory { opaque_label_targets.extend(possible_label_targets); }
+        preserves_frame_memory &= preserves_memory;
+        preserves_independent_frame_memory &= preserves_independent_memory;
         if states.handlers.last().is_some_and(|frame| frame.payload_claim == Some(false))
             && !allowed_before_payload_claim(instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
@@ -6366,6 +6513,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 write(&mut states, *dst)?
             }
             VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
+                for ty in types { validate_vm_type_with_layouts(ty, &layouts)?; }
                 let (parameters, result) = memory_intrinsic_signature(*primitive, types)?;
                 if arguments.len() != parameters.len() {
                     return Err(VmArtifactError::MalformedEncoding { message: "memory operation has the wrong arity" });
@@ -6536,7 +6684,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 states.registers[*dst as usize] = Some(true);
             }
             VmInstruction::ArrayLen { dst, value } => {
-                if !matches!(register_type(function, *value)?, VmType::Array(_)) {
+                if register_type(function, *value)?.array_element().is_none() {
                     return Err(VmArtifactError::MalformedEncoding { message: "array length requires an array" });
                 }
                 expect_type(function, *dst, VmType::Usize)?;
@@ -6545,11 +6693,12 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
             }
             VmInstruction::ArrayElementIsInitialized { dst, value, index }
             | VmInstruction::TakeArrayElement { dst, value, index } => {
-                let VmType::Array(element) = register_type(function, *value)? else {
+                let array = register_type(function, *value)?;
+                let Some(element) = array.array_element() else {
                     return Err(VmArtifactError::MalformedEncoding { message: "dynamic array storage requires an array" });
                 };
                 expect_type(function, *index, VmType::Usize)?;
-                expect_type(function, *dst, if matches!(instruction, VmInstruction::TakeArrayElement { .. }) { *element } else { VmType::Bool })?;
+                expect_type(function, *dst, if matches!(instruction, VmInstruction::TakeArrayElement { .. }) { element.clone() } else { VmType::Bool })?;
                 if dst == value {
                     return Err(VmArtifactError::MalformedEncoding { message: "array storage requires a distinct destination" });
                 }
@@ -6844,7 +6993,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 expect_type(function, *value, VmType::I64)?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::MakeTuple { dst, fields } => {
+            VmInstruction::MakeTupleOwned { dst, fields } | VmInstruction::MakeTuple { dst, fields } => {
                 let expected = match register_type(function, *dst)? {
                     VmType::Tuple(fields) => fields,
                     found => {
@@ -6880,14 +7029,14 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     .iter()
                     .any(|field| states.resumptions[*field as usize]);
             }
-            VmInstruction::MakeArray {
+            VmInstruction::MakeArrayOwned { dst, fields, element_type } | VmInstruction::MakeArray {
                 dst,
                 fields,
                 element_type,
             } => {
                 let expected = VmType::Array(Box::new(element_type.clone()));
                 let found = register_type(function, *dst)?;
-                if found != expected {
+                if found.array_element() != Some(element_type) || !found.array_accepts_count(fields.len()) {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected,
@@ -6913,7 +7062,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     .iter()
                     .any(|field| states.resumptions[*field as usize]);
             }
-            VmInstruction::MakeRecord {
+            VmInstruction::MakeRecordOwned { dst, definition, fields, field_types } | VmInstruction::MakeRecord {
                 dst,
                 definition,
                 fields,
@@ -6966,7 +7115,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     .iter()
                     .any(|field| states.resumptions[*field as usize]);
             }
-            VmInstruction::MakeEnum {
+            VmInstruction::MakeEnumOwned { dst, definition, variant, fields, field_types } | VmInstruction::MakeEnum {
                 dst,
                 definition,
                 variant,
@@ -7145,14 +7294,15 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     return Err(VmArtifactError::InvalidRegister { register: *index });
                 }
                 read(&states, *base)?;
-                let VmType::Array(actual) = register_type(function, *base)? else {
+                let array = register_type(function, *base)?;
+                let Some(actual) = array.array_element() else {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *base,
                         expected: VmType::Array(Box::new(element_type.clone())),
                         found: register_type(function, *base)?,
                     });
                 };
-                if actual.as_ref() != element_type
+                if actual != element_type || !array.array_accepts_count(*field_count as usize)
                     || register_type(function, *dst)? != *element_type
                 {
                     return Err(VmArtifactError::TypeMismatch {
@@ -7299,11 +7449,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     states.handlers[index].payload_domain = if owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
                     states.handlers[index].payload_probe = None;
                     states.handlers[index].continuations = vec![VerifierContinuation {
+                        may_initialized: states.may_initialized.clone(),
                         target: (pc + 1) as u32,
                         dst: *dst,
                         registers: saved,
                         storage_live: states.storage_live.clone(),
                         reference_origins: states.reference_origins.clone(),
+                        frame_independent: states.frame_independent.clone(),
+                        referent_independent: states.referent_independent.clone(),
+                        local_labels: states.local_labels.clone(),
+                        destruction_preserves_frames: states.destruction_preserves_frames.clone(),
+                        invocation_preserves_frames: states.invocation_preserves_frames.clone(),
                         snapshots: states.snapshots.clone(),
                         labels: states.labels.clone(),
                         resumptions: states.resumptions.clone(),
@@ -7507,10 +7663,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
+                        last_instruction: Some(pc),
+                        may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         source_storage: states.source_storage.clone(),
                         reference_origins: continuation.reference_origins,
+                        frame_independent: continuation.frame_independent,
+                        referent_independent: continuation.referent_independent,
+                        local_labels: continuation.local_labels,
+                        destruction_preserves_frames: continuation.destruction_preserves_frames,
+                        invocation_preserves_frames: continuation.invocation_preserves_frames,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -7576,10 +7739,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                         return Err(VmArtifactError::HandlerStateMismatch);
                     }
                     let mut resumed = VerifierState {
+                        last_instruction: Some(pc),
+                        may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         source_storage: states.source_storage.clone(),
                         reference_origins: continuation.reference_origins,
+                        frame_independent: continuation.frame_independent,
+                        referent_independent: continuation.referent_independent,
+                        local_labels: continuation.local_labels,
+                        destruction_preserves_frames: continuation.destruction_preserves_frames,
+                        invocation_preserves_frames: continuation.invocation_preserves_frames,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -7699,10 +7869,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
+                        last_instruction: Some(pc),
+                        may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         source_storage: states.source_storage.clone(),
                         reference_origins: continuation.reference_origins,
+                        frame_independent: continuation.frame_independent,
+                        referent_independent: continuation.referent_independent,
+                        local_labels: continuation.local_labels,
+                        destruction_preserves_frames: continuation.destruction_preserves_frames,
+                        invocation_preserves_frames: continuation.invocation_preserves_frames,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -7755,6 +7932,11 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     forwarded.registers = continuation.registers.clone();
                     forwarded.storage_live = continuation.storage_live.clone();
                     forwarded.reference_origins = continuation.reference_origins.clone();
+                    forwarded.frame_independent = continuation.frame_independent.clone();
+                    forwarded.referent_independent = continuation.referent_independent.clone();
+                    forwarded.local_labels = continuation.local_labels.clone();
+                    forwarded.destruction_preserves_frames = continuation.destruction_preserves_frames.clone();
+                    forwarded.invocation_preserves_frames = continuation.invocation_preserves_frames.clone();
                     forwarded.snapshots = continuation.snapshots.clone();
                     forwarded.labels = continuation.labels.clone();
                     forwarded.resumptions = continuation.resumptions.clone();
@@ -7782,11 +7964,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                     crossed.push(declined_active);
                     crossed.extend(continuation.above.clone());
                     forwarded.handlers[index].continuations = vec![VerifierContinuation {
+                        may_initialized: states.may_initialized.clone(),
                         target: continuation.target,
                         dst: continuation.dst,
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         reference_origins: continuation.reference_origins,
+                        frame_independent: continuation.frame_independent,
+                        referent_independent: continuation.referent_independent,
+                        local_labels: continuation.local_labels,
+                        destruction_preserves_frames: continuation.destruction_preserves_frames,
+                        invocation_preserves_frames: continuation.invocation_preserves_frames,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -7904,7 +8092,17 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 states.labels[*local as usize] = false;
                 states.resumptions[*local as usize] = false;
             }
-            VmInstruction::Store { dst, src } => {
+            VmInstruction::Store { dst, src } | VmInstruction::StoreOwned { dst, src } => {
+                // Store deliberately permits overwrites and does not use
+                // `write`; it still invalidates loans of the replaced slot.
+                tail_provenance::invalidate_referent_storage(&mut states, *dst);
+                if matches!(instruction, VmInstruction::StoreOwned { .. }) && dst == src {
+                    return Err(VmArtifactError::MalformedEncoding { message: "owned store aliases its consumed carrier" });
+                }
+                if matches!(instruction, VmInstruction::StoreOwned { .. })
+                    && states.registers.get(*dst as usize) == Some(&Some(true)) {
+                    return Err(VmArtifactError::DoubleWrite { register: *dst });
+                }
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
                 let index = *dst as usize;
@@ -8036,7 +8234,7 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 states.reference_origins[*dst as usize] = if *reborrow {
                     states.reference_origins[*src as usize].clone()
                 } else {
-                    BTreeSet::from([*src])
+                    ReferenceOriginSet::One(*src)
                 };
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -8334,6 +8532,52 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 states.registers[*value as usize] = Some(false);
                 write(&mut states, *dst)?;
             }
+            VmInstruction::TailCallOwned { arguments, callee } => {
+                if !states.handlers.is_empty() || states.resuming || function.captures != 0 {
+                    return Err(VmArtifactError::HandlerStillActive);
+                }
+                for argument in arguments {
+                    read(&states, *argument)?;
+                    if check_return_flag && !tail_provenance::independent(function, &states, *argument) {
+                        return Err(VmArtifactError::UnprovenTailCarrier {
+                            message: "mandatory tail carrier has no frame-independent provenance proof",
+                            function: function.definition,
+                            pc: pc as u32,
+                            register: *argument,
+                        });
+                    }
+                }
+                preserves_frame_memory &= tail_provenance::call_preserving(transfer_proofs, callee,
+                    arguments.iter().all(|argument| tail_provenance::destruction_preserving(function, &states, *argument)));
+                preserves_independent_frame_memory &= tail_provenance::call_preserving_independent(
+                    function, &states, transfer_proofs, callee, arguments);
+                for action in declared_frame_cleanup(function)? {
+                    if !arguments.contains(&action.owner) && states.may_initialized[action.owner as usize] {
+                        return Err(VmArtifactError::MalformedEncoding { message: "mandatory tail transfer bypasses frame destruction" });
+                    }
+                    // Moving an owner out of its source slot does not discharge
+                    // its destructor. Prepared carriers of the same frozen
+                    // resident contract must also leave or be consumed.
+                    let owner_type = register_type(function, action.owner)?;
+                    if function.registers.iter().enumerate().any(|(index, ty)|
+                        *ty == owner_type && states.may_initialized[index]
+                            && !arguments.contains(&(index as u32))) {
+                        return Err(VmArtifactError::MalformedEncoding { message: "mandatory tail transfer retains an undisposed destructor carrier" });
+                    }
+                }
+                let Some((result, returns)) = declared_result else {
+                    return Err(VmArtifactError::MalformedEncoding { message: "mandatory tail transfer requires a declared result destination" });
+                };
+                if returns {
+                    returned = Some(result.clone());
+                    result_independent &= transfer_proofs.independent_results.contains(callee)
+                        && arguments.iter().all(|argument| tail_provenance::independent(function, &states, *argument)
+                            && tail_provenance::destruction_preserving(function, &states, *argument));
+                    result_destruction_preserving &= transfer_proofs.preserving_result_destruction.contains(callee)
+                        && arguments.iter().all(|argument| tail_provenance::destruction_preserving(function, &states, *argument));
+                } else { trapped = true; }
+                advances = false;
+            }
             VmInstruction::MakeCallable { dst, captures, environment, .. } => {
                 for &capture in captures {
                     read(&states, capture)?;
@@ -8495,8 +8739,18 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 }
                 states.handlers.truncate(handler_depth);
                 states.snapshots.fill(None);
-                for &destination in destinations {
+                let transferred_proofs = arguments.iter().map(|argument| (
+                    tail_provenance::independent(function, &states, *argument),
+                    tail_provenance::referent_independent(function, &states, *argument),
+                    tail_provenance::destruction_preserving(function, &states, *argument),
+                    tail_provenance::invocation_preserving(function, &states, *argument),
+                )).collect::<Vec<_>>();
+                for (&destination, (independent, referent_independent, destruction_preserves, invocation_preserves)) in destinations.iter().zip(transferred_proofs) {
                     write(&mut states, destination)?;
+                    states.frame_independent[destination as usize] = independent;
+                    states.referent_independent[destination as usize] = referent_independent;
+                    states.destruction_preserves_frames[destination as usize] = destruction_preserves;
+                    states.invocation_preserves_frames[destination as usize] = invocation_preserves;
                 }
                 propagate_state(&mut incoming, &mut worklist, *target, &states)?;
                 advances = false;
@@ -8510,17 +8764,21 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 expect_type(function, *condition, VmType::Bool)?;
                 let mut then_states = states.clone();
                 let mut else_states = states.clone();
+                let mut definitely_empty = false;
                 if let Some(VmInstruction::DerefIsInitialized { dst, reference }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
-                    && dst == condition {
+                    && dst == condition && previous_instruction == pc.checked_sub(1) {
                     then_states[*reference as usize] = Some(true);
                     else_states[*reference as usize] = Some(false);
                 }
                 if let Some(VmInstruction::IsInitialized { dst, base, fields }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
-                    && dst == condition {
+                    && dst == condition && previous_instruction == pc.checked_sub(1) {
+                    definitely_empty = fields.is_empty() && !exposed_storage[*base as usize]
+                        && states.registers[*base as usize] == Some(false);
                     then_states[*base as usize] = Some(true);
                     if fields.is_empty() { else_states[*base as usize] = Some(false); }
                 }
                 for (outcome, target, mut branch) in [(true, *then_target, then_states), (false, *else_target, else_states)] {
+                    if outcome && definitely_empty { continue; }
                     if let Some(frame) = branch.handlers.last_mut()
                         && frame.payload_claim == Some(false)
                         && let Some((probe, column, pattern)) = &frame.payload_probe
@@ -8560,6 +8818,8 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 if !states.handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
+                result_independent &= tail_provenance::independent(function, &states, *value);
+                result_destruction_preserving &= tail_provenance::destruction_preserving(function, &states, *value);
                 let found = register_type(function, *value)?;
                 // Every normal return must honor the declaration, including
                 // entrypoints which have no call site to check their ABI.
@@ -8594,6 +8854,15 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 advances = false;
             }
         }
+        if let Some((destination, independent, referent_independent, destruction_preserves, invocation_preserves)) = tail_update {
+            states.frame_independent[destination as usize] = independent;
+            states.referent_independent[destination as usize] = referent_independent;
+            states.destruction_preserves_frames[destination as usize] = destruction_preserves;
+            states.invocation_preserves_frames[destination as usize] = invocation_preserves;
+        }
+        if let Some((destination, label)) = local_label_update {
+            states.local_labels[destination as usize] = label;
+        }
         if let Some(arguments) = instruction.consumed_arguments() {
             let mut seen = BTreeSet::new();
             for &argument in arguments {
@@ -8602,6 +8871,11 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
                 }
                 states.registers[argument as usize] = Some(false);
                 states.reference_origins[argument as usize].clear();
+                states.frame_independent[argument as usize] = false;
+                states.referent_independent[argument as usize] = false;
+                states.local_labels[argument as usize] = None;
+                states.destruction_preserves_frames[argument as usize] = false;
+                states.invocation_preserves_frames[argument as usize] = false;
                 states.snapshots[argument as usize] = None;
                 states.labels[argument as usize] = false;
                 states.resumptions[argument as usize] = false;
@@ -8611,8 +8885,10 @@ fn verify_function_control(function: &VmFunction, check_return_flag: bool) -> Re
             propagate_state(&mut incoming, &mut worklist, (pc + 1) as u32, &states)?;
         }
     }
+    if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
-        Ok(returned.is_some())
+        Ok(VerifiedFunctionControl { returns: returned.is_some(), result_independent,
+            result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory })
     } else {
         Err(VmArtifactError::NoReturn)
     }
@@ -8650,9 +8926,9 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
             VmGenericArgument::Lifetime(Lifetime::Infer(_)) => return Err(VmArtifactError::MalformedEncoding {
                 message: "VM identity retains a body-local lifetime inference variable",
             }),
-            VmGenericArgument::ConstU32(_) => {}
-            VmGenericArgument::ConstU32Expr(value) => validate_vm_structural_u32_expr(value)?,
-            VmGenericArgument::Lifetime(Lifetime::Bound { .. }) => {
+            VmGenericArgument::ConstInteger(_) => {}
+            VmGenericArgument::ConstIntegerExpr(value) => validate_vm_structural_integer_expr(value)?,
+            VmGenericArgument::Lifetime(Lifetime::Bound { .. } | Lifetime::Placeholder(_)) => {
                 return Err(VmArtifactError::MalformedEncoding {
                     message: "VM effect identity retains an escaped higher-ranked lifetime",
                 });
@@ -8675,8 +8951,25 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
 }
 
 fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
+    validate_vm_type_with_layouts(value, &[])
+}
+
+fn validate_vm_type_with_layouts(value: &VmType, layouts: &[VmNominalCopyDescriptor]) -> Result<(), VmArtifactError> {
+    let validate = |value: &VmType| validate_vm_type_with_layouts(value, layouts);
     match value {
-        VmType::Array(value) => validate_vm_type(value),
+        VmType::Array(value) => validate(value),
+        VmType::FixedArray { element, .. } => {
+            validate(element)?;
+            // Private VM representations remain available for element kinds
+            // without a native ABI. A known inline size overflow is different:
+            // reject it at admission, even when no resident is constructed.
+            match native_memory::native_layout(value, &Arc::from(layouts), &mut vec![]) {
+                Err(error @ VmArtifactError::NativeMemory { message:
+                    "native layout size overflow" | "invalid raw allocation layout"
+                    | "fixed array count exceeds target indexing width" }) => Err(error),
+                _ => Ok(()),
+            }
+        }
         VmType::StaticData {
             element,
             alignment,
@@ -8687,30 +8980,34 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
                     message: "static-data type has invalid alignment",
                 });
             }
-            validate_vm_type(element)
+            validate(element)
         }
-        VmType::Tuple(values) => values.iter().try_for_each(validate_vm_type),
-        VmType::Nominal { arguments, .. } => arguments
-            .iter()
-            .try_for_each(validate_vm_nominal_argument_type),
+        VmType::Tuple(values) => values.iter().try_for_each(validate),
+        VmType::Nominal { arguments, .. } => {
+            for argument in arguments {
+                validate_vm_nominal_argument_type(argument)?;
+                if let VmGenericArgument::Type(value) = argument { validate(value)?; }
+            }
+            Ok(())
+        }
         VmType::Callable {
             parameters,
             result,
             effects,
             ..
         } => {
-            parameters.iter().try_for_each(validate_vm_type)?;
-            validate_vm_type(result)?;
+            parameters.iter().try_for_each(validate)?;
+            validate(result)?;
             validate_vm_effect_row(effects)
         }
-        VmType::Reference { referent, .. } => validate_vm_type(referent),
-        VmType::RawPointer { pointee, .. } => validate_vm_type(pointee),
+        VmType::Reference { referent, .. } => validate(referent),
+        VmType::RawPointer { pointee, .. } => validate(pointee),
         // Consts are metadata slots inside a nominal identity, not VM value
         // layouts. Reject direct candidate registers/parameters/results and
         // any attempt to smuggle one through a tuple, array, callable, or
         // reference type.
-        VmType::ConstU32(_)
-        | VmType::ConstU32Expr(_)
+        VmType::ConstInteger(_)
+        | VmType::ConstIntegerExpr(_)
         | VmType::ConstQuantity { .. }
         | VmType::ConstGeneric { .. } => Err(VmArtifactError::MalformedEncoding {
             message: "metadata-only structural const used as VM value type",
@@ -8738,32 +9035,28 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
     }
 }
 
-fn validate_vm_nominal_argument_type(value: &VmType) -> Result<(), VmArtifactError> {
-    match value {
-        VmType::ConstU32(_) | VmType::ConstGeneric { .. } => Ok(()),
-        VmType::ConstU32Expr(value) => validate_vm_structural_u32_expr(value),
-        VmType::ConstQuantity { lower, upper } if upper.is_some_and(|upper| *lower > upper) => {
-            Err(VmArtifactError::MalformedEncoding {
-                message: "invalid quantity interval",
-            })
-        }
-        VmType::ConstQuantity { .. } => Ok(()),
-        value => validate_vm_type(value),
+fn validate_vm_nominal_argument_type(value: &VmGenericArgument) -> Result<(), VmArtifactError> {
+    if matches!(value, VmGenericArgument::Lifetime(_)) {
+        return Err(VmArtifactError::MalformedEncoding { message: "VM nominal identity retains an unerased lifetime argument" });
     }
+    validate_vm_generic_arguments(std::slice::from_ref(value))
 }
 
-fn validate_vm_structural_u32_expr(value: &StructuralU32Expr) -> Result<(), VmArtifactError> {
+fn validate_vm_structural_integer_expr(value: &IntegerConstExpr) -> Result<(), VmArtifactError> {
+    if matches!(value, IntegerConstExpr::Literal(_) | IntegerConstExpr::Param { .. }) {
+        return Err(VmArtifactError::NonCanonicalEncoding);
+    }
     match value.clone().normalized() {
         Ok(normalized) if normalized == *value => Ok(()),
         Ok(_) => Err(VmArtifactError::NonCanonicalEncoding),
         Err(_) => Err(VmArtifactError::MalformedEncoding {
-            message: "invalid structural u32 expression",
+            message: "invalid structural integer expression",
         }),
     }
 }
 
 fn validate_vm_effect_row(row: &VmEffectRow) -> Result<(), VmArtifactError> {
-    if matches!(row.tail, Some(EffectTail::Infer(_))) {
+    if row.tails.iter().any(|tail| matches!(tail, EffectTail::Infer(_))) {
         return Err(VmArtifactError::MalformedEncoding {
             message: "VM effect row retains inference tail",
         });
@@ -8891,6 +9184,23 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
     }
     Ok(())
 }
+/// Join already allocated fact tables in place. The transfer function and
+/// changed bit are identical to constructing a new table and comparing it,
+/// but the common unchanged edge does not allocate or rebuild every field.
+fn join_verifier_facts<T: Copy + PartialEq>(
+    existing: &mut [T],
+    incoming: &[T],
+    mut join: impl FnMut(T, T) -> T,
+) -> bool {
+    debug_assert_eq!(existing.len(), incoming.len());
+    let mut changed = false;
+    for (left, right) in existing.iter_mut().zip(incoming) {
+        let value = join(*left, *right);
+        if *left != value { *left = value; changed = true; }
+    }
+    changed
+}
+
 fn propagate_state(
     incoming: &mut [BTreeMap<VerifierContext, VerifierState>],
     worklist: &mut VerifierWorklist,
@@ -8903,105 +9213,62 @@ fn propagate_state(
     let context = state.context();
     match slot.get_mut(&context) {
         None => {
-            slot.insert(context.clone(), state.clone());
+            let mut initial = state.clone();
+            for (possible, definite) in initial.may_initialized.iter_mut().zip(&state.registers) {
+                *possible = definite.unwrap_or(*possible);
+            }
+            slot.insert(context.clone(), initial);
             worklist.push((target as usize, context));
             Ok(())
         }
         Some(existing) => {
-            let handler_changed = merge_handler_states(&mut existing.handlers, &state.handlers)
+            let mut changed = merge_handler_states(&mut existing.handlers, &state.handlers)
                 .ok_or(VmArtifactError::HandlerStateMismatch)?;
             // Forwarding can resume one protected path from distinct arms.
-            // Retain every caller ABI: a completion must satisfy all callers
-            // whose dynamic handler brand can select that boundary.
-            let mut result_changed = false;
+            // Every caller ABI remains an obligation at completion.
             for result in &state.resumption_return_result {
                 if !existing.resumption_return_result.contains(result) {
                     existing.resumption_return_result.push(result.clone());
-                    result_changed = true;
+                    changed = true;
                 }
             }
-            // This is a forward must-analysis: a register is readable at a
-            // join only when every predecessor has initialized it and none
-            // has moved it.  Requiring identical complete register files
-            // rejects valid CFGs merely because separate arms allocate dead
-            // temporaries.  Joining their facts also lets a later use of a
-            // path-local value produce the ordinary read-before-write error.
-            let joined = existing
-                .registers
-                .iter()
-                .zip(&state.registers)
-                .map(|(left, right)| match (left, right) {
-                    (Some(true), Some(true)) => Some(true),
-                    (Some(false), Some(false)) => Some(false),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            // Source-storage liveness is also a must fact.  A post-join
-            // write may initialize an addressable slot only when that slot
-            // remains live on every incoming edge; otherwise bytecode could
-            // revive a slot which a sibling arm already erased.
-            let storage_live = existing
-                .storage_live
-                .iter()
-                .zip(&state.storage_live)
-                .map(|(left, right)| *left && *right)
-                .collect::<Vec<_>>();
-            // Reference provenance is a may fact.  A merged reference can
-            // address any root reached by either predecessor, and a later
-            // StorageDead must therefore respect every retained loan.
-            let reference_origins = existing
-                .reference_origins
-                .iter()
-                .zip(&state.reference_origins)
-                .map(|(left, right)| left.union(right).copied().collect::<BTreeSet<_>>())
-                .collect::<Vec<_>>();
-            let snapshots = existing
-                .snapshots
-                .iter()
-                .zip(&state.snapshots)
-                .map(|(left, right)| if left == right { *left } else { None })
-                .collect::<Vec<_>>();
-            // Labels and captured resumptions are capability facts, not
-            // ordinary register initialization. A join must retain either
-            // taint whenever one predecessor carries it; otherwise a
-            // continuation minted in just one handler-clause branch can be
-            // repackaged as an innocent callable after the merge.
-            let labels = existing
-                .labels
-                .iter()
-                .zip(&state.labels)
-                .map(|(left, right)| *left || *right)
-                .collect::<Vec<_>>();
-            let resumptions = existing
-                .resumptions
-                .iter()
-                .zip(&state.resumptions)
-                .map(|(left, right)| *left || *right)
-                .collect::<Vec<_>>();
-            let pending_leave = if existing.pending_leave == state.pending_leave {
-                existing.pending_leave.clone()
-            } else {
-                None
-            };
-            if existing.registers != joined
-                || existing.storage_live != storage_live
-                || existing.reference_origins != reference_origins
-                || existing.snapshots != snapshots
-                || existing.labels != labels
-                || existing.resumptions != resumptions
-                || existing.pending_leave != pending_leave
-                || handler_changed
-                || result_changed
-            {
-                existing.registers = joined;
-                existing.storage_live = storage_live;
-                existing.reference_origins = reference_origins;
-                existing.snapshots = snapshots;
-                existing.labels = labels;
-                existing.resumptions = resumptions;
-                existing.pending_leave = pending_leave;
-                worklist.push((target as usize, context));
+            if existing.last_instruction != state.last_instruction
+                && existing.last_instruction.take().is_some() {
+                changed = true;
             }
+            for ((possible, incoming_possible), definite) in existing.may_initialized.iter_mut()
+                .zip(&state.may_initialized).zip(&state.registers) {
+                let joined = *possible || definite.unwrap_or(*incoming_possible);
+                if *possible != joined { *possible = joined; changed = true; }
+            }
+            // Readability and source-storage liveness are must facts. In
+            // particular Some(false) and None remain distinct: neither an
+            // absent SSA resident nor dead storage becomes writable here.
+            changed |= join_verifier_facts(&mut existing.registers, &state.registers, |left, right| match (left, right) {
+                (Some(true), Some(true)) => Some(true),
+                (Some(false), Some(false)) => Some(false),
+                _ => None,
+            });
+            changed |= join_verifier_facts(&mut existing.storage_live, &state.storage_live, |left, right| left && right);
+            // Reference provenance is a may fact. Retain every possible root
+            // so StorageDead continues respecting loans from all branches.
+            for (left, right) in existing.reference_origins.iter_mut().zip(&state.reference_origins) {
+                changed |= left.union_with(right);
+            }
+            changed |= join_verifier_facts(&mut existing.frame_independent, &state.frame_independent, |left, right| left && right);
+            changed |= join_verifier_facts(&mut existing.referent_independent, &state.referent_independent, |left, right| left && right);
+            changed |= join_verifier_facts(&mut existing.local_labels, &state.local_labels, |left, right| if left == right { left } else { None });
+            changed |= join_verifier_facts(&mut existing.destruction_preserves_frames, &state.destruction_preserves_frames, |left, right| left && right);
+            changed |= join_verifier_facts(&mut existing.invocation_preserves_frames, &state.invocation_preserves_frames, |left, right| left && right);
+            changed |= join_verifier_facts(&mut existing.snapshots, &state.snapshots, |left, right| if left == right { left } else { None });
+            // Labels/resumptions are capability may-taints, not readability.
+            // An arm cannot erase authority carried on another predecessor.
+            changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
+            changed |= join_verifier_facts(&mut existing.resumptions, &state.resumptions, |left, right| left || right);
+            if existing.pending_leave != state.pending_leave && existing.pending_leave.take().is_some() {
+                changed = true;
+            }
+            if changed { worklist.push((target as usize, context)); }
             Ok(())
         }
     }
@@ -9040,8 +9307,14 @@ fn seed_terminal_call_handlers(
         terminal.handlers[index].payload_domain = if frame.owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
         terminal.handlers[index].payload_probe = None;
         terminal.handlers[index].continuations = vec![VerifierContinuation {
+            may_initialized: terminal.may_initialized.clone(),
             target: (pc + 1) as u32, dst, registers: terminal.registers.clone(),
             storage_live: terminal.storage_live.clone(), reference_origins: terminal.reference_origins.clone(),
+            frame_independent: terminal.frame_independent.clone(),
+            referent_independent: terminal.referent_independent.clone(),
+            local_labels: terminal.local_labels.clone(),
+            destruction_preserves_frames: terminal.destruction_preserves_frames.clone(),
+            invocation_preserves_frames: terminal.invocation_preserves_frames.clone(),
             snapshots: terminal.snapshots.clone(), labels: terminal.labels.clone(), resumptions: terminal.resumptions.clone(),
             performed: VerifierPerformed { effect: frame.effect, effect_arguments: frame.effect_arguments.clone(),
                 operation: frame.operation, arguments: frame.payload_destinations.clone() },
@@ -9203,6 +9476,7 @@ fn projected_storage_types(
                     if let Some(ty) = elements.get(*field as usize) { insert(ty); }
                 }
                 VmType::Array(element) => { insert(&element); }
+                VmType::FixedArray { element, length } if u64::from(*field) < length => { insert(&element); }
                 nominal @ VmType::Nominal { .. } => {
                     for variant in &nominal_layout_descriptor(function, &nominal)?.variants {
                         if let Some(ty) = variant.get(*field as usize) { insert(ty); }
@@ -9288,6 +9562,7 @@ fn vm_projected_referent_type(
                 .get(*field as usize)
                 .ok_or(VmArtifactError::InvalidRegister { register: *field })?,
             VmType::Array(element) => element,
+            VmType::FixedArray { element, length } if u64::from(*field) < *length => element,
             VmType::Nominal { .. } => return Ok(None),
             _ => return Err(VmArtifactError::InvalidRegister { register: *field }),
         };
@@ -9299,7 +9574,7 @@ fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -
     fn visit(
         ty: &VmType,
         descriptors: &[VmNominalCopyDescriptor],
-        active: &mut Vec<(DefKey, Vec<VmType>)>,
+        active: &mut Vec<(DefKey, Vec<VmGenericArgument>)>,
     ) -> bool {
         match ty {
             VmType::Reference { unique, .. } => !*unique,
@@ -9307,6 +9582,7 @@ fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -
                 .iter()
                 .all(|element| visit(element, descriptors, active)),
             VmType::Array(element) => visit(element, descriptors, active),
+            VmType::FixedArray { element, length } => *length == 0 || visit(element, descriptors, active),
             VmType::Nominal {
                 definition,
                 arguments,
@@ -9341,13 +9617,34 @@ fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -
     visit(ty, descriptors, &mut Vec::new())
 }
 
+fn vm_tail_owned_type(ty: &VmType, descriptors: &[VmNominalCopyDescriptor],
+    active: &mut Vec<(DefKey, Vec<VmGenericArgument>)>) -> bool {
+    match ty {
+        VmType::Reference { .. } | VmType::RawPointer { .. } | VmType::Callable { .. }
+        | VmType::Generic(_) | VmType::ConstGeneric { .. } | VmType::ConstIntegerExpr(_) => false,
+        VmType::Tuple(fields) => fields.iter().all(|field| vm_tail_owned_type(field, descriptors, active)),
+        VmType::Array(element) | VmType::FixedArray { element, .. } | VmType::StaticData { element, .. } => vm_tail_owned_type(element, descriptors, active),
+        VmType::Nominal { definition, arguments } => {
+            let key = (*definition, arguments.clone());
+            let Some(descriptor) = descriptors.iter().find(|descriptor|
+                descriptor.definition == *definition && descriptor.arguments == *arguments) else { return false; };
+            if active.contains(&key) { return true; }
+            active.push(key);
+            let safe = descriptor.variants.iter().flatten().all(|field| vm_tail_owned_type(field, descriptors, active));
+            active.pop();
+            safe
+        }
+        _ => true,
+    }
+}
+
 /// A native-representable referent has an address-stable source home. Private
 /// referents still cannot retain a unique frame-relative write-back target.
 fn vm_type_contains_unanchored_unique_reference(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -> bool {
     fn visit(
         ty: &VmType,
         descriptors: &[VmNominalCopyDescriptor],
-        active: &mut Vec<(DefKey, Vec<VmType>)>,
+        active: &mut Vec<(DefKey, Vec<VmGenericArgument>)>,
     ) -> bool {
         match ty {
             VmType::Reference { unique, referent } => {
@@ -9356,6 +9653,7 @@ fn vm_type_contains_unanchored_unique_reference(ty: &VmType, descriptors: &[VmNo
             }
             VmType::Tuple(elements) => elements.iter().any(|element| visit(element, descriptors, active)),
             VmType::Array(element) => visit(element, descriptors, active),
+            VmType::FixedArray { element, length } => *length != 0 && visit(element, descriptors, active),
             VmType::Nominal {
                 definition,
                 arguments,
@@ -9415,6 +9713,9 @@ fn same_type(function: &VmFunction, destination: u32, source: u32) -> Result<(),
 }
 
 fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactError> {
+    // Replacing an addressable slot must not leave a child reference carrying
+    // an earlier resident-graph proof, including in saved continuations.
+    tail_provenance::invalidate_referent_storage(states, register);
     for frame in &mut states.handlers {
         if frame.payload_probe.as_ref().is_some_and(|(probe, _, _)| *probe == register) {
             frame.payload_probe = None;
@@ -9434,6 +9735,11 @@ fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactErro
         .get_mut(index)
         .ok_or(VmArtifactError::InvalidRegister { register })?;
     states.reference_origins[index].clear();
+    states.frame_independent[index] = false;
+    states.referent_independent[index] = false;
+    states.local_labels[index] = None;
+    states.destruction_preserves_frames[index] = false;
+    states.invocation_preserves_frames[index] = false;
     match *state {
         None if !source_storage || storage_live => {
             *state = Some(true);
@@ -10043,7 +10349,7 @@ fn take_storage_projection(
         .as_mut().ok_or(VmArtifactError::UseAfterMove { register: base })?;
     if let VmValue::Resident(home) = value {
         let value = home.take(fields, budget)?;
-        if !vm_type_matches(&value.ty(), expected) {
+        if !value_matches_vm_type(&value, expected) {
             return Err(VmArtifactError::ResultType { expected: expected.clone(), found: value.ty() });
         }
         return Ok(value);
@@ -10052,7 +10358,7 @@ fn take_storage_projection(
     if matches!(slot, VmValue::Uninitialized(_)) {
         return Err(VmArtifactError::UseAfterMove { register: base });
     }
-    if !vm_type_matches(&slot.ty(), expected) {
+    if !value_matches_vm_type(slot, expected) {
         return Err(VmArtifactError::ResultType { expected: expected.clone(), found: slot.ty() });
     }
     let ty = slot.ty();
@@ -10127,6 +10433,10 @@ fn project_reference_mut<'a>(
 // their actual type, so an incompatible value is not relabeled as acceptable.
 fn borrowed_value_type(value: &VmValue, declared: &VmType) -> VmType {
     match (value, declared) {
+        (VmValue::Array { values, .. }, VmType::FixedArray { element, length }) => VmType::FixedArray {
+            element: Box::new(values.first().map(|value| borrowed_value_type(value, element)).unwrap_or((**element).clone())),
+            length: if values.len() as u64 == *length { *length } else { values.len() as u64 },
+        },
         (VmValue::Array { values, .. }, VmType::Array(element)) => VmType::Array(Box::new(
             values.first().map(|value| borrowed_value_type(value, element))
                 .unwrap_or_else(|| element.as_ref().clone()),
@@ -10431,20 +10741,24 @@ fn execute_array_storage(
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?)?));
         }
         VmInstruction::ArrayLen { dst, value } => {
-            let Some(VmValue::Array { values }) = registers[*value as usize].as_ref() else {
-                return Err(VmArtifactError::InvalidRegister { register: *value });
+            let count = match registers[*value as usize].as_ref() {
+                Some(VmValue::Array { values }) => values.len(),
+                Some(VmValue::Resident(home)) if matches!(home.ty(), VmType::FixedArray { .. }) => home.field_count(&[])?,
+                _ => return Err(VmArtifactError::InvalidRegister { register: *value }),
             };
-            registers[*dst as usize] = Some(VmValue::Usize(values.len() as u64));
+            registers[*dst as usize] = Some(VmValue::Usize(count as u64));
         }
         VmInstruction::ArrayElementIsInitialized { dst, value, index }
         | VmInstruction::TakeArrayElement { dst, value, index } => {
             let index = expect_usize(registers[*index as usize].as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *index })?)?;
             let index = u32::try_from(index).map_err(|_| VmArtifactError::InvalidRegister { register: *value })?;
-            let Some(VmValue::Array { values }) = registers[*value as usize].as_ref() else {
-                return Err(VmArtifactError::InvalidRegister { register: *value });
+            let count = match registers[*value as usize].as_ref() {
+                Some(VmValue::Array { values }) => values.len(),
+                Some(VmValue::Resident(home)) if matches!(home.ty(), VmType::FixedArray { .. }) => home.field_count(&[])?,
+                _ => return Err(VmArtifactError::InvalidRegister { register: *value }),
             };
-            if index as usize >= values.len() {
+            if index as usize >= count {
                 return Err(VmArtifactError::InvalidRegister { register: *value });
             }
             let result = if matches!(instruction, VmInstruction::TakeArrayElement { .. }) {
@@ -11903,17 +12217,15 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
                 .all(|(value, pattern)| matches_pattern(value, pattern)),
             _ => false,
         },
-        VmPattern::Array { element, elements } => match value {
+        VmPattern::Array { element, elements, rest } => match value {
             VmValue::Array { values, .. }
-                if values.len() == elements.len()
+                if crate::pattern::ArrayPatternRest::length(*rest, elements.len()) == Some(values.len())
                     && values
                         .iter()
                         .all(|value| value_matches_vm_type(value, element)) =>
             {
-                values
-                    .iter()
-                    .zip(elements)
-                    .all(|(value, pattern)| matches_pattern(value, pattern))
+                elements.iter().enumerate().all(|(index, pattern)|
+                    matches_pattern(&values[crate::pattern::ArrayPatternRest::index(*rest, index)], pattern))
             }
             _ => false,
         },
@@ -12009,8 +12321,8 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         VmType::Generic(_) => true,
         // Structural constants inhabit nominal identity only; no standalone
         // runtime value may claim one of these metadata-only layouts.
-        VmType::ConstU32(_)
-        | VmType::ConstU32Expr(_)
+        VmType::ConstInteger(_)
+        | VmType::ConstIntegerExpr(_)
         | VmType::ConstQuantity { .. }
         | VmType::ConstGeneric { .. } => false,
         VmType::Unit => matches!(value, VmValue::Unit),
@@ -12047,11 +12359,15 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         VmType::Array(expected) => {
             matches!(value, VmValue::Array { values, .. } if values.iter().all(|value| value_matches_vm_type(value, expected)))
         }
+        VmType::FixedArray { element, length } => {
+            matches!(value, VmValue::Array { values, .. } if values.len() as u64 == *length
+                && values.iter().all(|value| value_matches_vm_type(value, element)))
+        }
         VmType::Nominal {
             definition,
             arguments,
         } => {
-            matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
+            matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_generic_argument_matches(actual, expected)))
         }
         VmType::Callable {
             safety,
@@ -12070,6 +12386,8 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
 
 fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
     match expected {
+        VmType::FixedArray { element, length } => matches!(actual, VmType::FixedArray { element: actual, length: count }
+            if length == count && vm_type_matches(actual, element)),
         VmType::Generic(_) => true,
         VmType::Array(expected) => {
             matches!(actual, VmType::Array(actual) if vm_type_matches(actual, expected))
@@ -12092,7 +12410,7 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
             definition,
             arguments,
         } => {
-            matches!(actual, VmType::Nominal { definition: actual_definition, arguments: actual_arguments } if actual_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
+            matches!(actual, VmType::Nominal { definition: actual_definition, arguments: actual_arguments } if actual_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_generic_argument_matches(actual, expected)))
         }
         VmType::Callable {
             safety,
@@ -12113,7 +12431,7 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
 }
 
 fn vm_effect_row_matches(actual: &VmEffectRow, expected: &VmEffectRow) -> bool {
-    actual.tail == expected.tail
+    actual.tails == expected.tails
         && actual.effects.len() == expected.effects.len()
         && actual.projections.len() == expected.projections.len()
         && actual
@@ -12177,9 +12495,11 @@ fn literal_matches(value: &VmValue, literal: &str) -> bool {
         VmValue::I32(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == i64::from(*value)),
         VmValue::Isize(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == *value),
         VmValue::I128(value) => parse_pattern_i128(literal).is_some_and(|literal| literal == *value),
-        VmValue::F64(value) => parse_pattern_f64(literal).is_some_and(|literal| literal == *value),
+        VmValue::F64(value) => parse_pattern_f64(literal).is_some_and(|literal|
+            canonical_f64_bits(literal.to_bits()) == canonical_f64_bits(value.to_bits())),
         VmValue::F32(value) => {
-            parse_pattern_f64(literal).is_some_and(|literal| literal as f32 == *value)
+            crate::mir::parse_f32_literal(literal).is_ok_and(|literal|
+                crate::mir::canonical_f32_bits(literal.to_bits()) == crate::mir::canonical_f32_bits(value.to_bits()))
         }
         VmValue::Char(value) => {
             parse_pattern_char(literal).is_some_and(|literal| literal == *value)
@@ -12191,56 +12511,16 @@ fn literal_matches(value: &VmValue, literal: &str) -> bool {
     }
 }
 fn parse_pattern_i64(text: &str) -> Option<i64> {
-    let digits = text.replace('_', "");
-    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
-        (2, value)
-    } else if let Some(value) = digits.strip_prefix("0o") {
-        (8, value)
-    } else if let Some(value) = digits.strip_prefix("0x") {
-        (16, value)
-    } else {
-        (10, digits.as_str())
-    };
-    i64::from_str_radix(digits, radix).ok()
+    crate::mir::normalized_integer_literal(text, ScalarType::I64).ok()?.parse().ok()
 }
 fn parse_pattern_u64(text: &str) -> Option<u64> {
-    let digits = text.replace('_', "");
-    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
-        (2, value)
-    } else if let Some(value) = digits.strip_prefix("0o") {
-        (8, value)
-    } else if let Some(value) = digits.strip_prefix("0x") {
-        (16, value)
-    } else {
-        (10, digits.as_str())
-    };
-    u64::from_str_radix(digits, radix).ok()
+    crate::mir::normalized_integer_literal(text, ScalarType::U64).ok()?.parse().ok()
 }
 fn parse_pattern_u128(text: &str) -> Option<u128> {
-    let digits = text.replace('_', "");
-    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
-        (2, value)
-    } else if let Some(value) = digits.strip_prefix("0o") {
-        (8, value)
-    } else if let Some(value) = digits.strip_prefix("0x") {
-        (16, value)
-    } else {
-        (10, digits.as_str())
-    };
-    u128::from_str_radix(digits, radix).ok()
+    crate::mir::normalized_integer_literal(text, ScalarType::U128).ok()?.parse().ok()
 }
 fn parse_pattern_i128(text: &str) -> Option<i128> {
-    let digits = text.replace('_', "");
-    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
-        (2, value)
-    } else if let Some(value) = digits.strip_prefix("0o") {
-        (8, value)
-    } else if let Some(value) = digits.strip_prefix("0x") {
-        (16, value)
-    } else {
-        (10, digits.as_str())
-    };
-    i128::from_str_radix(digits, radix).ok()
+    crate::mir::normalized_integer_literal(text, ScalarType::I128).ok()?.parse().ok()
 }
 fn parse_pattern_f64(text: &str) -> Option<f64> {
     parse_f64_literal(text).ok()
@@ -12936,15 +13216,16 @@ fn execute(
                         .expect("verified register"),
                 )? as i128));
             }
-            VmInstruction::MakeTuple { dst, fields } => {
+            VmInstruction::MakeTupleOwned { dst, fields } | VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| registers.constructor_field(dst, *field, budget))
                     .collect::<Result<Vec<_>, _>>()?;
                 registers[dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(&fields); }
             }
-            VmInstruction::MakeArray { dst, fields, .. } => {
+            VmInstruction::MakeArrayOwned { dst, fields, .. } | VmInstruction::MakeArray { dst, fields, .. } => {
                 budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
@@ -12953,8 +13234,9 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::Array {
                     values: Arc::from(values),
                 });
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(&fields); }
             }
-            VmInstruction::MakeRecord {
+            VmInstruction::MakeRecordOwned { dst, definition, fields, .. } | VmInstruction::MakeRecord {
                 dst,
                 definition,
                 fields,
@@ -12971,8 +13253,9 @@ fn execute(
                     fields: Arc::from(values),
                     signature,
                 });
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(&fields); }
             }
-            VmInstruction::MakeEnum {
+            VmInstruction::MakeEnumOwned { dst, definition, variant, fields, .. } | VmInstruction::MakeEnum {
                 dst,
                 definition,
                 variant,
@@ -12991,6 +13274,7 @@ fn execute(
                     fields: Arc::from(values),
                     signature,
                 });
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(&fields); }
             }
             VmInstruction::IsInitialized { dst, base, fields } => {
                 registers[dst as usize] = Some(VmValue::Bool(storage_is_initialized(
@@ -13051,6 +13335,10 @@ fn execute(
                 field_count,
                 ..
             } => {
+                if let Some(value) = project_native_home(registers[base as usize].as_ref().expect("verified register"),
+                    index, field_count, &function.registers[dst as usize], budget)? {
+                    registers[dst as usize] = Some(value); pc += 1; continue;
+                }
                 let VmValue::Array { values: fields, .. } = registers[base as usize]
                     .as_ref()
                     .expect("verified register")
@@ -13596,6 +13884,9 @@ fn execute(
             }
             VmInstruction::Store { dst, src } => {
                 registers.copy_into(dst, src, budget)?;
+            }
+            VmInstruction::StoreOwned { dst, src } => {
+                registers.move_into(dst, src, budget)?;
             }
             VmInstruction::Move { dst, src } => {
                 registers.move_into(dst, src, budget)?;
@@ -14246,7 +14537,7 @@ fn execute(
                 pc = target as usize;
                 continue;
             }
-            VmInstruction::CallOwned { .. } | VmInstruction::Call { .. } | VmInstruction::MakeCallable { .. }
+            VmInstruction::CallOwned { .. } | VmInstruction::Call { .. } | VmInstruction::TailCallOwned { .. } | VmInstruction::MakeCallable { .. }
             | VmInstruction::DestroyCallable { .. } => {
                 return Err(VmArtifactError::CallRequiresProgram);
             }
@@ -15450,15 +15741,16 @@ fn execute_program_profiled(
                         .expect("verified register"),
                 )? as i128));
             }
-            VmInstruction::MakeTuple { dst, fields } => {
+            VmInstruction::MakeTupleOwned { dst, fields } | VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| registers.constructor_field(*dst, *field, budget))
                     .collect::<Result<Vec<_>, _>>()?;
                 registers[*dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(fields); }
             }
-            VmInstruction::MakeArray { dst, fields, .. } => {
+            VmInstruction::MakeArrayOwned { dst, fields, .. } | VmInstruction::MakeArray { dst, fields, .. } => {
                 budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
@@ -15467,8 +15759,9 @@ fn execute_program_profiled(
                 registers[*dst as usize] = Some(VmValue::Array {
                     values: Arc::from(values),
                 });
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(fields); }
             }
-            VmInstruction::MakeRecord {
+            VmInstruction::MakeRecordOwned { dst, definition, fields, .. } | VmInstruction::MakeRecord {
                 dst,
                 definition,
                 fields,
@@ -15485,8 +15778,9 @@ fn execute_program_profiled(
                     fields: Arc::from(values),
                     signature,
                 });
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(fields); }
             }
-            VmInstruction::MakeEnum {
+            VmInstruction::MakeEnumOwned { dst, definition, variant, fields, .. } | VmInstruction::MakeEnum {
                 dst,
                 definition,
                 variant,
@@ -15505,6 +15799,7 @@ fn execute_program_profiled(
                     fields: Arc::from(values),
                     signature,
                 });
+                if consumes_arguments { registers.finish_native_writes(budget)?; registers.retire_call_arguments(fields); }
             }
             VmInstruction::IsInitialized { dst, base, fields } => {
                 registers[*dst as usize] = Some(VmValue::Bool(storage_is_initialized(
@@ -15595,6 +15890,10 @@ fn execute_program_profiled(
                 field_count,
                 ..
             } => {
+                if let Some(value) = project_native_home(registers[*base as usize].as_ref().expect("verified register"),
+                    *index, *field_count, &function.registers[*dst as usize], budget)? {
+                    registers[*dst as usize] = Some(value); pc += 1; continue;
+                }
                 let VmValue::Array { values: fields, .. } = registers[*base as usize]
                     .as_ref()
                     .expect("verified register")
@@ -16196,6 +16495,9 @@ fn execute_program_profiled(
             }
             VmInstruction::Store { dst, src } => {
                 registers.copy_into(*dst, *src, budget)?;
+            }
+            VmInstruction::StoreOwned { dst, src } => {
+                registers.move_into(*dst, *src, budget)?;
             }
             VmInstruction::Move { dst, src } => {
                 registers.move_into(*dst, *src, budget)?;
@@ -16873,6 +17175,36 @@ fn execute_program_profiled(
                 )?);
                 if consumes_arguments { registers.retire_call_arguments(arguments); }
             }
+            VmInstruction::TailCallOwned { callee, arguments } => {
+                // Enclosing callers' handlers keep their original depth.
+                // Only a delimiter owned by the ending activation is illegal.
+                if handlers.iter().any(|handler| handler.call_depth >= callers.len())
+                    || registers.capture_environment.is_some()
+                    || resumption_returns.last().is_some_and(|pending|
+                        pending.program.as_ref().is_some_and(|saved|
+                            saved.definition == definition && saved.callers.len() == callers.len())) {
+                    return Err(VmArtifactError::HandlerStillActive);
+                }
+                let target = program.functions.get(callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: *callee })?;
+                require_execution_contract(target, budget)?;
+                budget.reserve_value("mandatory tail arguments", arguments.len())?;
+                let values = arguments.iter().map(|argument| registers.copy_value(*argument, budget))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let native_return = registers.native_plan.as_ref().is_some_and(|plan| plan.native_return);
+                budget.reserve_allocation(target.registers.len())?;
+                let mut incoming = RuntimeRegisters::for_function_with_native_return(target, budget, native_return)?;
+                for (index, value) in values.into_iter().enumerate() { incoming.install_argument(index, value); }
+                incoming.finish_native_writes(budget)?;
+                // No rebasing into a deeper caller index, no saved registers,
+                // and no RuntimeProgramCaller push: the destination remains
+                // exactly the destination inherited by this activation.
+                registers = incoming;
+                definition = *callee;
+                if let Some(profile) = profile.as_deref_mut() { profile.recycled_tail_calls += 1; }
+                pc = 0;
+                continue;
+            }
             VmInstruction::CallOwned { dst, callee, arguments }
             | VmInstruction::Call {
                 dst,
@@ -17436,6 +17768,13 @@ impl ExecutionBudget {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn vm_identity_rejects_proof_local_universal_regions() {
+        let value = super::VmGenericArgument::Lifetime(crate::Lifetime::Placeholder(crate::types::UniversalRegion {
+            universe: 1, index: 0,
+        }));
+        assert!(super::validate_vm_generic_arguments(&[value]).is_err());
+    }
+    #[test]
     fn return_reachability_includes_dynamic_handler_entries() {
         use super::*;
         let install = VmInstruction::InstallHandler {
@@ -17530,6 +17869,50 @@ mod tests {
         store_reference_target(&mut registers, &mut [], &target, &[0], VmValue::I64(19), &mut budget).unwrap();
         assert!(referent_is_initialized(&registers, &[], &alias).unwrap());
         assert!(matches!(load_reference_target(&registers, &[], &target, &[0], &mut budget).unwrap(), VmValue::I64(19)));
+    }
+
+    #[test]
+    fn taking_fixed_array_storage_checks_concrete_extent_and_clears_only_that_path() {
+        for (element, values) in [
+            (VmType::I64, vec![VmValue::I64(20), VmValue::I64(22)]),
+            (VmType::U8, vec![]),
+            (VmType::Unit, vec![VmValue::Unit, VmValue::Unit]),
+        ] {
+            let array = VmType::FixedArray {
+                element: Box::new(element), length: values.len() as u64,
+            };
+            let value = VmValue::Tuple(vec![
+                VmValue::Array { values: values.into() }, VmValue::I64(42),
+            ].into());
+            for resident in [false, true] {
+                let mut budget = cow_budget();
+                let value = if resident {
+                    let layout = native_memory::native_layout(
+                        &VmType::Tuple(vec![array.clone(), VmType::I64]), &Arc::from([]), &mut vec![],
+                    ).unwrap();
+                    let home = native_storage::NativeHome::new(Arc::new(layout), &mut budget).unwrap();
+                    home.store(&[], &value, &mut budget).unwrap();
+                    VmValue::Resident(home)
+                } else { value.clone() };
+                let mut registers = vec![Some(value)];
+                let moved = take_storage_projection(&mut registers, 0, &[0], &array, &mut budget).unwrap();
+                assert!(value_matches_vm_type(&moved, &array));
+                assert!(!storage_is_initialized(registers[0].as_ref(), &[0]));
+                assert!(storage_is_initialized(registers[0].as_ref(), &[1]));
+                assert!(take_storage_projection(&mut registers, 0, &[0], &array, &mut budget).is_err());
+            }
+        }
+        for expected in [
+            VmType::FixedArray { element: Box::new(VmType::I64), length: 3 },
+            VmType::FixedArray { element: Box::new(VmType::Bool), length: 2 },
+        ] {
+            let mut registers = vec![Some(VmValue::Array {
+                values: vec![VmValue::I64(20), VmValue::I64(22)].into(),
+            })];
+            assert!(matches!(take_storage_projection(&mut registers, 0, &[], &expected, &mut cow_budget()),
+                Err(VmArtifactError::ResultType { .. })));
+            assert!(storage_is_initialized(registers[0].as_ref(), &[]));
+        }
     }
 
     #[test]

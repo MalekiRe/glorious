@@ -81,7 +81,8 @@ impl Substitution<'_> {
                     .map(|field| self.pattern(field))
                     .collect::<Result<_, _>>()?,
             ),
-            P::Array { element, elements } => P::Array {
+            P::Array { element, elements, rest } => P::Array {
+                rest: *rest,
                 element: self.ty(element)?,
                 elements: elements
                     .iter()
@@ -263,6 +264,17 @@ impl SpecializedMir {
                         SpecializedOperation::Compute(match computation {
                             OCompute::Literal(text) => {
                                 SpecializedComputation::Literal(text.clone())
+                            }
+                            OCompute::ConstValue(argument) => {
+                                let argument = substitution.argument(argument)?;
+                                let (literal, expected) = match argument {
+                                    GenericArgument::ConstInteger(value) => (value.to_string(), Type::Scalar(value.scalar())),
+                                    _ => return Err(SpecializedError("const value is not a closed supported integer".into())),
+                                };
+                                if values[instruction.destination.0 as usize].ty != expected {
+                                    return Err(SpecializedError("const value has a different scalar kind than its result".into()));
+                                }
+                                SpecializedComputation::Literal(literal)
                             }
                             OCompute::Unit => SpecializedComputation::Unit,
                             OCompute::Function {

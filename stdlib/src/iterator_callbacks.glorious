@@ -1,0 +1,239 @@
+// Stored callbacks retain their exact callable/environment evidence. Construction
+// transfers fields only; it never polls an iterator or invokes a callback.
+
+pub struct Map<'env,Env,I,F> { private source: I, private callback: F }
+pub fn map_iter<'env,Env,I,F,U,e: EffectRow>(source: I, transform: F) -> Map<'env,Env,I,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {
+    Map { source: source, callback: transform }
+}
+impl<'env,Env,I,F> Map<'env,Env,I,F> {
+    pub fn into_parts(value: Self) -> (I,F) { (value.source, value.callback) }
+}
+pub impl<'env,Env,I,F,U,e: EffectRow> Iterator for Map<'env,Env,I,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {
+    type Item = U;
+    type Effects = { | <I as Iterator>::Effects,e };
+    fn next(value: &mut Self) -> Option<U> / { | <I as Iterator>::Effects,e } {
+        handle Iterator::next(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => { let transform = &mut value.callback; Some(transform(item)) },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { Iterator::size_hint(&value.source) }
+}
+
+pub impl<'env,Env,I,F,U,e: EffectRow> ExactSizeIterator for Map<'env,Env,I,F>
+where I: ExactSizeIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {
+    fn len(value: &Self) -> usize { ExactSizeIterator::len(&value.source) }
+}
+pub impl<'env,Env,I,F,U,e: EffectRow> DoubleEndedIterator for Map<'env,Env,I,F>
+where I: DoubleEndedIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {
+    fn next_back(value: &mut Self) -> Option<U> / { | <I as Iterator>::Effects,e } {
+        handle DoubleEndedIterator::next_back(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => { let transform = &mut value.callback; Some(transform(item)) },
+        }
+    }
+}
+
+pub impl<'env,Env,I,F,U,e: EffectRow> FusedIterator for Map<'env,Env,I,F>
+where I: FusedIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=U,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {}
+
+pub struct Inspect<'env,Env,I,F> { private source: I, private callback: F }
+pub fn inspect_iter<'env,Env,I,F,e: EffectRow>(source: I, observer: F) -> Inspect<'env,Env,I,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {
+    Inspect { source: source, callback: observer }
+}
+impl<'env,Env,I,F> Inspect<'env,Env,I,F> {
+    pub fn into_parts(value: Self) -> (I,F) { (value.source, value.callback) }
+}
+pub impl<'env,Env,I,F,e: EffectRow> Iterator for Inspect<'env,Env,I,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {
+    type Item = <I as Iterator>::Item;
+    type Effects = { | <I as Iterator>::Effects,e };
+    fn next(value: &mut Self) -> Option<<I as Iterator>::Item> / { | <I as Iterator>::Effects,e } {
+        handle Iterator::next(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => { let observer = &mut value.callback; observer(&item); Some(item) },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { Iterator::size_hint(&value.source) }
+}
+
+pub impl<'env,Env,I,F,e: EffectRow> ExactSizeIterator for Inspect<'env,Env,I,F>
+where I: ExactSizeIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {
+    fn len(value: &Self) -> usize { ExactSizeIterator::len(&value.source) }
+}
+pub impl<'env,Env,I,F,e: EffectRow> DoubleEndedIterator for Inspect<'env,Env,I,F>
+where I: DoubleEndedIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {
+    fn next_back(value: &mut Self) -> Option<<I as Iterator>::Item> / { | <I as Iterator>::Effects,e } {
+        handle DoubleEndedIterator::next_back(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => { let observer = &mut value.callback; observer(&item); Some(item) },
+        }
+    }
+}
+
+pub impl<'env,Env,I,F,e: EffectRow> FusedIterator for Inspect<'env,Env,I,F>
+where I: FusedIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=(),Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {}
+
+pub struct Filter<'env,Env,I,F> { private source: I, private callback: F }
+pub fn filter_iter<'env,Env,I,F,e: EffectRow>(source: I, predicate: F) -> Filter<'env,Env,I,F>
+where I: Iterator, <I as Iterator>::Item: Use<[0,1]>, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {
+    Filter { source: source, callback: predicate }
+}
+impl<'env,Env,I,F> Filter<'env,Env,I,F> {
+    pub fn into_parts(value: Self) -> (I,F) { (value.source, value.callback) }
+}
+pub impl<'env,Env,I,F,e: EffectRow> Iterator for Filter<'env,Env,I,F>
+where I: Iterator, <I as Iterator>::Item: Use<[0,1]>, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {
+    type Item = <I as Iterator>::Item;
+    type Effects = { | <I as Iterator>::Effects,e };
+    fn next(value: &mut Self) -> Option<<I as Iterator>::Item> / { | <I as Iterator>::Effects,e } {
+        handle Iterator::next(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => {
+                let predicate = &mut value.callback;
+                handle predicate(&item) { true => Some(item), false => { discard(item); tail Iterator::next(value) } }
+            },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { let (_, high) = Iterator::size_hint(&value.source); (0, high) }
+}
+
+pub impl<'env,Env,I,F,e: EffectRow> FusedIterator for Filter<'env,Env,I,F>
+where I: FusedIterator, I: Iterator, <I as Iterator>::Item: Use<[0,1]>, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call <I as Iterator>::Item,),Output=Bool,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call <I as Iterator>::Item,),After=Env> {}
+
+pub struct FilterMap<'env,Env,I,F> { private source: I, private callback: F }
+pub fn filter_map_iter<'env,Env,I,F,U,e: EffectRow>(source: I, transform: F) -> FilterMap<'env,Env,I,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {
+    FilterMap { source: source, callback: transform }
+}
+impl<'env,Env,I,F> FilterMap<'env,Env,I,F> {
+    pub fn into_parts(value: Self) -> (I,F) { (value.source, value.callback) }
+}
+pub impl<'env,Env,I,F,U,e: EffectRow> Iterator for FilterMap<'env,Env,I,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {
+    type Item = U;
+    type Effects = { | <I as Iterator>::Effects,e };
+    fn next(value: &mut Self) -> Option<U> / { | <I as Iterator>::Effects,e } {
+        handle Iterator::next(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => {
+                let transform = &mut value.callback;
+                handle transform(item) { Result::Ok(output) => Some(output), Result::Err(_) => tail Iterator::next(value) }
+            },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { let (_, high) = Iterator::size_hint(&value.source); (0, high) }
+}
+
+pub impl<'env,Env,I,F,U,e: EffectRow> FusedIterator for FilterMap<'env,Env,I,F>
+where I: FusedIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(<I as Iterator>::Item,),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(<I as Iterator>::Item,),After=Env> {}
+
+pub struct Scan<'env,Env,I,S,F> { private source: I, private state: S, private done: Bool, private callback: F }
+pub fn scan_iter<'env,Env,I,S,F,U,e: EffectRow>(source: I, state: S, step: F) -> Scan<'env,Env,I,S,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call mut S,<I as Iterator>::Item),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call mut S,<I as Iterator>::Item),After=Env> {
+    Scan { source: source, state: state, done: false, callback: step }
+}
+impl<'env,Env,I,S,F> Scan<'env,Env,I,S,F> {
+    pub fn into_parts(value: Self) -> (I,S,F) { (value.source, value.state, value.callback) }
+}
+pub impl<'env,Env,I,S,F,U,e: EffectRow> Iterator for Scan<'env,Env,I,S,F>
+where I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call mut S,<I as Iterator>::Item),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call mut S,<I as Iterator>::Item),After=Env> {
+    type Item = U;
+    type Effects = { | <I as Iterator>::Effects,e };
+    fn next(value: &mut Self) -> Option<U> / { | <I as Iterator>::Effects,e } {
+        handle value.done { true => return(None, @next), false => () };
+        handle Iterator::next(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => {
+                let step = &mut value.callback;
+                handle step(&mut value.state, item) {
+                    Result::Ok(output) => Some(output),
+                    Result::Err(_) => { value.done = true; None },
+                }
+            },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { handle value.done { true => (0, Some(0)), false => { let (_, high) = Iterator::size_hint(&value.source); (0, high) } } }
+}
+
+pub impl<'env,Env,I,S,F,U,e: EffectRow> FusedIterator for Scan<'env,Env,I,S,F>
+where I: FusedIterator, I: Iterator, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call mut S,<I as Iterator>::Item),Output=Option<U>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call mut S,<I as Iterator>::Item),After=Env> {}
+
+pub struct FoldFailure<I,A,E> { pub rest: I, pub state: A, pub error: E }
+pub struct FindOutcome<I,T> { pub found: Option<T>, pub rest: I }
+pub fn fold_iter<'env,Env,I,A,F,e: EffectRow>(source: I, initial: A, step: &mut F) -> A
+    / { | <I as Iterator>::Effects,e }
+where I: Iterator, I: Use<[0,1]>, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(A,<I as Iterator>::Item),Output=A,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(A,<I as Iterator>::Item),After=Env> {
+    let mut source = source;
+    handle Iterator::next(&mut source) {
+        Result::Err(_) => initial,
+        Result::Ok(item) => { let next = step(initial, item); tail fold_iter(source, next, step) },
+    }
+}
+pub fn try_fold_iter<'env,Env,I,A,E,F,e: EffectRow>(source: I, initial: A, step: &mut F)
+    -> Result<A,FoldFailure<I,A,E>> / { | <I as Iterator>::Effects,e }
+where I: Iterator, I: Use<[0,1]>, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(A,<I as Iterator>::Item),Output=Result<A,(A,E)>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(A,<I as Iterator>::Item),After=Env> {
+    let mut source = source;
+    handle Iterator::next(&mut source) {
+        Result::Err(_) => Result::Ok(initial),
+        Result::Ok(item) => handle step(initial, item) {
+            Result::Err((state, error)) => Result::Err(FoldFailure { rest: source, state: state, error: error }),
+            Result::Ok(next) => tail try_fold_iter(source, next, step),
+        },
+    }
+}
+pub fn fold_steps<'env,Env,I,A,F,e: EffectRow>(source: I, initial: A, step: &mut F) -> A
+    / { | <I as OwnedStepper>::Effects,e }
+where I: OwnedStepper, Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(A,<I as OwnedStepper>::Item),Output=A,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(A,<I as OwnedStepper>::Item),After=Env> {
+    handle OwnedStepper::step(source) {
+        Step::Done => initial,
+        Step::Yield { item: item, rest: rest } => { let next = step(initial, item); tail fold_steps(rest, next, step) },
+    }
+}

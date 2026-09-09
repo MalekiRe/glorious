@@ -1,0 +1,160 @@
+fn sorting_get<'a,'b,T>(items: &'b SliceMut<'a,T>, index: usize) -> &'b T {
+    Slice::get_unchecked(Slice { storage: & *items.storage, length: items.length }, index)
+}
+fn sorting_swap<T>(items: &mut SliceMut<T>, a: usize, b: usize) {
+    handle a == b { true => return((), @sorting_swap), false => () };
+    let low = min(a, b);
+    let high = max(a, b);
+    let view = SliceMut { storage: &mut *items.storage, length: items.length };
+    let (left, right) = handle SliceMut::split_at(view, high) { Result::Ok(parts) => parts, Result::Err(_) => __g1_abort() };
+    let left = handle SliceMut::get(left, low) { Result::Ok(place) => place, Result::Err(_) => __g1_abort() };
+    let right = handle SliceMut::get(right, 0) { Result::Ok(place) => place, Result::Err(_) => __g1_abort() };
+    swap(left, right)
+}
+fn sorting_sift<T>(items: &mut SliceMut<T>, count: usize, root: usize) where T: Ord {
+    handle root >= count / 2 {
+        true => (),
+        false => {
+            let left = root * 2 + 1;
+            let child = handle left + 1 < count {
+                false => left,
+                true => handle Ord::compare(sorting_get(& *items, left), sorting_get(& *items, left + 1)) {
+                    Ordering::Less => left + 1, _ => left,
+                },
+            };
+            handle Ord::compare(sorting_get(& *items, root), sorting_get(& *items, child)) {
+                Ordering::Less => { sorting_swap(&mut *items, root, child); tail sorting_sift(items, count, child) },
+                _ => (),
+            }
+        },
+    }
+}
+fn sorting_heapify<T>(items: &mut SliceMut<T>, count: usize, remaining: usize) where T: Ord {
+    handle remaining == 0 {
+        true => (),
+        false => { sorting_sift(&mut *items, count, remaining - 1); tail sorting_heapify(items, count, remaining - 1) },
+    }
+}
+fn sorting_heap_drain<T>(items: &mut SliceMut<T>, count: usize) where T: Ord {
+    handle count <= 1 {
+        true => (),
+        false => {
+            sorting_swap(&mut *items, 0, count - 1);
+            sorting_sift(&mut *items, count - 1, 0);
+            tail sorting_heap_drain(items, count - 1)
+        },
+    }
+}
+pub fn sort_unstable<T>(items: &mut SliceMut<T>) where T: Ord {
+    let length = SliceMut::len(& *items);
+    sorting_heapify(&mut *items, length, length / 2);
+    sorting_heap_drain(items, length)
+}
+fn sorting_insert<T>(items: &mut SliceMut<T>, index: usize) where T: Ord {
+    handle index == 0 {
+        true => (),
+        false => handle Ord::compare(sorting_get(& *items, index - 1), sorting_get(& *items, index)) {
+            Ordering::Greater => { sorting_swap(&mut *items, index - 1, index); tail sorting_insert(items, index - 1) },
+            _ => (),
+        },
+    }
+}
+fn sorting_stable_from<T>(items: &mut SliceMut<T>, index: usize) where T: Ord {
+    handle index >= SliceMut::len(& *items) {
+        true => (),
+        false => { sorting_insert(&mut *items, index); tail sorting_stable_from(items, index + 1) },
+    }
+}
+// This initial stable implementation uses adjacent insertion swaps: O(n^2)
+// comparisons, constant extra storage, no allocation and no uninitialized hole.
+// The mandated scratch owner must be empty and is preserved untouched; an empty
+// zero-capacity scratch is sufficient for this implementation.
+pub fn sort_stable<T>(items: &mut SliceMut<T>, scratch: &mut Vec<T>) -> Result<(),ScratchError> where T: Ord {
+    handle Vec::len(& *scratch) != 0 {
+        true => Result::Err(ScratchError::NonEmpty),
+        false => { sorting_stable_from(items, 1); Result::Ok(()) },
+    }
+}
+fn sorting_insert_by<'env,Env,T,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F, index: usize) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call T,&'call T),Output=Ordering,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call T,&'call T),After=Env> {
+    handle index == 0 {
+        true => (),
+        false => handle compare(sorting_get(& *items, index - 1), sorting_get(& *items, index)) {
+            Ordering::Greater => { sorting_swap(&mut *items, index - 1, index); tail sorting_insert_by(items, compare, index - 1) },
+            _ => (),
+        },
+    }
+}
+fn sorting_by_from<'env,Env,T,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F, index: usize) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call T,&'call T),Output=Ordering,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call T,&'call T),After=Env> {
+    handle index >= SliceMut::len(& *items) {
+        true => (),
+        false => { sorting_insert_by(&mut *items, &mut *compare, index); tail sorting_by_from(items, compare, index + 1) },
+    }
+}
+pub fn sort_by<'env,Env,T,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F) / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call T,&'call T),Output=Ordering,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call T,&'call T),After=Env> {
+    sorting_by_from(items, compare, 1)
+}
+fn sorting_try_insert_by<'env,Env,T,E,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F, index: usize) -> Result<(),E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call T,&'call T),Output=Result<Ordering,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call T,&'call T),After=Env> {
+    handle index == 0 {
+        true => Result::Ok(()),
+        false => handle compare(sorting_get(& *items, index - 1), sorting_get(& *items, index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(order) => handle order {
+                Ordering::Greater => { sorting_swap(&mut *items, index - 1, index); tail sorting_try_insert_by(items, compare, index - 1) },
+                _ => Result::Ok(()),
+            },
+        },
+    }
+}
+fn sorting_try_by_from<'env,Env,T,E,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F, index: usize) -> Result<(),E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call T,&'call T),Output=Result<Ordering,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call T,&'call T),After=Env> {
+    handle index >= SliceMut::len(& *items) {
+        true => Result::Ok(()),
+        false => handle sorting_try_insert_by(&mut *items, &mut *compare, index) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(()) => tail sorting_try_by_from(items, compare, index + 1),
+        },
+    }
+}
+pub fn try_sort_by<'env,Env,T,E,F,e: EffectRow>(items: &mut SliceMut<T>, compare: &mut F) -> Result<(),E> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'call T,&'call T),Output=Result<Ordering,E>,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'call T,&'call T),After=Env> {
+    sorting_try_by_from(items, compare, 1)
+}
+fn sorting_binary_by<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, compare: &mut F, start: usize, end: usize)
+    -> Result<usize,usize> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Ordering,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    handle start == end {
+        true => Result::Err(start),
+        false => {
+            let middle = start + (end - start) / 2;
+            handle compare(Slice::get_unchecked(items, middle)) {
+                Ordering::Equal => Result::Ok(middle),
+                Ordering::Less => tail sorting_binary_by(items, compare, middle + 1, end),
+                Ordering::Greater => tail sorting_binary_by(items, compare, start, middle),
+            }
+        },
+    }
+}
+pub fn binary_search_by<'a,'env,Env,T,F,e: EffectRow>(items: Slice<'a,T>, compare: &mut F) -> Result<usize,usize> / { | e }
+where Env: Environment<'env>,
+    for<'call> &'call mut F: Fn<(&'a T,),Output=Ordering,Effects=e>,
+    for<'call> &'call mut F: RunsIn<&'call mut Env,(&'a T,),After=Env> {
+    sorting_binary_by(items, compare, 0, Slice::len(&items))
+}

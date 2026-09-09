@@ -104,7 +104,8 @@ impl RuntimeMir {
                     .iter()
                     .position(|local| local.source == expression)
                     .map(|index| MirLocal(index as u32)),
-                PlaceBindingOrigin::HandlerBinder { .. }
+                PlaceBindingOrigin::Temporary { .. }
+                | PlaceBindingOrigin::HandlerBinder { .. }
                 | PlaceBindingOrigin::HandlerResumption { .. }
                 | PlaceBindingOrigin::CompletionBinder { .. } => {
                     bindings.get(&binding.origin).copied()

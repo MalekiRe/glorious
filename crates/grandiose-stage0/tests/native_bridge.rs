@@ -101,6 +101,54 @@ struct NativePair {
 }
 
 #[test]
+fn source_pointer_address_is_the_actual_backing_address_seen_by_native_code() {
+    let mut input = request(r#"
+        host interop fn inspect(pointer: *mut i64, address: usize) -> ();
+        pub fn main() -> i64 {
+            unsafe {
+                let pointer = native_home(as<i64>(40));
+                inspect(pointer, native_pointer_address(pointer));
+                native_take(pointer)
+            }
+        }
+    "#);
+    input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        format!("{}\n{NATIVE_HOMES}\n{}", include_str!("../../../stdlib/src/lib.glorious"), r#"
+            pub fn native_pointer_address<T>(pointer: *mut T) -> usize {
+                let readable = unsafe { __g1_memory_as_const(pointer) };
+                __g1_memory_pointer_address(readable)
+            }
+        "#).as_bytes());
+    let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+    let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    for program in [&artifact, &decoded] {
+        let observed = Rc::new(Cell::new(false));
+        let seen = observed.clone();
+        let mut imports = VmNativeImports::default();
+        let contract = program.native_imports().unwrap().remove(0);
+        // SAFETY: source owns an initialized aligned i64 allocation throughout
+        // this callback. Native code neither retains nor frees its pointer.
+        unsafe {
+            imports.insert(contract, move |call| {
+                let mut pointer = MaybeUninit::<*mut i64>::uninit();
+                let mut address = MaybeUninit::<usize>::uninit();
+                call.write_argument(0, pointer.as_mut_ptr().cast())?;
+                call.write_argument(1, address.as_mut_ptr().cast())?;
+                let pointer = pointer.assume_init();
+                assert_eq!(address.assume_init(), pointer.addr());
+                assert_eq!(*pointer, 40);
+                *pointer += 2;
+                seen.set(true);
+                Ok(())
+            }).unwrap();
+            assert_eq!(program.run_i64_with_native(&imports, Default::default()).unwrap(), 42);
+        }
+        assert!(observed.get());
+    }
+}
+
+#[test]
 fn ordinary_native_resident_arguments_copy_into_distinct_callee_homes() {
     for invocation in ["amend(pair)", "invoke(amend, pair)"] {
         let program = compile(&format!(
@@ -109,6 +157,7 @@ fn ordinary_native_resident_arguments_copy_into_distinct_callee_homes() {
             host interop fn observe(value: &Pair) -> ();
             host interop fn update(value: &mut Pair) -> ();
             fn amend(value: Pair) -> i64 {{
+                let mut value = value;
                 update(&mut value);
                 value.first + value.second
             }}
@@ -325,7 +374,7 @@ fn native_host_invokes_selected_bytecode_drop_without_an_explicit_callback_argum
             impl Drop for Widget { drop(&mut self) -> { note(); } }
             host interop fn dispose(value: Vec<Widget>) -> i64;
             pub fn main() -> i64 {
-                let values = Vec<Widget>::with_capacity(4);
+                let mut values = Vec<Widget>::with_capacity(4);
                 Vec::push(&mut values, Widget { value: 19 });
                 Vec::push(&mut values, Widget { value: 23 });
                 dispose(values)
@@ -761,6 +810,7 @@ fn effect_payload_native_home_survives_a_delimited_resumption() {
         pub fn main() -> i64 {
             sum(handle relay(Pair { first: 19, second: 20 }) {
                 Ask::ask(payload) with k => {
+                    let mut payload = payload;
                     let returned = update(&mut payload);
                     k(*returned)
                 }
@@ -856,7 +906,7 @@ fn ordinary_source_local_has_one_native_home_before_the_call() {
         struct Pair { first: i64, second: i64 }
         host interop fn update<'a>(value: &'a mut Pair) -> &'a mut Pair;
         pub fn main() -> i64 {
-            let pair = Pair { first: 19, second: 20 };
+            let mut pair = Pair { first: 19, second: 20 };
             let returned = update(&mut pair);
             let observed = returned.first + returned.second;
             handle observed == 42 { true => pair.first + pair.second, false => 0 }
@@ -1381,6 +1431,7 @@ fn native_owned_vec_roundtrip_grows_and_drops_only_in_bytecode() {
         host interop fn observe(value: &Vec<Widget>) -> ();
         fn append(value: Vec<Widget>) -> Vec<Widget> {
             observe(&value);
+            let mut value = value;
             let counter = Vec::get_unchecked(&value, 0).counter;
             Vec::push(&mut value, Widget { value: 23, counter: counter });
             value
@@ -1389,7 +1440,7 @@ fn native_owned_vec_roundtrip_grows_and_drops_only_in_bytecode() {
             unsafe {
                 let counter = native_home(as<i64>(0));
                 let total = {
-                    let value = Vec<Widget>::with_capacity(4);
+                    let mut value = Vec<Widget>::with_capacity(4);
                     Vec::push(&mut value, Widget { value: 19, counter: counter });
                     Vec::push(&mut value, Widget { value: 0, counter: counter });
                     Vec::push(&mut value, Widget { value: 0, counter: counter });
@@ -1486,7 +1537,7 @@ fn native_vec_callback_mutates_source_specialization_and_runs_resident_drop() {
             unsafe {
                 let counter = native_home(as<i64>(0));
                 let total = {
-                    let vector = Vec<Widget>::with_capacity(4);
+                    let mut vector = Vec<Widget>::with_capacity(4);
                     Vec::push(&mut vector, Widget { value: 18, counter: counter });
                     fill(&mut vector, counter, @EXTRA@);
                     let returned = update(&mut vector, append);
@@ -1905,7 +1956,7 @@ fn native_callback_runs_zero_sized_resident_destructors_as_bytecode() {
         fn clear(value: &mut Vec<Marker>) -> () { Vec::clear(value) }
         pub fn main() -> i64 {
             unsafe {
-                let vector = Vec<Marker>::new();
+                let mut vector = Vec<Marker>::new();
                 Vec::push(&mut vector, Marker {}); Vec::push(&mut vector, Marker {}); Vec::push(&mut vector, Marker {});
                 clear_native(&mut vector, clear)
             }

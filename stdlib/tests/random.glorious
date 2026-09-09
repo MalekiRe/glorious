@@ -1,0 +1,42 @@
+use std::random::*;
+struct Scripted { calls: u32 }
+fn fill_script(out: SliceMut<u8>, first: u8) {
+    handle SliceMut::len(&out) == 0 {
+        true => (),
+        false => handle SliceMut::split_at(out, 1) {
+            Result::Err(_) => (),
+            Result::Ok((head, rest)) => {
+                let place = SliceMut::get_unchecked(head, 0);
+                *place = first;
+                tail fill_script(rest, 0)
+            },
+        },
+    }
+}
+impl RandomSource for Scripted {
+    type Effects = {};
+    fn fill(value: &mut Self, out: SliceMut<u8>) -> Result<(),RandomError> {
+        let first = handle value.calls == 0 { true => 0, false => 7 };
+        (*value).calls = value.calls + 1;
+        fill_script(out, first);
+        Result::Ok(())
+    }
+}
+pub fn main() -> i64 {
+    let mut source = Scripted { calls: 0 };
+    assert_true(handle random_below(&mut source, 0) { Result::Err(RandomError::InvalidRange) => true, _ => false });
+    assert_true(source.calls == 0);
+    assert_true(handle random_below(&mut source, 3) { Result::Ok(1) => true, _ => false });
+    assert_true(source.calls == 2);
+    let seed = [as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),
+        as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),
+        as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),
+        as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0),as<u8>(0)];
+    let mut left = SeededRng::from_seed(seed);
+    let mut right = SeededRng::from_seed(seed);
+    assert_true(SeededRng::algorithm_version() == 1);
+    let first = SeededRng::next_u64(&mut left);
+    assert_true(handle random_u64(&mut right) { Result::Ok(value) => value == first, _ => false });
+    assert_true(SeededRng::next_u64(&mut left) == SeededRng::next_u64(&mut right));
+    42
+}

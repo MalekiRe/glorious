@@ -274,7 +274,9 @@ impl OwnershipMir {
                 .filter(|operand| operand.mode == ValueTransfer::Move)
                 .map(|operand| self.owner_of(operand.value))
                 .collect::<BTreeSet<_>>();
-            let suspends = matches!(
+            let tail = matches!(&block.terminator.control,
+                ControlTerminator::Invoke { contract, .. } if contract.mandatory_tail);
+            let suspends = !tail && matches!(
                 block.terminator.control,
                 ControlTerminator::Invoke { .. }
                     | ControlTerminator::Transfer(ControlTransfer::Perform { .. })
@@ -301,7 +303,7 @@ impl OwnershipMir {
                             } else if matches!(
                                 block.terminator.control,
                                 ControlTerminator::Return(_)
-                            ) || exit_scope.is_some_and(|scope| {
+                            ) || tail || exit_scope.is_some_and(|scope| {
                                 self.scope_is_below(self.owners[owner.0 as usize].scope, scope)
                             }) {
                                 OwnerDisposition::Abandon

@@ -1,0 +1,148 @@
+use grandiose_stage0::{
+    CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath,
+    PackageKey, SourceInput, StageZeroCompiler, decode_and_verify_program,
+};
+use std::collections::BTreeMap;
+
+fn request(source: &str, optimization: &str) -> CompilationRequest {
+    let package = PackageKey("reborrow-cases@0.1.0".into());
+    CompilationRequest {
+        build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"expected-reborrow-cases")),
+        mode: CompilationMode::Build,
+        root_package: package.clone(),
+        sources: vec![SourceInput::new(package, LogicalPath::parse("src/main.glorious").unwrap(), source.as_bytes())],
+        target: "stage0-vm".into(),
+        semantic_options: BTreeMap::new(),
+        codegen_options: BTreeMap::from([("optimization-level".into(), optimization.into())]),
+        capability_manifest: vec![], runtime_manifest: None,
+    }
+}
+
+fn accepts(source: &str) {
+    accepts_with_dependency(source, None);
+}
+
+fn accepts_with_dependency(source: &str, dependency: Option<&str>) {
+    for optimization in ["0", "2"] {
+        let mut input = request(source, optimization);
+        if let Some(dependency) = dependency {
+            input.sources.push(SourceInput::new(PackageKey("views@0.1.0".into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(), dependency.as_bytes()));
+        }
+        let result = StageZeroCompiler::new().compile(input).unwrap();
+        assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+        let artifact = result.artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+fn rejects(source: &str, codes: &[&str]) {
+    for optimization in ["0", "2"] {
+        let error = StageZeroCompiler::new().compile(request(source, optimization)).expect_err("invalid reference conversion must fail");
+        assert!(error.diagnostics().iter().any(|diagnostic| codes.contains(&diagnostic.code)), "{error:?}");
+    }
+}
+
+#[test]
+fn scalar_updates_through_a_borrowed_carrier_preserve_reference_provenance() {
+    accepts("struct View<'a,T> { value: &'a T, length: usize } fn reset<'a,T>(view: View<'a,T>) -> &'a T { let mut view = view; (*&mut view).length = 0; view.value } pub fn main() -> i64 { let number = 42; *reset(View { value: &number, length: 1 }) }");
+}
+
+#[test]
+fn expected_shared_reborrow_releases_before_later_unique_mutation() {
+    accepts("fn read(value: &i64) -> i64 { *value } pub fn main() -> i64 { let mut value = 10; let unique = &mut value; let a = read(unique); let b = read(unique); *unique = a + b + 22; *unique }");
+}
+
+#[test]
+fn expected_shared_reborrow_preserves_returned_loan_and_computed_origin() {
+    accepts("fn relay<'a>(value: &'a mut i64) -> &'a mut i64 { value } fn shared<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { let mut value = 41; let unique = &mut value; let child = shared(relay(unique)); let result = *child; value = result + 1; value }");
+    rejects("fn shared<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { let mut value = 41; let unique = &mut value; let child = shared(unique); *unique = 42; *child }", &["G5004"]);
+}
+
+#[test]
+fn expected_shared_reborrow_works_for_generic_calls_and_typed_bindings() {
+    accepts("fn shared<'a, T>(value: &'a T) -> &'a T { value } pub fn main() -> i64 { let mut value = 41; let unique = &mut value; let child: &i64 = unique; let a = *child; let b = *shared(unique); *unique = a + b - 40; *unique }");
+}
+
+#[test]
+fn expected_shared_reborrow_never_upgrades_shared_authority_or_extends_storage() {
+    rejects("fn read(value: &i64) -> i64 { *value } pub fn main() -> i64 { read(42) }", &["G4107", "G5017"]);
+    rejects("fn write(value: &mut i64) -> i64 { *value = 42; *value } pub fn main() -> i64 { let value = 1; write(&value) }", &["G4107", "G5017"]);
+    rejects("fn escape() -> &'static i64 { let mut value = 42; let unique = &mut value; unique } pub fn main() -> i64 { *escape() }", &["G5017", "G5006", "G5011"]);
+}
+
+#[test]
+fn expected_shared_reborrow_tracks_resumed_and_abandoned_effect_calls() {
+    accepts("effect Ask { [1,1] get() -> i64; } fn read(value: &i64) -> i64 / {Ask} { *value + Ask::get() } pub fn main() -> i64 { let mut value = 20; let unique = &mut value; let answer = handle read(unique) { Ask::get() with k => k(1) }; *unique = answer * 2; *unique }");
+    // Explicitly discard the optional continuation: an ordinary clause without
+    // `with` resumes with its value and would evaluate the suspended `+ *value`.
+    accepts("effect Ask { [0,1] get() -> i64; } fn read(value: &i64) -> i64 / {Ask} { Ask::get() + *value } pub fn main() -> i64 { let mut value = 20; let unique = &mut value; let answer = handle read(unique) { Ask::get() with _ => 41 }; *unique = answer + 1; *unique }");
+}
+
+#[test]
+fn expected_unique_reborrow_can_be_used_again_after_call() {
+    accepts("fn bump(value: &mut i64) { *value = *value + 1; } pub fn main() -> i64 { let mut value = 40; let unique = &mut value; bump(unique); bump(unique); *unique }");
+    rejects("fn relay<'a>(value: &'a mut i64) -> &'a mut i64 { value } pub fn main() -> i64 { let mut value = 41; let unique = &mut value; let child = relay(unique); *unique = 42; *child }", &["G5004"]);
+}
+
+#[test]
+fn borrowed_record_returns_its_stored_reference_region() {
+    accepts("struct Window<'a> { storage: &'a i64, position: i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } pub fn main() -> i64 { let backing = 42; let mut window = Window { storage: &backing, position: 0 }; let result = get(&window); window.position = 1; *result }");
+}
+
+#[test]
+fn stored_reference_outlives_its_short_record_borrow() {
+    accepts("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } pub fn main() -> i64 { let backing = 42; let result = { let window = Window { storage: &backing }; get(&window) }; *result }");
+    accepts("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } fn wrap<'a>(storage: &'a i64) -> Window<'a> { Window { storage: storage } } pub fn main() -> i64 { let backing = 42; *get(&wrap(&backing)) }");
+    accepts("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } fn pass<'a>(incoming: &'a i64) -> &'a i64 { let holder = Window { storage: incoming }; let borrowed = &holder; let local = 0; let holder = Window { storage: &local }; get(borrowed) } pub fn main() -> i64 { let value = 42; *pass(&value) }");
+}
+
+#[test]
+fn unique_carrier_assignment_replaces_its_stored_reference_provenance() {
+    accepts("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } pub fn main() -> i64 { let mut first = 40; let second = 1; let mut window = Window { storage: &first }; let unique = &mut window; (*unique).storage = &second; first = 41; *get(unique) + first }");
+    rejects("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } pub fn main() -> i64 { let first = 40; let mut second = 1; let mut window = Window { storage: &first }; let unique = &mut window; (*unique).storage = &second; let result = get(unique); second = 42; *result }", &["G5007"]);
+}
+
+#[test]
+fn generic_stored_references_keep_computed_receiver_provenance() {
+    accepts("struct Window<'a,T> { storage: &'a T } struct Wrapped<T> { inner: T } fn get<'a,T>(value: &Wrapped<Window<'a,T>>) -> &'a T { value.inner.storage } fn relay<'a,T>(value: &'a mut T) -> &'a mut T { value } pub fn main() -> i64 { let backing = 42; let mut carrier = Wrapped { inner: Window { storage: &backing } }; let result = get(relay(&mut carrier)); *result }");
+    accepts("struct Window<'a> { storage: &'a i64 } struct Wrapped<'a,'b> { padding: &'b i64, inner: Window<'a> } fn wrap<'a,'b>(value: &'a i64, padding: &'b i64) -> Wrapped<'a,'b> { Wrapped { padding: padding, inner: Window { storage: value } } } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } fn pass<'a>(value: &'a i64) -> &'a i64 { let local = 0; get(&wrap(value, &local).inner) } pub fn main() -> i64 { let value = 42; *pass(&value) }");
+}
+
+#[test]
+fn stored_reference_keeps_backing_storage_borrowed() {
+    rejects("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } pub fn main() -> i64 { let mut backing = 41; let window = Window { storage: &backing }; let result = get(&window); backing = 42; *result }", &["G5007"]);
+    rejects("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } fn escape<'a>() -> &'a i64 { let backing = 42; let window = Window { storage: &backing }; get(&window) } pub fn main() -> i64 { *escape() }", &["G5017", "G5013", "G5006", "G5011"]);
+    rejects("fn bump(value: &mut i64) { *value = *value + 1; } pub fn main() -> i64 { let mut value = 40; let unique = &mut value; bump(move unique); bump(unique); value }", &["G5001", "G5003"]);
+    rejects("struct Window<'a> { storage: &'a i64 } fn choose<'a>(left: &Window<'a>, right: &Window<'a>, pick: i64) -> &'a i64 { handle pick { 0 => left.storage, _ => right.storage } } pub fn main() -> i64 { let first = 41; let mut second = 42; let left = Window { storage: &first }; let right = Window { storage: &second }; let result = choose(&left, &right, 1); second = 43; *result }", &["G5007"]);
+    accepts("struct Window<'a> { storage: &'a i64 } fn get<'a>(value: &Window<'a>) -> &'a i64 { value.storage } pub fn main() -> i64 { let first = 40; let second = 2; let mut window = Window { storage: &first }; let old = get(&window); window.storage = &second; *old + *get(&window) }");
+}
+
+#[test]
+fn nested_unique_reborrow_uses_the_carrier_access_region() {
+    accepts("struct Window<'a> { storage: &'a mut i64 } fn get<'a,'b>(value: &'b mut Window<'a>) -> &'b mut i64 { &mut *value.storage } pub fn main() -> i64 { let mut backing = 40; let mut window = Window { storage: &mut backing }; let a = get(&mut window); *a = *a + 1; let b = get(&mut window); *b = *b + 1; backing }");
+    rejects("struct Window<'a> { storage: &'a mut i64 } fn get<'a,'b>(value: &'b mut Window<'a>) -> &'a mut i64 { &mut *value.storage } pub fn main() -> i64 { 42 }", &["G5017"]);
+    rejects("struct Window<'a> { storage: &'a mut i64 } fn get<'a>(value: &Window<'a>) -> &'a mut i64 { value.storage } pub fn main() -> i64 { 42 }", &["G4141", "G5004"]);
+    accepts("fn read(value: &i64) -> i64 { *value } pub fn main() -> i64 { let mut value = 42; read(&mut value) }");
+    rejects("struct Window<'a> { storage: &'a mut i64 } fn get<'a,'b>(value: &'b mut Window<'a>) -> &'b mut i64 { &mut *value.storage } pub fn main() -> i64 { let mut backing = 41; let mut window = Window { storage: &mut backing }; let child = get(&mut window); *window.storage = 42; *child }", &["G5004"]);
+}
+
+#[test]
+fn imported_generic_reference_carriers_preserve_input_regions() {
+    accepts_with_dependency("use views::{Window, get, relay}; pub fn main() -> i64 { let backing = 42; let mut carrier = Window { storage: &backing }; let result = get(relay(&mut carrier)); *result }",
+        Some("pub struct Window<'a,T> { pub storage: &'a T } pub fn get<'a,T>(value: &Window<'a,T>) -> &'a T { value.storage } pub fn relay<'a,T>(value: &'a mut T) -> &'a mut T { value }"));
+}
+
+#[test]
+fn static_and_caller_views_join_at_the_checked_result_region() {
+    let source = "use std::*; fn select<'a>(bytes: Slice<'a,u8>, empty: Bool) -> Slice<'a,u8> { handle empty { true => b\"\", false => bytes } } pub fn main() -> i64 { as<i64>(Slice::len(&select(b\"x\", true))) + as<i64>(*Slice::get_unchecked(select(b\"*\", false), 0)) }";
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(request(source, optimization)).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: this fixture calls the trusted bundled Slice primitives on
+        // valid static storage, with an in-bounds element index.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}

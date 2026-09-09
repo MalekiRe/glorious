@@ -141,6 +141,9 @@ impl VmLirFunction {
                     else_target: starts[else_target.0 as usize],
                 },
                 VmLirTerminator::Return(value) => VmInstruction::Return { value: *value },
+                VmLirTerminator::TailCall { callee, arguments } => VmInstruction::TailCallOwned {
+                    callee: *callee, arguments: arguments.clone(),
+                },
                 VmLirTerminator::Leave {
                     brand_owner,
                     brand_label,

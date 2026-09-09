@@ -1,0 +1,318 @@
+pub trait Iterator {
+    type Item;
+    type Effects: EffectRow;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <Self as Iterator>::Effects };
+    fn size_hint(value: &Self) -> (usize,Option<usize>);
+}
+pub trait DoubleEndedIterator: Iterator {
+    fn next_back(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <Self as Iterator>::Effects };
+}
+pub trait ExactSizeIterator: Iterator { fn len(value: &Self) -> usize; }
+pub trait FusedIterator: Iterator {}
+pub enum Step<T,I> { Yield { item: T, rest: I }, Done }
+pub trait OwnedStepper {
+    type Item;
+    type Effects: EffectRow;
+    fn step(value: Self) -> Step<<Self as OwnedStepper>::Item,Self> / { | <Self as OwnedStepper>::Effects };
+}
+pub trait LendingIterator {
+    type Item<'a> where Self: 'a;
+    type Effects: EffectRow;
+    fn next<'a>(value: &'a mut Self) -> Option<<Self as LendingIterator>::Item<'a>> / { | <Self as LendingIterator>::Effects };
+}
+
+// Hint arithmetic never becomes an allocation/write proof. Overflow in an
+// upper bound means unknown, and lower bounds saturate at the largest usize.
+fn iterator_hint_add(a: usize, b: usize) -> Option<usize> {
+    handle a > bit_not<usize>(0) - b { true => None, false => Some(a + b) }
+}
+fn iterator_hint_sum(a: (usize,Option<usize>), b: (usize,Option<usize>)) -> (usize,Option<usize>) {
+    let (a_low, a_high) = a;
+    let (b_low, b_high) = b;
+    let low = handle iterator_hint_add(a_low, b_low) { Result::Ok(n) => n, _ => bit_not<usize>(0) };
+    let high = handle a_high {
+        Result::Err(_) => None,
+        Result::Ok(a) => handle b_high { Result::Ok(b) => iterator_hint_add(a, b), _ => None },
+    };
+    (low, high)
+}
+fn iterator_hint_min(a: (usize,Option<usize>), b: (usize,Option<usize>)) -> (usize,Option<usize>) {
+    let (a_low, a_high) = a;
+    let (b_low, b_high) = b;
+    let high = handle a_high {
+        Result::Err(_) => b_high,
+        Result::Ok(a) => handle b_high { Result::Ok(b) => Some(min(a, b)), _ => Some(a) },
+    };
+    (min(a_low, b_low), high)
+}
+// Each caller establishes the empty-slot invariant without consuming the
+// borrowed owner. Replacing transfers the previous shell; it never implicitly
+// discards an Option whose item might be exact-linear.
+fn iterator_store_empty<T>(slot: &mut Option<T>, incoming: Option<T>) {
+    handle replace(slot, incoming) { Result::Err(()) => (), Result::Ok(previous) => __g1_abort() }
+}
+
+pub struct Enumerate<I> { private source: I, private index: usize }
+pub struct Rev<I> { private source: I }
+pub struct Chain<I,J> { private first: I, private second: J, private first_done: Bool }
+pub struct Take<I> { private source: I, private remaining: usize }
+pub struct Skip<I> { private source: I, private remaining: usize }
+pub struct Fuse<I> { private source: I, private done: Bool }
+pub struct Peekable<I> where I: Iterator {
+    private source: I, private loaded: Bool, private cached: Option<<I as Iterator>::Item>,
+}
+pub struct Zip<I,J> where I: Iterator, J: Iterator {
+    private left: I, private right: J,
+    private left_item: Option<<I as Iterator>::Item>, private right_item: Option<<J as Iterator>::Item>,
+}
+pub fn enumerate<I>(source: I) -> Enumerate<I> where I: Iterator { Enumerate { source: source, index: 0 } }
+pub fn rev<I>(source: I) -> Rev<I> where I: DoubleEndedIterator { Rev { source: source } }
+pub fn chain<I,J>(first: I, second: J) -> Chain<I,J> where I: Iterator, J: Iterator<Item=<I as Iterator>::Item> {
+    Chain { first: first, second: second, first_done: false }
+}
+pub fn take_iter<I>(source: I, count: usize) -> Take<I> where I: Iterator { Take { source: source, remaining: count } }
+pub fn skip_iter<I>(source: I, count: usize) -> Skip<I> where I: Iterator, <I as Iterator>::Item: Use<[0,1]> {
+    Skip { source: source, remaining: count }
+}
+pub fn peekable<I>(source: I) -> Peekable<I> where I: Iterator { Peekable { source: source, loaded: false, cached: None } }
+pub fn fuse<I>(source: I) -> Fuse<I> where I: Iterator { Fuse { source: source, done: false } }
+pub fn zip<I,J>(left: I, right: J) -> Zip<I,J> where I: Iterator, J: Iterator {
+    Zip { left: left, right: right, left_item: None, right_item: None }
+}
+impl<I> Enumerate<I> { pub fn into_parts(value: Self) -> (I,usize) { (value.source, value.index) } }
+impl<I> Rev<I> { pub fn into_inner(value: Self) -> I { value.source } }
+impl<I,J> Chain<I,J> { pub fn into_parts(value: Self) -> (I,J) { (value.first, value.second) } }
+impl<I> Take<I> { pub fn into_parts(value: Self) -> (I,usize) { (value.source, value.remaining) } }
+impl<I> Skip<I> { pub fn into_parts(value: Self) -> (I,usize) { (value.source, value.remaining) } }
+impl<I> Fuse<I> { pub fn into_inner(value: Self) -> I { value.source } }
+impl<I> Peekable<I> where I: Iterator {
+    pub fn peek<'a>(value: &'a mut Self) -> Option<&'a <I as Iterator>::Item> / { | <I as Iterator>::Effects } {
+        handle value.loaded {
+            true => (),
+            false => { iterator_store_empty(&mut value.cached, Iterator::next(&mut value.source)); (*value).loaded = true; },
+        };
+        handle Option::as_ref(&value.cached) { Result::Ok(item) => Some(item), Result::Err(_) => None }
+    }
+    pub fn into_parts(value: Self) -> (I,Option<<I as Iterator>::Item>) { (value.source, value.cached) }
+}
+impl<I,J> Zip<I,J> where I: Iterator, J: Iterator {
+    pub fn into_parts(value: Self) -> (I,J,Option<<I as Iterator>::Item>,Option<<J as Iterator>::Item>) {
+        (value.left, value.right, value.left_item, value.right_item)
+    }
+}
+pub impl<I> Iterator for Enumerate<I> where I: Iterator {
+    type Item = (usize,<I as Iterator>::Item);
+    type Effects = <I as Iterator>::Effects;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } {
+        handle Iterator::next(&mut value.source) {
+            Result::Err(_) => None,
+            Result::Ok(item) => {
+                let index = value.index;
+                handle index == bit_not<usize>(0) { true => __g1_abort(), false => () };
+                (*value).index = index + 1;
+                Some((index, item))
+            },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { Iterator::size_hint(&value.source) }
+}
+pub impl<I> Iterator for Rev<I> where I: DoubleEndedIterator {
+    type Item = <I as Iterator>::Item;
+    type Effects = <I as Iterator>::Effects;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } { DoubleEndedIterator::next_back(&mut value.source) }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { Iterator::size_hint(&value.source) }
+}
+pub impl<I> DoubleEndedIterator for Rev<I> where I: DoubleEndedIterator {
+    fn next_back(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } { Iterator::next(&mut value.source) }
+}
+pub impl<I,J> Iterator for Chain<I,J> where I: Iterator, J: Iterator<Item=<I as Iterator>::Item> {
+    type Item = <I as Iterator>::Item;
+    type Effects = { | <I as Iterator>::Effects,<J as Iterator>::Effects };
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects,<J as Iterator>::Effects } {
+        handle value.first_done {
+            true => (),
+            false => handle Iterator::next(&mut value.first) {
+                Result::Ok(item) => return(Some(item), @next), Result::Err(_) => { (*value).first_done = true; },
+            },
+        };
+        Iterator::next(&mut value.second)
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) {
+        handle value.first_done { true => Iterator::size_hint(&value.second), false => iterator_hint_sum(Iterator::size_hint(&value.first), Iterator::size_hint(&value.second)) }
+    }
+}
+pub impl<I> Iterator for Take<I> where I: Iterator {
+    type Item = <I as Iterator>::Item;
+    type Effects = <I as Iterator>::Effects;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } {
+        handle value.remaining == 0 {
+            true => None,
+            false => handle Iterator::next(&mut value.source) {
+                Result::Err(_) => None,
+                Result::Ok(item) => { (*value).remaining = value.remaining - 1; Some(item) },
+            },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { iterator_hint_min(Iterator::size_hint(&value.source), (value.remaining, Some(value.remaining))) }
+}
+pub impl<I> Iterator for Skip<I> where I: Iterator, <I as Iterator>::Item: Use<[0,1]> {
+    type Item = <I as Iterator>::Item;
+    type Effects = <I as Iterator>::Effects;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } {
+        handle value.remaining == 0 {
+            true => Iterator::next(&mut value.source),
+            false => handle Iterator::next(&mut value.source) {
+                Result::Err(_) => None,
+                Result::Ok(item) => { discard(item); (*value).remaining = value.remaining - 1; tail Iterator::next(value) },
+            },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) {
+        let (low, high) = Iterator::size_hint(&value.source);
+        let remaining = value.remaining;
+        let low = handle low < remaining { true => 0, false => low - remaining };
+        let high = handle high { Result::Err(_) => None, Result::Ok(n) => Some(handle n < remaining { true => 0, false => n - remaining }) };
+        (low, high)
+    }
+}
+pub impl<I> Iterator for Fuse<I> where I: Iterator {
+    type Item = <I as Iterator>::Item;
+    type Effects = <I as Iterator>::Effects;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } {
+        handle value.done {
+            true => None,
+            false => handle Iterator::next(&mut value.source) { Result::Ok(item) => Some(item), Result::Err(_) => { (*value).done = true; None } },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { handle value.done { true => (0, Some(0)), false => Iterator::size_hint(&value.source) } }
+}
+pub impl<I> Iterator for Peekable<I> where I: Iterator {
+    type Item = <I as Iterator>::Item;
+    type Effects = <I as Iterator>::Effects;
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects } {
+        handle value.loaded {
+            true => { (*value).loaded = false; replace(&mut value.cached, None) },
+            false => Iterator::next(&mut value.source),
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) {
+        handle value.loaded {
+            false => Iterator::size_hint(&value.source),
+            true => handle Option::as_ref(&value.cached) {
+                Result::Ok(_) => iterator_hint_sum((1, Some(1)), Iterator::size_hint(&value.source)),
+                Result::Err(_) => (0, None),
+            },
+        }
+    }
+}
+pub impl<I,J> Iterator for Zip<I,J> where I: Iterator, J: Iterator {
+    type Item = (<I as Iterator>::Item,<J as Iterator>::Item);
+    type Effects = { | <I as Iterator>::Effects,<J as Iterator>::Effects };
+    fn next(value: &mut Self) -> Option<<Self as Iterator>::Item> / { | <I as Iterator>::Effects,<J as Iterator>::Effects } {
+        handle Option::as_ref(&value.left_item) {
+            Result::Ok(_) => (),
+            Result::Err(_) => { iterator_store_empty(&mut value.left_item, Iterator::next(&mut value.left)); },
+        };
+        handle Option::as_ref(&value.left_item) { Result::Err(_) => return(None, @next), _ => () };
+        handle Option::as_ref(&value.right_item) {
+            Result::Ok(_) => (),
+            Result::Err(_) => { iterator_store_empty(&mut value.right_item, Iterator::next(&mut value.right)); },
+        };
+        handle Option::as_ref(&value.right_item) { Result::Err(_) => return(None, @next), _ => () };
+        let left = handle replace(&mut value.left_item, None) { Result::Ok(item) => item, _ => __g1_abort() };
+        let right = handle replace(&mut value.right_item, None) { Result::Ok(item) => item, _ => __g1_abort() };
+        Some((left, right))
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) {
+        let left = handle Option::as_ref(&value.left_item) { Result::Ok(_) => 1, _ => 0 };
+        let right = handle Option::as_ref(&value.right_item) { Result::Ok(_) => 1, _ => 0 };
+        iterator_hint_min(iterator_hint_sum((left, Some(left)), Iterator::size_hint(&value.left)), iterator_hint_sum((right, Some(right)), Iterator::size_hint(&value.right)))
+    }
+}
+
+pub impl<I> FusedIterator for Fuse<I> where I: Iterator {}
+pub impl<I> FusedIterator for Enumerate<I> where I: FusedIterator {}
+pub impl<I> FusedIterator for Take<I> where I: FusedIterator {}
+pub impl<I> FusedIterator for Skip<I> where I: FusedIterator, <I as Iterator>::Item: Use<[0,1]> {}
+pub impl<I> FusedIterator for Rev<I> where I: DoubleEndedIterator, I: FusedIterator {}
+pub impl<I> FusedIterator for Peekable<I> where I: FusedIterator {}
+pub impl<I,J> FusedIterator for Zip<I,J> where I: FusedIterator, J: FusedIterator {}
+pub impl<I,J> FusedIterator for Chain<I,J> where I: Iterator, J: FusedIterator<Item=<I as Iterator>::Item> {}
+pub impl<I> ExactSizeIterator for Enumerate<I> where I: ExactSizeIterator { fn len(value: &Self) -> usize { ExactSizeIterator::len(&value.source) } }
+pub impl<I> ExactSizeIterator for Rev<I> where I: ExactSizeIterator, I: DoubleEndedIterator { fn len(value: &Self) -> usize { ExactSizeIterator::len(&value.source) } }
+pub impl<I> ExactSizeIterator for Take<I> where I: ExactSizeIterator { fn len(value: &Self) -> usize { min(value.remaining, ExactSizeIterator::len(&value.source)) } }
+
+// Existing shared slice views yield references tied to the backing owner, not
+// to this individual next call. Front/back consume disjoint index positions.
+pub impl<'a,T> Iterator for SliceIter<'a,T> where T: 'a {
+    type Item = &'a T;
+    type Effects = {};
+    fn next(value: &mut Self) -> Option<&'a T> {
+        handle value.position == value.slice.length {
+            true => None,
+            false => { let index = value.position; (*value).position = index + 1; Some(Slice::get_unchecked(value.slice, index)) },
+        }
+    }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { let length = value.slice.length - value.position; (length, Some(length)) }
+}
+pub impl<'a,T> DoubleEndedIterator for SliceIter<'a,T> where T: 'a {
+    fn next_back(value: &mut Self) -> Option<&'a T> {
+        handle value.position == value.slice.length {
+            true => None,
+            false => { let index = value.slice.length - 1; let item = Slice::get_unchecked(value.slice, index); (*value).slice.length = index; Some(item) },
+        }
+    }
+}
+pub impl<'a,T> ExactSizeIterator for SliceIter<'a,T> where T: 'a { fn len(value: &Self) -> usize { value.slice.length - value.position } }
+pub impl<'a,T> FusedIterator for SliceIter<'a,T> where T: 'a {}
+pub impl<T> Iterator for VecIntoIter<T> {
+    type Item = T;
+    type Effects = {};
+    fn next(value: &mut Self) -> Option<T> { Vec::remove(&mut value.remaining, 0) }
+    fn size_hint(value: &Self) -> (usize,Option<usize>) { let length = Vec::len(&value.remaining); (length, Some(length)) }
+}
+pub impl<T> DoubleEndedIterator for VecIntoIter<T> { fn next_back(value: &mut Self) -> Option<T> { Vec::pop(&mut value.remaining) } }
+pub impl<T> ExactSizeIterator for VecIntoIter<T> { fn len(value: &Self) -> usize { Vec::len(&value.remaining) } }
+pub impl<T> FusedIterator for VecIntoIter<T> {}
+pub impl<T> OwnedStepper for VecIntoIter<T> {
+    type Item = T;
+    type Effects = {};
+    fn step(value: Self) -> Step<T,Self> {
+        let mut value = value;
+        handle Vec::remove(&mut value.remaining, 0) {
+            Result::Ok(item) => Step::Yield { item: item, rest: value },
+            Result::Err(_) => { handle Vec::finish_empty(value.remaining) { Result::Ok(()) => (), _ => __g1_abort() }; Step::Done },
+        }
+    }
+}
+impl<T> VecIntoIter<T> {
+    pub fn into_inner(value: Self) -> Vec<T> { value.remaining }
+    pub fn finish_empty(value: Self) -> Result<(),Self> {
+        handle Vec::finish_empty(value.remaining) { Result::Ok(()) => Result::Ok(()), Result::Err(rest) => Result::Err(VecIntoIter { remaining: rest }) }
+    }
+}
+fn iterator_collect_from<I>(source: I, output: Vec<<I as OwnedStepper>::Item>) -> Vec<<I as OwnedStepper>::Item>
+    / { | <I as OwnedStepper>::Effects } where I: OwnedStepper {
+    handle OwnedStepper::step(source) {
+        Step::Done => output,
+        Step::Yield { item: item, rest: rest } => { let mut output = output; Vec::push(&mut output, item); tail iterator_collect_from(rest, output) },
+    }
+}
+pub fn collect_vec<I>(source: I) -> Vec<<I as OwnedStepper>::Item> / { | <I as OwnedStepper>::Effects } where I: OwnedStepper {
+    iterator_collect_from(source, Vec::new())
+}
+fn iterator_count_from<I>(source: &mut I, count: usize) -> usize / { | <I as Iterator>::Effects }
+    where I: Iterator, <I as Iterator>::Item: Use<[0,1]> {
+    handle Iterator::next(&mut *source) {
+        Result::Err(_) => count,
+        Result::Ok(item) => {
+            discard(item);
+            handle count == bit_not<usize>(0) { true => __g1_abort(), false => () };
+            tail iterator_count_from(source, count + 1)
+        },
+    }
+}
+pub fn count_iter<I>(source: I) -> usize / { | <I as Iterator>::Effects } where I: Iterator, I: Use<[0,1]>, <I as Iterator>::Item: Use<[0,1]> {
+    let mut source = source;
+    iterator_count_from(&mut source, 0)
+}

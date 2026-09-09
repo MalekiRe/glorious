@@ -19,11 +19,6 @@ fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
         host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
-                role: PrimitiveRole::BranchBool,
-                module_path: "crate".into(),
-                name: "branch_bool".into(),
-            },
-            PrimitiveSelector {
                 role: PrimitiveRole::TextByteLen,
                 module_path: "crate".into(),
                 name: "__g1_text_byte_len".into(),
@@ -65,7 +60,7 @@ fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
 #[test]
 fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
     let standard = PackageKey("std@0.1.0".into());
-    let source = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () }";
+    let source = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () }";
     let standard_interface = interface(standard.clone(), source);
     let signatures = ElaboratedInterface::elaborate(&standard_interface);
     assert!(
@@ -76,16 +71,16 @@ fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
     let bound_manifest = manifest(standard.clone())
         .bind(vec![standard_interface.clone()], &signatures)
         .unwrap();
-    let bound = bound_manifest.primitives[&PrimitiveRole::BranchBool];
-    let standard_branch = standard_interface
+    let bound = bound_manifest.primitives[&PrimitiveRole::TextByteLen];
+    let standard_leaf = standard_interface
         .definitions
         .iter()
-        .find(|definition| definition.name.as_deref() == Some("branch_bool"))
-        .expect("fixture declares branch_bool")
+        .find(|definition| definition.name.as_deref() == Some("__g1_text_byte_len"))
+        .expect("fixture declares text_byte_len")
         .key;
     assert_eq!(bound_manifest.standard_library, standard);
     assert_eq!(
-        bound, standard_branch,
+        bound, standard_leaf,
         "the manifest binds a declaration identity, not its spelling"
     );
 
@@ -99,11 +94,11 @@ fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
         user_interface
             .definitions
             .iter()
-            .find(|definition| definition.name.as_deref() == Some("branch_bool"))
-            .expect("fixture declares branch_bool")
+            .find(|definition| definition.name.as_deref() == Some("__g1_text_byte_len"))
+            .expect("fixture declares text_byte_len")
             .key
     );
-    assert_eq!(unchanged.primitives[&PrimitiveRole::BranchBool], bound);
+    assert_eq!(unchanged.primitives[&PrimitiveRole::TextByteLen], bound);
 }
 
 #[test]
@@ -786,11 +781,11 @@ fn primitive_manifest_rejects_signature_mismatch_before_authority_freezes() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
         standard.clone(),
-        "pub fn branch_bool(condition: Bool) -> Bool { condition } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () }",
+        "pub enum Bool { Yes, No } pub fn branch_bool(condition: Bool) -> Bool { condition } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () }",
     );
     let signatures = ElaboratedInterface::elaborate(&interface);
     assert!(matches!(
-        manifest(standard).bind(vec![interface], &signatures),
+        RuntimeManifestInput { standard_library: standard, host_imports: vec![], selectors: vec![PrimitiveSelector { role: PrimitiveRole::BranchBool, module_path: "crate".into(), name: "branch_bool".into() }] }.bind(vec![interface], &signatures),
         Err(ManifestError::IncompatibleSignature {
             role: PrimitiveRole::BranchBool,
             ..
@@ -803,7 +798,7 @@ fn text_byte_len_requires_its_exact_monomorphic_abi() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
         standard.clone(),
-        "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> i64 { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () }",
+        "pub fn __g1_text_byte_len(value: Text) -> i64 { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () }",
     );
     let signatures = ElaboratedInterface::elaborate(&interface);
     assert!(matches!(

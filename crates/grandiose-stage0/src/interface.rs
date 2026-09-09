@@ -15,7 +15,7 @@ use crate::{
     header::{HeaderParse, ParsedHeader},
     identity::{DefKey, Digest, FileKey, ModuleKey, PackageKey},
     request::CompilerBuildIdentity,
-    scanner::{DeclarationKind, DeclarationScan, TokenRange},
+    scanner::{DeclarationKind, DeclarationScan, TokenRange, Visibility},
     source::{LexedFile, Span},
 };
 
@@ -35,7 +35,7 @@ pub struct Definition {
     pub kind: DeclarationKind,
     pub namespace: Option<DefinitionNamespace>,
     pub name: Option<String>,
-    pub public: bool,
+    pub visibility: Visibility,
     pub module: ModuleKey,
     pub span: Span,
     pub header: TokenRange,
@@ -265,6 +265,10 @@ impl InterfaceSet {
         }).collect::<Vec<_>>();
 
         for (ordinal, shell) in scan.declarations.iter().enumerate() {
+            if shell.visibility == Visibility::Super && module.path == "crate" {
+                diagnostics.push(InterfaceDiagnostic { code: "G3004", span: shell.span,
+                    message: "`pub(super)` requires a parent module".into() });
+            }
             let namespace = namespace(shell.kind);
             let name = shell.name.clone();
             let fingerprint_range = match shell.kind {
@@ -308,6 +312,18 @@ impl InterfaceSet {
                         message: diagnostic.message.to_owned(),
                     }),
             );
+            if module.path == "crate" {
+                let fields = match &syntax.header {
+                    ParsedHeader::Nominal { layout: crate::header::NominalLayoutHeader::Struct(fields) | crate::header::NominalLayoutHeader::TupleStruct(fields), .. } => fields.iter().collect::<Vec<_>>(),
+                    ParsedHeader::Nominal { layout: crate::header::NominalLayoutHeader::Enum(variants), .. } => variants.iter().flat_map(|variant|
+                        match &variant.payload { crate::header::EnumVariantPayloadHeader::Struct(fields) => fields.as_slice(), _ => &[] }).collect(),
+                    _ => vec![],
+                };
+                for field in fields.into_iter().filter(|field| field.visibility == Visibility::Super) {
+                    diagnostics.push(InterfaceDiagnostic { code: "G3004", span: field.span,
+                        message: "`pub(super)` field requires a parent module".into() });
+                }
+            }
             if let ParsedHeader::InherentImplementation(implementation) = &syntax.header {
                 let (methods, method_diagnostics) =
                     collect_inherent_methods(&module, lexed, source, shell.header, implementation);
@@ -335,7 +351,7 @@ impl InterfaceSet {
                 kind: shell.kind,
                 namespace,
                 name,
-                public: shell.visibility_public,
+                visibility: shell.visibility,
                 module: module.clone(),
                 span: shell.span,
                 header: shell.header,
@@ -348,7 +364,14 @@ impl InterfaceSet {
         }
         let mut occupied = BTreeMap::<(DefinitionNamespace, String), Span>::new();
         for definition in &definitions {
-            if let (Some(namespace), Some(name)) = (definition.namespace, &definition.name)
+            let mut namespaces = definition.namespace.into_iter().collect::<Vec<_>>();
+            if matches!(&definition.syntax.header, ParsedHeader::Nominal {
+                layout: crate::header::NominalLayoutHeader::Struct(_)
+                    | crate::header::NominalLayoutHeader::TupleStruct(_), .. }) {
+                namespaces.push(DefinitionNamespace::Value);
+            }
+            for namespace in namespaces {
+            if let Some(name) = &definition.name
                 && namespace != DefinitionNamespace::Operator
                 && let Some(previous) = occupied.insert((namespace, name.clone()), definition.span)
             {
@@ -360,6 +383,7 @@ impl InterfaceSet {
                         previous.start
                     ),
                 });
+            }
             }
         }
         let mut fixities = BTreeMap::new();
@@ -431,6 +455,10 @@ fn collect_inherent_methods(
         _ => return (definitions, diagnostics),
     };
     for method in &implementation.methods {
+        if method.visibility == Visibility::Super && module.path == "crate" {
+            diagnostics.push(InterfaceDiagnostic { code: "G3004", span: method.span,
+                message: "`pub(super)` function requires a parent module".into() });
+        }
         let name = format!("{}::{}", owner.join("::"), method.name);
         let mut signature = method.signature.clone();
         let mut generics = implementation.generics.clone();
@@ -447,6 +475,7 @@ fn collect_inherent_methods(
         generics.effect_rows.extend(signature.generics.effect_rows);
         generics.lifetimes.extend(signature.generics.lifetimes);
         generics.consts.extend(signature.generics.consts);
+        generics.defaults.extend(signature.generics.defaults);
         generics
             .const_defaults
             .extend(signature.generics.const_defaults);
@@ -467,7 +496,7 @@ fn collect_inherent_methods(
             header_fingerprint(lexed, source, header)
                 .as_bytes()
                 .as_slice(),
-            &[u8::from(method.public)],
+            &[method.visibility as u8],
         ]);
         definitions.push(Definition {
             key: definition_key(
@@ -480,7 +509,7 @@ fn collect_inherent_methods(
             kind: DeclarationKind::Function,
             namespace: Some(DefinitionNamespace::Value),
             name: Some(name),
-            public: method.public,
+            visibility: method.visibility,
             module: module.clone(),
             span: method.span,
             header,
@@ -609,7 +638,7 @@ fn public_fingerprint(module: &ModuleKey, definitions: &[Definition]) -> Digest 
     // Freeze the normalized import *bindings* as a set instead.
     for definition in definitions
         .iter()
-        .filter(|definition| definition.public && definition.kind != DeclarationKind::Import)
+        .filter(|definition| definition.visibility.is_public() && definition.kind != DeclarationKind::Import)
     {
         append(&mut bytes, b"definition");
         append(&mut bytes, &definition.key.0.as_bytes());
@@ -620,7 +649,7 @@ fn public_fingerprint(module: &ModuleKey, definitions: &[Definition]) -> Digest 
     }
     let mut imports = definitions
         .iter()
-        .filter(|definition| definition.public)
+        .filter(|definition| definition.visibility.is_public())
         .filter_map(|definition| match &definition.syntax.header {
             ParsedHeader::Import(import) => Some(import.bindings.iter()),
             _ => None,

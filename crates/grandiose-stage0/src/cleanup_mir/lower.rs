@@ -268,7 +268,8 @@ impl CleanupMir {
                 .filter(|(_, disposition)| *disposition == OwnerDisposition::Abandon)
                 .map(|(owner, _)| *owner)
                 .collect::<Vec<_>>();
-            if matches!(control, CleanupControl::Return(_)) {
+            if matches!(control, CleanupControl::Return(_)) || matches!(&control,
+                CleanupControl::Invoke { contract, .. } if contract.mandatory_tail) {
                 // Guarded residual owners include partially moved aggregates.
                 // Captures belong to the environment, not this invocation.
                 exiting = frame.clone();

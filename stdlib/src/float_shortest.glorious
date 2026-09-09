@@ -1,0 +1,104 @@
+// Search decimal grids in increasing significant-digit count. The two grid
+// points bracketing the exact value suffice: the round-trip interval is convex.
+// Candidate validation always parses at the destination precision.
+fn float_shortest_digits(bytes: Slice<u8>, index: usize, digits: &mut Vec<u8>) -> usize {
+    let byte = *Slice::get_unchecked(bytes, index);
+    handle byte {
+        101 => index + 1,
+        46 => tail float_shortest_digits(bytes, index + 1, digits),
+        _ => { Vec::push(&mut *digits, byte - 48); tail float_shortest_digits(bytes, index + 1, digits) },
+    }
+}
+fn float_shortest_exponent(bytes: Slice<u8>, index: usize, value: i32) -> i32 {
+    handle index == Slice::len(&bytes) {
+        true => value,
+        false => tail float_shortest_exponent(bytes, index + 1, value * 10 + as<i32>(*Slice::get_unchecked(bytes, index) - 48)),
+    }
+}
+fn float_shortest_candidate(mantissa: u64, count: usize, exponent: i32, negative: Bool) -> String {
+    let mut digits = Vec::new();
+    float_decimal_digits(mantissa, &mut digits);
+    let length = Vec::len(&digits);
+    let exponent = exponent + as<i32>(length) - as<i32>(count);
+    let low = float_decimal_low(&digits, 0);
+    let mut out = String::new();
+    handle negative { true => Vec::push(&mut out.storage, 45), false => () };
+    Vec::push(&mut out.storage, 48 + *Vec::get_unchecked(&digits, length - 1));
+    handle length - low > 1 {
+        true => { Vec::push(&mut out.storage, 46); float_write_decimal(&digits, length - 1, low, &mut out); },
+        false => (),
+    };
+    Vec::push(&mut out.storage, 101);
+    handle exponent < 0 {
+        true => { Vec::push(&mut out.storage, 45); float_write_exponent(as<u32>(0 - exponent), &mut out); },
+        false => { Vec::push(&mut out.storage, 43); float_write_exponent(as<u32>(exponent), &mut out); },
+    };
+    out
+}
+fn float_shortest_roundtrips(text: &String, bits: u64, width: u32, mantissa_bits: u32, bias: i32) -> Bool {
+    let (maximum, minimum) = handle width == 32 { true => (as<i128>(38), as<i128>(-46)), false => (as<i128>(308), as<i128>(-324)) };
+    handle float_parse_bits(String::as_str(text), width, mantissa_bits, bias, maximum, minimum) {
+        Result::Ok(parsed) => parsed == bits, Result::Err(_) => false,
+    }
+}
+fn float_shortest_tail_nonzero(digits: &Vec<u8>, index: usize) -> Bool {
+    handle index == Vec::len(digits) {
+        true => false,
+        false => handle *Vec::get_unchecked(digits, index) == 0 {
+            true => tail float_shortest_tail_nonzero(digits, index + 1), false => true,
+        },
+    }
+}
+fn float_shortest_choose(digits: &Vec<u8>, index: usize, lower: String, upper: String) -> String {
+    let next = *Vec::get_unchecked(digits, index);
+    handle next < 5 { true => return(lower, @float_shortest_choose), false => () };
+    handle next > 5 { true => return(upper, @float_shortest_choose), false => () };
+    handle float_shortest_tail_nonzero(digits, index + 1) { true => return(upper, @float_shortest_choose), false => () };
+    handle Slice::lex_compare(Str::as_bytes(String::as_str(&lower)), Str::as_bytes(String::as_str(&upper))) {
+        Ordering::Greater => upper, _ => lower,
+    }
+}
+fn float_shortest_search(digits: &Vec<u8>, index: usize, prefix: u64, exponent: i32, negative: Bool,
+    bits: u64, width: u32, mantissa_bits: u32, bias: i32) -> String {
+    let prefix = prefix * 10 + as<u64>(*Vec::get_unchecked(digits, index));
+    let count = index + 1;
+    let lower = float_shortest_candidate(prefix, count, exponent, negative);
+    handle count == Vec::len(digits) { true => return(lower, @float_shortest_search), false => () };
+    let upper = float_shortest_candidate(prefix + 1, count, exponent, negative);
+    let lower_ok = float_shortest_roundtrips(&lower, bits, width, mantissa_bits, bias);
+    let upper_ok = float_shortest_roundtrips(&upper, bits, width, mantissa_bits, bias);
+    handle lower_ok {
+        true => handle upper_ok { true => float_shortest_choose(digits, count, lower, upper), false => lower },
+        false => handle upper_ok {
+            true => upper,
+            false => {
+                // IEEE binary32/binary64 need at most 9/17 significant digits.
+                let limit = handle width == 32 { true => 9, false => 17 };
+                handle count == limit { true => __g1_abort(), false => () };
+                tail float_shortest_search(digits, count, prefix, exponent, negative, bits, width, mantissa_bits, bias)
+            },
+        },
+    }
+}
+fn float_format_shortest(bits: u64, width: u32, mantissa_bits: u32, bias: i32) -> String {
+    let exact = float_format_exact(bits, width, mantissa_bits, bias);
+    let sign_mask = bit_shl(as<u64>(1), width - 1);
+    let magnitude = bit_and(bits, sign_mask - 1);
+    let infinity = bit_shl(bit_shl(as<u64>(1), width - mantissa_bits - 1) - 1, mantissa_bits);
+    handle magnitude == 0 { true => return(exact, @float_format_shortest), false => () };
+    handle magnitude >= infinity { true => return(exact, @float_format_shortest), false => () };
+    let negative = bit_and(bits, sign_mask) != 0;
+    let bytes = Str::as_bytes(String::as_str(&exact));
+    let mut digits = Vec::new();
+    let start = handle negative { true => 1, false => 0 };
+    let exponent_start = float_shortest_digits(bytes, start, &mut digits);
+    let exponent = float_shortest_exponent(bytes, exponent_start + 1, 0);
+    let exponent = handle *Slice::get_unchecked(bytes, exponent_start) == 45 { true => 0 - exponent, false => exponent };
+    float_shortest_search(&digits, 0, 0, exponent, negative, bits, width, mantissa_bits, bias)
+}
+impl f32 {
+    pub fn format_shortest(value: Self) -> String { float_format_shortest(as<u64>(Self::to_bits(value)), 32, 23, 127) }
+}
+impl f64 {
+    pub fn format_shortest(value: Self) -> String { float_format_shortest(Self::to_bits(value), 64, 52, 1023) }
+}

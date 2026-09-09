@@ -53,6 +53,9 @@ fn ty(value: &Type, depth: u32) -> Type {
         },
         Type::Tuple(fields) => Type::Tuple(fields.iter().map(|value| ty(value, depth)).collect()),
         Type::Array(value) => Type::Array(Box::new(ty(value, depth))),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(ty(element, depth)), length: Box::new(argument(length, depth)),
+        },
         Type::StaticData {
             tag,
             alignment,

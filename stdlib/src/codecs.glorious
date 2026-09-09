@@ -1,0 +1,185 @@
+// Strict small encodings, with byte-positioned failures (§23).
+pub enum HexErrorKind { InvalidDigit, OddLength, IncorrectLength }
+pub struct HexError { pub offset: usize, pub kind: HexErrorKind }
+pub enum Base64ErrorKind { InvalidDigit, InvalidPadding, NonCanonicalTail, IncorrectLength }
+pub struct Base64Error { pub offset: usize, pub kind: Base64ErrorKind }
+pub enum Base64Alphabet { Standard, UrlSafe }
+pub enum Padding { Required, Optional, Forbidden }
+pub struct Base64Options { pub alphabet: Base64Alphabet, pub padding: Padding }
+
+fn hex_digit(value: u8) -> u8 {
+    handle value < 10 { true => value + 48, false => value - 10 + 97 }
+}
+fn hex_encode_from(bytes: Slice<u8>, index: usize, output: &mut String) {
+    handle index == Slice::len(&bytes) {
+        true => (),
+        false => {
+            let byte = *Slice::get_unchecked(bytes, index);
+            Vec::push(&mut output.storage, hex_digit(byte / 16));
+            Vec::push(&mut output.storage, hex_digit(byte % 16));
+            tail hex_encode_from(bytes, index + 1, output)
+        },
+    }
+}
+pub fn hex_encode(bytes: Slice<u8>) -> String {
+    let mut output = String::new();
+    hex_encode_from(bytes, 0, &mut output);
+    output
+}
+fn hex_decode_digit(bytes: Slice<u8>, index: usize) -> Result<u8,HexError> {
+    handle integer_digit(*Slice::get_unchecked(bytes, index)) {
+        Result::Err(_) => Result::Err(HexError { offset: index, kind: HexErrorKind::InvalidDigit }),
+        Result::Ok(digit) => handle digit < 16 {
+            true => Result::Ok(as<u8>(digit)),
+            false => Result::Err(HexError { offset: index, kind: HexErrorKind::InvalidDigit }),
+        },
+    }
+}
+fn hex_decode_from(bytes: Slice<u8>, index: usize, output: &mut Vec<u8>) -> Result<(),HexError> {
+    handle index == Slice::len(&bytes) {
+        true => Result::Ok(()),
+        false => handle hex_decode_digit(bytes, index) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(high) => handle hex_decode_digit(bytes, index + 1) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(low) => {
+                    Vec::push(&mut *output, high * 16 + low);
+                    tail hex_decode_from(bytes, index + 2, output)
+                },
+            },
+        },
+    }
+}
+pub fn hex_decode(text: Str) -> Result<Vec<u8>,HexError> {
+    let bytes = Str::as_bytes(text);
+    handle Slice::len(&bytes) % 2 == 1 {
+        true => Result::Err(HexError { offset: Slice::len(&bytes), kind: HexErrorKind::OddLength }),
+        false => {
+            let mut output = Vec::new();
+            handle hex_decode_from(bytes, 0, &mut output) {
+                Result::Ok(_) => Result::Ok(output), Result::Err(error) => Result::Err(error),
+            }
+        },
+    }
+}
+fn base64_digit(value: u8, alphabet: Base64Alphabet) -> u8 {
+    handle value < 26 {
+        true => 65 + value,
+        false => handle value < 52 {
+            true => 97 + value - 26,
+            false => handle value < 62 {
+                true => 48 + value - 52,
+                false => handle alphabet {
+                    Base64Alphabet::Standard => handle value == 62 { true => 43, false => 47 },
+                    Base64Alphabet::UrlSafe => handle value == 62 { true => 45, false => 95 },
+                },
+            },
+        },
+    }
+}
+fn base64_encode_from(bytes: Slice<u8>, index: usize, options: Base64Options, output: &mut String) {
+    let remaining = Slice::len(&bytes) - index;
+    handle remaining == 0 {
+        true => (),
+        false => {
+            let a = *Slice::get_unchecked(bytes, index);
+            let b = handle remaining > 1 { true => *Slice::get_unchecked(bytes, index + 1), false => 0 };
+            let c = handle remaining > 2 { true => *Slice::get_unchecked(bytes, index + 2), false => 0 };
+            Vec::push(&mut output.storage, base64_digit(a / 4, options.alphabet));
+            Vec::push(&mut output.storage, base64_digit((a % 4) * 16 + b / 16, options.alphabet));
+            handle remaining > 1 {
+                true => Vec::push(&mut output.storage, base64_digit((b % 16) * 4 + c / 64, options.alphabet)),
+                false => handle options.padding { Padding::Required => Vec::push(&mut output.storage, 61), _ => () },
+            };
+            handle remaining > 2 {
+                true => {
+                    Vec::push(&mut output.storage, base64_digit(c % 64, options.alphabet));
+                    tail base64_encode_from(bytes, index + 3, options, output)
+                },
+                false => handle options.padding { Padding::Required => Vec::push(&mut output.storage, 61), _ => () },
+            }
+        },
+    }
+}
+pub fn base64_encode(bytes: Slice<u8>, options: Base64Options) -> String {
+    let mut output = String::new();
+    base64_encode_from(bytes, 0, options, &mut output);
+    output
+}
+fn base64_value(byte: u8, alphabet: Base64Alphabet) -> Option<u8> {
+    handle byte >= 65 {
+        true => handle byte <= 90 { true => return(Some(byte - 65), @base64_value), false => () },
+        false => (),
+    };
+    handle byte >= 97 {
+        true => handle byte <= 122 { true => return(Some(byte - 97 + 26), @base64_value), false => () },
+        false => (),
+    };
+    handle byte >= 48 {
+        true => handle byte <= 57 { true => return(Some(byte - 48 + 52), @base64_value), false => () },
+        false => (),
+    };
+    handle alphabet {
+        Base64Alphabet::Standard => handle byte { 43 => Some(62), 47 => Some(63), _ => None },
+        Base64Alphabet::UrlSafe => handle byte { 45 => Some(62), 95 => Some(63), _ => None },
+    }
+}
+fn base64_decode_from(bytes: Slice<u8>, index: usize, end: usize, alphabet: Base64Alphabet,
+    carry: u32, bits: u32, output: &mut Vec<u8>) -> Result<(),Base64Error> {
+    handle index == end {
+        true => handle carry == 0 {
+            true => Result::Ok(()),
+            false => Result::Err(Base64Error { offset: end - 1, kind: Base64ErrorKind::NonCanonicalTail }),
+        },
+        false => handle base64_value(*Slice::get_unchecked(bytes, index), alphabet) {
+            Result::Err(_) => Result::Err(Base64Error { offset: index, kind: Base64ErrorKind::InvalidDigit }),
+            Result::Ok(digit) => {
+                let carry = carry * 64 + as<u32>(digit);
+                let bits = bits + 6;
+                handle bits >= 8 {
+                    false => tail base64_decode_from(bytes, index + 1, end, alphabet, carry, bits, output),
+                    true => {
+                        let bits = bits - 8;
+                        Vec::push(&mut *output, as<u8>(bit_shr(carry, bits)));
+                        let mask = bit_shl(1, bits) - 1;
+                        tail base64_decode_from(bytes, index + 1, end, alphabet, bit_and(carry, mask), bits, output)
+                    },
+                }
+            },
+        },
+    }
+}
+fn base64_padding_start(bytes: Slice<u8>, index: usize) -> usize {
+    handle index == 0 {
+        true => 0,
+        false => handle *Slice::get_unchecked(bytes, index - 1) == 61 {
+            false => index, true => tail base64_padding_start(bytes, index - 1),
+        },
+    }
+}
+pub fn base64_decode(text: Str, options: Base64Options) -> Result<Vec<u8>,Base64Error> {
+    let bytes = Str::as_bytes(text);
+    let length = Slice::len(&bytes);
+    let data_length = base64_padding_start(bytes, length);
+    let padding = length - data_length;
+    let remainder = data_length % 4;
+    handle remainder == 1 {
+        true => return(Result::Err(Base64Error { offset: data_length, kind: Base64ErrorKind::IncorrectLength }), @base64_decode),
+        false => (),
+    };
+    let expected = (4 - remainder) % 4;
+    let valid_padding = handle options.padding {
+        Padding::Required => padding == expected,
+        Padding::Forbidden => padding == 0,
+        Padding::Optional => handle padding == 0 { true => true, false => padding == expected },
+    };
+    handle valid_padding {
+        false => Result::Err(Base64Error { offset: data_length, kind: Base64ErrorKind::InvalidPadding }),
+        true => {
+            let mut output = Vec::new();
+            handle base64_decode_from(bytes, 0, data_length, options.alphabet, 0, 0, &mut output) {
+                Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(output),
+            }
+        },
+    }
+}

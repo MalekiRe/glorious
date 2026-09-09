@@ -133,8 +133,8 @@ fn array_elements_are_destroyed_by_runtime_loop() {
             ()
         }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             finish(&mut first, &mut second);
             first * 10 + second
         }
@@ -149,8 +149,8 @@ fn nested_array_elements_are_destroyed_by_runtime_loops() {
             ()
         }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             finish(&mut first, &mut second);
             first * 10 + second
         }
@@ -176,7 +176,7 @@ fn uninvoked_closure_destroys_its_captured_array() {
             let pending = () -> i64 { let taken = move owners; 42 };
             ()
         }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
 }
 
@@ -188,7 +188,7 @@ fn cancelled_array_cleanup_preserves_surviving_caller_storage() {
             let owners = [Probe { target: target }];
             handle Stop::stop() { Stop::stop() with _ => 0 }
         }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
 }
 
@@ -196,8 +196,8 @@ fn cancelled_array_cleanup_preserves_surviving_caller_storage() {
 fn owning_array_patterns_leave_only_residual_elements_for_cleanup() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owners = [Probe { target: &mut first }, Probe { target: &mut second }];
                 handle owners { [left, _] => (), _ => () };
@@ -217,7 +217,7 @@ fn uninvoked_closure_destroys_its_moved_capture() {
             ()
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             finish(&mut count);
             count
         }
@@ -238,7 +238,7 @@ fn cancelled_capture_cleanup_preserves_checked_loans_into_surviving_callers() {
                 let pending = () -> i64 / Stop {{ {body} }};
                 handle pending() {{ Stop::stop() with _ => 0 }}
             }}
-            pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
+            pub fn main() -> i64 {{ let mut count = 0; finish(&mut count); count }}
         "#);
         assert_eq!(run(&source), 1, "{body}");
     }
@@ -253,7 +253,7 @@ fn cancellation_cleanup_cannot_bypass_the_ordinary_call_depth_budget() {
             let pending = () -> i64 / Stop { let taken = move owner; Stop::stop() };
             handle pending() { Stop::stop() with _ => 0 }
         }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#).unwrap();
     let artifact = outcome.artifact.unwrap();
     let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
@@ -274,7 +274,7 @@ fn nonlocal_label_calls_destroy_owners_in_abandoned_ordinary_frames() {
             @done: i64 { jump(@done, target) }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             finish(&mut count);
             count
         }
@@ -301,7 +301,7 @@ fn nonlocal_label_calls_destroy_suspended_handler_clause_owners() {
             @done: i64 { handled(@done, target) }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             finish(&mut count);
             count
         }
@@ -325,7 +325,7 @@ fn nonlocal_label_calls_destroy_abandoned_suspended_computations() {
             @done: i64 { handled(@done, target) }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             finish(&mut count);
             count
         }
@@ -356,7 +356,7 @@ fn lexical_leaves_destroy_abandoned_suspended_computations() {
             }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             finish(&mut count);
             count
         }
@@ -381,8 +381,8 @@ fn suspended_computation_cleanup_preserves_its_transferred_operation_payload() {
             @done: Probe<'a> { handled(@done, first, second) }
         }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             { let received = finish(&mut first, &mut second); () };
             first * 10 + second
         }
@@ -410,8 +410,8 @@ fn cancelling_nested_retained_computations_destroys_each_owned_branch() {
             handle nested(first, second) { Outer::ask() with _ => 0 }
         }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             finish(&mut first, &mut second);
             first * 10 + second
         }
@@ -431,7 +431,7 @@ fn nonlocal_label_calls_destroy_transferred_parameters_in_abandoned_frames() {
             @done: i64 { relay(@done, Probe { target: target }) }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             finish(&mut count);
             count
         }
@@ -448,7 +448,7 @@ fn nonlocal_label_calls_preserve_transferred_owned_payloads() {
             @done: Probe<'a> { jump(@done, Probe { target: target }) }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             { let received = finish(&mut count); () };
             count
         }
@@ -469,7 +469,7 @@ fn nonlocal_label_calls_return_residual_capture_ownership() {
                 pending(destination)
             }}
             fn finish(target: &mut i64) -> i64 {{ @done: i64 {{ jump(@done, target) }} }}
-            pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
+            pub fn main() -> i64 {{ let mut count = 0; finish(&mut count); count }}
         "#)), 1, "{body}");
     }
 }
@@ -489,7 +489,7 @@ fn terminal_label_calls_in_closures_end_strict_evaluation_before_dead_suffixes()
                 pending(destination)
             }}
             fn finish(target: &mut i64) -> i64 {{ @done: i64 {{ jump(@done, target) }} }}
-            pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
+            pub fn main() -> i64 {{ let mut count = 0; finish(&mut count); count }}
         "#)), 1, "{body}");
     }
 }
@@ -509,7 +509,7 @@ fn terminal_call_operands_preserve_the_strict_prefix_and_skip_later_work() {
             pending(destination)
         }
         fn finish(target: &mut i64) -> i64 { @done: i64 { jump(@done, target) } }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 11);
 }
 
@@ -529,28 +529,31 @@ fn a_terminal_callee_expression_runs_before_its_call_arguments() {
             pending(destination)
         }
         fn finish(target: &mut i64) -> i64 { @done: i64 { jump(@done, target) } }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
 }
 
 #[test]
 fn terminal_calls_only_end_the_selected_lazy_boolean_path() {
+    // The destination belongs to the callback's own activation. A callback
+    // retaining a label from its caller must be fused or rejected (§11); it
+    // is not an eager compiler-known Boolean branch.
     for flag in [false, true] {
         for operator in ["and", "or"] {
             assert_eq!(run(&format!(r#"
-                fn jump<L>(destination: L, target: &mut i64, flag: Bool) -> i64 where L: Label<i64> {{
-                    let owner = Probe {{ target: target }};
-                    let pending = (exit: L) -> i64 {{
-                        flag {operator} (() -> Bool {{ exit(0); false }});
-                        *owner.target = *owner.target + 10;
-                        let taken = move owner;
-                        42
-                    }};
-                    pending(destination)
+                fn finish(target: &mut i64, flag: Bool) -> i64 {{
+                    flag {operator} (() -> Bool {{
+                        @done: Bool {{
+                            let owner = Probe {{ target: target }};
+                            @done(true);
+                            *owner.target = *owner.target + 10;
+                            false
+                        }}
+                    }});
+                    42
                 }}
-                fn finish(target: &mut i64) -> i64 {{ @done: i64 {{ jump(@done, target, {flag}) }} }}
-                pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
-            "#)), if flag == (operator == "and") { 1 } else { 11 }, "{flag} {operator}");
+                pub fn main() -> i64 {{ let mut count = 0; finish(&mut count, {flag}); count }}
+            "#)), if flag == (operator == "and") { 1 } else { 0 }, "{flag} {operator}");
         }
     }
 }
@@ -570,7 +573,7 @@ fn terminal_first_completion_arm_does_not_erase_the_returning_arm() {
                 pending(destination)
             }}
             fn finish(target: &mut i64) -> i64 {{ @done: i64 {{ jump(@done, target, {flag}) }} }}
-            pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
+            pub fn main() -> i64 {{ let mut count = 0; finish(&mut count); count }}
         "#)), if flag { 1 } else { 11 }, "{flag}");
     }
 }
@@ -584,7 +587,7 @@ fn terminal_calls_in_ordinary_functions_end_the_source_block() {
             42
         }
         fn finish(target: &mut i64) -> i64 { @done: i64 { jump(@done, target) } }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
 }
 
@@ -602,7 +605,7 @@ fn completion_with_only_terminal_arms_has_no_value_join() {
                 pending(destination)
             }}
             fn finish(target: &mut i64) -> i64 {{ @done: i64 {{ jump(@done, target, {flag}) }} }}
-            pub fn main() -> i64 {{ let count = 0; let result = finish(&mut count); result * 10 + count }}
+            pub fn main() -> i64 {{ let mut count = 0; let result = finish(&mut count); result * 10 + count }}
         "#)), if flag { 11 } else { 21 }, "{flag}");
     }
 }
@@ -615,7 +618,7 @@ fn nonlocal_label_cleanup_cannot_bypass_the_ordinary_call_depth_budget() {
             destination(0)
         }
         fn finish(target: &mut i64) -> i64 { @done: i64 { jump(@done, target) } }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#).unwrap();
     let artifact = outcome.artifact.unwrap();
     let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
@@ -640,7 +643,7 @@ fn closure_destruction_preserves_moved_and_retained_capture_states() {
                 let pending = () -> i64 {{ let taken = move owner; 42 }};
                 {action}
             }}
-            pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
+            pub fn main() -> i64 {{ let mut count = 0; finish(&mut count); count }}
         "#)), 1, "{action}");
     }
     assert_eq!(run(r#"
@@ -651,7 +654,7 @@ fn closure_destruction_preserves_moved_and_retained_capture_states() {
             observe();
             ()
         }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
 }
 
@@ -661,11 +664,11 @@ fn replacing_a_copyable_closure_preserves_the_new_affine_capture_owner() {
         assert_eq!(run(&format!(r#"
             fn finish(target: &mut i64) -> {{
                 let owner = Probe {{ target: target }};
-                let pending = () -> i64 {{ 42 }};
+                let mut pending = () -> i64 {{ 42 }};
                 pending = () -> i64 {{ let taken = move owner; 42 }};
                 {action}
             }}
-            pub fn main() -> i64 {{ let count = 0; finish(&mut count); count }}
+            pub fn main() -> i64 {{ let mut count = 0; finish(&mut count); count }}
         "#)), 1, "{action}");
     }
 }
@@ -698,7 +701,7 @@ fn returned_owned_closure_preserves_its_capture_until_the_destination_drops() {
             held();
             ()
         }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
     let rejected = compile(r#"
         fn carry(callback: () -> i64) -> () -> i64 { callback(); move callback }
@@ -713,7 +716,7 @@ fn returned_owned_closure_preserves_its_capture_until_the_destination_drops() {
 fn borrowed_closure_captures_preserve_outer_storage_and_do_not_destroy_it() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             { let set = () -> { count = 42; }; set(); set(); };
             count
         }
@@ -724,7 +727,7 @@ fn borrowed_closure_captures_preserve_outer_storage_and_do_not_destroy_it() {
             { let observe = () -> i64 { *owner.target }; observe(); observe(); };
             ()
         }
-        pub fn main() -> i64 { let count = 0; finish(&mut count); count }
+        pub fn main() -> i64 { let mut count = 0; finish(&mut count); count }
     "#), 1);
 }
 
@@ -738,7 +741,7 @@ fn root_lowering_probes_preserve_lexical_owner_cleanup() {
                 {result}
             }}
             pub fn main() -> i64 {{
-                let count = 0;
+                let mut count = 0;
                 let result = finish(&mut count);
                 handle count == 1 {{ true => result, false => 0 }}
             }}
@@ -752,7 +755,7 @@ fn root_lowering_probes_preserve_lexical_owner_cleanup() {
                 {result}
             }}
             pub fn main() -> i64 {{
-                let count = 0;
+                let mut count = 0;
                 finish(&mut count, true);
                 handle count == 1 {{ true => 42, false => 0 }}
             }}
@@ -773,8 +776,8 @@ fn lazy_boolean_value_joins_preserve_branch_and_enclosing_owner_cleanup() {
                 selected or {{ false }}
             }}
             pub fn main() -> i64 {{
-                let outer = 0;
-                let inner = 0;
+                let mut outer = 0;
+                let mut inner = 0;
                 finish(&mut outer, &mut inner, {flag});
                 outer * 10 + inner
             }}
@@ -799,7 +802,7 @@ fn authoring_tail_calls_destroy_transferred_pattern_owners_exactly_once() {
             }
         }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             recur(Probe { target: &mut count }, 1000);
             count
         }
@@ -845,7 +848,7 @@ fn terminal_completion_arms_destroy_the_enclosing_lexical_owners() {
             }
         }
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             finish(&mut count, true);
             finish(&mut count, false);
             count
@@ -888,7 +891,7 @@ fn generic_erasure_destroys_the_concrete_owned_parameter() {
         run(r#"
         fn discard<T>(value: T) -> () where T: Use<[0, 1]> { () }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             discard(Probe { target: &mut count });
             count
         }
@@ -906,12 +909,12 @@ fn repeated_reference_field_reborrows_do_not_take_the_reference_owner() {
         fn update(carrier: Carrier) -> () {
             (*carrier.state).first = 20;
             (*carrier.state).second = 22;
-            let first = (*carrier.state).first;
-            let second = (*carrier.state).second;
+            let mut first = (*carrier.state).first;
+            let mut second = (*carrier.state).second;
             (*carrier.state).first = first + second;
         }
         pub fn main() -> i64 {
-            let state = State { first: 0, second: 0 };
+            let mut state = State { first: 0, second: 0 };
             update(Carrier { state: &mut state });
             state.first
         }
@@ -926,7 +929,7 @@ fn structural_destruction_reaches_nested_record_and_tuple_fields() {
         run(r#"
         struct Outer<'a> { nested: (i64, Probe<'a>) }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             { let owner = Outer { nested: (9, Probe { target: &mut count }) }; () };
             count
         }
@@ -941,7 +944,7 @@ fn structural_destruction_only_visits_the_active_enum_payload() {
         run(r#"
         enum Choice<'a> { Empty, Owned(Probe<'a>), Number(i64) }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             { let owner = Choice::Owned(Probe { target: &mut count }); () };
             { let empty = Choice::Empty; let number = Choice::Number(7); () };
             count
@@ -957,8 +960,8 @@ fn owning_enum_patterns_destroy_each_extracted_and_discarded_field_once() {
         assert_eq!(run(&format!(r#"
             enum Choice<'a> {{ Both(Probe<'a>, Probe<'a>), Empty }}
             pub fn main() -> i64 {{
-                let first = 0;
-                let second = 0;
+                let mut first = 0;
+                let mut second = 0;
                 {{
                     let owner = Choice::Both(Probe {{ target: &mut first }}, Probe {{ target: &mut second }});
                     handle owner {{ {pattern} => (), Choice::Empty => () }};
@@ -974,8 +977,8 @@ fn owning_enum_patterns_destroy_each_extracted_and_discarded_field_once() {
 fn an_owning_tuple_pattern_destroys_unbound_siblings() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = (Probe { target: &mut first }, Probe { target: &mut second });
                 handle owner { (left, _) => () };
@@ -990,8 +993,8 @@ fn an_owning_tuple_pattern_destroys_unbound_siblings() {
 fn a_temporary_pattern_subject_destroys_its_residual_fields() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             handle (Probe { target: &mut first }, Probe { target: &mut second }) { (left, _) => () };
             first * 10 + second
         }
@@ -1002,8 +1005,8 @@ fn a_temporary_pattern_subject_destroys_its_residual_fields() {
 fn a_returned_pattern_binder_is_transferred_out_of_the_arm() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let result = handle (Probe { target: &mut first }, Probe { target: &mut second }) { (left, _) => left };
                 ()
@@ -1019,8 +1022,8 @@ fn a_projected_pattern_subject_moves_from_the_original_owner() {
         struct Inner<'a> { first: Probe<'a>, second: Probe<'a> }
         struct Outer<'a> { nested: Inner<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = Outer { nested: Inner { first: Probe { target: &mut first }, second: Probe { target: &mut second } } };
                 handle owner.nested { Inner { first: selected } => () };
@@ -1035,8 +1038,8 @@ fn a_projected_pattern_subject_moves_from_the_original_owner() {
 fn a_pattern_binder_can_shadow_its_source_owner() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = (Probe { target: &mut first }, Probe { target: &mut second });
                 handle owner { (owner, _) => { *owner.target = *owner.target + 1; } };
@@ -1052,7 +1055,7 @@ fn a_pattern_move_prevents_reusing_the_extracted_source_field() {
     let outcome = compile(r#"
         struct Owner<'a> { field: Probe<'a> }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             let owner = Owner { field: Probe { target: &mut count } };
             handle owner { Owner { field: selected } => () };
             let again = owner.field;
@@ -1067,7 +1070,7 @@ fn a_pattern_move_prevents_reusing_the_extracted_source_field() {
 fn a_returned_pattern_owner_keeps_its_destructor_loan_live() {
     let outcome = compile(r#"
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             let result = handle (Probe { target: &mut count }, 0) { (left, _) => left };
             count = 100;
             0
@@ -1081,7 +1084,7 @@ fn a_returned_pattern_owner_keeps_its_destructor_loan_live() {
 fn a_temporary_pattern_binder_preserves_its_nested_reference_provenance() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             handle (Probe { target: &mut count }, 0) { (left, _) => { *left.target = *left.target + 1; } };
             count
         }
@@ -1099,7 +1102,7 @@ fn returned_pattern_owners_remain_live_across_strict_operands() {
         let outcome = compile(&format!(r#"
             struct Outer<'a> {{ nested: Probe<'a> }}
             fn consume<'a>(value: Probe<'a>, other: i64) -> () {{ () }}
-            pub fn main() -> i64 {{ let count = 0; {expression}; 0 }}
+            pub fn main() -> i64 {{ let mut count = 0; {expression}; 0 }}
         "#));
         let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {{
             panic!("expected an ownership diagnostic for {expression}");
@@ -1116,7 +1119,7 @@ fn discarded_computed_owners_release_their_destructor_loans() {
         "(handle (Probe { target: &mut count }, 0) { (left, _) => left }, 0)",
     ] {
         assert_eq!(run(&format!(r#"
-            pub fn main() -> i64 {{ let count = 41; {expression}; count }}
+            pub fn main() -> i64 {{ let mut count = 41; {expression}; count }}
         "#)), 42, "{expression}");
     }
 }
@@ -1125,7 +1128,7 @@ fn discarded_computed_owners_release_their_destructor_loans() {
 fn discarded_named_owners_are_destroyed_before_the_next_statement() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             let owner = Probe { target: &mut count };
             owner;
             count
@@ -1142,7 +1145,7 @@ fn testing_a_borrowed_noncopy_enum_field_does_not_move_its_owner() {
             handle slot.state { State::Full(_) => 41, State::Empty => 0 }
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             let observed = {
                 let slot = Slot { state: State::Full(Probe { target: &mut count }) };
                 inspect(&slot)
@@ -1161,7 +1164,7 @@ fn an_inactive_enum_destructor_does_not_extend_the_selected_reference_loan() {
         enum Outcome<'a> { Lent(&'a i64), Owned(Unrelated) }
         fn lend<'a>(value: &'a mut i64) -> Outcome<'a> { Outcome::Lent(& *value) }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             handle lend(&mut count) {
                 Outcome::Lent(_) => { count = 42; count },
                 Outcome::Owned(_) => 0,
@@ -1179,7 +1182,7 @@ fn an_inactive_enum_destructor_does_not_extend_the_selected_reference_loan() {
             enum Outcome<'a> {{ Lent(&'a i64), Owned(Unrelated) }}
             enum Resident<'a> {{ Owned(Probe<'a>), Empty }}
             fn lend<'a>(value: &'a mut i64) -> Outcome<'a> {{ Outcome::Lent(& *value) }}
-            pub fn main() -> i64 {{ let count = 0; {expression} }}
+            pub fn main() -> i64 {{ let mut count = 0; {expression} }}
         "#));
         let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = result else {
             panic!("a live selected loan or destructor was discarded: {expression}");
@@ -1189,17 +1192,23 @@ fn an_inactive_enum_destructor_does_not_extend_the_selected_reference_loan() {
 }
 
 #[test]
-fn an_owned_unique_reference_argument_requires_an_explicit_reborrow_for_later_use() {
+fn unique_reference_arguments_reborrow_contextually_but_explicit_moves_consume() {
     assert_eq!(run(r#"
         struct State { value: i64 }
         fn set(state: &mut State) -> () { (*state).value = 42; }
         fn inspect(state: &mut State) -> i64 { set(&mut *state); state.value }
-        pub fn main() -> i64 { let state = State { value: 0 }; inspect(&mut state) }
+        pub fn main() -> i64 { let mut state = State { value: 0 }; inspect(&mut state) }
+    "#), 42);
+    assert_eq!(run(r#"
+        struct State { value: i64 }
+        fn set(state: &mut State) -> () { (*state).value = 42; }
+        fn inspect(state: &mut State) -> i64 { set(state); state.value }
+        pub fn main() -> i64 { let mut state = State { value: 0 }; inspect(&mut state) }
     "#), 42);
     let result = compile(r#"
         struct State { value: i64 }
         fn set(state: &mut State) -> () { (*state).value = 42; }
-        fn inspect(state: &mut State) -> i64 { set(state); state.value }
+        fn inspect(state: &mut State) -> i64 { set(move state); state.value }
         pub fn main() -> i64 { 0 }
     "#);
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = result else {
@@ -1218,8 +1227,8 @@ fn an_operation_pattern_destroys_bound_and_discarded_payload_fields() {
             }
         }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             accept((Probe { target: &mut first }, Probe { target: &mut second }));
             first * 10 + second
         }
@@ -1231,7 +1240,7 @@ fn an_owning_pattern_cannot_extract_a_noncopy_field_through_a_borrow() {
     let outcome = compile(r#"
         struct Owner<'a> { field: Probe<'a> }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             let owner = Owner { field: Probe { target: &mut count } };
             let reference = &owner;
             handle *reference { Owner { field: selected } => () };
@@ -1246,8 +1255,8 @@ fn an_owning_pattern_cannot_extract_a_noncopy_field_through_a_borrow() {
 fn leaving_a_pattern_arm_destroys_its_binder_and_residual_owner() {
     assert_eq!(run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             let result = @done: i64 {
                 let owner = (Probe { target: &mut first }, Probe { target: &mut second });
                 handle owner { (left, _) => @done(0) };
@@ -1263,8 +1272,8 @@ fn a_positive_record_refinement_does_not_duplicate_destruction() {
     assert_eq!(run(r#"
         struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
                 handle owner is Pair { first: selected } { Test::Yes(_) => (), Test::No(_) => () };
@@ -1280,8 +1289,8 @@ fn an_observational_refinement_leaves_its_subject_owned() {
     assert_eq!(run(r#"
         struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
                 handle owner is Pair { first: selected } { Test::Yes(_) => (), Test::No(_) => () };
@@ -1302,11 +1311,11 @@ fn a_refinement_binder_borrows_the_selected_noncopy_owner() {
             struct Pair {{ field: Owner }}
             fn inspect(value: &Owner) -> i64 {{ value.value }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
-                let owner = Pair {{ field: Owner {{ value: 42 }} }};
+                let mut owner = Pair {{ field: Owner {{ value: 42 }} }};
                 let reference = &owner;
                 visit({subject} is Pair {{ field: selected }}) {{ inspect(selected) }}
             }}
@@ -1340,7 +1349,7 @@ fn first_class_refinement_packs_protect_borrowed_projections_across_calls() {
             struct Pair {{ field: Owner }}
             fn identity<T>(value: T) -> T {{ value }}
             pub fn main() -> i64 {{
-                let owner = Pair {{ field: Owner {{ value: 42 }} }};
+                let mut owner = Pair {{ field: Owner {{ value: 42 }} }};
                 let test = identity(owner is Pair {{ field: selected }});
                 {action};
                 handle test {{ Test::Yes(_) => 1, Test::No(_) => 0 }}
@@ -1369,12 +1378,16 @@ fn first_class_refinement_packs_protect_borrowed_projections_across_calls() {
 #[test]
 fn a_refinement_borrow_cannot_escape_its_owning_scope() {
     for body in [
-        "pub fn bad() -> &Owner { let value = Owner { value: 42 }; handle (value is selected) { true => selected, false => &value } } pub fn main() -> i64 { 0 }",
-        "pub fn main() -> i64 { let reference = { let value = Owner { value: 42 }; handle (value is selected) { true => selected, false => &value } }; reference.value }",
+        "pub fn bad() -> &Owner { let value = Owner { value: 42 }; visit(value is selected, &value) { selected } } pub fn main() -> i64 { 0 }",
+        "pub fn main() -> i64 { let reference = { let value = Owner { value: 42 }; visit(value is selected, &value) { selected } }; reference.value }",
     ] {
         let outcome = compile(&format!(r#"
             struct Owner {{ value: i64 }}
             impl Use<[0, 1]> for Owner {{}}
+            fn visit<Y, N, R, F>(test: Test<Y, N>, fallback: R, body: F) -> R
+            where N: Use<[0,1]>, F: Fn<(Y), Output = R>, R: Use<[0, 1]> {{
+                handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => fallback }}
+            }}
             {body}
         "#));
         let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {
@@ -1388,11 +1401,11 @@ fn a_refinement_borrow_cannot_escape_its_owning_scope() {
 fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed() {
     assert_eq!(run(r#"
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
-            let value = 21;
+            let mut value = 21;
             let reference = &mut value;
             let observed = visit(reference is selected) { *(*selected) };
             *reference = 21;
@@ -1402,11 +1415,11 @@ fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed()
     assert_eq!(run(r#"
         struct Owner { value: i64 }
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
-            let owner = Owner { value: 21 };
+            let mut owner = Owner { value: 21 };
             let reference = &mut owner;
             let observed = visit(*reference is Owner { value: selected }) { selected };
             (*reference).value = 21;
@@ -1419,11 +1432,11 @@ fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed()
 fn a_live_observational_pack_suspends_its_unique_reference_subject() {
     let outcome = compile(r#"
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
-            let value = 42;
+            let mut value = 42;
             let reference = &mut value;
             let test = reference is selected;
             *reference = 100;
@@ -1436,11 +1449,11 @@ fn a_live_observational_pack_suspends_its_unique_reference_subject() {
     assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"), "{diagnostics:#?}");
     assert_eq!(run(r#"
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
-            let value = 42;
+            let mut value = 42;
             let reference = &mut value;
             let test = reference is selected;
             let observed = *reference;
@@ -1455,11 +1468,11 @@ fn hidden_refinement_arguments_do_not_grant_unique_access() {
         let outcome = compile(&format!(r#"
             enum Holder<'a> {{ Held(&'a mut i64), Empty }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
-                let value = 42;
+                let mut value = 42;
                 let holder = Holder::Held(&mut value);
                 visit(holder is Holder::Held(selected)) {{ {action}; 0 }}
             }}
@@ -1477,11 +1490,11 @@ fn an_observational_refinement_cannot_recover_unique_access() {
         let outcome = compile(&format!(r#"
             enum Holder<'a> {{ Held(&'a mut i64), Empty }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
-                let value = 42;
+                let mut value = 42;
                 let holder = Holder::Held(&mut value);
                 let reference = &holder;
                 visit(*reference is Holder::Held(selected)) {{ {action}; 0 }};
@@ -1500,7 +1513,7 @@ fn copying_a_closure_capture_cannot_bypass_a_unique_field_loan() {
     let outcome = compile(r#"
         struct Pair { left: i64, right: i64 }
         pub fn main() -> i64 {
-            let owner = Pair { left: 1, right: 2 };
+            let mut owner = Pair { left: 1, right: 2 };
             let loan = &mut owner.left;
             let delayed = (ignored: i64) -> i64 { owner.left + owner.right };
             *loan = 40;
@@ -1514,7 +1527,7 @@ fn copying_a_closure_capture_cannot_bypass_a_unique_field_loan() {
     assert_eq!(run(r#"
         struct Pair { left: i64, right: i64 }
         pub fn main() -> i64 {
-            let owner = Pair { left: 1, right: 2 };
+            let mut owner = Pair { left: 1, right: 2 };
             let loan = &mut owner.left;
             *loan = 40;
             let delayed = (ignored: i64) -> i64 { owner.left + owner.right };
@@ -1535,11 +1548,11 @@ fn a_live_refinement_view_protects_its_source_place() {
             struct Pair {{ field: Owner }}
             fn inspect(value: &Owner) -> i64 {{ value.value }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
-                let owner = Pair {{ field: Owner {{ value: 42 }} }};
+                let mut owner = Pair {{ field: Owner {{ value: 42 }} }};
                 visit(owner is Pair {{ field: selected }}) {{ {action}; inspect(selected) }}
             }}
         "#));
@@ -1647,7 +1660,7 @@ fn resumption_completion_preserves_writes_to_the_enclosing_source_storage() {
             value
         }
         pub fn main() -> i64 {
-            let count = 0;
+            let mut count = 0;
             let answer = handle relay(&mut count) { Ask::ask() with k => k(1) * 2 };
             count * 100 + answer
         }
@@ -1686,7 +1699,7 @@ fn projected_reads_check_the_selected_referent_field() {
             let first = &mut value.first;
             handle value.second { 22 => { (*value).second = 22; *first = 20; *first + 22 }, _ => 0 }
         }
-        pub fn main() -> i64 { let value = Pair { first: 0, second: 22 }; inspect(&mut value) }
+        pub fn main() -> i64 { let mut value = Pair { first: 0, second: 22 }; inspect(&mut value) }
     "#), 42);
     for read in ["let copied = value.first; copied + *first", "handle value.first { copied => copied + *first }", "(*value).first = 42; *first"] {
         let outcome = compile(&format!(r#"
@@ -1710,7 +1723,7 @@ fn a_scalar_observation_consumes_its_computed_reference() {
         fn lend(value: &mut i64) -> &i64 { & *value }
         fn overwrite(value: &mut i64) -> i64 { *value = 42; *value }
         pub fn main() -> i64 {
-            let value = 0;
+            let mut value = 0;
             handle *lend(&mut value) { 0 => overwrite(&mut value), _ => 0 }
         }
     "#), 42);
@@ -1722,7 +1735,7 @@ fn a_consumed_reference_result_releases_only_dead_payload_loans() {
         enum Lent<'a> { Value(&'a i64) }
         fn lend(value: &mut i64) -> Lent { Lent::Value(& *value) }
         pub fn main() -> i64 {
-            let value = 21;
+            let mut value = 21;
             handle lend(&mut value) { Lent::Value(first) => {
                 let copied = *first;
                 handle lend(&mut value) { Lent::Value(second) => copied + *second }
@@ -1733,7 +1746,7 @@ fn a_consumed_reference_result_releases_only_dead_payload_loans() {
         enum Lent<'a> { Value(&'a i64) }
         fn lend(value: &mut i64) -> Lent { Lent::Value(& *value) }
         pub fn main() -> i64 {
-            let value = 21;
+            let mut value = 21;
             handle lend(&mut value) { Lent::Value(first) => {
                 handle lend(&mut value) { Lent::Value(second) => *first + *second }
             } }
@@ -1768,7 +1781,7 @@ fn disjoint_unique_reborrows_can_be_returned_together() {
             (&mut value.first, &mut value.second)
         }
         pub fn main() -> i64 {
-            let value = Pair { first: 2, second: 22 };
+            let mut value = Pair { first: 2, second: 22 };
             handle split(&mut value) { (left, right) => { *left = 20; *left + *right } }
         }
     "#), 42);
@@ -1803,7 +1816,7 @@ fn a_reference_tuple_cannot_copy_borrowed_unique_handles() {
         let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else {{
             panic!("a producer copied unique handles through {reference}");
         }};
-        assert!(diagnostics.iter().any(|d| matches!(d.code, "G5004" | "G5006")), "{diagnostics:#?}");
+        assert!(diagnostics.iter().any(|d| matches!(d.code, "G4141" | "G5004" | "G5006")), "{diagnostics:#?}");
     }
 }
 
@@ -1815,7 +1828,7 @@ fn a_partition_reborrow_preserves_disjoint_sibling_access() {
             (&mut value.first, &mut value.second)
         }
         pub fn main() -> i64 {
-            let value = Pair { first: 2, second: 0 };
+            let mut value = Pair { first: 2, second: 0 };
             handle split(&mut value) { (left, right) => {
                 let child = &mut *left;
                 *right = 22;
@@ -1834,7 +1847,7 @@ fn a_partition_cannot_be_reborrowed_twice_while_both_children_are_live() {
             (&mut value.first, &mut value.second)
         }
         pub fn main() -> i64 {
-            let value = Pair { first: 2, second: 22 };
+            let mut value = Pair { first: 2, second: 22 };
             handle split(&mut value) { (left, right) => {
                 let child = &mut *left;
                 let duplicate = &mut *left;
@@ -1854,8 +1867,8 @@ fn an_owning_record_pattern_preserves_nested_residual_owners() {
         struct Inner<'a> { first: Probe<'a>, second: Probe<'a> }
         struct Outer<'a> { nested: Inner<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = Outer { nested: Inner { first: Probe { target: &mut first }, second: Probe { target: &mut second } } };
                 handle owner { Outer { nested: Inner { first: selected } } => () };
@@ -1871,10 +1884,10 @@ fn replacement_destroys_the_old_owner_before_the_new_owner() {
     assert_eq!(
         run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
-                let owner = Probe { target: &mut first };
+                let mut owner = Probe { target: &mut first };
                 owner = Probe { target: &mut second };
                 ()
             };
@@ -1890,10 +1903,10 @@ fn replacement_releases_the_old_residents_loan_immediately() {
     assert_eq!(
         run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
-                let owner = Probe { target: &mut first };
+                let mut owner = Probe { target: &mut first };
                 owner = Probe { target: &mut second };
                 first = first + 30;
                 ()
@@ -1910,8 +1923,8 @@ fn assigning_an_owner_to_itself_retains_its_reference_provenance() {
     assert_eq!(
         run(r#"
         pub fn main() -> i64 {
-            let count = 41;
-            { let owner = Probe { target: &mut count }; owner = owner; () };
+            let mut count = 41;
+            { let mut owner = Probe { target: &mut count }; owner = owner; () };
             count
         }
     "#),
@@ -1925,8 +1938,8 @@ fn partial_moves_destroy_only_the_remaining_fields() {
         run(r#"
         struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let pair = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
                 let moved = move pair.first;
@@ -1945,7 +1958,7 @@ fn nonlocal_exit_destroys_nested_owners_once() {
         run(r#"
         struct Outer<'a> { nested: Probe<'a> }
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             let result = @done: i64 {
                 let owner = Outer { nested: Probe { target: &mut count } };
                 @done(1);
@@ -1964,7 +1977,7 @@ fn forwarding_an_owned_parameter_does_not_also_destroy_the_sender() {
         run(r#"
         fn relay<T>(value: T) -> T where T: Use<[0, 1]> { value }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             { let owner = relay(Probe { target: &mut count }); (); };
             count
         }
@@ -1980,7 +1993,7 @@ fn constructing_an_aggregate_transfers_the_owned_parameter() {
         struct Outer<'a> { nested: Probe<'a> }
         fn wrap<'a>(value: Probe<'a>) -> Outer<'a> { Outer { nested: value } }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             { let owner = wrap(Probe { target: &mut count }); (); };
             count
         }
@@ -1995,7 +2008,7 @@ fn an_ignored_owned_call_result_is_destroyed() {
         run(r#"
         fn make<'a>(target: &'a mut i64) -> Probe<'a> { Probe { target: target } }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             make(&mut count);
             count
         }
@@ -2010,7 +2023,7 @@ fn inspecting_a_borrow_does_not_destroy_the_borrowed_owner() {
         run(r#"
         fn inspect<'a, 'b>(value: &'a Probe<'b>) -> i64 { *value.target }
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             let observed = {
                 let owner = Probe { target: &mut count };
                 let before = inspect(&owner);
@@ -2029,8 +2042,8 @@ fn implicit_field_moves_destroy_only_the_remaining_owner() {
         run(r#"
         struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let pair = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
                 let moved = pair.first;
@@ -2050,8 +2063,8 @@ fn returning_a_field_destroys_the_remaining_parameter_fields() {
         struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
         fn first<'a>(pair: Pair<'a>) -> Probe<'a> { pair.first }
         pub fn main() -> i64 {
-            let left = 0;
-            let right = 0;
+            let mut left = 0;
+            let mut right = 0;
             {
                 let owner = first(Pair { first: Probe { target: &mut left }, second: Probe { target: &mut right } });
                 ()
@@ -2068,8 +2081,8 @@ fn shadowing_keeps_both_owned_bindings_armed_until_scope_exit() {
     assert_eq!(
         run(r#"
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
                 let owner = Probe { target: &mut first };
                 let owner = Probe { target: &mut second };
@@ -2091,7 +2104,7 @@ fn the_custom_hook_runs_before_structural_field_destruction() {
             drop(&mut self) -> { *self.nested.target = *self.nested.target * 10; }
         }
         pub fn main() -> i64 {
-            let count = 4;
+            let mut count = 4;
             { let owner = Outer { nested: Probe { target: &mut count } }; () };
             count
         }
@@ -2109,7 +2122,7 @@ fn generic_drop_hooks_and_owned_fields_are_specialized_together() {
             drop(&mut self) -> {}
         }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             { let owner = Outer { nested: Probe { target: &mut count } }; () };
             count
         }
@@ -2124,10 +2137,10 @@ fn replacing_a_borrowed_slot_destroys_its_previous_owner() {
         run(r#"
         fn replace<'a, 'b>(slot: &'a mut Probe<'b>, value: Probe<'b>) -> () { *slot = value; }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
-                let owner = Probe { target: &mut first };
+                let mut owner = Probe { target: &mut first };
                 replace(&mut owner, Probe { target: &mut second });
                 ()
             };
@@ -2147,8 +2160,8 @@ fn restoring_a_moved_referent_does_not_destroy_the_transferred_value() {
             *slot = resident;
         }
         pub fn main() -> i64 {
-            let count = 41;
-            { let owner = Probe { target: &mut count }; restore(&mut owner); () };
+            let mut count = 41;
+            { let mut owner = Probe { target: &mut count }; restore(&mut owner); () };
             count
         }
     "#),
@@ -2162,11 +2175,11 @@ fn field_replacement_destroys_only_the_old_field_and_preserves_siblings() {
         run(r#"
         struct Pair<'a> { first: Probe<'a>, second: Probe<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
-            let third = 0;
+            let mut first = 0;
+            let mut second = 0;
+            let mut third = 0;
             {
-                let pair = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
+                let mut pair = Pair { first: Probe { target: &mut first }, second: Probe { target: &mut second } };
                 pair.first = Probe { target: &mut third };
                 ()
             };
@@ -2183,10 +2196,10 @@ fn a_moved_field_can_be_restored_without_destroying_its_former_owner() {
         run(r#"
         struct Outer<'a> { nested: Probe<'a> }
         pub fn main() -> i64 {
-            let first = 0;
-            let second = 0;
+            let mut first = 0;
+            let mut second = 0;
             {
-                let owner = Outer { nested: Probe { target: &mut first } };
+                let mut owner = Outer { nested: Probe { target: &mut first } };
                 let moved = owner.nested;
                 owner.nested = Probe { target: &mut second };
                 ()

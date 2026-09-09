@@ -1,0 +1,17 @@
+[package]
+name = "grandiose-subsecond-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Deliberately isolated: production compiler dependencies and profiles are untouched.
+[workspace]
+
+[dependencies]
+grandiose-stage0 = { path = "../../crates/grandiose-stage0" }
+subsecond = "=0.7.6"
+dioxus-devtools = "=0.7.6"
+
+[profile.dev]
+debug = 0
+incremental = true

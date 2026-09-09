@@ -36,8 +36,17 @@ impl EscapeFlow {
     /// an input to this phase: its NLL/reborrow facts establish that this is a
     /// post-loan boundary, rather than a second lexical borrow checker.
     pub fn analyze(body: &TypedBody, flow: &PlaceFlow) -> Self {
+        Self::analyze_with_interface(body, flow, &crate::ElaboratedInterface::default())
+    }
+
+    /// Layouts establish frame independence for owned nominal residents;
+    /// value provenance establishes it for incoming borrowed residents.
+    pub fn analyze_with_interface(
+        body: &TypedBody, flow: &PlaceFlow, signatures: &crate::ElaboratedInterface,
+    ) -> Self {
         let mut analyzer = Analyzer {
             body,
+            signatures,
             // A direct borrow must already have entered the ownership flow.
             // Retaining these roots lets us fail closed if Core ever grows a
             // reference-producing operation without teaching PlaceFlow about
@@ -52,7 +61,7 @@ impl EscapeFlow {
                     _ => None,
                 })
                 .collect(),
-            values: BTreeMap::new(),
+            values: ValueEnvironment::default(),
             diagnostics: vec![],
         };
         // Parameters may carry references through structural aggregates. They
@@ -83,12 +92,17 @@ impl EscapeFlow {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Value {
     None,
+    /// Proven resident without any frame-relative component. Unlike `None`,
+    /// this is positive transfer evidence, never absence of a known loan.
+    FrameIndependent,
     /// A reference supplied by the caller. It may be returned or carried
     /// across suspension, but can be overwritten by a body-local borrow in
     /// an aggregate projection.
     ExternalBorrowed,
     Borrowed {
         root: String,
+        storage: Option<u64>,
+        fields: Vec<u32>,
     },
     Aggregate(Vec<Value>),
     /// A known constructor may lack a resident path present in another
@@ -97,8 +111,41 @@ enum Value {
     Closure {
         environment: EnvironmentBrand,
         captures: Vec<Capture>,
+        frame_independent: bool,
     },
     Joined(Vec<Value>),
+}
+
+/// A reference targets a storage identity, not the latest binding with the
+/// same source spelling. Keep retired residents available when a short-lived
+/// carrier is shadowed or leaves scope, so reading one of its stored caller
+/// references cannot silently select the replacement binding's provenance.
+#[derive(Clone, Default)]
+struct ValueEnvironment {
+    bindings: BTreeMap<String, u64>,
+    residents: BTreeMap<u64, Value>,
+    next: u64,
+}
+
+impl ValueEnvironment {
+    fn define(&mut self, name: String, value: Value) {
+        let identity = self.next;
+        self.next += 1;
+        self.bindings.insert(name, identity);
+        self.residents.insert(identity, value);
+    }
+    fn insert(&mut self, name: String, value: Value) {
+        if let Some(identity) = self.bindings.get(&name) {
+            self.residents.insert(*identity, value);
+        } else { self.define(name, value); }
+    }
+    fn get(&self, name: &str) -> Option<&Value> {
+        self.residents.get(self.bindings.get(name)?)
+    }
+    fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
+        self.residents.get_mut(self.bindings.get(name)?)
+    }
+    fn remove(&mut self, name: &str) { self.bindings.remove(name); }
 }
 
 fn parameter_value(ty: &Type) -> Value {
@@ -111,18 +158,19 @@ fn parameter_value(ty: &Type) -> Value {
         // carrier; frozen path forwarding can then retain that fact without
         // inventing a body-local loan (for example `Str -> Result<Str, E>`).
         Type::Nominal { .. } | Type::Projection { .. } => Value::ExternalBorrowed,
-        // Array length is not retained in `Type`, so it remains opaque.
-        Type::Array(_) | Type::StaticData { .. } | Type::RawPointer { .. } => Value::None,
+        // Homogeneous products retain external provenance without expanding
+        // potentially enormous element counts into analysis metadata.
+        Type::Array(_) | Type::FixedArray { .. } | Type::StaticData { .. } | Type::RawPointer { .. } => Value::ExternalBorrowed,
         Type::Callable { .. }
         | Type::Generic(_)
         | Type::Infer(_)
         | Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
-        | Type::Error => Value::None,
+        | Type::Error => Value::FrameIndependent,
     }
 }
 
@@ -137,15 +185,17 @@ enum Capture {
 
 struct Analyzer<'a> {
     body: &'a TypedBody,
+    signatures: &'a crate::ElaboratedInterface,
     loan_roots: BTreeSet<String>,
-    values: BTreeMap<String, Value>,
+    values: ValueEnvironment,
     diagnostics: Vec<EscapeDiagnostic>,
 }
 
 impl Analyzer<'_> {
     fn value(&mut self, id: CoreId) -> Value {
         let expression = self.body.expression(id).clone();
-        match expression.kind {
+        let value = match expression.kind {
+            CoreKind::ConstValue(_) => Value::None,
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
             | CoreKind::LabelValue { .. }
@@ -156,12 +206,33 @@ impl Analyzer<'_> {
             | CoreKind::PatternTest { .. }
             | CoreKind::IntrinsicCall { .. } => Value::None,
             CoreKind::Local(name) => self.values.get(&name).cloned().unwrap_or(Value::None),
-            CoreKind::Borrow { value, .. } => self.borrowed_value(value),
-            CoreKind::Deref(value) => {
+            CoreKind::Borrow { value, .. } if strict_expression_abrupt(self.body, value) => {
                 self.value(value);
                 Value::None
             }
+            CoreKind::Borrow { value, .. } => {
+                let base = crate::placeflow::borrowed_place_base(self.body, value);
+                if self.has_frozen_loan_root(&crate::placeflow::borrowed_temporary_root(base)) {
+                    // Borrowing does not skip the rvalue's strict evaluation:
+                    // nested calls, assignments and suspension still occur.
+                    let resident = self.value(base);
+                    self.values.insert(crate::placeflow::borrowed_temporary_root(base), resident);
+                }
+                self.borrowed_value(value)
+            }
+            CoreKind::Deref(value) => {
+                // Loading an incoming reference-bearing value preserves its
+                // caller-owned reference leaves. Do not fabricate external
+                // provenance for a local/unknown reference: those require a
+                // structural account of the referenced storage.
+                let value = self.value(value);
+                self.reference_path_value(&value, &[crate::core::REFERENCE_PATH_DEREF]).unwrap_or(Value::None)
+            }
             CoreKind::Move(value) => self.value(value),
+            CoreKind::ReleaseAvailable(value) => {
+                self.value(value);
+                Value::None
+            }
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
                 Value::Aggregate(self.strict_values(values))
             }
@@ -197,7 +268,7 @@ impl Analyzer<'_> {
                 if strict_expression_abrupt(self.body, value) {
                     return Value::None;
                 }
-                self.values.insert(name, evaluated);
+                self.values.define(name, evaluated);
                 Value::None
             }
             CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
@@ -212,13 +283,19 @@ impl Analyzer<'_> {
                 Value::None
             }
             CoreKind::Block(values) => {
+                let incoming = self.values.clone();
+                let mut bindings = BTreeSet::new();
                 let mut result = Value::None;
                 for value in values {
+                    if let CoreKind::Let { name, .. } = &self.body.expression(value).kind {
+                        bindings.insert(name.clone());
+                    }
                     result = self.value(value);
                     if strict_expression_abrupt(self.body, value) {
                         break;
                     }
                 }
+                restore_bindings(&mut self.values, &incoming, bindings);
                 result
             }
             CoreKind::Closure {
@@ -260,11 +337,17 @@ impl Analyzer<'_> {
                 // bindings or writes into the enclosing creation site.
                 let outer_values = self.values.clone();
                 for (name, ty) in &parameters {
-                    self.values.insert(name.clone(), parameter_value(ty));
+                    self.values.define(name.clone(), parameter_value(ty));
                 }
                 let returned = self.value(body);
                 self.values = outer_values;
 
+                let frame_independent = borrowed_roots(&returned).is_empty()
+                    && !crate::core::tail::has_outer_label_dependency(self.body, body)
+                    && environment.captures.iter().all(|capture| {
+                        matches!(capture.mode, crate::core::CaptureMode::Copy | crate::core::CaptureMode::Move)
+                            && self.values.get(&capture.name).is_some_and(frame_independent_value)
+                    });
                 let mut captures = environment
                     .captures
                     .into_iter()
@@ -302,6 +385,7 @@ impl Analyzer<'_> {
                 Value::Closure {
                     environment: environment.brand,
                     captures,
+                    frame_independent,
                 }
             }
             CoreKind::Call {
@@ -309,6 +393,7 @@ impl Analyzer<'_> {
                 arguments,
                 reference_origin,
                 reference_shape,
+                mandatory_tail,
                 ..
             } => {
                 // A call result is a boundary value in its own right. The
@@ -319,7 +404,17 @@ impl Analyzer<'_> {
                 if strict_expression_abrupt(self.body, callee) {
                     return Value::None;
                 }
-                let values = self.strict_values(arguments);
+                let values = self.strict_values(arguments.clone());
+                if mandatory_tail {
+                    for (argument, value) in arguments.iter().zip(&values) {
+                        if !frame_independent_value(value)
+                            && !crate::core::tail::tail_owned_type(self.signatures,
+                                &self.body.expression(*argument).ty, &mut vec![]) {
+                            self.error(self.body.expression(*argument).span, "G4403",
+                                "mandatory `tail` argument may retain a reference, pointer, or callable environment dependent on the ending frame; its transfer provenance is not proven");
+                        }
+                    }
+                }
                 if strict_expression_abrupt(self.body, id) {
                     return Value::None;
                 }
@@ -354,6 +449,7 @@ impl Analyzer<'_> {
                 // operation arm, so the computation is one of its dynamic
                 // exits alongside every matching clause.
                 let mut exits = vec![computation.clone()];
+                let mut environments = vec![incoming.clone()];
                 for clause in clauses {
                     self.values = incoming.clone();
                     if let Some((effect, operation, payloads, _)) = &performed
@@ -374,8 +470,13 @@ impl Analyzer<'_> {
                         self.values.remove(&name);
                     }
                     exits.push(self.value(clause.body));
+                    restore_bindings(&mut self.values, &incoming,
+                        clause.bindings.iter().map(|(name, _)| name.clone()));
+                    if !strict_expression_abrupt(self.body, clause.body) {
+                        environments.push(self.values.clone());
+                    }
                 }
-                self.values = incoming;
+                self.values = joined_environments(&incoming, environments);
                 join(exits)
             }
             CoreKind::Completion {
@@ -394,6 +495,7 @@ impl Analyzer<'_> {
                 // temporary `Option<&T>` look like the enclosing function's
                 // return value even when every arm consumed the reference.
                 let mut exits = Vec::with_capacity(clauses.len());
+                let mut environments = Vec::with_capacity(clauses.len());
                 for (index, clause) in clauses.into_iter().enumerate() {
                     self.values = incoming.clone();
                     self.bind_pattern_value(&clause.pattern, computation.clone());
@@ -429,10 +531,25 @@ impl Analyzer<'_> {
                         }
                     }
                     exits.push(self.value(clause.body));
+                    let mut bindings = BTreeSet::new();
+                    pattern_bindings(&clause.pattern, &mut bindings);
+                    if let Some(refinement) = &clause.refinement {
+                        pattern_bindings(&refinement.pattern, &mut bindings);
+                    }
+                    restore_bindings(&mut self.values, &incoming, bindings);
+                    if !strict_expression_abrupt(self.body, clause.body) {
+                        environments.push(self.values.clone());
+                    }
                 }
-                self.values = incoming;
+                self.values = joined_environments(&incoming, environments);
                 join(exits)
             }
+        };
+        if matches!(value, Value::None)
+            && crate::core::tail::tail_owned_type(self.signatures, &expression.ty, &mut vec![]) {
+            Value::FrameIndependent
+        } else {
+            value
         }
     }
 
@@ -466,7 +583,7 @@ impl Analyzer<'_> {
                         );
                         continue;
                     };
-                    let Some(value) = value_at_path(argument, &path.argument_fields) else {
+                    let Some(value) = self.reference_path_value(argument, &path.argument_fields) else {
                         self.error(
                             span,
                             "G5023",
@@ -501,6 +618,21 @@ impl Analyzer<'_> {
                 Value::None
             }
         }
+    }
+
+    fn reference_path_value(&self, value: &Value, path: &[u32]) -> Option<Value> {
+        let Some(deref) = path.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) else {
+            return value_at_path(value, path);
+        };
+        let reference = value_at_path(value, &path[..deref])?;
+        let resident = match reference {
+            Value::ExternalBorrowed => Value::ExternalBorrowed,
+            Value::Borrowed { storage, fields, .. } => value_at_path(self.values.residents.get(&storage?)?, &fields)?,
+            Value::Joined(values) => return values.iter().map(|value|
+                self.reference_path_value(value, &path[deref..])).collect::<Option<Vec<_>>>().map(join),
+            _ => return None,
+        };
+        self.reference_path_value(&resident, &path[deref + 1..])
     }
 
     /// Evaluate strict children in source order through their first abrupt
@@ -557,7 +689,7 @@ impl Analyzer<'_> {
     fn bind_pattern_value(&mut self, pattern: &crate::core::CorePattern, value: Value) {
         match pattern {
             crate::core::CorePattern::Bind { name } => {
-                self.values.insert(name.clone(), value);
+                self.values.define(name.clone(), value);
             }
             crate::core::CorePattern::Tuple(patterns) => {
                 for (index, pattern) in patterns.iter().enumerate() {
@@ -565,8 +697,9 @@ impl Analyzer<'_> {
                     self.bind_pattern_value(pattern, child);
                 }
             }
-            crate::core::CorePattern::Array { elements, .. } => {
+            crate::core::CorePattern::Array { elements, rest, .. } => {
                 for (index, pattern) in elements.iter().enumerate() {
+                    let index = crate::pattern::ArrayPatternRest::index(*rest, index);
                     let child = value_at_path(&value, &[index as u32]).unwrap_or(Value::None);
                     self.bind_pattern_value(pattern, child);
                 }
@@ -594,6 +727,13 @@ impl Analyzer<'_> {
             }
             return value;
         }
+        let mut fields = vec![];
+        let mut projected = id;
+        while let CoreKind::Field { base, index, .. } = self.body.expression(projected).kind {
+            fields.push(index);
+            projected = base;
+        }
+        fields.reverse();
         // Reborrowing through a reference supplied by the caller must remain
         // caller-owned.  `place_root` intentionally has no body-local root
         // for `&*external`; treating that absence as a temporary would reject
@@ -603,6 +743,14 @@ impl Analyzer<'_> {
         let Some(root) = self.place_root(id) else {
             if external_reborrow {
                 return Value::ExternalBorrowed;
+            }
+            let root = crate::placeflow::borrowed_temporary_root(crate::placeflow::borrowed_place_base(self.body, id));
+            if self.has_frozen_loan_root(&root) {
+                // A real local storage owner, not an external/static loan.
+                // Return, suspension and mandatory-tail checks still reject
+                // any value that carries this root across its boundary.
+                let storage = self.values.bindings.get(&root).copied();
+                return Value::Borrowed { root, storage, fields };
             }
             self.error(
                 self.body.expression(id).span,
@@ -621,7 +769,8 @@ impl Analyzer<'_> {
                 format!("reference to `{root}` has no frozen NLL loan fact"),
             );
         }
-        Value::Borrowed { root }
+        let storage = self.values.bindings.get(&root).copied();
+        Value::Borrowed { root, storage, fields }
     }
 
     fn has_frozen_loan_root(&self, spelling: &str) -> bool {
@@ -648,7 +797,16 @@ impl Analyzer<'_> {
 
     fn reborrowed_value(&mut self, id: CoreId) -> Option<Value> {
         match self.body.expression(id).kind.clone() {
-            CoreKind::Field { base, .. } => self.reborrowed_value(base),
+            CoreKind::Field { base, index, .. } => self.reborrowed_value(base).map(|value| {
+                fn project(value: Value, index: u32) -> Value {
+                    match value {
+                        Value::Borrowed { root, storage, mut fields } => { fields.push(index); Value::Borrowed { root, storage, fields } }
+                        Value::Joined(values) => join(values.into_iter().map(|value| project(value, index)).collect()),
+                        value => value,
+                    }
+                }
+                project(value, index)
+            }),
             CoreKind::Deref(reference) => {
                 let value = self.value(reference);
                 (!matches!(value, Value::None)).then_some(value)
@@ -677,6 +835,10 @@ impl Analyzer<'_> {
     }
 
     fn assign(&mut self, place: CorePlace, value: Value, span: Span) {
+        // Replacing a statically scalar resident cannot change any stored
+        // reference path. Still evaluate its reference operand below: an
+        // opaque generic carrier must not suppress computed-place effects.
+        let scalar_resident = matches!(place.ty(), Type::Scalar(_) | Type::Unit | Type::Never);
         if self.place_targets_external_storage(&place) {
             self.report_external_store_escape(&value, span);
         }
@@ -686,7 +848,8 @@ impl Analyzer<'_> {
             }
             CorePlace::Field { ref base, .. } => {
                 if let Some(name) = base.root_local().map(|(name, _)| name.to_owned()) {
-                    let entry = self.values.entry(name).or_insert(Value::None);
+                    if self.values.get(&name).is_none() { self.values.insert(name.clone(), Value::None); }
+                    let entry = self.values.get_mut(&name).expect("assignment has a resident");
                     let mut path = vec![];
                     collect_field_path(&place, &mut path);
                     if !assign_field_path(entry, &path, value) {
@@ -696,12 +859,49 @@ impl Analyzer<'_> {
                             "aggregate projection assignment has no sealed structural provenance path",
                         );
                     }
+                } else {
+                    let mut base = &place;
+                    let mut fields = vec![];
+                    while let CorePlace::Field { base: parent, index, .. } = base {
+                        fields.push(*index);
+                        base = parent;
+                    }
+                    if let CorePlace::Deref { reference, .. } = base {
+                        fields.reverse();
+                        let reference = self.value(*reference);
+                        if !scalar_resident { self.assign_reference_resident(reference, &fields, value, span); }
+                    }
                 }
             }
             CorePlace::Deref { reference, .. } => {
-                self.value(reference);
+                let reference = self.value(reference);
+                if !scalar_resident { self.assign_reference_resident(reference, &[], value, span); }
             }
             CorePlace::Error => {}
+        }
+    }
+
+    fn assign_reference_resident(&mut self, reference: Value, projected: &[u32], value: Value, span: Span) {
+        fn targets(reference: Value, projected: &[u32], result: &mut BTreeSet<(u64, Vec<u32>)>) {
+            match reference {
+                Value::Borrowed { storage: Some(storage), mut fields, .. } => {
+                    fields.extend_from_slice(projected);
+                    result.insert((storage, fields));
+                }
+                Value::Joined(values) => for value in values { targets(value, projected, result); },
+                _ => {},
+            }
+        }
+        let mut destinations = BTreeSet::new();
+        targets(reference, projected, &mut destinations);
+        let exact = destinations.len() == 1;
+        for (storage, fields) in destinations {
+            let Some(resident) = self.values.residents.get_mut(&storage) else { continue; };
+            let replacement = if exact { value.clone() }
+                else { join(vec![value_at_path(resident, &fields).unwrap_or(Value::None), value.clone()]) };
+            if !replace_resident_path(resident, &fields, replacement) {
+                self.error(span, "G5021", "reference projection assignment has no sealed resident provenance path");
+            }
         }
     }
 
@@ -815,6 +1015,13 @@ fn collect_field_path(place: &CorePlace, path: &mut Vec<(u32, u32)>) {
 /// terminal projection. Any contradiction with an existing aggregate shape
 /// is rejected instead of erasing a body-local borrow from escape analysis.
 fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value) -> bool {
+    if let Value::Joined(values) = value {
+        for value in values.iter_mut() {
+            if !assign_field_path(value, path, replacement.clone()) { return false; }
+        }
+        *value = join(std::mem::take(values));
+        return true;
+    }
     let mut current = value;
     for (position, (index, field_count)) in path.iter().enumerate() {
         if *index >= *field_count {
@@ -822,6 +1029,9 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         }
         if matches!(current, Value::None) {
             *current = Value::Aggregate(vec![Value::None; *field_count as usize]);
+        }
+        if matches!(current, Value::FrameIndependent) {
+            *current = Value::Aggregate(vec![Value::FrameIndependent; *field_count as usize]);
         }
         // A nominal parameter's private layout is opaque to escape analysis,
         // but its source-level projection path is already sealed by Core.
@@ -851,6 +1061,16 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
 
 fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
     value_at_variant_path(value, path, false)
+}
+
+fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
+    let Some((field, tail)) = path.split_first() else { *target = replacement; return true; };
+    if let Value::Joined(values) = target {
+        return values.iter_mut().all(|value| replace_resident_path(value, path, replacement.clone()));
+    }
+    let (Value::Aggregate(fields) | Value::Variant(fields)) = target else { return false; };
+    let Some(target) = fields.get_mut(*field as usize) else { return false; };
+    replace_resident_path(target, tail, replacement)
 }
 
 fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Option<Value> {
@@ -903,11 +1123,78 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
     put_value_at_path(&mut fields[path[0] as usize], &path[1..], replacement)
 }
 
-fn join(mut values: Vec<Value>) -> Value {
+fn restore_bindings(
+    values: &mut ValueEnvironment, incoming: &ValueEnvironment,
+    bindings: impl IntoIterator<Item = String>,
+) {
+    for name in bindings {
+        if let Some(identity) = incoming.bindings.get(&name) { values.bindings.insert(name, *identity); }
+        else { values.remove(&name); }
+    }
+}
+
+fn pattern_bindings(pattern: &crate::core::CorePattern, names: &mut BTreeSet<String>) {
+    use crate::core::CorePattern;
+    match pattern {
+        CorePattern::Bind { name } => { names.insert(name.clone()); }
+        CorePattern::Tuple(patterns) | CorePattern::Array { elements: patterns, .. } => {
+            for pattern in patterns { pattern_bindings(pattern, names); }
+        }
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            for field in fields { pattern_bindings(&field.pattern, names); }
+        }
+        CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
+    }
+}
+
+fn joined_environments(
+    incoming: &ValueEnvironment, exits: Vec<ValueEnvironment>,
+) -> ValueEnvironment {
+    if exits.is_empty() { return incoming.clone(); }
+    let identities = exits.iter().flat_map(|exit| exit.residents.keys().copied()).collect::<BTreeSet<_>>();
+    ValueEnvironment {
+        bindings: incoming.bindings.clone(),
+        next: exits.iter().map(|exit| exit.next).max().unwrap_or(incoming.next),
+        residents: identities.into_iter().map(|identity| (identity, join(exits.iter()
+            .filter_map(|exit| exit.residents.get(&identity).cloned()).collect()))).collect(),
+    }
+}
+
+fn join(incoming: Vec<Value>) -> Value {
+    fn flatten(values: Vec<Value>, output: &mut Vec<Value>) {
+        for value in values {
+            if let Value::Joined(values) = value { flatten(values, output); }
+            else if !output.contains(&value) { output.push(value); }
+        }
+    }
+    let mut values = vec![];
+    flatten(incoming, &mut values);
+    // Keep aggregate joins field-wise. Repeated conditional assignments
+    // must not materialize the Cartesian product of every earlier branch.
+    if values.len() > 1 && let Value::Aggregate(first) = &values[0] {
+        let count = first.len();
+        if values.iter().all(|value| matches!(value, Value::Aggregate(fields) if fields.len() == count)) {
+            return Value::Aggregate((0..count).map(|index| join(values.iter().map(|value| {
+                let Value::Aggregate(fields) = value else { unreachable!() };
+                fields[index].clone()
+            }).collect())).collect());
+        }
+    }
     match values.len() {
         0 => Value::None,
         1 => values.pop().expect("one value"),
         _ => Value::Joined(values),
+    }
+}
+
+fn frame_independent_value(value: &Value) -> bool {
+    match value {
+        Value::FrameIndependent | Value::ExternalBorrowed => true,
+        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
+            values.iter().all(frame_independent_value)
+        }
+        Value::Closure { frame_independent, .. } => *frame_independent,
+        Value::None | Value::Borrowed { .. } => false,
     }
 }
 
@@ -919,7 +1206,7 @@ fn borrowed_roots(value: &Value) -> BTreeSet<String> {
 
 fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
     match value {
-        Value::Borrowed { root } => {
+        Value::Borrowed { root, .. } => {
             roots.insert(root.clone());
         }
         Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
@@ -927,7 +1214,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
                 collect_borrowed_roots(value, roots);
             }
         }
-        Value::Closure { .. } | Value::None | Value::ExternalBorrowed => {}
+        Value::Closure { .. } | Value::None | Value::FrameIndependent | Value::ExternalBorrowed => {}
     }
 }
 
@@ -936,6 +1223,8 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
 /// body-local backing place in this generic declaration.
 fn contains_open_type_parameter(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => contains_open_type_parameter(element)
+            || generic_argument_contains_open_type_parameter(length),
         Type::Generic(_) => true,
         Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
         Type::Array(value)
@@ -974,7 +1263,7 @@ fn contains_open_type_parameter(value: &Type) -> bool {
         | Type::RawPointer { .. }
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Error => false,
@@ -996,10 +1285,10 @@ fn generic_argument_contains_open_type_parameter(value: &GenericArgument) -> boo
                     .any(generic_argument_contains_open_type_parameter)
         }
         GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstInfer { .. } => false,
     }
 }
@@ -1032,7 +1321,7 @@ fn value_contains_external_reference(value: &Value) -> bool {
         Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
             values.iter().any(value_contains_external_reference)
         }
-        Value::None | Value::Borrowed { .. } | Value::Closure { .. } => false,
+        Value::None | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
 
@@ -1054,17 +1343,32 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
                 collect_closure_captures(value, captures);
             }
         }
-        Value::None | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
+        Value::None | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provenance_joins_are_idempotent_and_keep_aggregate_choices_field_wise() {
+        use super::*;
+        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![] };
+        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![] };
+        let mut value = Value::Aggregate(vec![a.clone(), Value::ExternalBorrowed]);
+        for _ in 0..100 {
+            value = join(vec![value.clone(), value.clone()]);
+        }
+        assert_eq!(value, Value::Aggregate(vec![a.clone(), Value::ExternalBorrowed]));
+        let joined = join(vec![value, Value::Aggregate(vec![b.clone(), Value::ExternalBorrowed])]);
+        assert_eq!(joined, Value::Aggregate(vec![join(vec![a, b]), Value::ExternalBorrowed]));
+        assert!(!frame_independent_value(&joined));
+    }
+
     use super::*;
 
     #[test]
     fn variant_provenance_keeps_present_loans_and_only_omits_absent_residents() {
-        let loan = Value::Borrowed { root: "owner".into() };
+        let loan = Value::Borrowed { root: "owner".into(), storage: None, fields: vec![] };
         let yes = Value::Variant(vec![Value::Aggregate(vec![loan.clone()])]);
         let no = Value::Variant(vec![Value::Aggregate(vec![])]);
         let selected = value_at_path(&join(vec![yes, no]), &[0, 0]).unwrap();

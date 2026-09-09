@@ -1,0 +1,50 @@
+fn even(value: &i64) -> Bool { *value % 2 == 0 }
+fn positive(value: &i64) -> Bool { *value > 0 }
+fn never(value: &i64) -> Bool { __g1_abort() }
+fn add(state: i64, value: &i64) -> i64 { state + *value }
+fn double(value: &i64) -> i64 { *value * 2 }
+fn first_large(value: &i64) -> Option<i64> { handle *value >= 3 { true => Some(*value * 10), false => None } }
+fn fallible(value: &i64) -> Result<Bool,i64> { handle *value == 3 { true => Result::Err(3), false => Result::Ok(*value % 2 == 0) } }
+fn values() -> Vec<i64> {
+    let mut items = Vec::new();
+    Vec::push(&mut items, 1); Vec::push(&mut items, 2); Vec::push(&mut items, 3); Vec::push(&mut items, 4);
+    items
+}
+pub fn main() -> i64 {
+    let items = values();
+    let empty = Vec<i64>::new();
+    let mut unreachable = never;
+    assert_true(all(Vec::as_slice(&empty), &mut unreachable));
+    assert_true(!any(Vec::as_slice(&empty), &mut unreachable));
+    let mut predicate = even;
+    let mut greater = positive;
+    assert_true(all(Vec::as_slice(&items), &mut greater));
+    assert_true(!all(Vec::as_slice(&items), &mut predicate));
+    assert_true(any(Vec::as_slice(&items), &mut predicate));
+    assert_true(count_where(Vec::as_slice(&items), &mut predicate) == 2);
+    assert_true(handle position(Vec::as_slice(&items), &mut predicate) { Result::Ok(1) => true, _ => false });
+    assert_true(handle rposition(Vec::as_slice(&items), &mut predicate) { Result::Ok(3) => true, _ => false });
+    assert_true(handle find(Vec::as_slice(&items), &mut predicate) { Result::Ok(item) => *item == 2, _ => false });
+    assert_true(handle find_unique(Vec::as_slice(&items), &mut predicate) { UniqueMatch::Ambiguous(a,b) => *a + *b == 6, _ => false });
+    let selected = filter_refs(Vec::as_slice(&items), &mut predicate);
+    assert_true(Vec::len(&selected) == 2);
+    let (yes, no) = partition_refs(Vec::as_slice(&items), &mut predicate);
+    assert_true(Vec::len(&yes) == 2);
+    assert_true(Vec::len(&no) == 2);
+    assert_true(* *Vec::get_unchecked(&yes, 0) == 2);
+    assert_true(* *Vec::get_unchecked(&no, 1) == 3);
+    let mut sum = add;
+    assert_true(fold_slice(Vec::as_slice(&items), 0, &mut sum) == 10);
+    let mut map = double;
+    let doubled = map_collect(Vec::as_slice(&items), &mut map);
+    assert_true(*Vec::get_unchecked(&doubled, 3) == 8);
+    let mut large = first_large;
+    assert_true(handle find_map(Vec::as_slice(&items), &mut large) { Result::Ok(30) => true, _ => false });
+    let mut checked = fallible;
+    assert_true(handle try_all(Vec::as_slice(&items), &mut checked) { Result::Ok(false) => true, _ => false });
+    assert_true(handle try_any(Vec::as_slice(&items), &mut checked) { Result::Ok(true) => true, _ => false });
+    let suffix = handle Slice::slice(Vec::as_slice(&items), Range { start: 2, end: 4 }) { Result::Ok(slice) => slice, _ => __g1_abort() };
+    assert_true(handle try_position(suffix, &mut checked) { Result::Err(3) => true, _ => false });
+    assert_true(handle try_find(suffix, &mut checked) { Result::Err(3) => true, _ => false });
+    42
+}

@@ -1,0 +1,86 @@
+// Sequence algorithms own their policy and preserve element ownership.
+pub fn lower_bound<T>(items: Slice<T>, needle: &T) -> usize where T: Ord {
+    Slice::lower_bound(items, needle)
+}
+pub fn upper_bound<T>(items: Slice<T>, needle: &T) -> usize where T: Ord {
+    Slice::upper_bound(items, needle)
+}
+pub fn equal_range<T>(items: Slice<T>, needle: &T) -> Range<usize> where T: Ord {
+    Range { start: lower_bound(items, needle), end: upper_bound(items, needle) }
+}
+pub fn binary_search<T>(items: Slice<T>, needle: &T) -> Result<usize,usize> where T: Ord {
+    Slice::binary_search(items, needle)
+}
+pub fn lex_compare<T>(left: Slice<T>, right: Slice<T>) -> Ordering where T: Ord {
+    Slice::lex_compare(left, right)
+}
+fn common_prefix_from<T>(left: Slice<T>, right: Slice<T>, index: usize, end: usize) -> usize where T: Eq {
+    handle index == end {
+        true => index,
+        false => handle Eq::eq(Slice::get_unchecked(left, index), Slice::get_unchecked(right, index)) {
+            false => index, true => tail common_prefix_from(left, right, index + 1, end),
+        },
+    }
+}
+pub fn common_prefix_len<T>(left: Slice<T>, right: Slice<T>) -> usize where T: Eq {
+    common_prefix_from(left, right, 0, min(Slice::len(&left), Slice::len(&right)))
+}
+fn common_suffix_from<T>(left: Slice<T>, right: Slice<T>, count: usize, end: usize) -> usize where T: Eq {
+    handle count == end {
+        true => count,
+        false => handle Eq::eq(
+            Slice::get_unchecked(left, Slice::len(&left) - count - 1),
+            Slice::get_unchecked(right, Slice::len(&right) - count - 1)
+        ) {
+            false => count, true => tail common_suffix_from(left, right, count + 1, end),
+        },
+    }
+}
+pub fn common_suffix_len<T>(left: Slice<T>, right: Slice<T>) -> usize where T: Eq {
+    common_suffix_from(left, right, 0, min(Slice::len(&left), Slice::len(&right)))
+}
+fn subslice_matches<T>(haystack: Slice<T>, needle: Slice<T>, start: usize, index: usize) -> Bool where T: Eq {
+    handle index == Slice::len(&needle) {
+        true => true,
+        false => handle Eq::eq(Slice::get_unchecked(haystack, start + index), Slice::get_unchecked(needle, index)) {
+            false => false, true => tail subslice_matches(haystack, needle, start, index + 1),
+        },
+    }
+}
+fn find_subslice_from<T>(haystack: Slice<T>, needle: Slice<T>, start: usize, end: usize) -> Option<usize> where T: Eq {
+    handle subslice_matches(haystack, needle, start, 0) {
+        true => Some(start),
+        false => handle start == end {
+            true => None, false => tail find_subslice_from(haystack, needle, start + 1, end),
+        },
+    }
+}
+pub fn find_subslice<T>(haystack: Slice<T>, needle: Slice<T>) -> Option<usize> where T: Eq {
+    handle Slice::len(&needle) > Slice::len(&haystack) {
+        true => None,
+        false => find_subslice_from(haystack, needle, 0, Slice::len(&haystack) - Slice::len(&needle)),
+    }
+}
+fn dedup_take_from<T>(values: &mut Vec<T>, removed: &mut Vec<T>, index: usize) where T: Eq {
+    handle index < Vec::len(values) {
+        false => (),
+        true => handle Eq::eq(Vec::get_unchecked(values, index - 1), Vec::get_unchecked(values, index)) {
+            true => {
+                handle Vec::remove(&mut *values, index) {
+                    Result::Ok(item) => Vec::push(&mut *removed, item),
+                    Result::Err(_) => __g1_abort(),
+                };
+                tail dedup_take_from(values, removed, index)
+            },
+            false => tail dedup_take_from(values, removed, index + 1),
+        },
+    }
+}
+pub fn dedup_take<T>(values: &mut Vec<T>) -> Vec<T> where T: Eq {
+    let mut removed = Vec::new();
+    dedup_take_from(values, &mut removed, 1);
+    removed
+}
+pub fn dedup<T>(values: &mut Vec<T>) where T: Eq, T: Use<[0,1]> {
+    let mut removed = dedup_take(values);
+}

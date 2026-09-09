@@ -70,7 +70,7 @@ fn selected_trait_calls_have_concrete_targets() {
 fn first_class_functions_remain_indirect_when_reassigned() {
     assert_eq!(
         run(
-            "fn initial() -> i64 { 7 } fn answer() -> i64 { 42 } pub fn main() -> i64 { let selected = initial; selected = answer; selected() }"
+            "fn initial() -> i64 { 7 } fn answer() -> i64 { 42 } pub fn main() -> i64 { let mut selected = initial; selected = answer; selected() }"
         ),
         42
     );

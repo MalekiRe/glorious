@@ -177,7 +177,7 @@ fn semantic_multishot_resumptions_reject_unique_and_label_captures() {
     let unique = r#"
         effect Ask { [2, 2] ask() -> i64; }
         pub main() -> i64 {
-            let value = 0;
+            let mut value = 0;
             let reference = &mut value;
             handle {
                 let answer = Ask::ask();

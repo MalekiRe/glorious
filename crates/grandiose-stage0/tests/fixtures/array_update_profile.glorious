@@ -11,7 +11,7 @@ fn sixteen(values: &mut Vec<usize>) -> i64 {
     four(&mut *values) + four(&mut *values) + four(&mut *values) + four(values)
 }
 pub fn main() -> i64 {
-    let values = Vec<usize>::new();
+    let mut values = Vec<usize>::new();
     Vec::resize(&mut values, @SIZE@, 0);
     handle @UPDATE@ == 0 {
         true => 42,

@@ -217,7 +217,7 @@ impl CleanupMir {
                                 dst,
                                 fields,
                                 element_type: match ty {
-                                    Type::Array(element) => (**element).clone(),
+                                    Type::Array(element) | Type::FixedArray { element, .. } => (**element).clone(),
                                     _ => return None,
                                 },
                             },
@@ -419,7 +419,7 @@ impl CleanupMir {
                                     field_count: *field_count,
                                     field_type: ty.clone(),
                                 },
-                                Type::Array(_) => RuntimeOperation::ProjectArray {
+                                Type::Array(_) | Type::FixedArray { .. } => RuntimeOperation::ProjectArray {
                                     dst,
                                     base: local(*base),
                                     index: *index,
@@ -799,6 +799,16 @@ impl CleanupMir {
             } else {
                 None
             };
+            // Copies must also be protected BEFORE ending the activation.
+            // Their source owners still need their own destruction; the new
+            // carriers do not belong to the ending source-storage inventory.
+            let prepared_tail = if let CleanupControl::Invoke { arguments, contract, .. } = &block.terminator.control
+                && contract.mandatory_tail {
+                Some(arguments.iter().zip(block.terminator.operands.iter().skip(1))
+                    .map(|(value, operand)| emit_operand(*operand, local(*value),
+                        &self.values[value.0 as usize].ty, &mut locals, &mut instructions))
+                    .collect::<Option<Vec<_>>>()?)
+            } else { None };
             self.record_runtime_plan(
                 block.terminator.cleanup,
                 block_index,
@@ -824,9 +834,24 @@ impl CleanupMir {
                     arguments,
                     result,
                     continuation,
-                    ..
+                    contract,
                 } => {
-                    let arguments = arguments
+                    if let Some(arguments) = &prepared_tail
+                        && let SpecializedCallTarget::Direct(callee) = target {
+                        blocks.push(RuntimeBlock {
+                            scope: MirScopeId::ROOT,
+                            parameters: block.parameters.iter().copied().map(local).collect(),
+                            instructions,
+                            terminator: RuntimeTerminator::TailCall { callee: *callee, arguments: arguments.clone() },
+                        });
+                        continue;
+                    }
+                    // Manifest machine leaves inline after the same protected
+                    // cleanup boundary, so they need no activation at all.
+                    if contract.mandatory_tail && !matches!(target, SpecializedCallTarget::Primitive { .. }) {
+                        return None;
+                    }
+                    let arguments = if let Some(arguments) = prepared_tail { arguments } else { arguments
                         .iter()
                         .zip(block.terminator.operands.iter().skip(1))
                         .map(|(value, operand)| {
@@ -839,7 +864,7 @@ impl CleanupMir {
                                 &mut instructions,
                             )
                         })
-                        .collect::<Option<Vec<_>>>()?;
+                        .collect::<Option<Vec<_>>>()? };
                     match target {
                         SpecializedCallTarget::Resumption { .. } => {
                             if arguments.len() != 1 {
@@ -915,13 +940,15 @@ impl CleanupMir {
                             }
                         }
                     }
-                    match continuation {
+                    if contract.mandatory_tail {
+                        RuntimeTerminator::Return { value: local(*result) }
+                    } else { match continuation {
                         Some(target) => RuntimeTerminator::Goto {
                             target: MirBlockId(target.0),
                             arguments: vec![local(*result)],
                         },
                         None => RuntimeTerminator::Unreachable,
-                    }
+                    } }
                 }
                 CleanupControl::Return(_) => RuntimeTerminator::Return { value: returned? },
                 CleanupControl::Unreachable => RuntimeTerminator::Unreachable,

@@ -21,6 +21,49 @@ fn parse(source: &str) -> BodySyntax {
 }
 
 #[test]
+fn label_value_span_uses_the_lossless_token_index_after_trivia() {
+    let source = "{ label done { let ignored = 0; /* gap */ @done } }";
+    let body = parse(source);
+    assert!(body.diagnostics.is_empty(), "{:?}", body.diagnostics);
+    let label = body.expressions.iter().find(|expression| matches!(expression.kind, ExprKind::LabelValue { .. })).unwrap();
+    assert_eq!(&source[label.span.start as usize..label.span.end as usize], "@done");
+}
+
+#[test]
+fn explicit_tail_invocation_is_not_erased_to_an_ordinary_call() {
+    for source in ["{ tail next(1, value()) }", "{ tail module::next<i64>(42) }", "{ tail (callback)(42) }"] {
+        let body = parse(source);
+        assert!(body.diagnostics.is_empty(), "{source}: {:?}", body.diagnostics);
+        let ExprKind::Block(values) = &body.expression(body.root).kind else { panic!("block"); };
+        let ExprKind::TailCall { call } = body.expression(values[0]).kind else { panic!("mandatory tail marker"); };
+        assert!(matches!(body.expression(call).kind, ExprKind::Call { .. }));
+    }
+    let body = parse("{ let tail = 42; let pair = (1, tail); pair.1 }");
+    assert!(body.diagnostics.is_empty(), "{:?}", body.diagnostics);
+    assert!(!body.expressions.iter().any(|expression| matches!(expression.kind, ExprKind::TailCall { .. })));
+}
+
+#[test]
+fn body_effect_row_union_accepts_projection_terms_in_all_type_positions() {
+    for source in [
+        "{ let callback = () -> i64 / {| <T as First>::Effects, e, <T as Second>::Effects,} { 42 }; 0 }",
+        "{ let callback = (f: () -> i64 / {| e, <T as First>::Effects}) -> i64 { 42 }; 0 }",
+        "{ call<{| <T as First>::Effects, e, <T as Second>::Effects}>(); 0 }",
+    ] {
+        let body = parse(source);
+        assert!(body.diagnostics.is_empty(), "{source}: {:#?}", body.diagnostics);
+    }
+}
+
+#[test]
+fn body_effect_row_union_rejects_empty_or_repeated_separator() {
+    for row in ["{|}", "{|e|e}", "{|<T as First>::Effects <T as Second>::Effects}"] {
+        let body = parse(&format!("{{ let callback = () -> i64 / {row} {{ 42 }}; 0 }}"));
+        assert!(!body.diagnostics.is_empty(), "accepted {row}");
+    }
+}
+
+#[test]
 fn body_parser_keeps_operator_grouping_flat_and_contextual_blocks_deferred() {
     let body = parse("{ let value = add { 1 + 2 }; value * 3 }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
@@ -118,7 +161,7 @@ fn body_parser_lowers_compact_label_binders_and_transfers_to_existing_syntax() {
 
 #[test]
 fn assignments_are_block_statements_with_a_required_terminator() {
-    let body = parse("{ let value = 1; value = 2; value }");
+    let body = parse("{ let mut value = 1; value = 2; value }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
     let ExprKind::Block(values) = &body.expression(body.root).kind else {
         panic!("expected block");
@@ -128,7 +171,7 @@ fn assignments_are_block_statements_with_a_required_terminator() {
         ExprKind::Assign { .. }
     ));
 
-    let missing_terminator = parse("{ let value = 1; value = 2 value }");
+    let missing_terminator = parse("{ let mut value = 1; value = 2 value }");
     assert!(missing_terminator.recovered);
     assert!(
         missing_terminator
@@ -272,7 +315,8 @@ fn body_parser_allows_is_tests_as_handler_completion_subjects() {
     ));
     assert!(matches!(
         body.pattern(clauses[0].completion.expect("positive completion")).kind,
-        PatternKind::Literal(ref value) if value == "true"
+        // Truth spellings are unresolved names, not parser-owned literals.
+        PatternKind::Binding(ref value) if value == "true"
     ));
 }
 
@@ -421,6 +465,21 @@ fn body_parser_keeps_operation_generic_arguments_separate_from_effect_arguments(
 }
 
 #[test]
+fn body_const_arguments_and_quantity_bounds_share_radix_literal_parsing() {
+    for literal in ["42", "4_2", "0b10_1010", "0o52", "0x2a", "0x_2A"] {
+        let body = parse(&format!("{{ value<{literal}, [{literal}, {literal} + 1]>() }}"));
+        assert!(body.diagnostics.is_empty(), "{literal}: {:?}", body.diagnostics);
+        let ExprKind::Block(values) = &body.expression(body.root).kind else { panic!("block") };
+        let ExprKind::Call { callee, .. } = &body.expression(values[0]).kind else { panic!("call") };
+        let ExprKind::GenericPath { effect_arguments, .. } = &body.expression(*callee).kind else { panic!("generic path") };
+        assert_eq!(effect_arguments, &vec![HeaderGenericArgument::Integer(literal.into()), HeaderGenericArgument::Quantity(grandiose_stage0::Quantity::new(42, Some(43)).unwrap())]);
+    }
+    // Integer width belongs to the selected generic slot, not the parser.
+    assert!(parse("{ value<0x1_0000_0000>() }").diagnostics.is_empty());
+    assert!(!parse("{ value<[0, 0x1_0000_0000_0000_0000]>() }").diagnostics.is_empty());
+}
+
+#[test]
 fn body_parser_preserves_all_explicit_generic_argument_kinds_on_effect_paths() {
     let source = "{ handle perform Ask<'static, {Trace | Tail}, 7, [1, 2]>::ask<'_, {Log}, 3, [0, *]>(value) { Ask<'static, {Trace | Tail}, 7, [1, 2]>::ask<'_, {Log}, 3, [0, *]>(value) => value } }";
     let body = parse(source);
@@ -450,16 +509,16 @@ fn body_parser_preserves_all_explicit_generic_argument_kinds_on_effect_paths() {
     assert!(matches!(effect_arguments.as_slice(), [
         HeaderGenericArgument::Lifetime(name),
         HeaderGenericArgument::EffectRow(row),
-        HeaderGenericArgument::U32(7),
+        HeaderGenericArgument::Integer(integer),
         HeaderGenericArgument::Quantity(quantity),
-    ] if name == "'static" && row.effects.len() == 1 && row.tail.as_deref() == Some("Tail")
+    ] if integer == "7" && name == "'static" && row.effects.len() == 1 && row.tails.as_slice() == ["Tail"]
         && *quantity == grandiose_stage0::Quantity::new(1, Some(2)).unwrap()));
     assert!(matches!(operation_arguments.as_slice(), [
         HeaderGenericArgument::Lifetime(name),
         HeaderGenericArgument::EffectRow(row),
-        HeaderGenericArgument::U32(3),
+        HeaderGenericArgument::Integer(integer),
         HeaderGenericArgument::Quantity(quantity),
-    ] if name == "'_" && row.effects.len() == 1 && row.tail.is_none()
+    ] if integer == "3" && name == "'_" && row.effects.len() == 1 && row.tails.is_empty()
         && *quantity == grandiose_stage0::Quantity::new(0, None).unwrap()));
     assert_eq!(clauses[0].effect_arguments, *effect_arguments);
     assert_eq!(clauses[0].operation_arguments, *operation_arguments);
@@ -526,32 +585,31 @@ fn body_parser_preserves_open_effect_row_tails_in_typed_closures() {
     assert!(body.expressions.iter().any(|expression| matches!(
         &expression.kind,
         ExprKind::TypedClosure { effects, .. }
-            if effects.effects.len() == 1 && effects.tail.as_deref() == Some("e")
+            if effects.effects.len() == 1 && effects.tails.as_slice() == ["e"]
     )));
 }
 
 #[test]
-fn conditional_surface_syntax_desugars_to_contextual_library_calls() {
+fn conditional_surface_syntax_retains_source_defined_operator_chains() {
     let package = PackageKey("body-conditional@0.1.0".into());
-    let source = "pub fn main() -> i64 { if(true) { 1 } else { 2 } }";
+    let source = "pub infixr 1 else; pub fn main() -> i64 { if(true) { 1 } else { 2 } }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
     );
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
-    let body = BodySyntax::parse(&lexed, source, scan.declarations[0].body.unwrap());
+    let interface = grandiose_stage0::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let fixities = grandiose_stage0::FixityTable::for_module(&interface);
+    let body = BodySyntax::parse_with_fixities(&lexed, source, scan.declarations[1].body.unwrap(), &fixities);
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
     let ExprKind::Block(values) = &body.expression(body.root).kind else {
         panic!("function body was not a block")
     };
-    let ExprKind::Call { callee, arguments } = &body.expression(values[0]).kind else {
-        panic!("conditional was not desugared to a call")
+    let ExprKind::OperatorChain { operators, operands: arguments } = &body.expression(values[0]).kind else {
+        panic!("conditional did not retain its ordinary operator chain")
     };
-    assert!(matches!(
-        &body.expression(*callee).kind,
-        ExprKind::Path(path) if path == &["else"]
-    ));
+    assert_eq!(operators, &["else"]);
     assert!(matches!(
         &body.expression(arguments[1]).kind,
         ExprKind::ContextualBlock(_)

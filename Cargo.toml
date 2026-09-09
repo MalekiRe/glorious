@@ -1,3 +1,9 @@
 [workspace]
-members = ["crates/grandiose-runtime", "crates/grandiose-vm", "crates/grandiose-stage0"]
+members = [
+    "crates/grandiose-compiler-base",
+    "crates/grandiose-syntax",
+    "crates/grandiose-runtime",
+    "crates/grandiose-vm",
+    "crates/grandiose-stage0",
+]
 resolver = "2"

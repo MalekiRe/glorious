@@ -1,0 +1,54 @@
+fn values() -> Vec<i64> {
+    let mut output = Vec::new();
+    Vec::push(&mut output, 1); Vec::push(&mut output, 2); Vec::push(&mut output, 3); Vec::push(&mut output, 4);
+    output
+}
+fn double(value: i64) -> i64 { value * 2 }
+fn even(value: &i64) -> Bool { *value % 2 == 0 }
+fn only_large(value: i64) -> Option<i64> { handle value >= 3 { true => Some(value * 10), false => None } }
+fn never(value: i64) -> i64 { __g1_abort() }
+fn add(state: i64, value: i64) -> i64 { state + value }
+fn stop_at_three(state: i64, value: i64) -> Result<i64,(i64,i64)> {
+    handle value == 3 { true => Result::Err((state, value)), false => Result::Ok(state + value) }
+}
+fn prefix(state: &mut i64, value: i64) -> Option<i64> {
+    handle value == 3 { true => None, false => { *state = *state + value; Some(*state) } }
+}
+pub fn main() -> i64 {
+    let lazy = map_iter(Vec::into_iter(values()), never);
+    let (source, callback) = Map::into_parts(lazy);
+    assert_true(ExactSizeIterator::len(&source) == 4);
+    let mut mapped = map_iter(source, double);
+    assert_true(handle Iterator::next(&mut mapped) { Result::Ok(2) => true, _ => false });
+    assert_true(handle DoubleEndedIterator::next_back(&mut mapped) { Result::Ok(8) => true, _ => false });
+    assert_true(ExactSizeIterator::len(&mapped) == 2);
+    let mut predicate = filter_iter(Vec::into_iter(values()), even);
+    assert_true(handle Iterator::next(&mut predicate) { Result::Ok(2) => true, _ => false });
+    assert_true(handle Iterator::next(&mut predicate) { Result::Ok(4) => true, _ => false });
+    assert_true(handle Iterator::next(&mut predicate) { Result::Err(_) => true, _ => false });
+    let mut selected = filter_map_iter(Vec::into_iter(values()), only_large);
+    assert_true(handle Iterator::next(&mut selected) { Result::Ok(30) => true, _ => false });
+    assert_true(handle Iterator::next(&mut selected) { Result::Ok(40) => true, _ => false });
+    let mut scanned = scan_iter(Vec::into_iter(values()), 0, prefix);
+    assert_true(handle Iterator::next(&mut scanned) { Result::Ok(1) => true, _ => false });
+    assert_true(handle Iterator::next(&mut scanned) { Result::Ok(3) => true, _ => false });
+    assert_true(handle Iterator::next(&mut scanned) { Result::Err(_) => true, _ => false });
+    assert_true(handle Iterator::next(&mut scanned) { Result::Err(_) => true, _ => false });
+    let (rest, state, step) = Scan::into_parts(scanned);
+    assert_true(state == 3);
+    assert_true(ExactSizeIterator::len(&rest) == 1);
+    let mut sum = add;
+    assert_true(fold_iter(Vec::into_iter(values()), 0, &mut sum) == 10);
+    assert_true(fold_steps(Vec::into_iter(values()), 0, &mut sum) == 10);
+    let mut limited = stop_at_three;
+    handle try_fold_iter(Vec::into_iter(values()), 0, &mut limited) {
+        Result::Ok(_) => __g1_abort(),
+        Result::Err(failure) => {
+            assert_true(failure.state == 3);
+            assert_true(failure.error == 3);
+            let mut rest = failure.rest;
+            assert_true(handle Iterator::next(&mut rest) { Result::Ok(4) => true, _ => false });
+        },
+    };
+    42
+}

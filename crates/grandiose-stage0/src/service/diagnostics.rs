@@ -390,7 +390,11 @@ fn json_array(values: impl IntoIterator<Item = String>) -> String {
     format!("[{}]", values.into_iter().collect::<Vec<_>>().join(","))
 }
 
-impl Severity {
+trait DiagnosticJsonName {
+    fn json_name(self) -> &'static str;
+}
+
+impl DiagnosticJsonName for Severity {
     fn json_name(self) -> &'static str {
         match self {
             Self::Error => "error",
@@ -400,7 +404,7 @@ impl Severity {
     }
 }
 
-impl DiagnosticClass {
+impl DiagnosticJsonName for DiagnosticClass {
     fn json_name(self) -> &'static str {
         match self {
             Self::Request => "request",

@@ -171,6 +171,13 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
                     transfers.get(&(index, offset)).copied(),
                 );
                 let mut instruction = lower_instruction(&leaf, &labels)?.with_owned_effect_payloads();
+                if let RuntimeOperation::Store { dst, src } = operation {
+                    instruction = VmInstruction::StoreOwned { dst: dst.0, src: src.0 };
+                }
+                if matches!(operation, RuntimeOperation::MakeTuple { .. } | RuntimeOperation::MakeArray { .. }
+                    | RuntimeOperation::MakeRecord { .. } | RuntimeOperation::MakeEnum { .. }) {
+                    instruction = instruction.with_owned_aggregate();
+                }
                 if let (RuntimeOperation::InstallHandler { replay_owned, .. },
                     VmInstruction::InstallHandlerOwned { replay_owned: machine, .. }) = (operation, &mut instruction)
                 {
@@ -233,6 +240,9 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
                         .local
                         .0,
                 ),
+                RuntimeTerminator::TailCall { callee, arguments } => VmLirTerminator::TailCall {
+                    callee: *callee, arguments: arguments.iter().map(|argument| argument.0).collect(),
+                },
                 RuntimeTerminator::Leave {
                     brand,
                     target,
@@ -298,6 +308,8 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
         entry: VmLirBlockId(source.entry.0),
         blocks,
     };
-    function.returns = crate::vm_backend::infer_function_returns(&function.emit()?)?;
+    function.returns = crate::vm_backend::infer_function_returns(&function.emit()?)?
+        || (source.result != crate::Type::Never && function.blocks.iter().any(|block|
+            matches!(block.terminator, VmLirTerminator::TailCall { .. })));
     Ok(function)
 }

@@ -34,6 +34,7 @@ pub struct RuntimeArgument {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeTransferKind {
     Call(DefKey),
+    TailCall(DefKey),
     IndirectCall,
     HostCall,
     Perform(MirPerformSiteId),
@@ -279,6 +280,8 @@ impl RuntimeMir {
                 transition(operation, &mut initialized);
             }
             let contract = match &block.terminator {
+                RuntimeTerminator::TailCall { callee, arguments } =>
+                    Some((RuntimeTransferKind::TailCall(*callee), arguments.clone())),
                 RuntimeTerminator::Return { value } => {
                     Some((RuntimeTransferKind::Return, vec![*value]))
                 }
@@ -433,6 +436,9 @@ pub(super) fn consumed_carriers(operation: &RuntimeOperation) -> &[MirLocal] {
         RuntimeOperation::Resume { value, .. }
         | RuntimeOperation::ResumeReturn { value, .. }
         | RuntimeOperation::ResumeSnapshot { value, .. } => std::slice::from_ref(value),
+        RuntimeOperation::Store { src, .. } => std::slice::from_ref(src),
+        RuntimeOperation::MakeTuple { fields, .. } | RuntimeOperation::MakeArray { fields, .. }
+        | RuntimeOperation::MakeRecord { fields, .. } | RuntimeOperation::MakeEnum { fields, .. } => fields,
         _ => &[],
     }
 }

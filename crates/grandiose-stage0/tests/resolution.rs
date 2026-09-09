@@ -901,6 +901,40 @@ fn private_glob_import_edges_are_rejected_without_waiting_for_a_body_use() {
 }
 
 #[test]
+fn private_globs_do_not_make_absent_module_names_inaccessible() {
+    let collect = |package: &str, module: &str, source: &str| {
+        let package = PackageKey(package.into());
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package, module, &lexed, source, &scan).interface
+    };
+    for imports in [
+        "use library::*; use library::api::*;",
+        "use library::api::*; use library::*;",
+    ] {
+        let root = collect("consumer@0.1.0", "crate", imports);
+        let library = collect("library@0.1.0", "crate", "pub mod api; pub mod internal; pub fn library() { () }");
+        let api = collect("library@0.1.0", "crate::api", "use crate::*; use crate::library as hidden_value; pub fn answer() { () }");
+        let internal = collect("library@0.1.0", "crate::internal", "pub fn secret() { () }");
+        let index = DefinitionIndex::from_interfaces([&root, &library, &api, &internal]);
+        assert!(index.validate_imports().is_empty(), "{:#?}", index.validate_imports());
+        let owner = ModuleKey { package: root.package.clone(), path: "crate".into() };
+        let resolve = |path: &[&str]| index.resolve_path(DefinitionNamespace::Value, &owner,
+            &path.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>());
+        assert!(matches!(resolve(&["library", "api", "answer"]), ResolutionState::Resolved(_)));
+        assert!(matches!(resolve(&["library", "internal", "secret"]), ResolutionState::Resolved(_)));
+        assert!(matches!(resolve(&["library", "api", "internal", "secret"]), ResolutionState::Inaccessible(_)),
+            "a private glob must not re-export its actual module bindings");
+        assert_eq!(resolve(&["library", "api", "missing", "answer"]), ResolutionState::Unresolved);
+        assert_eq!(resolve(&["library", "api", "hidden_value", "answer"]), ResolutionState::Unresolved);
+        assert!(matches!(resolve(&["library", "api", "hidden_value"]),
+            ResolutionState::Inaccessible(_) | ResolutionState::Unresolved),
+            "the private value alias must not become an exported value");
+    }
+}
+
+#[test]
 fn interface_index_and_reference_index_share_one_stable_definition_identity() {
     let source = "pub fn answer() { () }";
     let package = PackageKey("resolution@0.1.0".into());

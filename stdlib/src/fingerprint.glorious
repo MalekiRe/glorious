@@ -1,0 +1,57 @@
+pub mod fingerprint {
+    use crate::*;
+    pub struct Digest256([u8;32]);
+    pub struct Blake3 { private bytes: Vec<u8> }
+    pub struct FingerprintWriter { private hash: Blake3 }
+    impl Digest256 {
+        pub fn from_bytes(bytes: [u8;32]) -> Self { Digest256(bytes) }
+        pub fn as_bytes<'a>(value: &'a Self) -> Slice<'a,u8> { array_as_slice(&value.0) }
+        pub fn to_hex(value: &Self) -> String { hex_encode(Self::as_bytes(value)) }
+        pub fn parse_hex(value: Str) -> Result<Self,HexError> {
+            handle Str::len(value) != 64 {
+                true => Result::Err(HexError { offset: Str::len(value), kind: HexErrorKind::IncorrectLength }),
+                false => handle hex_decode(value) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(bytes) => handle array_try_from_vec(bytes) { Result::Ok(array) => Result::Ok(Digest256(array)), Result::Err(_) => crate::__g1_abort() },
+                },
+            }
+        }
+    }
+    pub fn blake3(bytes: Slice<u8>) -> Digest256 {
+        handle array_try_from_vec(crate::blake3(bytes)) { Result::Ok(array) => Digest256(array), Result::Err(_) => crate::__g1_abort() }
+    }
+    impl Blake3 {
+        pub fn new() -> Self { Blake3 { bytes: Vec::new() } }
+        pub fn update(value: &mut Self, bytes: Slice<u8>) { Vec::extend_from_slice(&mut value.bytes, bytes) }
+        pub fn finish(value: Self) -> Digest256 { blake3(Vec::as_slice(&value.bytes)) }
+    }
+    fn write_word(value: &mut Blake3, word: u64, width: usize, index: usize) {
+        handle index == width {
+            true => (),
+            false => {
+                Vec::push(&mut value.bytes, as<u8>(bit_shr(word, as<u32>(index * 8))));
+                tail write_word(value, word, width, index + 1)
+            },
+        }
+    }
+    impl FingerprintWriter {
+        pub fn new(domain: Str, schema: u32) -> Self {
+            let mut hash = Blake3::new();
+            Blake3::update(&mut hash, b"GLORIOUS-FP\x00");
+            write_word(&mut hash, as<u64>(schema), 4, 0);
+            write_word(&mut hash, as<u64>(Str::len(domain)), 8, 0);
+            Blake3::update(&mut hash, Str::as_bytes(domain));
+            FingerprintWriter { hash: hash }
+        }
+        pub fn tag(value: &mut Self, tag: u32) { write_word(&mut value.hash, as<u64>(tag), 4, 0) }
+        pub fn u32(value: &mut Self, input: u32) { write_word(&mut value.hash, as<u64>(input), 4, 0) }
+        pub fn u64(value: &mut Self, input: u64) { write_word(&mut value.hash, input, 8, 0) }
+        pub fn bytes(value: &mut Self, bytes: Slice<u8>) {
+            write_word(&mut value.hash, as<u64>(Slice::len(&bytes)), 8, 0);
+            Blake3::update(&mut value.hash, bytes)
+        }
+        pub fn text(value: &mut Self, text: Str) { Self::bytes(value, Str::as_bytes(text)) }
+        pub fn digest(value: &mut Self, digest: &Digest256) { Blake3::update(&mut value.hash, Digest256::as_bytes(digest)) }
+        pub fn finish(value: Self) -> Digest256 { Blake3::finish(value.hash) }
+    }
+}

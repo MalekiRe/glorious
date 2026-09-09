@@ -8,7 +8,7 @@
 use crate::{
     fixity::FixityTable,
     header::{
-        EffectRowHeader, HeaderGenericArgument, HeaderStructuralConst, HeaderStructuralU32Expr,
+        EffectRowHeader, HeaderGenericArgument, HeaderStructuralConst, HeaderIntegerExpr,
         HeaderType,
     },
     quantity::Quantity,
@@ -30,9 +30,8 @@ pub enum PatternKind {
     Binding(String),
     Literal(String),
     Tuple(Vec<PatternId>),
-    /// Exact-length structural array pattern. Array length is a runtime
-    /// property, so this is always refutable even when every element is `_`.
-    Array(Vec<PatternId>),
+    /// Sparse fixed-array remainder: the optional index separates prefix and suffix.
+    Array { elements: Vec<PatternId>, rest: Option<u32> },
     Record {
         path: Vec<String>,
         arguments: Vec<HeaderGenericArgument>,
@@ -140,7 +139,18 @@ pub enum ExprKind {
     },
     Let {
         name: String,
+        mutable: bool,
+        annotation: Option<HeaderType>,
         value: ExprId,
+    },
+    /// A checked irrefutable binding owns the lexical suffix of its block.
+    /// The parser attaches that suffix after reading the complete block.
+    PatternLet {
+        pattern: PatternId,
+        mutable: bool,
+        annotation: Option<HeaderType>,
+        value: ExprId,
+        body: Option<ExprId>,
     },
     /// A lexical, owner-scoped nonlocal destination. Its identity is minted
     /// during Core elaboration. Compact `@name: Type { ... }` binders retain
@@ -167,6 +177,8 @@ pub enum ExprKind {
         callee: ExprId,
         arguments: Vec<ExprId>,
     },
+    /// A mandatory activation transfer, never an optional call optimization.
+    TailCall { call: ExprId },
     Field {
         base: ExprId,
         name: String,
@@ -342,6 +354,23 @@ impl Parser<'_> {
             start: self.lexed.tokens[open].span.start,
             end: self.lexed.tokens[close].span.end,
         };
+        // A destructuring binding introduces names in the rest of this block,
+        // not in its initializer or in a sibling/outer block. Freeze the
+        // lexical continuation explicitly so Core can reuse checked pattern
+        // ownership transfer without synthesizing collision-prone local names.
+        let mut suffix = Vec::new();
+        for expression in expressions.into_iter().rev() {
+            if matches!(self.expression(expression).kind, ExprKind::PatternLet { .. }) {
+                suffix.reverse();
+                let body = self.alloc(ExprKind::Block(std::mem::take(&mut suffix)), span);
+                if let ExprKind::PatternLet { body: continuation, .. } = &mut self.expressions[expression.0 as usize].kind {
+                    *continuation = Some(body);
+                }
+            }
+            suffix.push(expression);
+        }
+        suffix.reverse();
+        let expressions = suffix;
         Some(self.alloc(
             if contextual {
                 ExprKind::ContextualBlock(expressions)
@@ -435,6 +464,21 @@ impl Parser<'_> {
     }
 
     fn parse_prefix(&mut self) -> Option<ExprId> {
+        if self.word() == Some("tail")
+            && (self.tokens.get(self.position + 1).is_some_and(|index|
+                self.lexed.tokens[*index].kind == TokenKind::Identifier)
+                || self.peek_punctuation(1, '('))
+        {
+            let start = self.advance()?;
+            let call = self.parse_prefix()?;
+            if !matches!(self.expression(call).kind, ExprKind::Call { .. }) {
+                self.error_current("G4040", "`tail` requires a callable invocation");
+            }
+            return Some(self.alloc(
+                ExprKind::TailCall { call },
+                join(self.lexed.tokens[start].span, self.expression(call).span),
+            ));
+        }
         if self.word() == Some("unsafe") {
             let start = self.advance()?;
             let block = self.parse_block(false)?;
@@ -489,7 +533,7 @@ impl Parser<'_> {
                 ExprKind::LabelValue { name },
                 join(
                     self.lexed.tokens[start].span,
-                    self.lexed.tokens[self.position - 1].span,
+                    self.lexed.tokens[self.tokens[self.position - 1]].span,
                 ),
             ));
         }
@@ -548,6 +592,17 @@ impl Parser<'_> {
                 ExprKind::Move(value),
                 join(self.lexed.tokens[start].span, self.expression(value).span),
             ));
+        }
+        // The lexer preserves maximal operator runs. Built-in dereference
+        // followed immediately by borrow is still two prefix operations.
+        if self.at_operator("*&") {
+            let start = self.advance()?;
+            let unique = self.word() == Some("mut");
+            if unique { self.position += 1; }
+            let value = self.parse_prefix().unwrap_or_else(|| self.recover_expression());
+            let span = join(self.lexed.tokens[start].span, self.expression(value).span);
+            let borrowed = self.alloc(ExprKind::Borrow { unique, value }, span);
+            return Some(self.alloc(ExprKind::Deref(borrowed), span));
         }
         if self.at_operator("&") {
             let start = self.advance()?;
@@ -611,12 +666,31 @@ impl Parser<'_> {
             } else if self.at_punctuation('.') {
                 let start = self.expression(value).span;
                 self.position += 1;
-                // Tuple and enum payload projections use their canonical
+                // Tuple and proven aggregate projections use their canonical
                 // positional spelling (`value.0`).  The scanner correctly
                 // classifies that segment as an integer, while named record
                 // projections remain identifiers; preserve both spellings in
                 // one Field syntax node for Core to resolve by the base type.
                 let name = match self.current() {
+                    Some(index) if self.lexed.tokens[index].kind == TokenKind::Float => {
+                        // Maximal-munch lexing sees `pair.0.1` as a dot and
+                        // one `0.1` token. In projection position only, split
+                        // two decimal indices; exponents remain invalid fields.
+                        let text = self.text(index).to_owned();
+                        let Some((first, second)) = text.split_once('.').filter(|(first, second)|
+                            !first.is_empty() && !second.is_empty()
+                            && first.bytes().all(|byte| byte.is_ascii_digit())
+                            && second.bytes().all(|byte| byte.is_ascii_digit()))
+                        else {
+                            self.error_current("G4005", "expected field name or positional index");
+                            return None;
+                        };
+                        let mut first_span = self.lexed.tokens[index].span;
+                        first_span.end = first_span.start + first.len() as u32;
+                        value = self.alloc(ExprKind::Field { base: value, name: first.to_owned() }, join(start, first_span));
+                        self.position += 1;
+                        second.to_owned()
+                    }
                     Some(index)
                         if matches!(
                             self.lexed.tokens[index].kind,
@@ -991,7 +1065,7 @@ impl Parser<'_> {
                 ));
             } else if self.word().is_some_and(|name| name.starts_with('\'')) {
                 arguments.push(HeaderGenericArgument::Lifetime(self.expect_identifier()?));
-            } else if self.at_punctuation('[') {
+            } else if self.at_punctuation('[') && !self.fixed_array_type_ahead() {
                 arguments.push(HeaderGenericArgument::Quantity(
                     self.closure_structural_quantity_argument()?,
                 ));
@@ -1047,6 +1121,21 @@ impl Parser<'_> {
         }
         false
     }
+    fn fixed_array_type_ahead(&self) -> bool {
+        let mut depth = 0;
+        for &index in &self.tokens[self.position..] {
+            match self.lexed.tokens[index].kind {
+                TokenKind::Punctuation('[' | '(' | '{') => depth += 1,
+                TokenKind::Punctuation(']' | ')' | '}') => {
+                    depth -= 1;
+                    if depth == 0 { return false; }
+                }
+                TokenKind::Punctuation(';') if depth == 1 => return true,
+                _ => {}
+            }
+        }
+        false
+    }
 
     /// Body applications retain the same symbolic `u32` language as
     /// declaration headers.  In particular, a direct call such as
@@ -1054,7 +1143,7 @@ impl Parser<'_> {
     /// merely because its target generic kind is only known during Core
     /// elaboration.
     fn starts_structural_u32_argument(&self) -> bool {
-        self.current().is_some_and(|index| {
+        self.at_operator("-") || self.current().is_some_and(|index| {
             self.lexed.tokens[index].kind == TokenKind::Integer
                 || (self.lexed.tokens[index].kind == TokenKind::Punctuation('(')
                     && self.parenthesized_structural_u32_ahead())
@@ -1107,9 +1196,9 @@ impl Parser<'_> {
     ) -> Option<HeaderGenericArgument> {
         let expression = self.closure_structural_u32_expression(code)?;
         Some(match expression {
-            HeaderStructuralU32Expr::Literal(value) => HeaderGenericArgument::U32(value),
+            HeaderIntegerExpr::Literal(value) => HeaderGenericArgument::Integer(value),
             expression => HeaderGenericArgument::StructuralConst(
-                HeaderStructuralConst::U32Expression(expression),
+                HeaderStructuralConst::IntegerExpression(expression),
             ),
         })
     }
@@ -1117,7 +1206,7 @@ impl Parser<'_> {
     fn closure_structural_u32_expression(
         &mut self,
         code: &'static str,
-    ) -> Option<HeaderStructuralU32Expr> {
+    ) -> Option<HeaderIntegerExpr> {
         let mut value = self.closure_structural_u32_product(code)?;
         while let Some(operator) = self
             .at_operator("+")
@@ -1127,8 +1216,8 @@ impl Parser<'_> {
             self.position += 1;
             let right = self.closure_structural_u32_product(code)?;
             value = match operator {
-                '+' => HeaderStructuralU32Expr::Add(Box::new(value), Box::new(right)),
-                '-' => HeaderStructuralU32Expr::Sub(Box::new(value), Box::new(right)),
+                '+' => HeaderIntegerExpr::Add(Box::new(value), Box::new(right)),
+                '-' => HeaderIntegerExpr::Sub(Box::new(value), Box::new(right)),
                 _ => unreachable!("only additive structural operators are accepted"),
             };
         }
@@ -1138,7 +1227,7 @@ impl Parser<'_> {
     fn closure_structural_u32_product(
         &mut self,
         code: &'static str,
-    ) -> Option<HeaderStructuralU32Expr> {
+    ) -> Option<HeaderIntegerExpr> {
         let mut value = self.closure_structural_u32_primary(code)?;
         while let Some(operator) = self
             .at_operator("*")
@@ -1149,9 +1238,9 @@ impl Parser<'_> {
             self.position += 1;
             let right = self.closure_structural_u32_primary(code)?;
             value = match operator {
-                '*' => HeaderStructuralU32Expr::Mul(Box::new(value), Box::new(right)),
-                '/' => HeaderStructuralU32Expr::Div(Box::new(value), Box::new(right)),
-                '%' => HeaderStructuralU32Expr::Rem(Box::new(value), Box::new(right)),
+                '*' => HeaderIntegerExpr::Mul(Box::new(value), Box::new(right)),
+                '/' => HeaderIntegerExpr::Div(Box::new(value), Box::new(right)),
+                '%' => HeaderIntegerExpr::Rem(Box::new(value), Box::new(right)),
                 _ => unreachable!("only multiplicative structural operators are accepted"),
             };
         }
@@ -1161,7 +1250,12 @@ impl Parser<'_> {
     fn closure_structural_u32_primary(
         &mut self,
         code: &'static str,
-    ) -> Option<HeaderStructuralU32Expr> {
+    ) -> Option<HeaderIntegerExpr> {
+        if self.at_operator("-") {
+            self.position += 1;
+            return self.closure_structural_u32_primary(code)
+                .map(|value| HeaderIntegerExpr::Neg(Box::new(value)));
+        }
         if self.at_punctuation('(') {
             self.position += 1;
             let value = self.closure_structural_u32_expression(code)?;
@@ -1174,20 +1268,14 @@ impl Parser<'_> {
         }
         let index = self.current()?;
         if self.lexed.tokens[index].kind == TokenKind::Integer {
-            let value = match self.text(index).parse::<u32>() {
-                Ok(value) => value,
-                Err(_) => {
-                    self.error_current(code, "structural u32 generic argument is out of range");
-                    return None;
-                }
-            };
+            let value = self.text(index).to_owned();
             self.position += 1;
-            return Some(HeaderStructuralU32Expr::Literal(value));
+            return Some(HeaderIntegerExpr::Literal(value));
         }
         if self.lexed.tokens[index].kind == TokenKind::Identifier {
             let name = self.text(index).to_owned();
             self.position += 1;
-            return Some(HeaderStructuralU32Expr::Param(name));
+            return Some(HeaderIntegerExpr::Param(name));
         }
         self.error_current(code, "expected a structural u32 generic argument");
         None
@@ -1239,6 +1327,12 @@ impl Parser<'_> {
                 self.position += 1;
                 Some(self.alloc(ExprKind::Literal(self.text(index).to_owned()), token.span))
             }
+            TokenKind::Identifier if self.text(index) == "fn" => {
+                self.position += 1;
+                let value = self.parse_typed_closure(true)?;
+                self.expressions[value.0 as usize].span.start = token.span.start;
+                Some(value)
+            }
             TokenKind::Identifier => {
                 self.position += 1;
                 let mut path = vec![self.text(index).to_owned()];
@@ -1288,7 +1382,7 @@ impl Parser<'_> {
                 self.parse_compact_closure()
             }
             TokenKind::Punctuation('{') => self.parse_block(true),
-            TokenKind::Punctuation('(') if self.typed_closure_ahead() => self.parse_typed_closure(),
+            TokenKind::Punctuation('(') if self.typed_closure_ahead() => self.parse_typed_closure(false),
             TokenKind::Punctuation('(') => self.parse_group_or_tuple(),
             TokenKind::Punctuation('[') => self.parse_array(),
             _ => {
@@ -1469,7 +1563,7 @@ impl Parser<'_> {
                 .is_some_and(|token| self.text(*token) == "->")
     }
 
-    fn parse_typed_closure(&mut self) -> Option<ExprId> {
+    fn parse_typed_closure(&mut self, canonical: bool) -> Option<ExprId> {
         let open = self.expect_punctuation('(')?;
         let mut parameters = vec![];
         while !self.at_punctuation(')') && self.current().is_some() {
@@ -1496,13 +1590,17 @@ impl Parser<'_> {
             }
             self.position += 1;
         }
-        if self.expect_punctuation(')').is_none() || !self.at_operator("->") {
+        self.expect_punctuation(')')?;
+        let has_arrow = self.at_operator("->");
+        if !canonical && !has_arrow {
             self.error_current("G4008", "expected `->` after typed closure parameters");
             return None;
         }
-        self.position += 1;
-        let result = if !self.at_punctuation('{') && !self.at_operator("/") {
+        if has_arrow { self.position += 1; }
+        let result = if has_arrow && (canonical || (!self.at_punctuation('{') && !self.at_operator("/"))) {
             Some(self.closure_type()?)
+        } else if canonical {
+            Some(HeaderType::Tuple(vec![]))
         } else {
             None
         };
@@ -1510,29 +1608,7 @@ impl Parser<'_> {
         if self.at_operator("/") {
             self.position += 1;
             if self.at_punctuation('{') {
-                self.position += 1;
-                while !self.at_punctuation('}') && self.current().is_some() {
-                    if self.at_operator("|") {
-                        self.position += 1;
-                        effects.tail = Some(self.expect_identifier()?);
-                        break;
-                    }
-                    effects.effects.push(self.closure_type()?);
-                    if self.at_operator("|") {
-                        continue;
-                    }
-                    if !self.at_punctuation(',') {
-                        if !self.at_punctuation('}') {
-                            self.error_current(
-                                "G4017",
-                                "expected `,` between typed closure effect-row members",
-                            );
-                        }
-                        break;
-                    }
-                    self.position += 1;
-                }
-                self.expect_punctuation('}')?;
+                effects = self.closure_effect_row_literal("G4017")?;
             } else {
                 effects.effects.push(self.closure_type()?);
             }
@@ -1724,6 +1800,18 @@ impl Parser<'_> {
             }
             return Some(HeaderType::Tuple(values));
         }
+        if self.at_punctuation('[') {
+            self.position += 1;
+            let element = self.closure_type()?;
+            self.expect_punctuation(';')?;
+            let length = if self.at_operator("<") {
+                HeaderStructuralConst::Projection(self.closure_type()?)
+            } else {
+                HeaderStructuralConst::IntegerExpression(self.closure_structural_u32_expression("G4030")?)
+            };
+            self.expect_punctuation(']')?;
+            return Some(HeaderType::FixedArray { element: Box::new(element), length: Box::new(length) });
+        }
         let mut path = vec![self.expect_identifier()?];
         while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
             self.position += 2;
@@ -1755,7 +1843,7 @@ impl Parser<'_> {
         }
         Some(EffectRowHeader {
             effects: vec![self.closure_type()?],
-            tail: None,
+            tails: Default::default(),
         })
     }
 
@@ -1766,14 +1854,26 @@ impl Parser<'_> {
     fn closure_effect_row_literal(&mut self, code: &'static str) -> Option<EffectRowHeader> {
         self.expect_punctuation('{')?;
         let mut effects = vec![];
-        let mut tail = None;
+        let mut tails = vec![];
+        let mut in_union = false;
         while !self.at_punctuation('}') && self.current().is_some() {
             if self.at_operator("|") {
                 self.position += 1;
-                tail = Some(self.expect_identifier()?);
-                break;
+                if in_union {
+                    self.error_current(code, "only one `|` is permitted in an effect row");
+                    return None;
+                }
+                in_union = true;
+                if self.at_punctuation('}') {
+                    self.error_current(code, "expected effect-row term after `|`");
+                    return None;
+                }
             }
-            effects.push(self.closure_type()?);
+            if in_union && !self.at_operator("<") {
+                tails.push(self.expect_identifier()?);
+            } else {
+                effects.push(self.closure_type()?);
+            }
             if self.at_operator("|") {
                 continue;
             }
@@ -1790,7 +1890,9 @@ impl Parser<'_> {
             self.error_current(code, "expected `}` after effect-row argument");
             return None;
         }
-        Some(EffectRowHeader { effects, tail })
+        tails.sort();
+        tails.dedup();
+        Some(EffectRowHeader { effects, tails })
     }
 
     fn closure_structural_quantity_argument(&mut self) -> Option<Quantity> {
@@ -1897,7 +1999,9 @@ impl Parser<'_> {
             self.error_current("G4009", "expected a non-negative structural integer");
             return 0;
         }
-        let value = self.text(index).parse().unwrap_or_else(|_| {
+        let value = crate::types::integer_const::IntegerConst::from_literal(
+            crate::types::ScalarType::U64, self.text(index), false, 64,
+        ).map(|value| value.magnitude() as u64).unwrap_or_else(|_| {
             self.error_current("G4009", "structural integer is out of range");
             0
         });
@@ -1926,7 +2030,15 @@ impl Parser<'_> {
 
     fn parse_let(&mut self) -> Option<ExprId> {
         let start = self.advance()?;
-        let name = self.expect_identifier()?;
+        let mutable = self.word() == Some("mut");
+        if mutable { self.position += 1; }
+        let pattern = self.parse_pattern()?;
+        let annotation = if self.at_punctuation(':') {
+            self.position += 1;
+            Some(self.closure_type()?)
+        } else {
+            None
+        };
         if !self.at_operator("=") {
             self.error_current("G4003", "expected `=` in let binding");
             return None;
@@ -1935,8 +2047,12 @@ impl Parser<'_> {
         let value = self
             .parse_expression()
             .unwrap_or_else(|| self.recover_expression());
+        let kind = match self.patterns[pattern.0 as usize].kind.clone() {
+            PatternKind::Binding(name) => ExprKind::Let { name, mutable, annotation, value },
+            _ => ExprKind::PatternLet { pattern, mutable, annotation, value, body: None },
+        };
         Some(self.alloc(
-            ExprKind::Let { name, value },
+            kind,
             join(self.lexed.tokens[start].span, self.expression(value).span),
         ))
     }
@@ -1947,6 +2063,20 @@ impl Parser<'_> {
         let start = self.current()?;
         let token = &self.lexed.tokens[start];
         match token.kind {
+            TokenKind::Operator if self.text(start) == "-" => {
+                let start_span = token.span;
+                self.position += 1;
+                let literal = self.current()?;
+                if !matches!(self.lexed.tokens[literal].kind, TokenKind::Integer | TokenKind::Float) {
+                    self.error_current("G4018", "pattern negation requires a numeric literal");
+                    return None;
+                }
+                self.position += 1;
+                Some(self.alloc_pattern(
+                    PatternKind::Literal(format!("-{}", self.text(literal))),
+                    join(start_span, self.lexed.tokens[literal].span),
+                ))
+            }
             TokenKind::Integer
             | TokenKind::Float
             | TokenKind::String
@@ -1977,8 +2107,17 @@ impl Parser<'_> {
             TokenKind::Punctuation('[') => {
                 self.position += 1;
                 let mut values = vec![];
+                let mut rest = None;
                 while !self.at_punctuation(']') && self.current().is_some() {
-                    values.push(self.parse_pattern()?);
+                    if self.at_punctuation('.') && self.peek_punctuation(1, '.') {
+                        if rest.replace(values.len() as u32).is_some() {
+                            self.error_current("G4018", "array patterns permit only one remainder");
+                            return None;
+                        }
+                        self.position += 2;
+                    } else {
+                        values.push(self.parse_pattern()?);
+                    }
                     if !self.at_punctuation(',') {
                         break;
                     }
@@ -1986,7 +2125,7 @@ impl Parser<'_> {
                 }
                 let close = self.expect_punctuation(']')?;
                 Some(self.alloc_pattern(
-                    PatternKind::Array(values),
+                    PatternKind::Array { elements: values, rest },
                     join(token.span, self.lexed.tokens[close].span),
                 ))
             }

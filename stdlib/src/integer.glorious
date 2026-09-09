@@ -1,0 +1,2437 @@
+// Concrete integer families (specification §11.2). Generated mechanical
+// repetition is checked in as Glorious source; execution uses no code generator.
+// Every arithmetic failure is checked in source before a trapping operation.
+pub enum ConversionError { OutOfRange, NonFinite, Fractional, PrecisionLoss }
+pub enum RadixError { TooSmall, TooLarge }
+pub enum IntParseErrorKind { Empty, InvalidDigit, InvalidSeparator, InvalidSign, Overflow, InvalidRadix }
+pub struct IntParseError { pub offset: usize, pub kind: IntParseErrorKind }
+
+fn num_u8_magnitude(value: u8) -> u8 { value }
+impl u8 {
+    pub fn min_value() -> Self { 0 }
+    pub fn max_value() -> Self { 255 }
+    pub fn bits() -> u32 { 8 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle wrapped < left { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle left < right { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_u8_magnitude(left);
+        let b = num_u8_magnitude(right);
+        let limit: u8 = 255;
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == 0 { true => Some(0), false => None } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 8 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 8 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 8) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 8) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => 255 }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => 0 }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => 255 }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_u8_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_u8_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => 255,
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        num_u8_next_power(value, 1)
+    }
+    pub fn count_ones(value: Self) -> u32 { num_u8_ones(as<u8>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 8 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_u8_leading(as<u8>(value), 8) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_u8_trailing(as<u8>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 8;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u8>(value), count), bit_shr(as<u8>(value), 8 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 8 - count % 8) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_u8_reverse(as<u8>(value), 0, 8)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_u8_swap_bytes(as<u8>(value), 0, 1)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u8 {
+        handle left >= right {
+            true => wrapping_sub(as<u8>(left), as<u8>(right)),
+            false => wrapping_sub(as<u8>(right), as<u8>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_u8_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => Some(quotient),
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => Some(remainder),
+        }
+    }
+}
+fn num_u8_checked_pow(value: u8, exponent: u32, result: u8) -> Option<u8> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => u8::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle u8::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_u8_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_u8_wrapping_pow(value: u8, exponent: u32, result: u8) -> u8 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_u8_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_u8_next_power(value: u8, power: u8) -> Option<u8> {
+    handle power >= value {
+        true => Some(power),
+        false => handle u8::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_u8_next_power(value, next),
+        },
+    }
+}
+fn num_u8_ones(value: u8, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u8_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_u8_leading(value: u8, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u8_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_u8_trailing(value: u8, count: u32) -> u32 {
+    handle count == 8 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_u8_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_u8_reverse(value: u8, result: u8, count: u32) -> u8 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u8_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_u8_swap_bytes(value: u8, result: u8, count: u32) -> u8 {
+    handle count == 0 {
+        true => result,
+        false => value,
+    }
+}
+fn num_u8_ilog(value: u8, base: u8, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_u8_ilog(value / base, base, count + 1) }
+}
+
+fn num_u16_magnitude(value: u16) -> u16 { value }
+impl u16 {
+    pub fn min_value() -> Self { 0 }
+    pub fn max_value() -> Self { 65535 }
+    pub fn bits() -> u32 { 16 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle wrapped < left { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle left < right { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_u16_magnitude(left);
+        let b = num_u16_magnitude(right);
+        let limit: u16 = 65535;
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == 0 { true => Some(0), false => None } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 16 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 16 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 16) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 16) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => 65535 }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => 0 }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => 65535 }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_u16_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_u16_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => 65535,
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        num_u16_next_power(value, 1)
+    }
+    pub fn count_ones(value: Self) -> u32 { num_u16_ones(as<u16>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 16 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_u16_leading(as<u16>(value), 16) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_u16_trailing(as<u16>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 16;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u16>(value), count), bit_shr(as<u16>(value), 16 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 16 - count % 16) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_u16_reverse(as<u16>(value), 0, 16)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_u16_swap_bytes(as<u16>(value), 0, 2)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u16 {
+        handle left >= right {
+            true => wrapping_sub(as<u16>(left), as<u16>(right)),
+            false => wrapping_sub(as<u16>(right), as<u16>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_u16_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => Some(quotient),
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => Some(remainder),
+        }
+    }
+}
+fn num_u16_checked_pow(value: u16, exponent: u32, result: u16) -> Option<u16> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => u16::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle u16::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_u16_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_u16_wrapping_pow(value: u16, exponent: u32, result: u16) -> u16 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_u16_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_u16_next_power(value: u16, power: u16) -> Option<u16> {
+    handle power >= value {
+        true => Some(power),
+        false => handle u16::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_u16_next_power(value, next),
+        },
+    }
+}
+fn num_u16_ones(value: u16, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u16_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_u16_leading(value: u16, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u16_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_u16_trailing(value: u16, count: u32) -> u32 {
+    handle count == 16 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_u16_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_u16_reverse(value: u16, result: u16, count: u32) -> u16 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u16_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_u16_swap_bytes(value: u16, result: u16, count: u32) -> u16 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u16_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_u16_ilog(value: u16, base: u16, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_u16_ilog(value / base, base, count + 1) }
+}
+
+fn num_u32_magnitude(value: u32) -> u32 { value }
+impl u32 {
+    pub fn min_value() -> Self { 0 }
+    pub fn max_value() -> Self { 4294967295 }
+    pub fn bits() -> u32 { 32 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle wrapped < left { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle left < right { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_u32_magnitude(left);
+        let b = num_u32_magnitude(right);
+        let limit: u32 = 4294967295;
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == 0 { true => Some(0), false => None } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 32 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 32 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 32) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 32) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => 4294967295 }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => 0 }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => 4294967295 }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_u32_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_u32_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => 4294967295,
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        num_u32_next_power(value, 1)
+    }
+    pub fn count_ones(value: Self) -> u32 { num_u32_ones(as<u32>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 32 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_u32_leading(as<u32>(value), 32) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_u32_trailing(as<u32>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 32;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u32>(value), count), bit_shr(as<u32>(value), 32 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 32 - count % 32) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_u32_reverse(as<u32>(value), 0, 32)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_u32_swap_bytes(as<u32>(value), 0, 4)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u32 {
+        handle left >= right {
+            true => wrapping_sub(as<u32>(left), as<u32>(right)),
+            false => wrapping_sub(as<u32>(right), as<u32>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_u32_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => Some(quotient),
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => Some(remainder),
+        }
+    }
+}
+fn num_u32_checked_pow(value: u32, exponent: u32, result: u32) -> Option<u32> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => u32::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle u32::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_u32_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_u32_wrapping_pow(value: u32, exponent: u32, result: u32) -> u32 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_u32_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_u32_next_power(value: u32, power: u32) -> Option<u32> {
+    handle power >= value {
+        true => Some(power),
+        false => handle u32::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_u32_next_power(value, next),
+        },
+    }
+}
+fn num_u32_ones(value: u32, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u32_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_u32_leading(value: u32, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u32_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_u32_trailing(value: u32, count: u32) -> u32 {
+    handle count == 32 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_u32_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_u32_reverse(value: u32, result: u32, count: u32) -> u32 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u32_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_u32_swap_bytes(value: u32, result: u32, count: u32) -> u32 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u32_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_u32_ilog(value: u32, base: u32, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_u32_ilog(value / base, base, count + 1) }
+}
+
+fn num_u64_magnitude(value: u64) -> u64 { value }
+impl u64 {
+    pub fn min_value() -> Self { 0 }
+    pub fn max_value() -> Self { 18446744073709551615 }
+    pub fn bits() -> u32 { 64 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle wrapped < left { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle left < right { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_u64_magnitude(left);
+        let b = num_u64_magnitude(right);
+        let limit: u64 = 18446744073709551615;
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == 0 { true => Some(0), false => None } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 64) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 64) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => 18446744073709551615 }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => 0 }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => 18446744073709551615 }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_u64_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_u64_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => 18446744073709551615,
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        num_u64_next_power(value, 1)
+    }
+    pub fn count_ones(value: Self) -> u32 { num_u64_ones(as<u64>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 64 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_u64_leading(as<u64>(value), 64) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_u64_trailing(as<u64>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 64;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u64>(value), count), bit_shr(as<u64>(value), 64 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 64 - count % 64) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_u64_reverse(as<u64>(value), 0, 64)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_u64_swap_bytes(as<u64>(value), 0, 8)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u64 {
+        handle left >= right {
+            true => wrapping_sub(as<u64>(left), as<u64>(right)),
+            false => wrapping_sub(as<u64>(right), as<u64>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_u64_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => Some(quotient),
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => Some(remainder),
+        }
+    }
+}
+fn num_u64_checked_pow(value: u64, exponent: u32, result: u64) -> Option<u64> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => u64::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle u64::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_u64_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_u64_wrapping_pow(value: u64, exponent: u32, result: u64) -> u64 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_u64_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_u64_next_power(value: u64, power: u64) -> Option<u64> {
+    handle power >= value {
+        true => Some(power),
+        false => handle u64::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_u64_next_power(value, next),
+        },
+    }
+}
+fn num_u64_ones(value: u64, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u64_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_u64_leading(value: u64, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u64_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_u64_trailing(value: u64, count: u32) -> u32 {
+    handle count == 64 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_u64_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_u64_reverse(value: u64, result: u64, count: u32) -> u64 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u64_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_u64_swap_bytes(value: u64, result: u64, count: u32) -> u64 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u64_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_u64_ilog(value: u64, base: u64, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_u64_ilog(value / base, base, count + 1) }
+}
+
+fn num_u128_magnitude(value: u128) -> u128 { value }
+impl u128 {
+    pub fn min_value() -> Self { 0 }
+    pub fn max_value() -> Self { 340282366920938463463374607431768211455 }
+    pub fn bits() -> u32 { 128 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle wrapped < left { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle left < right { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_u128_magnitude(left);
+        let b = num_u128_magnitude(right);
+        let limit: u128 = 340282366920938463463374607431768211455;
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == 0 { true => Some(0), false => None } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 128 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 128 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 128) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 128) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => 340282366920938463463374607431768211455 }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => 0 }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => 340282366920938463463374607431768211455 }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_u128_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_u128_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => 340282366920938463463374607431768211455,
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        num_u128_next_power(value, 1)
+    }
+    pub fn count_ones(value: Self) -> u32 { num_u128_ones(as<u128>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 128 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_u128_leading(as<u128>(value), 128) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_u128_trailing(as<u128>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 128;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u128>(value), count), bit_shr(as<u128>(value), 128 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 128 - count % 128) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_u128_reverse(as<u128>(value), 0, 128)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_u128_swap_bytes(as<u128>(value), 0, 16)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u128 {
+        handle left >= right {
+            true => wrapping_sub(as<u128>(left), as<u128>(right)),
+            false => wrapping_sub(as<u128>(right), as<u128>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_u128_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => Some(quotient),
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => Some(remainder),
+        }
+    }
+}
+fn num_u128_checked_pow(value: u128, exponent: u32, result: u128) -> Option<u128> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => u128::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle u128::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_u128_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_u128_wrapping_pow(value: u128, exponent: u32, result: u128) -> u128 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_u128_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_u128_next_power(value: u128, power: u128) -> Option<u128> {
+    handle power >= value {
+        true => Some(power),
+        false => handle u128::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_u128_next_power(value, next),
+        },
+    }
+}
+fn num_u128_ones(value: u128, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u128_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_u128_leading(value: u128, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_u128_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_u128_trailing(value: u128, count: u32) -> u32 {
+    handle count == 128 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_u128_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_u128_reverse(value: u128, result: u128, count: u32) -> u128 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u128_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_u128_swap_bytes(value: u128, result: u128, count: u32) -> u128 {
+    handle count == 0 {
+        true => result,
+        false => tail num_u128_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_u128_ilog(value: u128, base: u128, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_u128_ilog(value / base, base, count + 1) }
+}
+
+fn num_usize_magnitude(value: usize) -> usize { value }
+impl usize {
+    pub fn min_value() -> Self { 0 }
+    pub fn max_value() -> Self { 18446744073709551615 }
+    pub fn bits() -> u32 { 64 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle wrapped < left { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle left < right { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_usize_magnitude(left);
+        let b = num_usize_magnitude(right);
+        let limit: usize = 18446744073709551615;
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle false { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == 0 { true => Some(0), false => None } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 64) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 64) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => 18446744073709551615 }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => 0 }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => 18446744073709551615 }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_usize_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_usize_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => 18446744073709551615,
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        num_usize_next_power(value, 1)
+    }
+    pub fn count_ones(value: Self) -> u32 { num_usize_ones(as<usize>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 64 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_usize_leading(as<usize>(value), 64) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_usize_trailing(as<usize>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 64;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<usize>(value), count), bit_shr(as<usize>(value), 64 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 64 - count % 64) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_usize_reverse(as<usize>(value), 0, 64)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_usize_swap_bytes(as<usize>(value), 0, 8)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> usize {
+        handle left >= right {
+            true => wrapping_sub(as<usize>(left), as<usize>(right)),
+            false => wrapping_sub(as<usize>(right), as<usize>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_usize_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => Some(quotient),
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => Some(remainder),
+        }
+    }
+}
+fn num_usize_checked_pow(value: usize, exponent: u32, result: usize) -> Option<usize> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => usize::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle usize::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_usize_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_usize_wrapping_pow(value: usize, exponent: u32, result: usize) -> usize {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_usize_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_usize_next_power(value: usize, power: usize) -> Option<usize> {
+    handle power >= value {
+        true => Some(power),
+        false => handle usize::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_usize_next_power(value, next),
+        },
+    }
+}
+fn num_usize_ones(value: usize, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_usize_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_usize_leading(value: usize, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_usize_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_usize_trailing(value: usize, count: u32) -> u32 {
+    handle count == 64 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_usize_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_usize_reverse(value: usize, result: usize, count: u32) -> usize {
+    handle count == 0 {
+        true => result,
+        false => tail num_usize_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_usize_swap_bytes(value: usize, result: usize, count: u32) -> usize {
+    handle count == 0 {
+        true => result,
+        false => tail num_usize_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_usize_ilog(value: usize, base: usize, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_usize_ilog(value / base, base, count + 1) }
+}
+
+fn num_i8_magnitude(value: i8) -> u8 { handle value < 0 { true => wrapping_sub(0, as<u8>(value)), false => as<u8>(value) } }
+impl i8 {
+    pub fn min_value() -> Self { -128 }
+    pub fn max_value() -> Self { 127 }
+    pub fn bits() -> u32 { 8 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle handle right > 0 { true => wrapped < left, false => wrapped > left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle handle right > 0 { true => wrapped > left, false => wrapped < left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_i8_magnitude(left);
+        let b = num_i8_magnitude(right);
+        let negative = Bool::xor(left < 0, right < 0);
+        let limit: u8 = handle negative { true => 128, false => 127 };
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -128 { true => right == -1, false => false } { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -128 { true => right == -1, false => false } { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == -128 { true => None, false => Some(0 - value) } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 8 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 8 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 8) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 8) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => -128, false => 127 } }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => 127, false => -128 } }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => handle Bool::xor(left < 0, right < 0) { true => -128, false => 127 } }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_i8_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_i8_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => handle value < 0 { true => handle exponent % 2 == 1 { true => -128, false => 127 }, false => 127 },
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        handle value < 0 { true => None, false => num_i8_next_power(value, 1) }
+    }
+    pub fn count_ones(value: Self) -> u32 { num_i8_ones(as<u8>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 8 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_i8_leading(as<u8>(value), 8) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_i8_trailing(as<u8>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 8;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u8>(value), count), bit_shr(as<u8>(value), 8 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 8 - count % 8) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_i8_reverse(as<u8>(value), 0, 8)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_i8_swap_bytes(as<u8>(value), 0, 1)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u8 {
+        handle left >= right {
+            true => wrapping_sub(as<u8>(left), as<u8>(right)),
+            false => wrapping_sub(as<u8>(right), as<u8>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_i8_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => handle left % right < 0 {
+                false => Some(quotient),
+                true => handle right > 0 { true => Some(quotient - 1), false => Some(quotient + 1) },
+            },
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => handle remainder < 0 {
+                false => Some(remainder),
+                true => handle right > 0 { true => Some(remainder + right), false => Some(remainder - right) },
+            },
+        }
+    }
+
+    pub fn unsigned_abs(value: Self) -> u8 { num_i8_magnitude(value) }
+    pub fn checked_abs(value: Self) -> Option<Self> {
+        handle value < 0 { true => Self::checked_neg(value), false => Some(value) }
+    }
+    pub fn wrapping_abs(value: Self) -> Self {
+        handle value < 0 { true => wrapping_sub(0, value), false => value }
+    }
+    pub fn saturating_abs(value: Self) -> Self {
+        handle Self::checked_abs(value) { Result::Ok(result) => result, Result::Err(_) => 127 }
+    }
+    pub fn signum(value: Self) -> Self { handle value < 0 { true => -1, false => handle value == 0 { true => 0, false => 1 } } }
+    pub fn is_negative(value: Self) -> Bool { value < 0 }
+    pub fn is_positive(value: Self) -> Bool { value > 0 }
+}
+fn num_i8_checked_pow(value: i8, exponent: u32, result: i8) -> Option<i8> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => i8::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle i8::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_i8_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_i8_wrapping_pow(value: i8, exponent: u32, result: i8) -> i8 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_i8_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_i8_next_power(value: i8, power: i8) -> Option<i8> {
+    handle power >= value {
+        true => Some(power),
+        false => handle i8::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_i8_next_power(value, next),
+        },
+    }
+}
+fn num_i8_ones(value: u8, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i8_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_i8_leading(value: u8, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i8_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_i8_trailing(value: u8, count: u32) -> u32 {
+    handle count == 8 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_i8_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_i8_reverse(value: u8, result: u8, count: u32) -> u8 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i8_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_i8_swap_bytes(value: u8, result: u8, count: u32) -> u8 {
+    handle count == 0 {
+        true => result,
+        false => value,
+    }
+}
+fn num_i8_ilog(value: i8, base: i8, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_i8_ilog(value / base, base, count + 1) }
+}
+
+fn num_i16_magnitude(value: i16) -> u16 { handle value < 0 { true => wrapping_sub(0, as<u16>(value)), false => as<u16>(value) } }
+impl i16 {
+    pub fn min_value() -> Self { -32768 }
+    pub fn max_value() -> Self { 32767 }
+    pub fn bits() -> u32 { 16 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle handle right > 0 { true => wrapped < left, false => wrapped > left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle handle right > 0 { true => wrapped > left, false => wrapped < left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_i16_magnitude(left);
+        let b = num_i16_magnitude(right);
+        let negative = Bool::xor(left < 0, right < 0);
+        let limit: u16 = handle negative { true => 32768, false => 32767 };
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -32768 { true => right == -1, false => false } { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -32768 { true => right == -1, false => false } { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == -32768 { true => None, false => Some(0 - value) } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 16 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 16 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 16) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 16) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => -32768, false => 32767 } }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => 32767, false => -32768 } }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => handle Bool::xor(left < 0, right < 0) { true => -32768, false => 32767 } }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_i16_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_i16_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => handle value < 0 { true => handle exponent % 2 == 1 { true => -32768, false => 32767 }, false => 32767 },
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        handle value < 0 { true => None, false => num_i16_next_power(value, 1) }
+    }
+    pub fn count_ones(value: Self) -> u32 { num_i16_ones(as<u16>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 16 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_i16_leading(as<u16>(value), 16) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_i16_trailing(as<u16>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 16;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u16>(value), count), bit_shr(as<u16>(value), 16 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 16 - count % 16) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_i16_reverse(as<u16>(value), 0, 16)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_i16_swap_bytes(as<u16>(value), 0, 2)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u16 {
+        handle left >= right {
+            true => wrapping_sub(as<u16>(left), as<u16>(right)),
+            false => wrapping_sub(as<u16>(right), as<u16>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_i16_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => handle left % right < 0 {
+                false => Some(quotient),
+                true => handle right > 0 { true => Some(quotient - 1), false => Some(quotient + 1) },
+            },
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => handle remainder < 0 {
+                false => Some(remainder),
+                true => handle right > 0 { true => Some(remainder + right), false => Some(remainder - right) },
+            },
+        }
+    }
+
+    pub fn unsigned_abs(value: Self) -> u16 { num_i16_magnitude(value) }
+    pub fn checked_abs(value: Self) -> Option<Self> {
+        handle value < 0 { true => Self::checked_neg(value), false => Some(value) }
+    }
+    pub fn wrapping_abs(value: Self) -> Self {
+        handle value < 0 { true => wrapping_sub(0, value), false => value }
+    }
+    pub fn saturating_abs(value: Self) -> Self {
+        handle Self::checked_abs(value) { Result::Ok(result) => result, Result::Err(_) => 32767 }
+    }
+    pub fn signum(value: Self) -> Self { handle value < 0 { true => -1, false => handle value == 0 { true => 0, false => 1 } } }
+    pub fn is_negative(value: Self) -> Bool { value < 0 }
+    pub fn is_positive(value: Self) -> Bool { value > 0 }
+}
+fn num_i16_checked_pow(value: i16, exponent: u32, result: i16) -> Option<i16> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => i16::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle i16::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_i16_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_i16_wrapping_pow(value: i16, exponent: u32, result: i16) -> i16 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_i16_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_i16_next_power(value: i16, power: i16) -> Option<i16> {
+    handle power >= value {
+        true => Some(power),
+        false => handle i16::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_i16_next_power(value, next),
+        },
+    }
+}
+fn num_i16_ones(value: u16, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i16_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_i16_leading(value: u16, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i16_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_i16_trailing(value: u16, count: u32) -> u32 {
+    handle count == 16 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_i16_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_i16_reverse(value: u16, result: u16, count: u32) -> u16 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i16_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_i16_swap_bytes(value: u16, result: u16, count: u32) -> u16 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i16_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_i16_ilog(value: i16, base: i16, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_i16_ilog(value / base, base, count + 1) }
+}
+
+fn num_i32_magnitude(value: i32) -> u32 { handle value < 0 { true => wrapping_sub(0, as<u32>(value)), false => as<u32>(value) } }
+impl i32 {
+    pub fn min_value() -> Self { -2147483648 }
+    pub fn max_value() -> Self { 2147483647 }
+    pub fn bits() -> u32 { 32 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle handle right > 0 { true => wrapped < left, false => wrapped > left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle handle right > 0 { true => wrapped > left, false => wrapped < left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_i32_magnitude(left);
+        let b = num_i32_magnitude(right);
+        let negative = Bool::xor(left < 0, right < 0);
+        let limit: u32 = handle negative { true => 2147483648, false => 2147483647 };
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -2147483648 { true => right == -1, false => false } { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -2147483648 { true => right == -1, false => false } { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == -2147483648 { true => None, false => Some(0 - value) } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 32 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 32 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 32) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 32) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => -2147483648, false => 2147483647 } }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => 2147483647, false => -2147483648 } }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => handle Bool::xor(left < 0, right < 0) { true => -2147483648, false => 2147483647 } }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_i32_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_i32_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => handle value < 0 { true => handle exponent % 2 == 1 { true => -2147483648, false => 2147483647 }, false => 2147483647 },
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        handle value < 0 { true => None, false => num_i32_next_power(value, 1) }
+    }
+    pub fn count_ones(value: Self) -> u32 { num_i32_ones(as<u32>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 32 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_i32_leading(as<u32>(value), 32) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_i32_trailing(as<u32>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 32;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u32>(value), count), bit_shr(as<u32>(value), 32 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 32 - count % 32) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_i32_reverse(as<u32>(value), 0, 32)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_i32_swap_bytes(as<u32>(value), 0, 4)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u32 {
+        handle left >= right {
+            true => wrapping_sub(as<u32>(left), as<u32>(right)),
+            false => wrapping_sub(as<u32>(right), as<u32>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_i32_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => handle left % right < 0 {
+                false => Some(quotient),
+                true => handle right > 0 { true => Some(quotient - 1), false => Some(quotient + 1) },
+            },
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => handle remainder < 0 {
+                false => Some(remainder),
+                true => handle right > 0 { true => Some(remainder + right), false => Some(remainder - right) },
+            },
+        }
+    }
+
+    pub fn unsigned_abs(value: Self) -> u32 { num_i32_magnitude(value) }
+    pub fn checked_abs(value: Self) -> Option<Self> {
+        handle value < 0 { true => Self::checked_neg(value), false => Some(value) }
+    }
+    pub fn wrapping_abs(value: Self) -> Self {
+        handle value < 0 { true => wrapping_sub(0, value), false => value }
+    }
+    pub fn saturating_abs(value: Self) -> Self {
+        handle Self::checked_abs(value) { Result::Ok(result) => result, Result::Err(_) => 2147483647 }
+    }
+    pub fn signum(value: Self) -> Self { handle value < 0 { true => -1, false => handle value == 0 { true => 0, false => 1 } } }
+    pub fn is_negative(value: Self) -> Bool { value < 0 }
+    pub fn is_positive(value: Self) -> Bool { value > 0 }
+}
+fn num_i32_checked_pow(value: i32, exponent: u32, result: i32) -> Option<i32> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => i32::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle i32::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_i32_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_i32_wrapping_pow(value: i32, exponent: u32, result: i32) -> i32 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_i32_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_i32_next_power(value: i32, power: i32) -> Option<i32> {
+    handle power >= value {
+        true => Some(power),
+        false => handle i32::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_i32_next_power(value, next),
+        },
+    }
+}
+fn num_i32_ones(value: u32, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i32_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_i32_leading(value: u32, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i32_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_i32_trailing(value: u32, count: u32) -> u32 {
+    handle count == 32 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_i32_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_i32_reverse(value: u32, result: u32, count: u32) -> u32 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i32_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_i32_swap_bytes(value: u32, result: u32, count: u32) -> u32 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i32_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_i32_ilog(value: i32, base: i32, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_i32_ilog(value / base, base, count + 1) }
+}
+
+fn num_i64_magnitude(value: i64) -> u64 { handle value < 0 { true => wrapping_sub(0, as<u64>(value)), false => as<u64>(value) } }
+impl i64 {
+    pub fn min_value() -> Self { -9223372036854775808 }
+    pub fn max_value() -> Self { 9223372036854775807 }
+    pub fn bits() -> u32 { 64 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle handle right > 0 { true => wrapped < left, false => wrapped > left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle handle right > 0 { true => wrapped > left, false => wrapped < left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_i64_magnitude(left);
+        let b = num_i64_magnitude(right);
+        let negative = Bool::xor(left < 0, right < 0);
+        let limit: u64 = handle negative { true => 9223372036854775808, false => 9223372036854775807 };
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -9223372036854775808 { true => right == -1, false => false } { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -9223372036854775808 { true => right == -1, false => false } { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == -9223372036854775808 { true => None, false => Some(0 - value) } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 64) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 64) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => -9223372036854775808, false => 9223372036854775807 } }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => 9223372036854775807, false => -9223372036854775808 } }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => handle Bool::xor(left < 0, right < 0) { true => -9223372036854775808, false => 9223372036854775807 } }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_i64_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_i64_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => handle value < 0 { true => handle exponent % 2 == 1 { true => -9223372036854775808, false => 9223372036854775807 }, false => 9223372036854775807 },
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        handle value < 0 { true => None, false => num_i64_next_power(value, 1) }
+    }
+    pub fn count_ones(value: Self) -> u32 { num_i64_ones(as<u64>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 64 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_i64_leading(as<u64>(value), 64) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_i64_trailing(as<u64>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 64;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u64>(value), count), bit_shr(as<u64>(value), 64 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 64 - count % 64) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_i64_reverse(as<u64>(value), 0, 64)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_i64_swap_bytes(as<u64>(value), 0, 8)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u64 {
+        handle left >= right {
+            true => wrapping_sub(as<u64>(left), as<u64>(right)),
+            false => wrapping_sub(as<u64>(right), as<u64>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_i64_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => handle left % right < 0 {
+                false => Some(quotient),
+                true => handle right > 0 { true => Some(quotient - 1), false => Some(quotient + 1) },
+            },
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => handle remainder < 0 {
+                false => Some(remainder),
+                true => handle right > 0 { true => Some(remainder + right), false => Some(remainder - right) },
+            },
+        }
+    }
+
+    pub fn unsigned_abs(value: Self) -> u64 { num_i64_magnitude(value) }
+    pub fn checked_abs(value: Self) -> Option<Self> {
+        handle value < 0 { true => Self::checked_neg(value), false => Some(value) }
+    }
+    pub fn wrapping_abs(value: Self) -> Self {
+        handle value < 0 { true => wrapping_sub(0, value), false => value }
+    }
+    pub fn saturating_abs(value: Self) -> Self {
+        handle Self::checked_abs(value) { Result::Ok(result) => result, Result::Err(_) => 9223372036854775807 }
+    }
+    pub fn signum(value: Self) -> Self { handle value < 0 { true => -1, false => handle value == 0 { true => 0, false => 1 } } }
+    pub fn is_negative(value: Self) -> Bool { value < 0 }
+    pub fn is_positive(value: Self) -> Bool { value > 0 }
+}
+fn num_i64_checked_pow(value: i64, exponent: u32, result: i64) -> Option<i64> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => i64::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle i64::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_i64_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_i64_wrapping_pow(value: i64, exponent: u32, result: i64) -> i64 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_i64_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_i64_next_power(value: i64, power: i64) -> Option<i64> {
+    handle power >= value {
+        true => Some(power),
+        false => handle i64::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_i64_next_power(value, next),
+        },
+    }
+}
+fn num_i64_ones(value: u64, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i64_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_i64_leading(value: u64, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i64_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_i64_trailing(value: u64, count: u32) -> u32 {
+    handle count == 64 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_i64_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_i64_reverse(value: u64, result: u64, count: u32) -> u64 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i64_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_i64_swap_bytes(value: u64, result: u64, count: u32) -> u64 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i64_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_i64_ilog(value: i64, base: i64, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_i64_ilog(value / base, base, count + 1) }
+}
+
+fn num_i128_magnitude(value: i128) -> u128 { handle value < 0 { true => wrapping_sub(0, as<u128>(value)), false => as<u128>(value) } }
+impl i128 {
+    pub fn min_value() -> Self { -170141183460469231731687303715884105728 }
+    pub fn max_value() -> Self { 170141183460469231731687303715884105727 }
+    pub fn bits() -> u32 { 128 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle handle right > 0 { true => wrapped < left, false => wrapped > left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle handle right > 0 { true => wrapped > left, false => wrapped < left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_i128_magnitude(left);
+        let b = num_i128_magnitude(right);
+        let negative = Bool::xor(left < 0, right < 0);
+        let limit: u128 = handle negative { true => 170141183460469231731687303715884105728, false => 170141183460469231731687303715884105727 };
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -170141183460469231731687303715884105728 { true => right == -1, false => false } { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -170141183460469231731687303715884105728 { true => right == -1, false => false } { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == -170141183460469231731687303715884105728 { true => None, false => Some(0 - value) } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 128 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 128 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 128) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 128) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => -170141183460469231731687303715884105728, false => 170141183460469231731687303715884105727 } }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => 170141183460469231731687303715884105727, false => -170141183460469231731687303715884105728 } }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => handle Bool::xor(left < 0, right < 0) { true => -170141183460469231731687303715884105728, false => 170141183460469231731687303715884105727 } }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_i128_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_i128_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => handle value < 0 { true => handle exponent % 2 == 1 { true => -170141183460469231731687303715884105728, false => 170141183460469231731687303715884105727 }, false => 170141183460469231731687303715884105727 },
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        handle value < 0 { true => None, false => num_i128_next_power(value, 1) }
+    }
+    pub fn count_ones(value: Self) -> u32 { num_i128_ones(as<u128>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 128 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_i128_leading(as<u128>(value), 128) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_i128_trailing(as<u128>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 128;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<u128>(value), count), bit_shr(as<u128>(value), 128 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 128 - count % 128) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_i128_reverse(as<u128>(value), 0, 128)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_i128_swap_bytes(as<u128>(value), 0, 16)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> u128 {
+        handle left >= right {
+            true => wrapping_sub(as<u128>(left), as<u128>(right)),
+            false => wrapping_sub(as<u128>(right), as<u128>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_i128_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => handle left % right < 0 {
+                false => Some(quotient),
+                true => handle right > 0 { true => Some(quotient - 1), false => Some(quotient + 1) },
+            },
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => handle remainder < 0 {
+                false => Some(remainder),
+                true => handle right > 0 { true => Some(remainder + right), false => Some(remainder - right) },
+            },
+        }
+    }
+
+    pub fn unsigned_abs(value: Self) -> u128 { num_i128_magnitude(value) }
+    pub fn checked_abs(value: Self) -> Option<Self> {
+        handle value < 0 { true => Self::checked_neg(value), false => Some(value) }
+    }
+    pub fn wrapping_abs(value: Self) -> Self {
+        handle value < 0 { true => wrapping_sub(0, value), false => value }
+    }
+    pub fn saturating_abs(value: Self) -> Self {
+        handle Self::checked_abs(value) { Result::Ok(result) => result, Result::Err(_) => 170141183460469231731687303715884105727 }
+    }
+    pub fn signum(value: Self) -> Self { handle value < 0 { true => -1, false => handle value == 0 { true => 0, false => 1 } } }
+    pub fn is_negative(value: Self) -> Bool { value < 0 }
+    pub fn is_positive(value: Self) -> Bool { value > 0 }
+}
+fn num_i128_checked_pow(value: i128, exponent: u32, result: i128) -> Option<i128> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => i128::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle i128::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_i128_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_i128_wrapping_pow(value: i128, exponent: u32, result: i128) -> i128 {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_i128_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_i128_next_power(value: i128, power: i128) -> Option<i128> {
+    handle power >= value {
+        true => Some(power),
+        false => handle i128::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_i128_next_power(value, next),
+        },
+    }
+}
+fn num_i128_ones(value: u128, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i128_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_i128_leading(value: u128, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_i128_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_i128_trailing(value: u128, count: u32) -> u32 {
+    handle count == 128 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_i128_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_i128_reverse(value: u128, result: u128, count: u32) -> u128 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i128_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_i128_swap_bytes(value: u128, result: u128, count: u32) -> u128 {
+    handle count == 0 {
+        true => result,
+        false => tail num_i128_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_i128_ilog(value: i128, base: i128, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_i128_ilog(value / base, base, count + 1) }
+}
+
+fn num_isize_magnitude(value: isize) -> usize { handle value < 0 { true => wrapping_sub(0, as<usize>(value)), false => as<usize>(value) } }
+impl isize {
+    pub fn min_value() -> Self { -9223372036854775808 }
+    pub fn max_value() -> Self { 9223372036854775807 }
+    pub fn bits() -> u32 { 64 }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_add(left, right);
+        handle handle right > 0 { true => wrapped < left, false => wrapped > left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        let wrapped = wrapping_sub(left, right);
+        handle handle right > 0 { true => wrapped > left, false => wrapped < left } { true => None, false => Some(wrapped) }
+    }
+    pub fn checked_mul(left: Self, right: Self) -> Option<Self> {
+        let a = num_isize_magnitude(left);
+        let b = num_isize_magnitude(right);
+        let negative = Bool::xor(left < 0, right < 0);
+        let limit: usize = handle negative { true => 9223372036854775808, false => 9223372036854775807 };
+        handle b == 0 {
+            true => Some(0),
+            false => handle a > limit / b { true => None, false => Some(wrapping_mul(left, right)) },
+        }
+    }
+    pub fn checked_div(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -9223372036854775808 { true => right == -1, false => false } { true => None, false => Some(left / right) },
+        }
+    }
+    pub fn checked_rem(left: Self, right: Self) -> Option<Self> {
+        handle right == 0 {
+            true => None,
+            false => handle handle left == -9223372036854775808 { true => right == -1, false => false } { true => None, false => Some(left % right) },
+        }
+    }
+    pub fn checked_neg(value: Self) -> Option<Self> { handle value == -9223372036854775808 { true => None, false => Some(0 - value) } }
+    pub fn checked_shl(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shl(value, count)), false => None }
+    }
+    pub fn checked_shr(value: Self, count: u32) -> Option<Self> {
+        handle count < 64 { true => Some(bit_shr(value, count)), false => None }
+    }
+    pub fn wrapping_add(left: Self, right: Self) -> Self { wrapping_add(left, right) }
+    pub fn wrapping_sub(left: Self, right: Self) -> Self { wrapping_sub(left, right) }
+    pub fn wrapping_mul(left: Self, right: Self) -> Self { wrapping_mul(left, right) }
+    pub fn wrapping_neg(value: Self) -> Self { wrapping_sub(0, value) }
+    pub fn wrapping_shl(value: Self, count: u32) -> Self { bit_shl(value, count % 64) }
+    pub fn wrapping_shr(value: Self, count: u32) -> Self { bit_shr(value, count % 64) }
+    pub fn saturating_add(left: Self, right: Self) -> Self {
+        handle Self::checked_add(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => -9223372036854775808, false => 9223372036854775807 } }
+    }
+    pub fn saturating_sub(left: Self, right: Self) -> Self {
+        handle Self::checked_sub(left, right) { Result::Ok(value) => value, Result::Err(_) => handle right < 0 { true => 9223372036854775807, false => -9223372036854775808 } }
+    }
+    pub fn saturating_mul(left: Self, right: Self) -> Self {
+        handle Self::checked_mul(left, right) { Result::Ok(value) => value, Result::Err(_) => handle Bool::xor(left < 0, right < 0) { true => -9223372036854775808, false => 9223372036854775807 } }
+    }
+    pub fn overflowing_add(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_add(left, right), handle Self::checked_add(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_sub(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_sub(left, right), handle Self::checked_sub(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_mul(left: Self, right: Self) -> (Self,Bool) {
+        (wrapping_mul(left, right), handle Self::checked_mul(left, right) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn overflowing_neg(value: Self) -> (Self,Bool) {
+        (wrapping_sub(0, value), handle Self::checked_neg(value) { Result::Ok(_) => false, Result::Err(_) => true })
+    }
+    pub fn checked_pow(value: Self, exponent: u32) -> Option<Self> { num_isize_checked_pow(value, exponent, 1) }
+    pub fn wrapping_pow(value: Self, exponent: u32) -> Self { num_isize_wrapping_pow(value, exponent, 1) }
+    pub fn saturating_pow(value: Self, exponent: u32) -> Self {
+        handle Self::checked_pow(value, exponent) {
+            Result::Ok(result) => result,
+            Result::Err(_) => handle value < 0 { true => handle exponent % 2 == 1 { true => -9223372036854775808, false => 9223372036854775807 }, false => 9223372036854775807 },
+        }
+    }
+    pub fn checked_next_power_of_two(value: Self) -> Option<Self> {
+        handle value < 0 { true => None, false => num_isize_next_power(value, 1) }
+    }
+    pub fn count_ones(value: Self) -> u32 { num_isize_ones(as<usize>(value), 0) }
+    pub fn count_zeros(value: Self) -> u32 { 64 - Self::count_ones(value) }
+    pub fn leading_zeros(value: Self) -> u32 { num_isize_leading(as<usize>(value), 64) }
+    pub fn trailing_zeros(value: Self) -> u32 { num_isize_trailing(as<usize>(value), 0) }
+    pub fn leading_ones(value: Self) -> u32 { Self::leading_zeros(bit_not(value)) }
+    pub fn trailing_ones(value: Self) -> u32 { Self::trailing_zeros(bit_not(value)) }
+    pub fn rotate_left(value: Self, count: u32) -> Self {
+        let count = count % 64;
+        handle count == 0 {
+            true => value,
+            false => as<Self>(bit_or(bit_shl(as<usize>(value), count), bit_shr(as<usize>(value), 64 - count))),
+        }
+    }
+    pub fn rotate_right(value: Self, count: u32) -> Self { Self::rotate_left(value, 64 - count % 64) }
+    pub fn reverse_bits(value: Self) -> Self { as<Self>(num_isize_reverse(as<usize>(value), 0, 64)) }
+    pub fn swap_bytes(value: Self) -> Self { as<Self>(num_isize_swap_bytes(as<usize>(value), 0, 8)) }
+    pub fn is_power_of_two(value: Self) -> Bool {
+        handle value > 0 { false => false, true => bit_and(value, value - 1) == 0 }
+    }
+    pub fn abs_diff(left: Self, right: Self) -> usize {
+        handle left >= right {
+            true => wrapping_sub(as<usize>(left), as<usize>(right)),
+            false => wrapping_sub(as<usize>(right), as<usize>(left)),
+        }
+    }
+    pub fn checked_ilog(value: Self, base: Self) -> Option<u32> {
+        handle value <= 0 {
+            true => None,
+            false => handle base < 2 { true => None, false => Some(num_isize_ilog(value, base, 0)) },
+        }
+    }
+    pub fn checked_ilog2(value: Self) -> Option<u32> { Self::checked_ilog(value, 2) }
+    pub fn checked_ilog10(value: Self) -> Option<u32> { Self::checked_ilog(value, 10) }
+    pub fn checked_div_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_div(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(quotient) => handle left % right < 0 {
+                false => Some(quotient),
+                true => handle right > 0 { true => Some(quotient - 1), false => Some(quotient + 1) },
+            },
+        }
+    }
+    pub fn checked_rem_euclid(left: Self, right: Self) -> Option<Self> {
+        handle Self::checked_rem(left, right) {
+            Result::Err(_) => None,
+            Result::Ok(remainder) => handle remainder < 0 {
+                false => Some(remainder),
+                true => handle right > 0 { true => Some(remainder + right), false => Some(remainder - right) },
+            },
+        }
+    }
+
+    pub fn unsigned_abs(value: Self) -> usize { num_isize_magnitude(value) }
+    pub fn checked_abs(value: Self) -> Option<Self> {
+        handle value < 0 { true => Self::checked_neg(value), false => Some(value) }
+    }
+    pub fn wrapping_abs(value: Self) -> Self {
+        handle value < 0 { true => wrapping_sub(0, value), false => value }
+    }
+    pub fn saturating_abs(value: Self) -> Self {
+        handle Self::checked_abs(value) { Result::Ok(result) => result, Result::Err(_) => 9223372036854775807 }
+    }
+    pub fn signum(value: Self) -> Self { handle value < 0 { true => -1, false => handle value == 0 { true => 0, false => 1 } } }
+    pub fn is_negative(value: Self) -> Bool { value < 0 }
+    pub fn is_positive(value: Self) -> Bool { value > 0 }
+}
+fn num_isize_checked_pow(value: isize, exponent: u32, result: isize) -> Option<isize> {
+    handle exponent == 0 {
+        true => Some(result),
+        false => {
+            let result = handle exponent % 2 == 1 {
+                true => isize::checked_mul(result, value), false => Some(result),
+            };
+            handle result {
+                Result::Err(_) => None,
+                Result::Ok(result) => handle exponent == 1 {
+                    true => Some(result),
+                    false => handle isize::checked_mul(value, value) {
+                        Result::Err(_) => None,
+                        Result::Ok(square) => tail num_isize_checked_pow(square, exponent / 2, result),
+                    },
+                },
+            }
+        },
+    }
+}
+fn num_isize_wrapping_pow(value: isize, exponent: u32, result: isize) -> isize {
+    handle exponent == 0 {
+        true => result,
+        false => {
+            let result = handle exponent % 2 == 1 { true => wrapping_mul(result, value), false => result };
+            tail num_isize_wrapping_pow(wrapping_mul(value, value), exponent / 2, result)
+        },
+    }
+}
+fn num_isize_next_power(value: isize, power: isize) -> Option<isize> {
+    handle power >= value {
+        true => Some(power),
+        false => handle isize::checked_mul(power, 2) {
+            Result::Err(_) => None, Result::Ok(next) => tail num_isize_next_power(value, next),
+        },
+    }
+}
+fn num_isize_ones(value: usize, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_isize_ones(bit_and(value, value - 1), count + 1) }
+}
+fn num_isize_leading(value: usize, count: u32) -> u32 {
+    handle value == 0 { true => count, false => tail num_isize_leading(bit_shr(value, 1), count - 1) }
+}
+fn num_isize_trailing(value: usize, count: u32) -> u32 {
+    handle count == 64 {
+        true => count,
+        false => handle bit_and(value, 1) == 1 {
+            true => count, false => tail num_isize_trailing(bit_shr(value, 1), count + 1),
+        },
+    }
+}
+fn num_isize_reverse(value: usize, result: usize, count: u32) -> usize {
+    handle count == 0 {
+        true => result,
+        false => tail num_isize_reverse(bit_shr(value, 1), bit_or(bit_shl(result, 1), bit_and(value, 1)), count - 1),
+    }
+}
+fn num_isize_swap_bytes(value: usize, result: usize, count: u32) -> usize {
+    handle count == 0 {
+        true => result,
+        false => tail num_isize_swap_bytes(bit_shr(value, 8), bit_or(bit_shl(result, 8), bit_and(value, 255)), count - 1),
+    }
+}
+fn num_isize_ilog(value: isize, base: isize, count: u32) -> u32 {
+    handle value < base { true => count, false => tail num_isize_ilog(value / base, base, count + 1) }
+}

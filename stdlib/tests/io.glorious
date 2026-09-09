@@ -1,0 +1,78 @@
+use std::io::*;
+fn bytes(input: Slice<u8>) -> Vec<u8> {
+    let mut out = Vec::new();
+    Vec::extend_from_slice(&mut out, input);
+    out
+}
+struct LimitedWrite { output: Vec<u8>, limit: usize, zero: Bool }
+impl Write for LimitedWrite {
+    type Effects = {};
+    fn write(value: &mut Self, input: Slice<u8>) -> Result<usize,IoError> {
+        handle value.zero { true => return(Result::Ok(0), @write), false => () };
+        handle Vec::len(&value.output) == value.limit {
+            true => Result::Err(IoError { kind: IoErrorKind::Other, native_code: None }),
+            false => {
+                let count = min(Slice::len(&input), value.limit - Vec::len(&value.output));
+                let prefix = handle Slice::slice(input, Range { start: 0, end: count }) { Result::Ok(view) => view, _ => b"" };
+                Vec::extend_from_slice(&mut value.output, prefix);
+                Result::Ok(count)
+            },
+        }
+    }
+    fn flush(value: &mut Self) -> Result<(),IoError> { Result::Ok(()) }
+}
+pub fn main() -> i64 {
+    let mut reader = MemoryCursor::new(bytes(b"abcdef"));
+    let mut destination = bytes(b"zzzzzzz");
+    assert_true(handle read_exact(&mut reader, Vec::as_mut_slice(&mut destination)) {
+        Result::Err(failure) => handle failure.error.kind { IoErrorKind::UnexpectedEof => failure.filled == 6, _ => false }, _ => false,
+    });
+    assert_bytes(Vec::as_slice(&destination), b"abcdefz");
+    assert_true(MemoryCursor::position(&reader) == 6);
+    assert_true(handle Seek::seek(&mut reader, SeekFrom::Current(-7)) { Result::Err(_) => true, _ => false });
+    assert_true(MemoryCursor::position(&reader) == 6);
+    assert_true(handle Seek::seek(&mut reader, SeekFrom::Start(8)) { Result::Ok(8) => true, _ => false });
+    assert_true(handle write_all(&mut reader, b"x") { Result::Ok(_) => true, _ => false });
+    assert_bytes(MemoryCursor::as_slice(&reader), b"abcdef\x00\x00x");
+
+    let mut limited = LimitedWrite { output: Vec::new(), limit: 2, zero: false };
+    assert_true(handle write_all(&mut limited, b"abcd") { Result::Err(failure) => failure.written == 2, _ => false });
+    assert_bytes(Vec::as_slice(&limited.output), b"ab");
+    let mut zero = LimitedWrite { output: Vec::new(), limit: 0, zero: true };
+    assert_true(handle write_all(&mut zero, b"a") {
+        Result::Err(failure) => handle failure.error.kind { IoErrorKind::WriteZero => failure.written == 0, _ => false }, _ => false,
+    });
+
+    let mut reader = MemoryCursor::new(bytes(b"abcdef"));
+    let mut writer = LimitedWrite { output: Vec::new(), limit: 2, zero: false };
+    assert_true(handle copy_stream(&mut reader, &mut writer, 6) {
+        Result::Err(failure) => handle failure.read == 6 { true => failure.written == 2, false => false }, _ => false,
+    });
+    let mut reader = MemoryCursor::new(bytes(b"abcdef"));
+    let mut output = bytes(b"prefix:");
+    assert_true(handle read_to_end(&mut reader, &mut output, 3) { Result::Ok(3) => true, _ => false });
+    assert_bytes(Vec::as_slice(&output), b"prefix:abc");
+    assert_true(MemoryCursor::position(&reader) == 3);
+
+    let reader = MemoryCursor::new(bytes(b"abcdef"));
+    let mut buffered = handle BufferReader::new(reader, 4) { Result::Ok(value) => value, _ => return(0, @main) };
+    let mut one = bytes(b"z");
+    assert_true(handle Read::read(&mut buffered, Vec::as_mut_slice(&mut one)) { Result::Ok(1) => true, _ => false });
+    assert_true(handle BufferedRead::consume(&mut buffered, 4) { Result::Err(_) => true, _ => false });
+    let (reader, unread) = BufferReader::into_parts(buffered);
+    assert_bytes(Vec::as_slice(&unread), b"bcd");
+    assert_true(MemoryCursor::position(&reader) == 4);
+
+    let writer = LimitedWrite { output: Vec::new(), limit: 2, zero: false };
+    let mut buffered = handle BufferWriter::new(writer, 4) { Result::Ok(value) => value, _ => return(0, @main) };
+    assert_true(handle write_all(&mut buffered, b"abcd") { Result::Ok(_) => true, _ => false });
+    assert_bytes(BufferWriter::pending(&buffered), b"abcd");
+    handle BufferWriter::finish(buffered) {
+        Result::Ok(_) => return(0, @main),
+        Result::Err(failure) => {
+            assert_bytes(Vec::as_slice(&failure.writer.output), b"ab");
+            assert_bytes(Vec::as_slice(&failure.pending), b"cd");
+        },
+    };
+    42
+}

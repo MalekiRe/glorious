@@ -23,6 +23,7 @@ pub(crate) fn call_type_matches(expected: &Type, actual: &Type) -> bool {
             a.len() == b.len() && a.iter().zip(b).all(|(a,b)| call_type_matches(a,b)) && call_type_matches(x,y),
         (Type::Tuple(a), Type::Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(a,b)| call_type_matches(a,b)),
         (Type::Array(a), Type::Array(b)) => call_type_matches(a,b),
+        (Type::FixedArray { element: a, length: an }, Type::FixedArray { element: b, length: bn }) => an == bn && call_type_matches(a,b),
         (Type::Nominal { definition: a, arguments: x }, Type::Nominal { definition: b, arguments: y }) => a == b && x.len() == y.len() && x.iter().zip(y).all(|(a,b)| match (a,b) {
             (GenericArgument::Type(a), GenericArgument::Type(b)) => call_type_matches(a,b),
             (GenericArgument::Lifetime(_), GenericArgument::Lifetime(_)) => true,
@@ -56,6 +57,7 @@ pub struct ControlScope {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlOperation {
     Literal(String),
+    ConstValue(GenericArgument),
     Unit,
     /// Value flow; Ownership MIR decides whether this copies or transfers an
     /// owner. Control construction must not assert duplicability.
@@ -266,7 +268,7 @@ impl ControlMir {
                     arguments,
                     result,
                     continuation,
-                    ..
+                    contract,
                 } => {
                     let mut callee_ty = self.ty(*callee)?;
                     while let Type::Reference { referent, .. } = callee_ty { callee_ty = referent; }
@@ -289,7 +291,7 @@ impl ControlMir {
                             .zip(arguments)
                             .any(|(ty, value)| !self.ty(*value).is_ok_and(|actual| call_type_matches(ty, actual)))
                         || !call_type_matches(result_ty, self.ty(*result)?)
-                        || continuation.is_none() != (**result_ty == Type::Never)
+                        || continuation.is_none() != (**result_ty == Type::Never || contract.mandatory_tail)
                     {
                         return Err(invalid("invoke boundary disagrees with callable contract"));
                     }
@@ -414,6 +416,8 @@ impl ControlMir {
             self.ty(input)?;
         }
         let valid = match &instruction.operation {
+            ControlOperation::ConstValue(argument) => crate::types::integer_const_argument_type(argument).as_ref() == Some(ty)
+                && crate::types::is_canonical_generic_argument_identity(argument),
             ControlOperation::Unit | ControlOperation::Discard(_) => ty == &Type::Unit,
             ControlOperation::Forward(value) | ControlOperation::Read(value) => call_type_matches(ty, self.ty(*value)?),
             ControlOperation::EndScope {
@@ -433,7 +437,8 @@ impl ControlMir {
                 }
             }
             ControlOperation::Array(values) => {
-                matches!(ty, Type::Array(element) if values.iter().all(|value| self.ty(*value).ok() == Some(element.as_ref())))
+                ty.array_accepts_count(values.len()) && ty.array_element().is_some_and(|element|
+                    values.iter().all(|value| self.ty(*value).ok() == Some(element)))
             }
             ControlOperation::Function { .. } => matches!(ty, Type::Callable { .. }),
             ControlOperation::Literal(_) => {
@@ -679,6 +684,7 @@ mod tests {
             arguments: vec![],
             result: ControlValue(6),
             contract: EvaluationCallContract {
+                mandatory_tail: false,
                 reference_contract: crate::CallReferenceOrigin::None,
                 reference_origin: crate::CallReferenceOrigin::None,
                 reference_shape: crate::CallReferenceShape::None,
@@ -816,6 +822,7 @@ impl Builder<'_> {
             }
             let operation = match instruction.operation {
                 EvalOp::Literal(value) => ControlOperation::Literal(value),
+                EvalOp::ConstValue(value) => ControlOperation::ConstValue(value),
                 EvalOp::ReadLocal(name) => {
                     let value = *names.get(&name).ok_or_else(|| ControlError::Invalid(format!("unbound local {name}")))?;
                     if let Type::Reference { referent, .. } = self.result.ty(value)?
@@ -883,7 +890,7 @@ impl Builder<'_> {
                     continue;
                 }
                 EvalOp::Call(contract) => {
-                    let continuation = if instruction.ty == Type::Never {
+                    let continuation = if instruction.ty == Type::Never || contract.mandatory_tail {
                         None
                     } else {
                         Some(self.block(vec![destination])?)

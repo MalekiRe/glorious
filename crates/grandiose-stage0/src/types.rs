@@ -4,25 +4,87 @@
 //! `InferContext` owned by one body elaboration. No backend or diagnostic phase
 //! creates a parallel type vocabulary.
 
-use std::{cmp::Ordering, collections::BTreeSet};
+use std::{cmp::Ordering, collections::{BTreeMap, BTreeSet}};
 
 use crate::{
     identity::{DefKey, Digest},
     quantity::Quantity,
 };
 
+pub mod integer_const;
+pub(crate) mod regions;
+mod universes;
+pub(crate) use universes::UniversalScope;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InferVar(pub u32);
 
-/// Whether invoking a callable requires programmer-owned unsafe obligations.
-/// This is a type contract, not an effect, implementation trust certificate,
-/// or host authorization to execute unsafe bytecode.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum Safety {
-    #[default]
-    Safe,
-    Unsafe,
+#[cfg(test)]
+mod numeric_constraint_tests {
+    use super::*;
+
+    #[test]
+    fn known_numeric_context_wins_before_defaults_in_either_order() {
+        for context_first in [false, true] {
+            let mut inference = InferContext::default();
+            let literal = inference.fresh();
+            let usize_type = Type::Scalar(ScalarType::Usize);
+            if context_first {
+                inference.unify(literal.clone(), usize_type.clone()).unwrap();
+            }
+            inference.constrain_numeric(literal.clone(), false).unwrap();
+            if !context_first {
+                assert!(matches!(inference.zonk(literal.clone()), Err(TypeError::Unresolved(_))));
+                inference.unify(literal.clone(), usize_type.clone()).unwrap();
+            }
+            inference.finish_numeric_defaults().unwrap();
+            assert_eq!(inference.zonk(literal).unwrap(), usize_type);
+        }
+    }
+
+    #[test]
+    fn merged_literal_classes_default_independently_of_union_direction() {
+        for reverse in [false, true] {
+            let mut inference = InferContext::default();
+            let integer = inference.fresh();
+            let floating = inference.fresh();
+            inference.constrain_numeric(integer.clone(), false).unwrap();
+            inference.constrain_numeric(floating.clone(), true).unwrap();
+            let (left, right) = if reverse { (&floating, &integer) } else { (&integer, &floating) };
+            inference.unify(left.clone(), right.clone()).unwrap();
+            inference.finish_numeric_defaults().unwrap();
+            assert_eq!(inference.zonk(integer).unwrap(), Type::Scalar(ScalarType::F64));
+            assert_eq!(inference.zonk(floating).unwrap(), Type::Scalar(ScalarType::F64));
+        }
+    }
+
+    #[test]
+    fn numeric_constraints_reject_wrong_domains_without_poisoning_the_hole() {
+        let mut inference = InferContext::default();
+        let literal = inference.fresh();
+        inference.constrain_numeric(literal.clone(), true).unwrap();
+        for wrong in [Type::Unit, Type::Scalar(ScalarType::Bool), Type::Scalar(ScalarType::Usize)] {
+            assert!(inference.unify(literal.clone(), wrong).is_err());
+        }
+        inference.unify(literal.clone(), Type::Scalar(ScalarType::F32)).unwrap();
+        inference.finish_numeric_defaults().unwrap();
+        assert_eq!(inference.zonk(literal).unwrap(), Type::Scalar(ScalarType::F32));
+    }
+
+    #[test]
+    fn only_numeric_holes_receive_defaults() {
+        let mut inference = InferContext::default();
+        let integer = inference.fresh();
+        let ordinary = inference.fresh();
+        inference.constrain_numeric(integer.clone(), false).unwrap();
+        inference.finish_numeric_defaults().unwrap();
+        inference.finish_numeric_defaults().unwrap();
+        assert_eq!(inference.zonk(integer).unwrap(), Type::Scalar(ScalarType::I64));
+        assert!(matches!(inference.zonk(ordinary), Err(TypeError::Unresolved(_))));
+    }
 }
+
+pub use grandiose_compiler_base::Safety;
 
 /// A body-local structural-constant hole.  Const generics have their own
 /// finite domains and must not borrow either the type or effect-row variable
@@ -41,7 +103,7 @@ pub struct LifetimeInferVar(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct EffectVar(pub u32);
 
-/// The one open tail permitted in a canonical effect row. Inference tails are
+/// One operand of an open effect-row union. Inference tails are
 /// body-local; generic tails survive frozen signatures but must be instantiated
 /// or proven closed before code generation.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -60,6 +122,9 @@ pub enum Lifetime {
     Infer(LifetimeInferVar),
     Static,
     Generic(u32),
+    /// A fresh rigid region used only while checking a universal predicate.
+    /// This is not a declaration slot or a serializable source region.
+    Placeholder(UniversalRegion),
     /// A rigid region introduced by a `for<'a>` callable binder. The index is
     /// local to the nearest enclosing [`Type::Callable`] binder list, making
     /// alpha-equivalent source spellings canonical while keeping this region
@@ -74,6 +139,12 @@ pub enum Lifetime {
     Elided,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct UniversalRegion {
+    pub(crate) universe: u32,
+    pub(crate) index: u32,
+}
+
 /// The closed structural-constant domains admitted by the G1 frontend.
 ///
 /// A const binder is deliberately not a [`Type::Generic`]: it may participate
@@ -82,170 +153,98 @@ pub enum Lifetime {
 /// separately so this kind information is available at every frozen interface
 /// boundary first.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
 pub enum ConstKind {
     U32,
     Quantity,
+    U8,
+    U16,
+    U64,
+    U128,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Usize,
+    Isize,
 }
 
-/// A symbolic, checked `u32` const term.  The language deliberately keeps
-/// const evaluation structural: this tree cannot call a function or inspect a
-/// runtime value.  Terms are normalized at every interface boundary, so the
-/// same arithmetic has one identity whether it was written in an alias,
-/// associated item default, or a direct nominal application.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StructuralU32Expr {
-    Literal(u32),
-    Param(u32),
-    Add(Box<Self>, Box<Self>),
-    Sub(Box<Self>, Box<Self>),
-    Mul(Box<Self>, Box<Self>),
-    Div(Box<Self>, Box<Self>),
-    Rem(Box<Self>, Box<Self>),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum StructuralConstError {
-    OverflowOrDivisionByZero,
-    ResourceLimit,
-}
-
-impl StructuralU32Expr {
-    /// Normalize arithmetic deterministically.  Addition and multiplication
-    /// are canonicalized in operand order after their checked literal folds;
-    /// this keeps `N + 1` and `1 + N` identical without admitting arbitrary
-    /// algebraic rewrites that could hide an overflow.
-    pub fn normalized(self) -> Result<Self, StructuralConstError> {
-        self.normalize_with_budget(&mut 1024)
-    }
-
-    fn normalize_with_budget(self, budget: &mut u32) -> Result<Self, StructuralConstError> {
-        if *budget == 0 {
-            return Err(StructuralConstError::ResourceLimit);
-        }
-        *budget -= 1;
-        let binary = |left: Box<Self>,
-                      right: Box<Self>,
-                      op: fn(Box<Self>, Box<Self>) -> Self,
-                      checked: fn(u32, u32) -> Option<u32>,
-                      commutative: bool,
-                      budget: &mut u32|
-         -> Result<Self, StructuralConstError> {
-            let mut left = left.normalize_with_budget(budget)?;
-            let mut right = right.normalize_with_budget(budget)?;
-            if let (Self::Literal(left), Self::Literal(right)) = (&left, &right) {
-                return checked(*left, *right)
-                    .map(Self::Literal)
-                    .ok_or(StructuralConstError::OverflowOrDivisionByZero);
-            }
-            if commutative && structural_u32_expr_key(&right) < structural_u32_expr_key(&left) {
-                std::mem::swap(&mut left, &mut right);
-            }
-            Ok(op(Box::new(left), Box::new(right)))
-        };
+impl ConstKind {
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Literal(_) | Self::Param(_) => Ok(self),
-            Self::Add(left, right) => {
-                binary(left, right, Self::Add, u32::checked_add, true, budget)
-            }
-            Self::Sub(left, right) => {
-                binary(left, right, Self::Sub, u32::checked_sub, false, budget)
-            }
-            Self::Mul(left, right) => {
-                binary(left, right, Self::Mul, u32::checked_mul, true, budget)
-            }
-            Self::Div(left, right) => {
-                binary(left, right, Self::Div, u32::checked_div, false, budget)
-            }
-            Self::Rem(left, right) => {
-                binary(left, right, Self::Rem, u32::checked_rem, false, budget)
-            }
+            Self::U32 => "u32", Self::Quantity => "Quantity",
+            Self::U8 => "u8", Self::U16 => "u16", Self::U64 => "u64",
+            Self::U128 => "u128", Self::I8 => "i8", Self::I16 => "i16",
+            Self::I32 => "i32", Self::I64 => "i64", Self::I128 => "i128",
+            Self::Usize => "usize", Self::Isize => "isize",
         }
     }
+    pub fn tag(self) -> u8 { self as u8 }
 
-    /// Replace declaration-local const binders and fold newly-ground
-    /// arithmetic.  An unresolved binder remains symbolic, which is required
-    /// for generic aliases and associated defaults.
-    pub fn substitute(&self, arguments: &[GenericArgument]) -> Self {
-        let term = match self {
-            Self::Literal(value) => Self::Literal(*value),
-            Self::Param(index) => match arguments.get(*index as usize) {
-                Some(GenericArgument::ConstU32(value)) => Self::Literal(*value),
-                Some(GenericArgument::ConstU32Expr(value)) => value.clone(),
-                Some(GenericArgument::ConstGeneric {
-                    index,
-                    kind: ConstKind::U32,
-                }) => Self::Param(*index),
-                _ => Self::Param(*index),
-            },
-            Self::Add(left, right) => Self::Add(
-                Box::new(left.substitute(arguments)),
-                Box::new(right.substitute(arguments)),
-            ),
-            Self::Sub(left, right) => Self::Sub(
-                Box::new(left.substitute(arguments)),
-                Box::new(right.substitute(arguments)),
-            ),
-            Self::Mul(left, right) => Self::Mul(
-                Box::new(left.substitute(arguments)),
-                Box::new(right.substitute(arguments)),
-            ),
-            Self::Div(left, right) => Self::Div(
-                Box::new(left.substitute(arguments)),
-                Box::new(right.substitute(arguments)),
-            ),
-            Self::Rem(left, right) => Self::Rem(
-                Box::new(left.substitute(arguments)),
-                Box::new(right.substitute(arguments)),
-            ),
-        };
-        // Existing source has already received a diagnostic for invalid
-        // arithmetic.  Retaining the pre-normalized term here is preferable
-        // to inventing a different fallback identity during substitution.
-        term.clone().normalized().unwrap_or(term)
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            0 => Self::U32, 1 => Self::Quantity, 2 => Self::U8,
+            3 => Self::U16, 4 => Self::U64, 5 => Self::U128,
+            6 => Self::I8, 7 => Self::I16, 8 => Self::I32,
+            9 => Self::I64, 10 => Self::I128, 11 => Self::Usize,
+            12 => Self::Isize, _ => return None,
+        })
+    }
+
+    pub fn integer_scalar(self) -> Option<ScalarType> {
+        Some(match self {
+            Self::U8 => ScalarType::U8, Self::U16 => ScalarType::U16,
+            Self::U32 => ScalarType::U32, Self::U64 => ScalarType::U64,
+            Self::U128 => ScalarType::U128, Self::I8 => ScalarType::I8,
+            Self::I16 => ScalarType::I16, Self::I32 => ScalarType::I32,
+            Self::I64 => ScalarType::I64, Self::I128 => ScalarType::I128,
+            Self::Usize => ScalarType::Usize, Self::Isize => ScalarType::Isize,
+            Self::Quantity => return None,
+        })
+    }
+
+    pub fn from_integer_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "u8" => Self::U8, "u16" => Self::U16, "u32" => Self::U32,
+            "u64" => Self::U64, "u128" => Self::U128, "i8" => Self::I8,
+            "i16" => Self::I16, "i32" => Self::I32, "i64" => Self::I64,
+            "i128" => Self::I128, "usize" => Self::Usize, "isize" => Self::Isize,
+            _ => return None,
+        })
+    }
+
+    pub fn from_integer_scalar(scalar: ScalarType) -> Option<Self> {
+        Some(match scalar {
+            ScalarType::U8 => Self::U8, ScalarType::U16 => Self::U16,
+            ScalarType::U32 => Self::U32, ScalarType::U64 => Self::U64,
+            ScalarType::U128 => Self::U128, ScalarType::Usize => Self::Usize,
+            ScalarType::I8 => Self::I8, ScalarType::I16 => Self::I16,
+            ScalarType::I32 => Self::I32, ScalarType::I64 => Self::I64,
+            ScalarType::I128 => Self::I128, ScalarType::Isize => Self::Isize,
+            _ => return None,
+        })
     }
 }
 
-fn structural_u32_expr_key(value: &StructuralU32Expr) -> Vec<u8> {
-    let mut output = vec![];
-    encode_structural_u32_expr(value, &mut output);
-    output
+/// Typed structural integer terms share the checked const-normalization kernel.
+pub use integer_const::{IntegerConst, IntegerConstError as StructuralConstError, IntegerConstExpr};
+
+fn encode_structural_integer_expr(value: &IntegerConstExpr, output: &mut Vec<u8>) {
+    value.encode(output);
 }
 
-fn encode_structural_u32_expr(value: &StructuralU32Expr, output: &mut Vec<u8>) {
+/// Freeze a normalized integer term into its unique generic-argument form.
+/// Invalid substitutions remain errors, never a fabricated zero value.
+pub(crate) fn integer_const_argument(value: Result<IntegerConstExpr, StructuralConstError>) -> GenericArgument {
     match value {
-        StructuralU32Expr::Literal(value) => {
-            output.push(0);
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        StructuralU32Expr::Param(value) => {
-            output.push(1);
-            output.extend_from_slice(&value.to_le_bytes());
-        }
-        StructuralU32Expr::Add(left, right) => {
-            output.push(2);
-            encode_structural_u32_expr(left, output);
-            encode_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Sub(left, right) => {
-            output.push(3);
-            encode_structural_u32_expr(left, output);
-            encode_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Mul(left, right) => {
-            output.push(4);
-            encode_structural_u32_expr(left, output);
-            encode_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Div(left, right) => {
-            output.push(5);
-            encode_structural_u32_expr(left, output);
-            encode_structural_u32_expr(right, output);
-        }
-        StructuralU32Expr::Rem(left, right) => {
-            output.push(6);
-            encode_structural_u32_expr(left, output);
-            encode_structural_u32_expr(right, output);
-        }
+        Ok(IntegerConstExpr::Literal(value)) => GenericArgument::ConstInteger(value),
+        Ok(IntegerConstExpr::Param { index, scalar }) => match ConstKind::from_integer_scalar(scalar) {
+            Some(kind) => GenericArgument::ConstGeneric { index, kind },
+            None => GenericArgument::Type(Type::Error),
+        },
+        Ok(value) => GenericArgument::ConstIntegerExpr(value),
+        Err(_) => GenericArgument::Type(Type::Error),
     }
 }
 
@@ -260,6 +259,22 @@ pub enum GenericKind {
     Const(ConstKind),
 }
 
+impl GenericKind {
+    pub fn tag(self) -> u8 {
+        match self {
+            Self::Type => 0, Self::EffectRow => 1, Self::Lifetime => 2,
+            Self::Const(kind) => 3 + kind.tag(),
+        }
+    }
+
+    pub fn from_tag(tag: u8) -> Option<Self> {
+        Some(match tag {
+            0 => Self::Type, 1 => Self::EffectRow, 2 => Self::Lifetime,
+            _ => Self::Const(ConstKind::from_tag(tag.checked_sub(3)?)?),
+        })
+    }
+}
+
 /// A canonical argument supplied to a declaration-level generic slot.
 ///
 /// This is intentionally not `Type`: effect rows and lifetimes participate in
@@ -270,10 +285,10 @@ pub enum GenericArgument {
     Type(Type),
     EffectRow(EffectRow),
     Lifetime(Lifetime),
-    ConstU32(u32),
-    /// A normalized symbolic `u32` term retained until all const binders have
-    /// been supplied.  Closed terms are always folded to `ConstU32`.
-    ConstU32Expr(StructuralU32Expr),
+    ConstInteger(integer_const::IntegerConst),
+    /// A normalized, kind-preserving integer term retained until all const
+    /// binders have been supplied. Closed terms fold to `ConstInteger`.
+    ConstIntegerExpr(IntegerConstExpr),
     ConstQuantity(Quantity),
     ConstGeneric {
         index: u32,
@@ -386,12 +401,32 @@ pub struct EffectRow {
     /// Symbolic associated effect-row terms. They are normalized by the trait
     /// solver before a callable can become executable.
     pub projections: Vec<EffectRowProjection>,
-    /// Body-local row variable. It may not cross into a frozen interface or
-    /// Typed Core product before elaboration has resolved it.
-    pub tail: Option<EffectTail>,
+    /// Independent row operands, with stable ordering and duplicate removal.
+    /// Inference-owned operands must resolve before a persistence boundary.
+    pub tails: std::collections::BTreeSet<EffectTail>,
 }
 
 impl EffectRow {
+    /// Union rows without equating their independent operands.
+    pub fn extend(&mut self, row: Self) {
+        self.effects.extend(row.effects);
+        self.projections.extend(row.projections);
+        self.tails.extend(row.tails);
+        self.canonicalize();
+    }
+
+    /// Substitution is simultaneous: returned rows belong to the caller's
+    /// binder space and must not be substituted again using callee indices.
+    pub fn substitute_tails(&mut self, mut substitute: impl FnMut(EffectTail) -> Option<Self>) {
+        for tail in std::mem::take(&mut self.tails) {
+            if let Some(row) = substitute(tail) {
+                self.extend(row);
+            } else {
+                self.tails.insert(tail);
+            }
+        }
+        self.canonicalize();
+    }
     pub fn closed(effects: impl IntoIterator<Item = DefKey>) -> Self {
         Self::closed_instances(effects.into_iter().map(|definition| EffectInstance {
             definition,
@@ -403,7 +438,7 @@ impl EffectRow {
         Self {
             effects: effects.into_iter().collect(),
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         }
     }
 
@@ -459,6 +494,9 @@ pub enum Type {
     },
     Tuple(Vec<Type>),
     Array(Box<Type>),
+    /// Inline homogeneous product. Length is a usize-kinded structural const,
+    /// including inference and projection terms until specialization seals it.
+    FixedArray { element: Box<Type>, length: Box<GenericArgument> },
     /// Compiler-created immutable data embedded in the artifact. This type is
     /// deliberately not expressible in source: it is the sealed backing for
     /// literals and trusted standard-library leaves, not a public slice type.
@@ -487,12 +525,12 @@ pub enum Type {
         effects: EffectRow,
         invocation: Quantity,
     },
-    /// A normalized structural `u32` supplied to a const generic slot. This
+    /// A normalized structural integer supplied to a const generic slot. This
     /// is an argument term, not a standalone source type; header elaboration
-    /// enforces that it only occupies a `ConstKind::U32` slot.
-    ConstU32(u32),
+    /// enforces that its integer kind matches the declared const slot.
+    ConstInteger(integer_const::IntegerConst),
     /// A normalized structural quantity interval supplied to a const generic
-    /// slot. Like `ConstU32`, it is an identity-only argument term.
+    /// slot. Like `ConstInteger`, it is an identity-only argument term.
     ConstQuantity(Quantity),
     /// A const binder occurrence retained in a nominal identity.  It shares
     /// the owner-local source slot numbering with other generic kinds, while
@@ -504,6 +542,38 @@ pub enum Type {
     Generic(u32),
     Infer(InferVar),
     Error,
+}
+
+impl Type {
+    pub(crate) fn fixed_array(element: Type, count: u64) -> Self {
+        Self::FixedArray { element: Box::new(element), length: Box::new(GenericArgument::ConstInteger(
+            IntegerConst::new(ScalarType::Usize, false, u128::from(count), 64)
+                .expect("u64 count is representable by the stage0 usize target"))) }
+    }
+
+    pub(crate) fn fixed_array_length(&self) -> Option<u64> {
+        let Self::FixedArray { length, .. } = self else { return None; };
+        match length.as_ref() {
+            GenericArgument::ConstInteger(value) if value.kind() == ConstKind::Usize => value.array_length(64).ok(),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn array_element(&self) -> Option<&Type> {
+        match self {
+            Self::Array(element) | Self::FixedArray { element, .. } => Some(element),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn array_accepts_pattern(&self, count: usize, rest: Option<crate::pattern::ArrayPatternRest>) -> bool {
+        (rest.is_none() || matches!(self, Self::FixedArray { .. }))
+            && crate::pattern::ArrayPatternRest::length(rest, count).is_some_and(|count| self.array_accepts_count(count))
+    }
+
+    pub(crate) fn array_accepts_count(&self, count: usize) -> bool {
+        matches!(self, Self::Array(_)) || self.fixed_array_length() == u64::try_from(count).ok()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -521,6 +591,7 @@ pub enum TypeError {
         expected: EffectRow,
         found: EffectRow,
     },
+    AmbiguousEffectUnion { left: EffectRow, right: EffectRow },
     EffectOccurs(EffectVar, EffectRow),
     UnresolvedEffect(EffectVar),
     UnresolvedGenericEffectRow(u32),
@@ -528,20 +599,87 @@ pub enum TypeError {
     UnresolvedConst(ConstInferVar),
     UnresolvedLifetime(LifetimeInferVar),
     LifetimeMismatch { expected: Lifetime, found: Lifetime },
+    EscapingUniversalRegion(UniversalRegion),
+    InvalidUniversalScope,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct InferContext {
     bindings: Vec<Option<Type>>,
+    /// Numeric evidence is a constraint on a type variable, not an eager
+    /// binding to i64/f64. Roots merge this evidence before defaulting.
+    numeric_constraints: BTreeMap<InferVar, bool>,
     effect_bindings: Vec<Option<EffectRow>>,
+    pending_effect_equalities: Vec<(EffectRow, EffectRow)>,
+    solving_effect_equalities: bool,
     const_bindings: Vec<Option<GenericArgument>>,
     lifetime_bindings: Vec<Option<Lifetime>>,
     /// Body elaboration may inspect partially constrained constructor types.
     /// Sealing ends this phase and resolves unconstrained elision holes.
     pending_body_lifetimes: bool,
+    next_universe: u32,
+    active_universes: Vec<u32>,
+    /// A private partial-zonk mode used only by transactional leak checking.
+    checking_universe_leaks: Option<u32>,
+    freezing_types: bool,
 }
 
 impl InferContext {
+    pub(crate) fn has_numeric_constraint(&self, mut value: Type) -> bool {
+        while let Type::Infer(variable) = value {
+            match &self.bindings[variable.0 as usize] {
+                Some(binding) => value = binding.clone(),
+                None => return self.numeric_constraints.contains_key(&variable),
+            }
+        }
+        false
+    }
+    /// Constrain a literal's type without choosing its default. Integer
+    /// literals admit integer or floating scalar contexts; floating literals
+    /// require floating contexts. `floating` describes the source literal,
+    /// not a conversion of an already typed value.
+    pub fn constrain_numeric(&mut self, value: Type, floating: bool) -> Result<Type, TypeError> {
+        let value = self.resolve(value);
+        match &value {
+            Type::Infer(variable) => {
+                self.numeric_constraints.entry(*variable)
+                    .and_modify(|required_float| *required_float |= floating)
+                    .or_insert(floating);
+            }
+            Type::Generic(_) | Type::Error => {}
+            Type::Scalar(scalar) if matches!(scalar, ScalarType::F32 | ScalarType::F64)
+                || (!floating && matches!(scalar,
+                    ScalarType::U8 | ScalarType::U16 | ScalarType::U32 | ScalarType::U64
+                    | ScalarType::U128 | ScalarType::Usize | ScalarType::I8 | ScalarType::I16
+                    | ScalarType::I32 | ScalarType::I64 | ScalarType::I128 | ScalarType::Isize)) => {}
+            _ => return Err(TypeError::Mismatch {
+                expected: Box::new(Type::Scalar(if floating { ScalarType::F64 } else { ScalarType::I64 })),
+                found: Box::new(value),
+            }),
+        }
+        Ok(value)
+    }
+
+    /// Finish numeric inference only after the caller has supplied all
+    /// non-defaultable constraints. Ordinary unconstrained type variables
+    /// remain unresolved; this is not a general inference fallback.
+    pub fn finish_numeric_defaults(&mut self) -> Result<(), TypeError> {
+        let constraints = self.numeric_constraints.clone();
+        // `bind` transfers evidence to the surviving root. Resolve again so
+        // bindings supplied since the last literal are checked as well.
+        for (variable, floating) in constraints {
+            self.constrain_numeric(Type::Infer(variable), floating)?;
+        }
+        let constraints = self.numeric_constraints.clone();
+        for (variable, floating) in constraints {
+            if let Type::Infer(root) = self.resolve(Type::Infer(variable)) {
+                let floating = floating || self.numeric_constraints.get(&root).copied().unwrap_or(false);
+                self.bind(root, Type::Scalar(if floating { ScalarType::F64 } else { ScalarType::I64 }))?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn for_body() -> Self {
         Self { pending_body_lifetimes: true, ..Self::default() }
     }
@@ -567,7 +705,7 @@ impl InferContext {
         }
     }
 
-    fn unify_lifetimes(&mut self, left: Lifetime, right: Lifetime) -> Result<Lifetime, TypeError> {
+    pub(crate) fn unify_lifetimes(&mut self, left: Lifetime, right: Lifetime) -> Result<Lifetime, TypeError> {
         let left = self.resolve_lifetime(left)?;
         let right = self.resolve_lifetime(right)?;
         if left == right { return Ok(left); }
@@ -582,7 +720,11 @@ impl InferContext {
 
     fn zonk_lifetime(&mut self, value: Lifetime) -> Result<Lifetime, TypeError> {
         match self.resolve_lifetime(value)? {
-            Lifetime::Infer(variable) if !self.pending_body_lifetimes => Err(TypeError::UnresolvedLifetime(variable)),
+            Lifetime::Infer(variable) if !self.pending_body_lifetimes && self.checking_universe_leaks.is_none() => Err(TypeError::UnresolvedLifetime(variable)),
+            Lifetime::Placeholder(region) if self.freezing_types
+                || !self.active_universes.contains(&region.universe)
+                || self.checking_universe_leaks.is_some_and(|universe| region.universe >= universe) =>
+                Err(TypeError::EscapingUniversalRegion(region)),
             value => Ok(value),
         }
     }
@@ -615,7 +757,7 @@ impl InferContext {
         EffectRow {
             effects: BTreeSet::new(),
             projections: vec![],
-            tail: Some(EffectTail::Infer(variable)),
+            tails: [EffectTail::Infer(variable)].into_iter().collect(),
         }
     }
 
@@ -645,6 +787,9 @@ impl InferContext {
         &mut self,
         value: Type,
     ) -> Result<(Type, Vec<GenericKind>), TypeError> {
+        // Numeric literals are defaultable scalar choices, not parametric
+        // values that can be generalized over every possible type.
+        self.finish_numeric_defaults()?;
         let mut variables = BTreeSet::new();
         self.collect_unresolved_type_variables(value.clone(), &mut variables)?;
         let variables = variables.into_iter().collect::<Vec<_>>();
@@ -686,6 +831,10 @@ impl InferContext {
                 .into_iter()
                 .try_for_each(|value| self.collect_unresolved_type_variables(value, variables)),
             Type::Array(value) => self.collect_unresolved_type_variables(*value, variables),
+            Type::FixedArray { element, length } => {
+                self.collect_unresolved_type_variables(*element, variables)?;
+                self.collect_generic_argument_variables(*length, variables)
+            }
             Type::StaticData { element, .. } => {
                 self.collect_unresolved_type_variables(*element, variables)
             }
@@ -738,11 +887,10 @@ impl InferContext {
         effects: EffectRow,
         variables: &mut BTreeSet<InferVar>,
     ) -> Result<(), TypeError> {
-        if matches!(effects.tail, Some(EffectTail::Infer(_))) {
-            return Err(TypeError::UnresolvedEffect(match effects.tail {
-                Some(EffectTail::Infer(variable)) => variable,
-                _ => unreachable!(),
-            }));
+        if let Some(variable) = effects.tails.iter().find_map(|tail| match tail {
+            EffectTail::Infer(variable) => Some(*variable), _ => None,
+        }) {
+            return Err(TypeError::UnresolvedEffect(variable));
         }
         for effect in effects.effects {
             for argument in effect.arguments {
@@ -776,8 +924,8 @@ impl InferContext {
             }
             (Type::Unit, Type::Unit) => Ok(Type::Unit),
             (Type::Scalar(left), Type::Scalar(right)) if left == right => Ok(Type::Scalar(left)),
-            (Type::ConstU32(left), Type::ConstU32(right)) if left == right => {
-                Ok(Type::ConstU32(left))
+            (Type::ConstInteger(left), Type::ConstInteger(right)) if left == right => {
+                Ok(Type::ConstInteger(left))
             }
             (Type::ConstQuantity(left), Type::ConstQuantity(right)) if left == right => {
                 Ok(Type::ConstQuantity(left))
@@ -847,6 +995,10 @@ impl InferContext {
             }
             (Type::Array(left), Type::Array(right)) => {
                 Ok(Type::Array(Box::new(self.unify(*left, *right)?)))
+            }
+            (Type::FixedArray { element: left, length: ln }, Type::FixedArray { element: right, length: rn }) => {
+                Ok(Type::FixedArray { element: Box::new(self.unify(*left, *right)?),
+                    length: Box::new(self.unify_generic_arguments(vec![*ln], vec![*rn])?.remove(0)) })
             }
             (
                 Type::RawPointer { mutability: left_mutability, pointee: left },
@@ -925,8 +1077,9 @@ impl InferContext {
     }
 
     pub fn zonk(&mut self, value: Type) -> Result<Type, TypeError> {
+        self.solve_effect_equalities()?;
         match self.resolve(value) {
-            Type::Infer(variable) => Err(TypeError::Unresolved(variable)),
+            Type::Infer(variable) if self.checking_universe_leaks.is_none() => Err(TypeError::Unresolved(variable)),
             Type::Nominal {
                 definition,
                 arguments,
@@ -965,6 +1118,9 @@ impl InferContext {
                     .collect::<Result<_, _>>()?,
             )),
             Type::Array(element) => Ok(Type::Array(Box::new(self.zonk(*element)?))),
+            Type::FixedArray { element, length } => Ok(Type::FixedArray {
+                element: Box::new(self.zonk(*element)?), length: Box::new(self.zonk_generic_argument(*length)?),
+            }),
             Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
                 mutability,
                 pointee: Box::new(self.zonk(*pointee)?),
@@ -1018,7 +1174,9 @@ impl InferContext {
     /// fingerprint.
     pub fn type_fingerprint(&mut self, value: Type) -> Result<Digest, TypeError> {
         let pending = std::mem::replace(&mut self.pending_body_lifetimes, false);
+        let freezing = std::mem::replace(&mut self.freezing_types, true);
         let resolved = self.zonk(value);
+        self.freezing_types = freezing;
         self.pending_body_lifetimes = pending;
         let value = resolved?;
         let bytes = canonical_type_encoding(&value);
@@ -1030,7 +1188,9 @@ impl InferContext {
 
     pub fn zonk_effects(&mut self, effects: EffectRow) -> Result<EffectRow, TypeError> {
         let effects = self.zonk_effects_allowing_generic_tail(effects)?;
-        if let Some(EffectTail::Generic(index)) = effects.tail {
+        if let Some(index) = effects.tails.iter().find_map(|tail| match tail {
+            EffectTail::Generic(index) => Some(*index), _ => None,
+        }) {
             return Err(TypeError::UnresolvedGenericEffectRow(index));
         }
         Ok(effects)
@@ -1045,8 +1205,11 @@ impl InferContext {
         &mut self,
         effects: EffectRow,
     ) -> Result<EffectRow, TypeError> {
+        self.solve_effect_equalities()?;
         let effects = self.resolve_effects(effects);
-        if let Some(EffectTail::Infer(variable)) = effects.tail {
+        if let Some(variable) = effects.tails.iter().find_map(|tail| match tail {
+            EffectTail::Infer(variable) => Some(*variable), _ => None,
+        }) && self.checking_universe_leaks.is_none() {
             return Err(TypeError::UnresolvedEffect(variable));
         }
         Ok(EffectRow {
@@ -1086,7 +1249,7 @@ impl InferContext {
                     })
                 })
                 .collect::<Result<_, _>>()?,
-            tail: effects.tail,
+            tails: effects.tails.clone(),
         }
         .canonicalized())
     }
@@ -1121,11 +1284,25 @@ impl InferContext {
                 found: required,
             });
         };
-        match (required.tail, allowed.tail) {
+        if required.tails.is_subset(&allowed.tails) {
+            return Ok(EffectRow { effects: required.effects, projections, tails: required.tails });
+        }
+        if required.tails.len() > 1 || allowed.tails.len() > 1 {
+            let unknowns: Vec<_> = required.tails.difference(&allowed.tails).copied().collect();
+            if let [EffectTail::Infer(variable)] = unknowns.as_slice() {
+                self.bind_effect(*variable, EffectRow {
+                    effects: allowed_only, projections: allowed.projections.clone(),
+                    tails: allowed.tails.difference(&required.tails).copied().collect(),
+                })?;
+                return Ok(self.resolve_effects(required));
+            }
+            return Err(TypeError::EffectRow { expected: allowed, found: required });
+        }
+        match (required.tails.first().copied(), allowed.tails.first().copied()) {
             (None, _) => Ok(EffectRow {
                 effects: required.effects,
                 projections,
-                tail: None,
+                tails: Default::default(),
             }
             .canonicalized()),
             (Some(EffectTail::Generic(left)), Some(EffectTail::Generic(right)))
@@ -1134,7 +1311,7 @@ impl InferContext {
                 Ok(EffectRow {
                     effects: required.effects,
                     projections,
-                    tail: Some(EffectTail::Generic(left)),
+                    tails: [EffectTail::Generic(left)].into_iter().collect(),
                 }
                 .canonicalized())
             }
@@ -1144,13 +1321,13 @@ impl InferContext {
                     EffectRow {
                         effects: allowed_only,
                         projections: allowed.projections,
-                        tail,
+                        tails: tail.into_iter().collect(),
                     },
                 )?;
                 Ok(EffectRow {
                     effects: required.effects,
                     projections,
-                    tail: Some(EffectTail::Infer(variable)),
+                    tails: [EffectTail::Infer(variable)].into_iter().collect(),
                 }
                 .canonicalized())
             }
@@ -1166,13 +1343,13 @@ impl InferContext {
                     EffectRow {
                         effects: allowed_only,
                         projections: allowed.projections,
-                        tail: Some(EffectTail::Generic(generic)),
+                        tails: [EffectTail::Generic(generic)].into_iter().collect(),
                     },
                 )?;
                 Ok(EffectRow {
                     effects: required.effects,
                     projections,
-                    tail: Some(EffectTail::Generic(generic)),
+                    tails: [EffectTail::Generic(generic)].into_iter().collect(),
                 }
                 .canonicalized())
             }
@@ -1271,7 +1448,7 @@ impl InferContext {
             .collect()
     }
 
-    fn unify_effect_rows(
+    pub(crate) fn unify_effect_rows(
         &mut self,
         left: EffectRow,
         right: EffectRow,
@@ -1291,11 +1468,56 @@ impl InferContext {
                 found: right,
             });
         };
-        match (left.tail, right.tail) {
+        if left.tails.len() > 1 || right.tails.len() > 1 {
+            // The empty union has one solution: every operand is empty.
+            // Unlike a nonempty known row, it has no nonunique partitions.
+            for (open, closed) in [(&left, &right), (&right, &left)] {
+                if closed.effects.is_empty() && closed.projections.is_empty() && closed.tails.is_empty()
+                    && open.effects.is_empty() && open.projections.is_empty()
+                    && open.tails.iter().all(|tail| matches!(tail, EffectTail::Infer(_))) {
+                    for tail in &open.tails {
+                        let EffectTail::Infer(variable) = tail else { unreachable!(); };
+                        self.bind_effect(*variable, EffectRow::empty())?;
+                    }
+                    return Ok(EffectRow::empty());
+                }
+            }
+            let left_tails: BTreeSet<_> = left.tails.difference(&right.tails).copied().collect();
+            let right_tails: BTreeSet<_> = right.tails.difference(&left.tails).copied().collect();
+            if left_tails.is_empty() && right_tails.is_empty()
+                && left_only.is_empty() && right_only.is_empty() { return Ok(left); }
+            if let [EffectTail::Infer(variable)] = left_tails.iter().copied().collect::<Vec<_>>().as_slice()
+                && left_only.is_empty() {
+                self.bind_effect(*variable, EffectRow {
+                    effects: right_only, projections: vec![], tails: right_tails,
+                })?;
+                return Ok(self.resolve_effects(left));
+            }
+            if let [EffectTail::Infer(variable)] = right_tails.iter().copied().collect::<Vec<_>>().as_slice()
+                && right_only.is_empty() {
+                self.bind_effect(*variable, EffectRow {
+                    effects: left_only, projections: vec![], tails: left_tails,
+                })?;
+                return Ok(self.resolve_effects(right));
+            }
+            // Arguments later in the call may determine these operands.
+            // Retain an equation, never an arbitrary partition or equality
+            // between the operands. Freezing requires a unique solution.
+            if left_tails.iter().chain(&right_tails)
+                .any(|tail| matches!(tail, EffectTail::Infer(_))) {
+                let equation = (left.clone(), right);
+                if !self.pending_effect_equalities.contains(&equation) {
+                    self.pending_effect_equalities.push(equation);
+                }
+                return Ok(left);
+            }
+            return Err(TypeError::EffectRow { expected: left, found: right });
+        }
+        match (left.tails.first().copied(), right.tails.first().copied()) {
             (None, None) if left_only.is_empty() && right_only.is_empty() => Ok(EffectRow {
                 effects: left.effects.union(&right.effects).cloned().collect(),
                 projections,
-                tail: None,
+                tails: Default::default(),
             }
             .canonicalized()),
             (None, None) => Err(TypeError::EffectRow {
@@ -1321,7 +1543,7 @@ impl InferContext {
                     EffectRow {
                         effects: right_only,
                         projections: vec![],
-                        tail: Some(EffectTail::Generic(generic)),
+                        tails: [EffectTail::Generic(generic)].into_iter().collect(),
                     },
                 )?;
                 Ok(right)
@@ -1332,7 +1554,7 @@ impl InferContext {
                     EffectRow {
                         effects: left_only,
                         projections: vec![],
-                        tail: Some(EffectTail::Generic(generic)),
+                        tails: [EffectTail::Generic(generic)].into_iter().collect(),
                     },
                 )?;
                 Ok(left)
@@ -1343,13 +1565,13 @@ impl InferContext {
                 Ok(EffectRow {
                     effects: left.effects.union(&right.effects).cloned().collect(),
                     projections,
-                    tail: Some(EffectTail::Infer(variable)),
+                    tails: [EffectTail::Infer(variable)].into_iter().collect(),
                 }
                 .canonicalized())
             }
             (Some(EffectTail::Infer(variable)), Some(EffectTail::Infer(other))) => {
                 let remainder = self.fresh_effects();
-                let Some(EffectTail::Infer(tail)) = remainder.tail else {
+                let Some(EffectTail::Infer(tail)) = remainder.tails.first().copied() else {
                     unreachable!("fresh effect row has an inference tail")
                 };
                 self.bind_effect(
@@ -1357,7 +1579,7 @@ impl InferContext {
                     EffectRow {
                         effects: right_only,
                         projections: vec![],
-                        tail: Some(EffectTail::Infer(tail)),
+                        tails: [EffectTail::Infer(tail)].into_iter().collect(),
                     },
                 )?;
                 self.bind_effect(
@@ -1365,13 +1587,13 @@ impl InferContext {
                     EffectRow {
                         effects: left_only,
                         projections: vec![],
-                        tail: Some(EffectTail::Infer(tail)),
+                        tails: [EffectTail::Infer(tail)].into_iter().collect(),
                     },
                 )?;
                 Ok(EffectRow {
                     effects: left.effects.union(&right.effects).cloned().collect(),
                     projections,
-                    tail: Some(EffectTail::Infer(tail)),
+                    tails: [EffectTail::Infer(tail)].into_iter().collect(),
                 }
                 .canonicalized())
             }
@@ -1438,36 +1660,50 @@ impl InferContext {
         required: Vec<EffectRowProjection>,
         allowed: Vec<EffectRowProjection>,
     ) -> Result<Option<Vec<EffectRowProjection>>, TypeError> {
+        let mut inference = self.clone();
         let mut unmatched = allowed;
         let mut unified = Vec::with_capacity(required.len());
         for required_projection in required {
-            let Some(index) = unmatched.iter().position(|candidate| {
+            // Prefer exact row membership. Equal item names on different
+            // subjects are distinct operands, not an instruction to equate
+            // those subjects (for example I::Effects | J::Effects).
+            if let Some(index) = unmatched.iter().position(|candidate| candidate == &required_projection) {
+                unified.push(unmatched.remove(index));
+                continue;
+            }
+            let mut selected = None;
+            for (index, candidate) in unmatched.iter().enumerate().filter(|(_, candidate)| {
                 candidate.trait_definition == required_projection.trait_definition
                     && candidate.name == required_projection.name
                     && candidate.trait_arguments.len() == required_projection.trait_arguments.len()
                     && candidate.item_generic_kinds == required_projection.item_generic_kinds
                     && candidate.item_arguments.len() == required_projection.item_arguments.len()
-            }) else {
-                return Ok(None);
-            };
-            let allowed_projection = unmatched.remove(index);
-            unified.push(EffectRowProjection {
-                subject: Box::new(
-                    self.unify(*required_projection.subject, *allowed_projection.subject)?,
-                ),
-                trait_definition: required_projection.trait_definition,
-                trait_arguments: self.unify_generic_arguments(
-                    required_projection.trait_arguments,
-                    allowed_projection.trait_arguments,
-                )?,
-                name: required_projection.name,
-                item_generic_kinds: required_projection.item_generic_kinds,
-                item_arguments: self.unify_generic_arguments(
-                    required_projection.item_arguments,
-                    allowed_projection.item_arguments,
-                )?,
-            });
+            }) {
+                let mut trial = inference.clone();
+                let value = (|| -> Result<EffectRowProjection, TypeError> {
+                    Ok(EffectRowProjection {
+                        subject: Box::new(trial.unify(*required_projection.subject.clone(), *candidate.subject.clone())?),
+                        trait_definition: required_projection.trait_definition,
+                        trait_arguments: trial.unify_generic_arguments(required_projection.trait_arguments.clone(), candidate.trait_arguments.clone())?,
+                        name: required_projection.name.clone(),
+                        item_generic_kinds: required_projection.item_generic_kinds.clone(),
+                        item_arguments: trial.unify_generic_arguments(required_projection.item_arguments.clone(), candidate.item_arguments.clone())?,
+                    })
+                })();
+                if let Ok(value) = value {
+                    // An inference hole must not arbitrarily choose between
+                    // distinct allowed operands. Nor may a failed candidate
+                    // leave partial bindings behind for the next candidate.
+                    if selected.is_some() { return Ok(None); }
+                    selected = Some((index, trial, value));
+                }
+            }
+            let Some((index, trial, value)) = selected else { return Ok(None); };
+            unmatched.remove(index);
+            inference = trial;
+            unified.push(value);
         }
+        *self = inference;
         Ok(Some(unified))
     }
 
@@ -1477,6 +1713,9 @@ impl InferContext {
         }
         if self.occurs(variable, &value) {
             return Err(TypeError::Occurs(variable, Box::new(value)));
+        }
+        if let Some(floating) = self.numeric_constraints.get(&variable).copied() {
+            self.constrain_numeric(value.clone(), floating)?;
         }
         self.bindings[variable.0 as usize] = Some(value);
         Ok(())
@@ -1551,8 +1790,8 @@ impl InferContext {
                         .any(|argument| self.const_argument_occurs(variable, argument))
             }
             GenericArgument::Lifetime(_)
-            | GenericArgument::ConstU32(_)
-            | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstInteger(_)
+            | GenericArgument::ConstIntegerExpr(_)
             | GenericArgument::ConstQuantity(_)
             | GenericArgument::ConstGeneric { .. } => false,
         }
@@ -1560,6 +1799,8 @@ impl InferContext {
 
     fn const_occurs_in_type(&mut self, variable: ConstInferVar, value: &Type) -> bool {
         match self.resolve(value.clone()) {
+            Type::FixedArray { element, length } => self.const_occurs_in_type(variable, &element)
+                || self.const_argument_occurs(variable, &length),
             Type::Nominal { arguments, .. } => arguments
                 .iter()
                 .any(|argument| self.const_argument_occurs(variable, argument)),
@@ -1601,7 +1842,7 @@ impl InferContext {
             Type::Unit
             | Type::Never
             | Type::Scalar(_)
-            | Type::ConstU32(_)
+            | Type::ConstInteger(_)
             | Type::ConstQuantity(_)
             | Type::ConstGeneric { .. }
             | Type::Generic(_)
@@ -1717,6 +1958,8 @@ impl InferContext {
                 .zip(&right)
                 .all(|(left, right)| self.types_may_unify(left, right)),
             (Type::Array(left), Type::Array(right)) => self.types_may_unify(&left, &right),
+            (Type::FixedArray { element: left, length: ln }, Type::FixedArray { element: right, length: rn }) =>
+                self.types_may_unify(&left, &right) && self.generic_arguments_may_unify(&ln, &rn),
             (
                 Type::RawPointer { mutability: left_mutability, pointee: left },
                 Type::RawPointer { mutability: right_mutability, pointee: right },
@@ -1767,8 +2010,77 @@ impl InferContext {
         resolved
     }
 
+    /// Expose solved type shapes inside a body contract without defaulting
+    /// numeric variables or requiring unrelated fields to be fully inferred.
+    /// This is not a persistence operation: `zonk` remains mandatory there.
+    pub(crate) fn resolve_type_structure(&self, mut value: Type) -> Type {
+        while let Type::Infer(variable) = value {
+            let Some(binding) = &self.bindings[variable.0 as usize] else { break; };
+            value = binding.clone();
+        }
+        match value {
+            Type::Nominal { definition, arguments } => Type::Nominal {
+                definition, arguments: arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+            },
+            Type::Projection { subject, trait_definition, trait_arguments, name, item_generic_kinds, item_arguments } => Type::Projection {
+                subject: Box::new(self.resolve_type_structure(*subject)), trait_definition,
+                trait_arguments: trait_arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+                name, item_generic_kinds,
+                item_arguments: item_arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+            },
+            Type::Tuple(values) => Type::Tuple(values.into_iter().map(|value| self.resolve_type_structure(value)).collect()),
+            Type::Array(value) => Type::Array(Box::new(self.resolve_type_structure(*value))),
+            Type::FixedArray { element, length } => Type::FixedArray {
+                element: Box::new(self.resolve_type_structure(*element)), length: Box::new(self.resolve_argument_structure(*length)),
+            },
+            Type::Reference { mutability, lifetime, referent } => Type::Reference {
+                mutability, lifetime, referent: Box::new(self.resolve_type_structure(*referent)),
+            },
+            Type::RawPointer { mutability, pointee } => Type::RawPointer {
+                mutability, pointee: Box::new(self.resolve_type_structure(*pointee)),
+            },
+            Type::StaticData { element, tag, alignment } => Type::StaticData {
+                element: Box::new(self.resolve_type_structure(*element)), tag, alignment,
+            },
+            Type::Callable { safety, lifetime_binders, parameters, result, effects, invocation } => Type::Callable {
+                safety, lifetime_binders,
+                parameters: parameters.into_iter().map(|value| self.resolve_type_structure(value)).collect(),
+                result: Box::new(self.resolve_type_structure(*result)), effects, invocation,
+            },
+            value => value,
+        }
+    }
+
+    fn resolve_argument_structure(&self, argument: GenericArgument) -> GenericArgument {
+        match argument {
+            GenericArgument::Type(value) => GenericArgument::Type(self.resolve_type_structure(value)),
+            argument => argument,
+        }
+    }
+
+    fn solve_effect_equalities(&mut self) -> Result<(), TypeError> {
+        if self.solving_effect_equalities || self.pending_effect_equalities.is_empty() { return Ok(()); }
+        self.solving_effect_equalities = true;
+        let result = (|| {
+            loop {
+                let before = self.effect_bindings.clone();
+                for (left, right) in std::mem::take(&mut self.pending_effect_equalities) {
+                    self.unify_effect_rows(left, right)?;
+                }
+                if self.pending_effect_equalities.is_empty() { return Ok(()); }
+                if before == self.effect_bindings {
+                    let (left, right) = self.pending_effect_equalities[0].clone();
+                    return Err(TypeError::AmbiguousEffectUnion { left, right });
+                }
+            }
+        })();
+        self.solving_effect_equalities = false;
+        result
+    }
+
     fn bind_effect(&mut self, variable: EffectVar, value: EffectRow) -> Result<(), TypeError> {
-        if value.tail == Some(EffectTail::Infer(variable)) && value.effects.is_empty() {
+        if value.tails == BTreeSet::from([EffectTail::Infer(variable)])
+            && value.effects.is_empty() && value.projections.is_empty() {
             return Ok(());
         }
         if self.effect_occurs(variable, &value) {
@@ -1778,37 +2090,28 @@ impl InferContext {
         Ok(())
     }
 
-    fn resolve_effects(&mut self, effects: EffectRow) -> EffectRow {
-        let Some(EffectTail::Infer(variable)) = effects.tail else {
-            return effects;
-        };
-        let Some(binding) = self.effect_bindings[variable.0 as usize].clone() else {
-            return effects;
-        };
-        let binding = self.resolve_effects(binding);
-        self.effect_bindings[variable.0 as usize] = Some(binding.clone());
-        EffectRow {
-            effects: effects.effects.union(&binding.effects).cloned().collect(),
-            projections: effects
-                .projections
-                .into_iter()
-                .chain(binding.projections)
-                .collect(),
-            tail: binding.tail,
-        }
+    fn resolve_effects(&mut self, mut effects: EffectRow) -> EffectRow {
+        effects.substitute_tails(|tail| {
+            let EffectTail::Infer(variable) = tail else { return None; };
+            let binding = self.effect_bindings.get(variable.0 as usize)?.clone()?;
+            let binding = self.resolve_effects(binding);
+            self.effect_bindings[variable.0 as usize] = Some(binding.clone());
+            Some(binding)
+        });
+        effects
     }
 
     fn effect_occurs(&mut self, variable: EffectVar, effects: &EffectRow) -> bool {
         self.effect_occurs_in_row(variable, effects)
     }
 
-    /// Effect variables do not live only in a row tail: an effect row can be
+    /// Effect variables do not live only in a row tails: an effect row can be
     /// carried as a generic argument, and a type argument can itself be a
     /// callable with an open effect row.  Follow every mixed-kind edge before
     /// binding the variable, otherwise later zonking can recurse forever.
     fn effect_occurs_in_row(&mut self, variable: EffectVar, effects: &EffectRow) -> bool {
         let effects = self.resolve_effects(effects.clone());
-        effects.tail == Some(EffectTail::Infer(variable))
+        effects.tails.contains(&EffectTail::Infer(variable))
             || effects.effects.iter().any(|effect| {
                 effect
                     .arguments
@@ -1847,8 +2150,8 @@ impl InferContext {
                         .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
             }
             GenericArgument::Lifetime(_)
-            | GenericArgument::ConstU32(_)
-            | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstInteger(_)
+            | GenericArgument::ConstIntegerExpr(_)
             | GenericArgument::ConstQuantity(_)
             | GenericArgument::ConstGeneric { .. }
             | GenericArgument::ConstInfer { .. } => false,
@@ -1857,6 +2160,8 @@ impl InferContext {
 
     fn effect_occurs_in_type(&mut self, variable: EffectVar, value: &Type) -> bool {
         match self.resolve(value.clone()) {
+            Type::FixedArray { element, length } => self.effect_occurs_in_type(variable, &element)
+                || self.effect_occurs_in_generic_argument(variable, &length),
             Type::Nominal { arguments, .. } => arguments
                 .iter()
                 .any(|argument| self.effect_occurs_in_generic_argument(variable, argument)),
@@ -1898,7 +2203,7 @@ impl InferContext {
             Type::Unit
             | Type::Never
             | Type::Scalar(_)
-            | Type::ConstU32(_)
+            | Type::ConstInteger(_)
             | Type::ConstQuantity(_)
             | Type::ConstGeneric { .. }
             | Type::Generic(_)
@@ -1909,6 +2214,8 @@ impl InferContext {
 
     fn occurs(&mut self, variable: InferVar, value: &Type) -> bool {
         match self.resolve(value.clone()) {
+            Type::FixedArray { element, length } => self.occurs(variable, &element)
+                || self.generic_argument_occurs(variable, &length),
             Type::Infer(found) => found == variable,
             Type::Nominal { arguments, .. } => arguments
                 .iter()
@@ -2005,16 +2312,12 @@ impl InferContext {
         if left == right {
             return true;
         }
-        if matches!(left.tail, Some(EffectTail::Infer(_)))
-            || matches!(right.tail, Some(EffectTail::Infer(_)))
+        if left.tails.iter().any(|tail| matches!(tail, EffectTail::Infer(_)))
+            || right.tails.iter().any(|tail| matches!(tail, EffectTail::Infer(_)))
         {
             return true;
         }
-        let compatible_tails = match (left.tail, right.tail) {
-            (None, None) => true,
-            (Some(EffectTail::Generic(left)), Some(EffectTail::Generic(right))) => left == right,
-            _ => false,
-        };
+        let compatible_tails = left.tails == right.tails;
         compatible_tails
             && left.effects.len() == right.effects.len()
             && left.projections.len() == right.projections.len()
@@ -2077,7 +2380,7 @@ impl InferContext {
                 name,
                 kind,
             }),
-            GenericArgument::ConstInfer { variable, .. } => {
+            GenericArgument::ConstInfer { variable, .. } if self.checking_universe_leaks.is_none() => {
                 Err(TypeError::UnresolvedConst(variable))
             }
             argument => Ok(argument),
@@ -2099,8 +2402,8 @@ impl InferContext {
                         .any(|argument| self.generic_argument_occurs(variable, argument))
             }
             GenericArgument::Lifetime(_)
-            | GenericArgument::ConstU32(_)
-            | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstInteger(_)
+            | GenericArgument::ConstIntegerExpr(_)
             | GenericArgument::ConstQuantity(_)
             | GenericArgument::ConstGeneric { .. }
             | GenericArgument::ConstInfer { .. } => false,
@@ -2142,68 +2445,39 @@ impl InferContext {
                     .item_arguments
                     .iter()
                     .any(|argument| self.generic_argument_occurs(variable, argument))
-        }) || match effects.tail {
-            Some(EffectTail::Infer(tail)) if visited_tails.insert(tail) => self
+        }) || effects.tails.iter().any(|tail| match *tail {
+            EffectTail::Infer(tail) if visited_tails.insert(tail) => self
                 .effect_bindings
                 .get(tail.0 as usize)
                 .and_then(|binding| binding.clone())
                 .is_some_and(|binding| {
                     self.effect_row_type_occurs_in(variable, &binding, visited_tails)
                 }),
-            Some(EffectTail::Infer(_)) | Some(EffectTail::Generic(_)) | None => false,
-        }
+            _ => false,
+        })
     }
 }
 
-fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKind) -> bool {
-    matches!(
-        (argument, kind),
-        (GenericArgument::ConstU32(_), ConstKind::U32)
-            | (GenericArgument::ConstU32Expr(_), ConstKind::U32)
-            | (GenericArgument::ConstQuantity(_), ConstKind::Quantity)
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: ConstKind::U32,
-                    ..
-                },
-                ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstGeneric {
-                    kind: ConstKind::Quantity,
-                    ..
-                },
-                ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstInfer {
-                    kind: ConstKind::U32,
-                    ..
-                },
-                ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstInfer {
-                    kind: ConstKind::Quantity,
-                    ..
-                },
-                ConstKind::Quantity
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: ConstKind::U32,
-                    ..
-                },
-                ConstKind::U32
-            )
-            | (
-                GenericArgument::ConstProjection {
-                    kind: ConstKind::Quantity,
-                    ..
-                },
-                ConstKind::Quantity
-            )
-    )
+pub(crate) fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKind) -> bool {
+    match argument {
+        GenericArgument::ConstInteger(value) => value.kind() == kind,
+        GenericArgument::ConstIntegerExpr(value) => value.scalar().ok().and_then(ConstKind::from_integer_scalar) == Some(kind),
+        GenericArgument::ConstQuantity(_) => kind == ConstKind::Quantity,
+        GenericArgument::ConstGeneric { kind: found, .. }
+        | GenericArgument::ConstInfer { kind: found, .. }
+        | GenericArgument::ConstProjection { kind: found, .. } => *found == kind,
+        _ => false,
+    }
+}
+
+pub(crate) fn integer_const_argument_type(argument: &GenericArgument) -> Option<Type> {
+    match argument {
+        GenericArgument::ConstInteger(value) => Some(Type::Scalar(value.scalar())),
+        GenericArgument::ConstIntegerExpr(value) => value.scalar().ok().map(Type::Scalar),
+        GenericArgument::ConstGeneric { kind, .. } | GenericArgument::ConstProjection { kind, .. }
+        | GenericArgument::ConstInfer { kind, .. } => kind.integer_scalar().map(Type::Scalar),
+        _ => None,
+    }
 }
 
 fn encode_type(value: &Type, output: &mut Vec<u8>) {
@@ -2266,6 +2540,11 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(5);
             encode_type(element, output);
         }
+        Type::FixedArray { element, length } => {
+            output.push(18);
+            encode_type(element, output);
+            encode_generic_arguments(std::slice::from_ref(length.as_ref()), output);
+        }
         Type::RawPointer { mutability, pointee } => {
             // New identity tag; existing type encodings remain unchanged.
             output.push(16);
@@ -2301,12 +2580,17 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 Lifetime::Generic(_) => 1,
                 Lifetime::Bound { .. } => 2,
                 Lifetime::Elided => 3,
+                Lifetime::Placeholder(_) => 5,
             });
             if let Lifetime::Generic(index) = lifetime {
                 output.extend_from_slice(&index.to_le_bytes());
             }
             if let Lifetime::Infer(variable) = lifetime {
                 output.extend_from_slice(&variable.0.to_le_bytes());
+            }
+            if let Lifetime::Placeholder(region) = lifetime {
+                output.extend_from_slice(&region.universe.to_le_bytes());
+                output.extend_from_slice(&region.index.to_le_bytes());
             }
             if let Lifetime::Bound { depth, index } = lifetime {
                 output.extend_from_slice(&depth.to_le_bytes());
@@ -2343,17 +2627,17 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 encode_generic_kinds(&projection.item_generic_kinds, output);
                 encode_generic_arguments(&projection.item_arguments, output);
             }
-            match effects.tail {
-                Some(EffectTail::Infer(variable)) => {
+            output.extend_from_slice(&(effects.tails.len() as u64).to_le_bytes());
+            for tail in &effects.tails { match tail {
+                EffectTail::Infer(variable) => {
                     output.push(0);
                     output.extend_from_slice(&variable.0.to_le_bytes());
                 }
-                Some(EffectTail::Generic(index)) => {
+                EffectTail::Generic(index) => {
                     output.push(1);
                     output.extend_from_slice(&index.to_le_bytes());
                 }
-                None => output.push(2),
-            }
+            } }
             output.extend_from_slice(&invocation.lower.to_le_bytes());
             match invocation.upper {
                 Some(upper) => {
@@ -2367,9 +2651,9 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(8);
             output.extend_from_slice(&index.to_le_bytes());
         }
-        Type::ConstU32(value) => {
+        Type::ConstInteger(value) => {
             output.push(12);
-            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&value.canonical_bytes());
         }
         Type::ConstQuantity(value) => {
             output.push(14);
@@ -2385,10 +2669,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
         Type::ConstGeneric { index, kind } => {
             output.push(13);
             output.extend_from_slice(&index.to_le_bytes());
-            output.push(match kind {
-                ConstKind::U32 => 0,
-                ConstKind::Quantity => 1,
-            });
+            output.push(kind.tag());
         }
         // Effect-instance ordering is also used while elaborating recovered
         // source. These encodings are deterministic body-local order keys;
@@ -2473,6 +2754,10 @@ pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
                 .collect(),
         ),
         Type::Array(element) => Type::Array(Box::new(canonicalize_type_identity(*element))),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(canonicalize_type_identity(*element)),
+            length: Box::new(canonicalize_generic_argument_identity(*length)),
+        },
         Type::RawPointer { mutability, pointee } => Type::RawPointer {
             mutability,
             pointee: Box::new(canonicalize_type_identity(*pointee)),
@@ -2533,6 +2818,9 @@ pub(crate) fn is_canonical_effect_row_identity(value: &EffectRow) -> bool {
 
 fn type_identity_is_well_formed(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => type_identity_is_well_formed(element)
+            && generic_argument_matches_const_kind(length, ConstKind::Usize)
+            && generic_argument_identity_is_well_formed(length),
         Type::Nominal { arguments, .. } => arguments
             .iter()
             .all(generic_argument_identity_is_well_formed),
@@ -2575,7 +2863,7 @@ fn type_identity_is_well_formed(value: &Type) -> bool {
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
         | Type::Infer(_)
@@ -2597,10 +2885,13 @@ fn generic_argument_identity_is_well_formed(value: &GenericArgument) -> bool {
                     .iter()
                     .all(generic_argument_identity_is_well_formed)
         }
-        GenericArgument::ConstU32Expr(value) => value.clone().normalized().is_ok(),
+        GenericArgument::ConstIntegerExpr(value) => {
+            !matches!(value, IntegerConstExpr::Literal(_) | IntegerConstExpr::Param { .. })
+                && value.normalized().as_ref() == Ok(value)
+        }
         GenericArgument::ConstQuantity(value) => quantity_is_well_formed(*value),
         GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstGeneric { .. } => true,
         // Allocation-local const holes are not semantic identities.  They
         // can be encoded transiently for deterministic body-local ordering,
@@ -2644,53 +2935,12 @@ pub(crate) fn projection_item_arguments_match_kinds(
     arguments: &[GenericArgument],
 ) -> bool {
     kinds.len() == arguments.len()
-        && kinds.iter().zip(arguments).all(|(kind, argument)| {
-            matches!(
-                (kind, argument),
-                (GenericKind::Type, GenericArgument::Type(_))
-                    | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
-                    | (GenericKind::Lifetime, GenericArgument::Lifetime(_))
-                    | (
-                        GenericKind::Const(ConstKind::U32),
-                        GenericArgument::ConstU32(_)
-                    )
-                    | (
-                        GenericKind::Const(ConstKind::U32),
-                        GenericArgument::ConstU32Expr(_)
-                    )
-                    | (
-                        GenericKind::Const(ConstKind::U32),
-                        GenericArgument::ConstProjection {
-                            kind: ConstKind::U32,
-                            ..
-                        }
-                    )
-                    | (
-                        GenericKind::Const(ConstKind::Quantity),
-                        GenericArgument::ConstQuantity(_)
-                    )
-                    | (
-                        GenericKind::Const(ConstKind::Quantity),
-                        GenericArgument::ConstProjection {
-                            kind: ConstKind::Quantity,
-                            ..
-                        }
-                    )
-                    | (
-                        GenericKind::Const(ConstKind::U32),
-                        GenericArgument::ConstGeneric {
-                            kind: ConstKind::U32,
-                            ..
-                        }
-                    )
-                    | (
-                        GenericKind::Const(ConstKind::Quantity),
-                        GenericArgument::ConstGeneric {
-                            kind: ConstKind::Quantity,
-                            ..
-                        }
-                    )
-            )
+        && kinds.iter().zip(arguments).all(|(kind, argument)| match kind {
+            GenericKind::Const(kind) => !matches!(argument, GenericArgument::ConstInfer { .. })
+                && generic_argument_matches_const_kind(argument, *kind),
+            GenericKind::Type => matches!(argument, GenericArgument::Type(_)),
+            GenericKind::EffectRow => matches!(argument, GenericArgument::EffectRow(_)),
+            GenericKind::Lifetime => matches!(argument, GenericArgument::Lifetime(_)),
         })
 }
 
@@ -2716,10 +2966,9 @@ fn canonicalize_generic_argument_identity(value: GenericArgument) -> GenericArgu
             name,
             kind,
         },
-        GenericArgument::ConstU32Expr(value) => match value.clone().normalized() {
-            Ok(StructuralU32Expr::Literal(value)) => GenericArgument::ConstU32(value),
-            Ok(value) => GenericArgument::ConstU32Expr(value),
-            Err(_) => GenericArgument::ConstU32Expr(value),
+        GenericArgument::ConstIntegerExpr(value) => match value.clone().normalized() {
+            Ok(value) => integer_const_argument(Ok(value)),
+            Err(_) => GenericArgument::ConstIntegerExpr(value),
         },
         value => value,
     }
@@ -2759,7 +3008,7 @@ fn canonicalize_effect_row_identity(value: EffectRow) -> EffectRow {
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
+        tails: value.tails.clone(),
     }
     .canonicalized()
 }
@@ -2790,13 +3039,7 @@ fn encode_types(values: &[Type], output: &mut Vec<u8>) {
 fn encode_generic_kinds(values: &[GenericKind], output: &mut Vec<u8>) {
     output.extend_from_slice(&(values.len() as u64).to_le_bytes());
     for value in values {
-        output.push(match value {
-            GenericKind::Type => 0,
-            GenericKind::EffectRow => 1,
-            GenericKind::Lifetime => 2,
-            GenericKind::Const(ConstKind::U32) => 3,
-            GenericKind::Const(ConstKind::Quantity) => 4,
-        });
+        output.push(value.tag());
     }
 }
 
@@ -2824,17 +3067,17 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
             for projection in &value.projections {
                 output.extend_from_slice(&effect_row_projection_key(projection));
             }
-            match value.tail {
-                Some(EffectTail::Infer(variable)) => {
+            output.extend_from_slice(&(value.tails.len() as u64).to_le_bytes());
+            for tail in &value.tails { match tail {
+                EffectTail::Infer(variable) => {
                     output.push(0);
                     output.extend_from_slice(&variable.0.to_le_bytes());
                 }
-                Some(EffectTail::Generic(index)) => {
+                EffectTail::Generic(index) => {
                     output.push(1);
                     output.extend_from_slice(&index.to_le_bytes());
                 }
-                None => output.push(2),
-            }
+            } }
         }
         GenericArgument::Lifetime(value) => {
             output.push(2);
@@ -2854,15 +3097,20 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
                     output.extend_from_slice(&index.to_le_bytes());
                 }
                 Lifetime::Elided => output.push(3),
+                Lifetime::Placeholder(region) => {
+                    output.push(5);
+                    output.extend_from_slice(&region.universe.to_le_bytes());
+                    output.extend_from_slice(&region.index.to_le_bytes());
+                }
             }
         }
-        GenericArgument::ConstU32(value) => {
+        GenericArgument::ConstInteger(value) => {
             output.push(3);
-            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&value.canonical_bytes());
         }
-        GenericArgument::ConstU32Expr(value) => {
+        GenericArgument::ConstIntegerExpr(value) => {
             output.push(6);
-            encode_structural_u32_expr(value, output);
+            encode_structural_integer_expr(value, output);
         }
         GenericArgument::ConstQuantity(value) => {
             output.push(4);
@@ -2878,10 +3126,7 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
         GenericArgument::ConstGeneric { index, kind } => {
             output.push(5);
             output.extend_from_slice(&index.to_le_bytes());
-            output.push(match kind {
-                ConstKind::U32 => 0,
-                ConstKind::Quantity => 1,
-            });
+            output.push(kind.tag());
         }
         GenericArgument::ConstInfer { variable, kind } => {
             // Body-local ordering needs a deterministic key while source
@@ -2889,10 +3134,7 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
             // through `generic_argument_identity_is_well_formed`.
             output.push(8);
             output.extend_from_slice(&variable.0.to_le_bytes());
-            output.push(match kind {
-                ConstKind::U32 => 0,
-                ConstKind::Quantity => 1,
-            });
+            output.push(kind.tag());
         }
         GenericArgument::ConstProjection {
             subject,
@@ -2907,10 +3149,7 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
             encode_generic_arguments(trait_arguments, output);
             output.extend_from_slice(&(name.len() as u64).to_le_bytes());
             output.extend_from_slice(name.as_bytes());
-            output.push(match kind {
-                ConstKind::U32 => 0,
-                ConstKind::Quantity => 1,
-            });
+            output.push(kind.tag());
         }
     }
 }

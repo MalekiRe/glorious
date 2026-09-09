@@ -188,7 +188,7 @@ fn polymorphic_constant_patterns_supply_ordinary_type_constraints() {
 #[test]
 fn an_unconstrained_nested_block_is_eager() {
     assert_eq!(
-        run("pub fn main() -> i64 { let count = 0; let pair = (1, { count = 42; 2 }); count }"),
+        run("pub fn main() -> i64 { let mut count = 0; let pair = (1, { count = 42; 2 }); count }"),
         42
     );
 }
@@ -202,7 +202,7 @@ fn binding_a_projected_owner_separates_it_from_later_source_replacement() {
         enum State { Full(Data), Empty }
         struct Slot { state: State }
         pub fn main() -> i64 {
-            let slot = Slot { state: State::Full(Data { value: 41 }) };
+            let mut slot = Slot { state: State::Full(Data { value: 41 }) };
             let saved = slot.state;
             slot.state = State::Full(Data { value: 7 });
             handle saved { State::Full(data) => data.value, State::Empty => 0 }
@@ -268,13 +268,13 @@ fn generic_constants_receive_context_even_after_a_terminal_expression() {
 fn result_control_preserves_payloads_and_only_invokes_selected_operands() {
     assert_eq!(
         run(
-            "use std::*; pub fn main() -> i64 { let calls = 0; let value = { let left = Result<i64, i64>::Err(42); let result = left and { calls = 1; Result::Ok(7) }; handle result { Result::Err(error) => error; Result::Ok(_) => 0 } }; value + calls }"
+            "use std::*; pub fn main() -> i64 { let mut calls = 0; let value = { let left = Result<i64, i64>::Err(42); let result = left and { calls = 1; Result::Ok(7) }; handle result { Result::Err(error) => error; Result::Ok(_) => 0 } }; value + calls }"
         ),
         42
     );
     assert_eq!(
         run(
-            "use std::*; pub fn main() -> i64 { let calls = 0; let value = { let left = Result<i64, i64>::Ok(42); let result = left or { calls = 1; Result::Err(7) }; handle result { Result::Ok(value) => value; Result::Err(_) => 0 } }; value + calls }"
+            "use std::*; pub fn main() -> i64 { let mut calls = 0; let value = { let left = Result<i64, i64>::Ok(42); let result = left or { calls = 1; Result::Err(7) }; handle result { Result::Ok(value) => value; Result::Err(_) => 0 } }; value + calls }"
         ),
         42
     );
@@ -318,13 +318,13 @@ fn result_control_preserves_payloads_and_only_invokes_selected_operands() {
 fn temporary_callback_loans_live_through_arguments_but_not_a_scalar_result() {
     assert_eq!(
         run(
-            "use std::*; fn apply<F>(body: F) -> i64 where F: Fn<(), Output = i64> { body() } pub fn main() -> i64 { let count = 0; apply(() -> i64 { count = 42; count }); count }"
+            "use std::*; fn apply<F>(body: F) -> i64 where F: Fn<(), Output = i64> { body() } pub fn main() -> i64 { let mut count = 0; apply(() -> i64 { count = 42; count }); count }"
         ),
         42
     );
     for source in [
-        "use std::*; fn apply<F>(body: F, other: i64) -> i64 where F: Fn<(), Output = i64> { body() } pub fn main() -> i64 { let count = 0; apply(() -> i64 { count = 42; count }, count) }",
-        "use std::*; fn identity<F>(body: F) -> F { body } pub fn main() -> i64 { let count = 0; let kept = identity(() -> i64 { count = 42; count }); let invalid = count; kept() }",
+        "use std::*; fn apply<F>(body: F, other: i64) -> i64 where F: Fn<(), Output = i64> { body() } pub fn main() -> i64 { let mut count = 0; apply(() -> i64 { count = 42; count }, count) }",
+        "use std::*; fn identity<F>(body: F) -> F { body } pub fn main() -> i64 { let mut count = 0; let kept = identity(() -> i64 { count = 42; count }); let invalid = count; kept() }",
     ] {
         let Err(ServiceError::Failed(diagnostics)) = compile(source) else {
             panic!("capture loan was released too early");
@@ -402,7 +402,7 @@ fn distinct_normal_completion_observes_inner_handler_clause_results() {
 fn reassigned_function_aliases_call_the_current_value() {
     assert_eq!(
         run(
-            "fn initial() -> i64 { 7 } fn answer() -> i64 { 42 } pub fn main() -> i64 { let selected = initial; selected = answer; selected() }"
+            "fn initial() -> i64 { 7 } fn answer() -> i64 { 42 } pub fn main() -> i64 { let mut selected = initial; selected = answer; selected() }"
         ),
         42
     );

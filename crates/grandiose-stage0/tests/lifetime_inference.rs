@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+mod support;
+
 use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath, PackageKey,
     SourceInput, StageZeroCompiler, decode_and_verify_program,
@@ -61,7 +63,7 @@ fn destructor_owned_loans_remain_live_until_the_owner_is_destroyed() {
         "let owner = Probe { target: &mut count }; let owner = 0;",
     ] {
         let source = format!(
-            "{PREFIX} pub fn main() -> i64 {{ let count = 0; {{ {owners} count = 41; () }}; count }}"
+            "{PREFIX} pub fn main() -> i64 {{ let mut count = 0; {{ {owners} count = 41; () }}; count }}"
         );
         let diagnostics = StageZeroCompiler::new()
             .compile(request(&source))
@@ -75,7 +77,7 @@ fn destructor_owned_loans_remain_live_until_the_owner_is_destroyed() {
         );
     }
     let source = format!(
-        "{PREFIX} pub fn main() -> i64 {{ let count = 0; {{
+        "{PREFIX} pub fn main() -> i64 {{ let mut count = 0; {{
         let first = Probe {{ target: &mut count }};
         let second = Probe {{ target: &mut count }}; () }}; count }}"
     );
@@ -90,8 +92,8 @@ fn destructor_owned_loans_remain_live_until_the_owner_is_destroyed() {
         "{diagnostics:#?}"
     );
     let source = format!(
-        "{PREFIX} pub fn main() -> i64 {{ let count = 0; {{
-        let owner = Probe {{ target: &mut count }}; owner = owner; count = 41; () }}; count }}"
+        "{PREFIX} pub fn main() -> i64 {{ let mut count = 0; {{
+        let mut owner = Probe {{ target: &mut count }}; owner = owner; count = 41; () }}; count }}"
     );
     let diagnostics = StageZeroCompiler::new()
         .compile(request(&source))
@@ -107,12 +109,14 @@ fn destructor_owned_loans_remain_live_until_the_owner_is_destroyed() {
     // destructor adds the implicit scope-exit use. This checks frontend
     // admission, not runtime success: executable MIR still needs explicit
     // loan ending for this same-block storage replacement (documented gap).
-    let mut plain = request(&format!("{PREFIX} struct Plain<'a> {{ target: &'a mut i64 }}
-        pub fn main() -> i64 {{ let count = 0; let owner = Plain {{ target: &mut count }}; count = 42; count }}"));
-    plain.mode = CompilationMode::Check;
-    let outcome = StageZeroCompiler::new().compile(plain).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(outcome.artifact.is_none());
+    // Check-mode service requests also validate executable MIR. Use the
+    // frontend boundary explicitly for this frontend-only NLL assertion.
+    let plain = format!("{PREFIX} struct Plain<'a> {{ target: &'a mut i64 }}
+        pub fn main() -> i64 {{ let mut count = 0; let owner = Plain {{ target: &mut count }}; count = 42; count }}");
+    let (_, core, signatures) = support::frontend("plain-reference-nll@0.1.0", &plain, "main");
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = grandiose_stage0::PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
 
 #[test]
@@ -316,8 +320,8 @@ fn multiple_possible_source_loans_compose_through_nested_calls() {
         fn pick<'a>(left: &'a mut i64, right: &'a mut i64) -> &'a mut i64 { right }
         fn relay<'a>(value: &'a mut i64) -> &'a mut i64 { value }
         pub fn main() -> i64 {
-            let left = 1;
-            let right = 7;
+            let mut left = 1;
+            let mut right = 7;
             let selected = relay(pick(&mut left, &mut right));
             *selected = 42;
             *selected
@@ -333,8 +337,8 @@ fn multi_source_reference_carriers_preserve_loans_through_moves_and_reborrows() 
         struct Hold<'a> { loan: &'a mut i64 }
         fn pick<'a>(left: &'a mut i64, right: &'a mut i64) -> &'a mut i64 { right }
         pub fn main() -> i64 {
-            let left = 1;
-            let right = 7;
+            let mut left = 1;
+            let mut right = 7;
             let selected = pick(&mut left, &mut right);
             let carrier = Hold { loan: selected };
             let carrier = carrier;
@@ -365,7 +369,7 @@ fn a_same_region_result_keeps_differently_shaped_input_loans() {
         struct Outer { field: i64 }
         fn project<'a>(whole: &'a Outer, other: &'a i64) -> &'a i64 { &whole.field }
         pub fn main() -> i64 {
-            let whole = Outer { field: 42 };
+            let mut whole = Outer { field: 42 };
             let other = 0;
             let selected = project(&whole, &other);
             *selected

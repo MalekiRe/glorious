@@ -1,0 +1,11 @@
+use std::*;
+fn assert_true(value: Bool) {
+    handle value {
+        true => (),
+        false => Result<(),String>::expect(Result::Err(String::new()), "standard-library assertion failed"),
+    }
+}
+fn owned(text: Str) -> String { Str::to_string(text) }
+fn assert_bytes(left: Slice<u8>, right: Slice<u8>) {
+    assert_true(handle Slice::lex_compare(left, right) { Ordering::Equal => true, _ => false })
+}

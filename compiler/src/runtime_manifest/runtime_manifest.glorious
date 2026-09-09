@@ -5,7 +5,7 @@ use super::kernel::identity::PackageKey;
 use super::kernel::identity::DefKey;
 pub mod input;
 
-// The existing finite authority protocol, not new intrinsics. Enum ordering
+// The finite authority protocol. New machine roles append stable tags; enum ordering
 // and wire tags are distinct contracts; invalid public conversion shapes have
 // no wire tag and must be rejected before a world can be fingerprinted.
 pub enum FloatWidth { F32, F64 }
@@ -23,7 +23,7 @@ pub enum MemoryPrimitive {
     Offset, OffsetConst, Cast, AsConst, Read, Write, Copy, CopyNonoverlapping,
     BorrowShared, BorrowUnique,
     AsRawShared, AsRawUnique, CastConst, StaticUtf8Address, StaticBytesAddress,
-    Forget, StaticBytesLen,
+    Forget, StaticBytesLen, PointerEq, PointerAddress,
 }
 fn memory_ordinal(value: MemoryPrimitive) -> usize {
     handle value {
@@ -40,6 +40,7 @@ fn memory_ordinal(value: MemoryPrimitive) -> usize {
         MemoryPrimitive::CastConst => 20, MemoryPrimitive::StaticUtf8Address => 21,
         MemoryPrimitive::StaticBytesAddress => 22,
         MemoryPrimitive::Forget => 23, MemoryPrimitive::StaticBytesLen => 24,
+        MemoryPrimitive::PointerEq => 25, MemoryPrimitive::PointerAddress => 26,
     }
 }
 fn memory_name(value: MemoryPrimitive) -> Str<'static> {
@@ -57,6 +58,7 @@ fn memory_name(value: MemoryPrimitive) -> Str<'static> {
         MemoryPrimitive::CastConst => "memory-cast-const", MemoryPrimitive::StaticUtf8Address => "memory-static-utf8-address",
         MemoryPrimitive::StaticBytesAddress => "memory-static-bytes-address",
         MemoryPrimitive::Forget => "memory-forget", MemoryPrimitive::StaticBytesLen => "memory-static-bytes-len",
+        MemoryPrimitive::PointerEq => "memory-pointer-eq", MemoryPrimitive::PointerAddress => "memory-pointer-address",
     }
 }
 pub enum PrimitiveRole {
@@ -140,9 +142,9 @@ pub enum PrimitiveRole {
     StaticLen,
     Memory(MemoryPrimitive),
 }
-pub struct PrimitiveSelector { role: PrimitiveRole, module_path: String, name: String }
-pub struct HostImportSelector { module_path: String, name: String, capability: String, symbol: String }
-pub struct RuntimeManifestInput { standard_library: PackageKey, selectors: Vec<PrimitiveSelector>, host_imports: Vec<HostImportSelector> }
+pub struct PrimitiveSelector { pub(crate) role: PrimitiveRole, pub(crate) module_path: String, pub(crate) name: String }
+pub struct HostImportSelector { pub(crate) module_path: String, pub(crate) name: String, pub(crate) capability: String, pub(crate) symbol: String }
+pub struct RuntimeManifestInput { pub(crate) standard_library: PackageKey, pub(crate) selectors: Vec<PrimitiveSelector>, pub(crate) host_imports: Vec<HostImportSelector> }
 pub enum ManifestError {
     InvalidRole(PrimitiveRole), DuplicateRole(PrimitiveRole),
     MissingDeclaration { module_path: String, name: String },

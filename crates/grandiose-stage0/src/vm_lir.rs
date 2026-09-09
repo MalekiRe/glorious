@@ -26,6 +26,7 @@ pub enum VmLirTerminator {
         else_target: VmLirBlockId,
     },
     Return(u32),
+    TailCall { callee: DefKey, arguments: Vec<u32> },
     Leave {
         brand_owner: DefKey,
         brand_label: u32,

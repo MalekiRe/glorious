@@ -348,7 +348,11 @@ pub struct StageZeroCompiler {
 }
 
 const BUNDLED_STANDARD_LIBRARY: &str = "std@0.1.0";
-const BUNDLED_STANDARD_SOURCE: &[u8] = include_bytes!("../../../stdlib/src/lib.glorious");
+#[path = "../../../stdlib/sources.rs"]
+mod standard_library_sources;
+pub use standard_library_sources::{STANDARD_LIBRARY_SOURCE, STANDARD_LIBRARY_FRAGMENTS};
+const STANDARD_LIBRARY_BASE_SOURCE: &[u8] = include_bytes!("../../../stdlib/src/lib.glorious");
+const BUNDLED_STANDARD_SOURCE: &[u8] = STANDARD_LIBRARY_BASE_SOURCE;
 
 fn request_root_attributes(request: &CompilationRequest) -> Option<crate::scanner::ModuleAttributes> {
     let mut roots = request.sources.iter().filter(|source| {
@@ -392,9 +396,14 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
         ));
     }
     let has_bundled_source = request.sources.iter().any(|source| {
-        source.package == standard_library && source.bytes.as_ref() == BUNDLED_STANDARD_SOURCE
+        source.package == standard_library
+            && standard_library_sources::is_standard_library_composition(source.bytes.as_ref())
     });
     if has_bundled_source && request.runtime_manifest.is_none() {
+        let float_bit_views = request.sources.iter().any(|source| {
+            source.package == standard_library
+                && standard_library_sources::composition_contains(source.bytes.as_ref(), "src/float.glorious")
+        });
         request.runtime_manifest = Some(RuntimeManifestInput {
             standard_library,
             selectors: [
@@ -604,6 +613,11 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 })
             }))
             .chain(crate::MemoryPrimitive::ALL.into_iter().map(PrimitiveRole::Memory))
+            .chain([
+                crate::runtime_manifest::FloatPrimitive::ToBits { width: crate::runtime_manifest::FloatWidth::F32 },
+                crate::runtime_manifest::FloatPrimitive::ToBits { width: crate::runtime_manifest::FloatWidth::F64 },
+                crate::runtime_manifest::FloatPrimitive::FromBits { width: crate::runtime_manifest::FloatWidth::F64 },
+            ].into_iter().filter(|_| float_bit_views).map(PrimitiveRole::Float))
             .chain([PrimitiveRole::Abort])
             .map(|role| PrimitiveSelector {
                 role,
@@ -975,12 +989,24 @@ impl StageZeroCompiler {
                     )
                 }),
         );
-        let coherence = CoherenceSet::collect(
+        // Coherence and body typing consume the same immutable signatures.
+        // Elaborating them inside coherence and again below duplicated every
+        // signature validation and all of its frozen solver construction.
+        let mut signatures = ElaboratedInterface::merge(
+            graphs
+                .values()
+                .flat_map(|graph| graph.modules.values())
+                .map(|node| {
+                    ElaboratedInterface::elaborate_with_index(&node.interface.interface, &index)
+                }),
+        );
+        let coherence = CoherenceSet::collect_with_signatures(
             graphs
                 .values()
                 .flat_map(|graph| graph.modules.values())
                 .map(|node| &node.interface.interface),
             &index,
+            &signatures,
         );
         diagnostics.extend(coherence.diagnostics.iter().map(|coherence_diagnostic| {
             let diagnostic = CompileDiagnostic::source(
@@ -1006,14 +1032,6 @@ impl StageZeroCompiler {
                 None => diagnostic,
             }
         }));
-        let mut signatures = ElaboratedInterface::merge(
-            graphs
-                .values()
-                .flat_map(|graph| graph.modules.values())
-                .map(|node| {
-                    ElaboratedInterface::elaborate_with_index(&node.interface.interface, &index)
-                }),
-        );
         diagnostics.extend(signatures.diagnostics.iter().map(|diagnostic| {
             CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), None)
         }));
@@ -1160,7 +1178,7 @@ impl StageZeroCompiler {
             if implementation.methods.get("drop").is_some_and(|method| {
                 !method.effects.effects.is_empty()
                     || !method.effects.projections.is_empty()
-                    || method.effects.tail.is_some()
+                    || !method.effects.tails.is_empty()
             }) {
                 diagnostics.push(CompileDiagnostic::source(
                     "G4197",
@@ -1270,7 +1288,7 @@ impl StageZeroCompiler {
                 }
                 if !signature.effects.effects.is_empty()
                     || !signature.effects.projections.is_empty()
-                    || signature.effects.tail.is_some()
+                    || !signature.effects.tails.is_empty()
                 {
                     diagnostics.push(
                         CompileDiagnostic::source(
@@ -1583,14 +1601,31 @@ impl StageZeroCompiler {
                         _ => None,
                     })
                     .unwrap_or_default();
+                let mut validation_solver = body_trait_solver.fresh_query();
+                if let Some(ElaboratedHeader::Callable(signature)) = signatures.definitions.get(&declaration.key) {
+                    validation_solver.assume_callable_contract(signature);
+                    validation_solver.set_associated_bindings(signature.where_associated_type_bindings.clone(), signature.where_associated_effect_bindings.clone());
+                }
                 core_validation.extend(
-                    core.validate_projection_obligations(&signatures, &ambient_projection_bounds),
+                    core.validate_projection_obligations_in_environment(&signatures, &ambient_projection_bounds,
+                        &signatures.definitions.get(&declaration.key).and_then(|header| match header {
+                            ElaboratedHeader::Callable(signature) => Some(signature.where_outlives.clone()),
+                            _ => None,
+                        }).unwrap_or_default(), validation_solver.fresh_query()),
                 );
                 diagnostics.extend(core_validation.iter().map(|diagnostic| {
-                    CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
+                    if diagnostic.code.starts_with("G440") {
+                        CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span))
+                    } else { CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone()) }
                 }));
-                let flow = PlaceFlow::analyze_with_interface_and_bounds(
-                    &core, &signatures, &ambient_projection_bounds,
+                let ambient_effect_bindings = signatures.definitions.get(&declaration.key)
+                    .and_then(|header| match header {
+                        ElaboratedHeader::Callable(signature) => Some(signature.where_associated_effect_bindings.as_slice()),
+                        _ => None,
+                    }).unwrap_or_default();
+                let flow = PlaceFlow::analyze_with_frozen_solver(
+                    &core, &signatures, &ambient_projection_bounds, ambient_effect_bindings, &validation_solver,
+                    runtime_manifest.as_ref().and_then(|manifest| manifest.primitives.get(&PrimitiveRole::Abort)).copied(),
                 );
                 diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
@@ -1599,7 +1634,7 @@ impl StageZeroCompiler {
                         Some(diagnostic.span),
                     )
                 }));
-                let escapes = EscapeFlow::analyze(&core, &flow);
+                let escapes = EscapeFlow::analyze_with_interface(&core, &flow, &signatures);
                 diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
                         diagnostic.code,
@@ -1752,17 +1787,33 @@ impl StageZeroCompiler {
                         implementation_signature.relation.clone(),
                     ));
                     ambient_projection_bounds.extend(method_signature.where_bounds.clone());
+                    let mut validation_solver = body_trait_solver.fresh_query();
+                    validation_solver.set_lexical_assumptions(ambient_projection_bounds.iter().map(|(subject, relation)| crate::TraitGoal {
+                        subject: subject.clone(), relation: relation.clone() }).collect());
+                    validation_solver.set_outlives_assumptions(implementation_signature.where_outlives.iter().chain(&method_signature.where_outlives).cloned().collect());
+                    validation_solver.set_universal_assumptions(implementation_signature.universal_bounds.iter()
+                        .chain(&method_signature.universal_bounds).cloned().collect());
+                    validation_solver.set_associated_bindings(
+                        implementation_signature.where_associated_type_bindings.iter().chain(&method_signature.where_associated_type_bindings).cloned().collect(),
+                        implementation_signature.where_associated_effect_bindings.iter().chain(&method_signature.where_associated_effect_bindings).cloned().collect());
                     core_validation.extend(
-                        core.validate_projection_obligations(
+                        core.validate_projection_obligations_in_environment(
                             &signatures,
                             &ambient_projection_bounds,
+                            &implementation_signature.where_outlives.iter().chain(&method_signature.where_outlives).cloned().collect::<Vec<_>>(),
+                            validation_solver.fresh_query(),
                         ),
                     );
                     diagnostics.extend(core_validation.iter().map(|diagnostic| {
-                        CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
+                        if diagnostic.code.starts_with("G440") {
+                            CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span))
+                        } else { CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone()) }
                     }));
-                    let flow = PlaceFlow::analyze_with_interface_and_bounds(
-                        &core, &signatures, &ambient_projection_bounds,
+                    let mut ambient_effect_bindings = implementation_signature.where_associated_effect_bindings.clone();
+                    ambient_effect_bindings.extend(method_signature.where_associated_effect_bindings.clone());
+                    let flow = PlaceFlow::analyze_with_frozen_solver(
+                        &core, &signatures, &ambient_projection_bounds, &ambient_effect_bindings, &validation_solver,
+                        runtime_manifest.as_ref().and_then(|manifest| manifest.primitives.get(&PrimitiveRole::Abort)).copied(),
                     );
                     diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
@@ -1771,7 +1822,7 @@ impl StageZeroCompiler {
                             Some(diagnostic.span),
                         )
                     }));
-                    let escapes = EscapeFlow::analyze(&core, &flow);
+                    let escapes = EscapeFlow::analyze_with_interface(&core, &flow, &signatures);
                     diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
                             diagnostic.code,
@@ -1833,7 +1884,7 @@ impl StageZeroCompiler {
             if !valid {
                 continue;
             }
-            match crate::ownership_mir::OwnershipMir::from_typed(definition, &core, &flow, Some(&signatures)) {
+            match crate::ownership_mir::OwnershipMir::from_typed_with_frozen_solver(definition, &core, &flow, Some(&signatures), Some(&body_trait_solver)) {
                 Ok((ownership, result)) => {
                     lowering.insert(definition, crate::specialized_mir::SpecializationInput { ownership, result, is_constant });
                 }
@@ -1898,8 +1949,24 @@ impl StageZeroCompiler {
             .expect("reachable function count fits in request work budget")
             .saturating_add(1);
         session.checkpoint_in(&emission_budget, backend_cost)?;
-        let program = crate::vm_lir::VmLirProgram::lower(&runtime)
-            .map_err(|error| failed(input_fingerprint, vec![CompileDiagnostic::invariant("G7042", format!("VM LIR lowering rejected Runtime MIR: {error:?}"))], &source_lengths))?;
+        let program = crate::vm_lir::VmLirProgram::lower(&runtime).map_err(|error| {
+            let mut diagnostic = CompileDiagnostic::invariant("G7042", format!("VM LIR lowering rejected Runtime MIR: {error:?}"));
+            if let crate::VmArtifactError::UnprovenTailCarrier { function, pc, register, .. } = &error {
+                let definition = runtime.instances().values().find(|instance| instance.executable == *function)
+                    .map_or(*function, |instance| instance.key.callable);
+                diagnostic = diagnostic.with_fact("vm-function", function.0.to_string())
+                    .with_fact("vm-pc", pc.to_string()).with_fact("vm-register", register.to_string());
+                if let Some(declaration) = graphs.values().flat_map(|graph| graph.modules.values())
+                    .flat_map(|node| &node.interface.interface.definitions).find(|declaration| declaration.key == definition) {
+                    let name = declaration.name.as_deref().unwrap_or("<anonymous>");
+                    diagnostic.message.push_str(&format!(" in `{name}`"));
+                    diagnostic = diagnostic.with_related_location("source callable", SourceSpan {
+                        file: declaration.span.file, start: declaration.span.start, end: declaration.span.end,
+                    });
+                }
+            }
+            failed(input_fingerprint, vec![diagnostic], &source_lengths)
+        })?;
         drop(runtime);
         for (definition, function) in program.functions() {
             dependencies.record(DependencyNode::Mir(*definition), function.fingerprint(), vec![DependencyNode::Core(function.definition())]);
@@ -2408,16 +2475,30 @@ pub(crate) fn materialization_body_arguments(
             };
             let relation_values = &key.arguments()[..relation_arguments];
             let mut bindings = BTreeMap::new();
-            for (template, value) in implementation
+            let mut pending: Vec<_> = implementation
                 .relation
                 .arguments
                 .iter()
                 .zip(relation_values)
-            {
-                bind_impl_head_argument(template, value, &mut bindings)?;
-            }
+                .map(|(template, value)| (template.clone(), value.clone())).collect();
             if let Some(receiver) = receiver {
-                bind_impl_head_type(&implementation.self_ty, receiver, &mut bindings)?;
+                pending.push((GenericArgument::Type(implementation.self_ty.clone()), GenericArgument::Type(receiver.clone())));
+            }
+            while !pending.is_empty() {
+                let previous = bindings.len();
+                let mut next = vec![];
+                let mut failure = None;
+                for (template, value) in pending {
+                    let mut candidate = bindings.clone();
+                    match bind_impl_head_argument(&template, &value, &mut candidate) {
+                        Ok(()) => bindings = candidate,
+                        Err(error) => { failure = Some(error); next.push((template, value)); }
+                    }
+                }
+                if !next.is_empty() && bindings.len() == previous {
+                    return Err(failure.expect("pending head equation has a failure"));
+                }
+                pending = next;
             }
             // Static trait methods have no receiver slot in their executable
             // identity. Their implementation generics may nevertheless be
@@ -2457,6 +2538,40 @@ fn bind_impl_head_argument(
     value: &GenericArgument,
     bindings: &mut BTreeMap<u32, GenericArgument>,
 ) -> Result<(), String> {
+    if let (GenericArgument::EffectRow(template), GenericArgument::EffectRow(value)) = (template, value) {
+        let mut resolved = template.clone();
+        resolved.substitute_tails(|tail| match tail {
+            crate::EffectTail::Generic(index) => match bindings.get(&index) {
+                Some(GenericArgument::EffectRow(row)) => Some(row.clone()), _ => None,
+            }, _ => None,
+        });
+        if resolved == *value { return Ok(()); }
+        let unknown: Vec<_> = template.tails.iter().filter_map(|tail| match tail {
+            crate::EffectTail::Generic(index) if !bindings.contains_key(index) => Some(*index), _ => None,
+        }).collect();
+        if *value == crate::EffectRow::empty() && resolved.effects.is_empty() && resolved.projections.is_empty()
+            && resolved.tails.iter().all(|tail| match tail {
+                crate::EffectTail::Generic(index) => unknown.contains(index), _ => false,
+            }) {
+            for index in unknown {
+                bind_impl_head_slot(index, GenericArgument::EffectRow(crate::EffectRow::empty()), bindings)?;
+            }
+            return Ok(());
+        }
+        if let [index] = unknown.as_slice()
+            && resolved.effects.is_subset(&value.effects)
+            && resolved.projections.iter().all(|projection| value.projections.contains(projection)) {
+            resolved.tails.remove(&crate::EffectTail::Generic(*index));
+            if resolved.tails.is_subset(&value.tails) {
+                return bind_impl_head_slot(*index, GenericArgument::EffectRow(crate::EffectRow {
+                    effects: value.effects.difference(&resolved.effects).cloned().collect(),
+                    projections: value.projections.iter().filter(|projection| !resolved.projections.contains(projection)).cloned().collect(),
+                    tails: value.tails.difference(&resolved.tails).copied().collect(),
+                }.canonicalized()), bindings);
+            }
+        }
+        return Err("selected trait implementation has an unresolved or incompatible effect-row union".into());
+    }
     match (template, value) {
         (GenericArgument::Type(template), GenericArgument::Type(value)) => {
             bind_impl_head_type(template, value, bindings)
@@ -2468,9 +2583,10 @@ fn bind_impl_head_argument(
         (GenericArgument::EffectRow(template), GenericArgument::EffectRow(value))
             if template.effects.is_empty()
                 && template.projections.is_empty()
-                && matches!(template.tail, Some(crate::EffectTail::Generic(_))) =>
+                && template.tails.len() == 1
+                && matches!(template.tails.first(), Some(crate::EffectTail::Generic(_))) =>
         {
-            let Some(crate::EffectTail::Generic(index)) = template.tail else {
+            let Some(crate::EffectTail::Generic(index)) = template.tails.first().copied() else {
                 unreachable!("effect-row guard established a generic tail");
             };
             bind_impl_head_slot(index, GenericArgument::EffectRow(value.clone()), bindings)
@@ -2516,6 +2632,10 @@ fn bind_impl_head_type(
                 bind_impl_head_type(template, value, bindings)?;
             }
             Ok(())
+        }
+        (Type::FixedArray { element: template, length: tn }, Type::FixedArray { element: value, length: vn }) => {
+            bind_impl_head_type(template, value, bindings)?;
+            bind_impl_head_argument(tn, vn, bindings)
         }
         (Type::Array(template), Type::Array(value)) => {
             bind_impl_head_type(template, value, bindings)
@@ -2749,9 +2869,9 @@ pub(crate) fn trait_method_instance_key(
         .map(instance_argument_kind)
         .collect::<Vec<_>>();
     for bytes in evidence.0.as_bytes().chunks_exact(4) {
-        arguments.push(GenericArgument::ConstU32(u32::from_le_bytes([
+        arguments.push(GenericArgument::ConstInteger(u32::from_le_bytes([
             bytes[0], bytes[1], bytes[2], bytes[3],
-        ])));
+        ]).into()));
         kinds.push(crate::GenericKind::Const(crate::ConstKind::U32));
     }
     InstanceKey::new(method, &kinds, arguments)
@@ -2762,8 +2882,9 @@ fn instance_argument_kind(argument: &GenericArgument) -> crate::GenericKind {
         GenericArgument::Type(_) => crate::GenericKind::Type,
         GenericArgument::EffectRow(_) => crate::GenericKind::EffectRow,
         GenericArgument::Lifetime(_) => crate::GenericKind::Lifetime,
-        GenericArgument::ConstU32(_) => crate::GenericKind::Const(crate::ConstKind::U32),
-        GenericArgument::ConstU32Expr(_) => crate::GenericKind::Const(crate::ConstKind::U32),
+        GenericArgument::ConstInteger(value) => crate::GenericKind::Const(value.kind()),
+        GenericArgument::ConstIntegerExpr(value) => value.scalar().ok().and_then(crate::ConstKind::from_integer_scalar)
+            .map(crate::GenericKind::Const).unwrap_or(crate::GenericKind::Type),
         GenericArgument::ConstQuantity(_) => crate::GenericKind::Const(crate::ConstKind::Quantity),
         GenericArgument::ConstGeneric { kind, .. } => crate::GenericKind::Const(*kind),
         GenericArgument::ConstInfer { kind, .. } => crate::GenericKind::Const(*kind),
@@ -2978,16 +3099,16 @@ fn register_specialized_nominal_copy_type(
                 register_specialized_nominal_copy_type(field, function, signatures, building);
             }
         }
-        Type::Array(element) | Type::StaticData { element, .. } => {
+        Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => {
             register_specialized_nominal_copy_type(element, function, signatures, building)
         }
         Type::Callable {
             parameters, result, ..
         } => {
             for parameter in parameters {
-                register_specialized_nominal_copy_type(parameter, function, signatures, building);
+                register_specialized_nominal_copy_type(&crate::core::open_hrtb_callable_body_type(parameter.clone(), 0), function, signatures, building);
             }
-            register_specialized_nominal_copy_type(result, function, signatures, building);
+            register_specialized_nominal_copy_type(&crate::core::open_hrtb_callable_body_type((**result).clone(), 0), function, signatures, building);
         }
         Type::Nominal {
             definition,
@@ -3002,7 +3123,7 @@ fn register_specialized_nominal_copy_type(
             }
             let variants = match signatures.definitions.get(definition) {
                 Some(ElaboratedHeader::Nominal {
-                    layout: crate::signature::ElaboratedNominalLayout::Struct(_),
+                    layout: crate::signature::ElaboratedNominalLayout::Struct(_) | crate::signature::ElaboratedNominalLayout::TupleStruct(_),
                     ..
                 }) => signatures
                     .instantiate_struct_fields_generic(*definition, arguments)
@@ -3066,7 +3187,7 @@ fn register_specialized_nominal_copy_type(
         | Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Projection { .. }
@@ -3089,7 +3210,7 @@ fn specialize_mir_pattern(pattern: &mut crate::MirPattern, arguments: &[GenericA
                 specialize_mir_pattern(element, arguments);
             }
         }
-        crate::MirPattern::Array { element, elements } => {
+        crate::MirPattern::Array { element, elements, .. } => {
             *element = specialize_type(element, arguments);
             for element in elements {
                 specialize_mir_pattern(element, arguments);
@@ -3133,6 +3254,10 @@ pub(crate) fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Ty
                 .collect(),
         ),
         Type::Array(element) => Type::Array(Box::new(specialize_type(element, arguments))),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(specialize_type(element, arguments)),
+            length: Box::new(specialize_generic_argument(length, arguments)),
+        },
         Type::RawPointer { mutability, pointee } => Type::RawPointer {
             mutability: *mutability,
             pointee: Box::new(specialize_type(pointee, arguments)),
@@ -3198,8 +3323,8 @@ pub(crate) fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Ty
         Type::ConstGeneric { index, kind } => arguments
             .get(*index as usize)
             .and_then(|argument| match (argument, kind) {
-                (GenericArgument::ConstU32(value), crate::ConstKind::U32) => {
-                    Some(Type::ConstU32(*value))
+                (GenericArgument::ConstInteger(value), expected) if value.kind() == *expected => {
+                    Some(Type::ConstInteger(*value))
                 }
                 (GenericArgument::ConstQuantity(value), crate::ConstKind::Quantity) => {
                     Some(Type::ConstQuantity(*value))
@@ -3275,16 +3400,15 @@ pub(crate) fn specialize_effect_row(
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
+        tails: value.tails.clone(),
     };
-    if let Some(crate::EffectTail::Generic(index)) = row.tail
-        && let Some(GenericArgument::EffectRow(argument)) = arguments.get(index as usize)
-    {
-        let argument = specialize_effect_row(argument, arguments);
-        row.effects.extend(argument.effects);
-        row.projections.extend(argument.projections);
-        row.tail = argument.tail;
-    }
+    row.substitute_tails(|tail| match tail {
+        crate::EffectTail::Generic(index) => match arguments.get(index as usize) {
+            // Instance arguments share the closed specialization environment;
+            // nested type/const identities still need materialization here.
+            Some(GenericArgument::EffectRow(row)) => Some(specialize_effect_row(row, arguments)), _ => None,
+        }, _ => None,
+    });
     row.canonicalized()
 }
 
@@ -3303,17 +3427,14 @@ pub(crate) fn specialize_generic_argument(
         GenericArgument::ConstGeneric { index, kind } => arguments
             .get(*index as usize)
             .filter(|argument| match (argument, kind) {
-                (GenericArgument::ConstU32(_), crate::ConstKind::U32)
-                | (GenericArgument::ConstQuantity(_), crate::ConstKind::Quantity) => true,
+                (GenericArgument::ConstInteger(value), expected) => value.kind() == *expected,
+                (GenericArgument::ConstQuantity(_), crate::ConstKind::Quantity) => true,
                 (GenericArgument::ConstGeneric { kind: found, .. }, expected) => found == expected,
                 _ => false,
             })
             .cloned()
             .unwrap_or_else(|| value.clone()),
-        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
-            crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
-            value => GenericArgument::ConstU32Expr(value),
-        },
+        GenericArgument::ConstIntegerExpr(value) => crate::types::integer_const_argument(value.substitute_arguments(arguments)),
         GenericArgument::ConstProjection {
             subject,
             trait_definition,
@@ -3482,6 +3603,10 @@ fn normalize_materialized_associated_projections(
 
 pub(crate) fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result<Type, String> {
     Ok(match value {
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(normalize_materialized_type(element, solver)?),
+            length: Box::new(normalize_materialized_generic_argument(length, solver)?),
+        },
         Type::Tuple(fields) => Type::Tuple(
             fields
                 .iter()
@@ -3605,7 +3730,7 @@ pub(crate) fn normalize_materialized_effect_row(
                 })
             })
             .collect::<Result<_, String>>()?,
-        tail: value.tail,
+        tails: value.tails.clone(),
     }
     .canonicalized();
     // Keep an unresolved row symbolic so the source checker remains the
@@ -3691,7 +3816,7 @@ fn normalize_materialized_pattern(
         crate::MirPattern::Tuple(elements) => elements
             .iter_mut()
             .try_for_each(|element| normalize_materialized_pattern(element, solver)),
-        crate::MirPattern::Array { element, elements } => {
+        crate::MirPattern::Array { element, elements, .. } => {
             *element = normalize_materialized_type(element, solver)?;
             elements
                 .iter_mut()
@@ -3892,6 +4017,39 @@ mod tests {
     }
 
     #[test]
+    fn frozen_solver_construction_does_not_scale_with_bodies_or_lifted_closures() {
+        fn compile_many(bodies: usize) -> usize {
+            let mut source = String::from("pub fn main() -> i64 { 42 }");
+            for index in 0..bodies {
+                source.push_str(&format!("\nfn work_{index}(value: i64) -> i64 {{ let callback = (input: i64) -> i64 {{ input }}; callback(value) }}"));
+            }
+            let package = crate::PackageKey("solver-scaling@0.1.0".into());
+            let request = crate::CompilationRequest {
+                build: crate::CompilerBuildIdentity::stage0(Digest::of_bytes(b"solver-scaling")),
+                mode: crate::CompilationMode::Build,
+                root_package: package.clone(),
+                sources: vec![crate::SourceInput::new(package,
+                    crate::LogicalPath::parse("src/main.glorious").unwrap(), source.as_bytes())],
+                target: "stage0-vm".into(),
+                semantic_options: Default::default(), codegen_options: Default::default(),
+                capability_manifest: vec![], runtime_manifest: None,
+            };
+            let before = crate::trait_solver::snapshot_builds();
+            let outcome = super::StageZeroCompiler::new().compile(request)
+                .unwrap_or_else(|error| panic!("{:#?}", error.diagnostics()));
+            let built = crate::trait_solver::snapshot_builds() - before;
+            let artifact = outcome.artifact.unwrap();
+            assert_eq!(artifact.run_i64().unwrap(), 42);
+            assert_eq!(crate::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+            built
+        }
+        let small = compile_many(2);
+        let large = compile_many(64);
+        assert_eq!(large, small, "immutable snapshot construction must not grow with body/closure count: {small} -> {large}");
+        assert!(large < 64, "a single small request rebuilt {large} immutable snapshots");
+    }
+
+    #[test]
     fn unmaterialized_trait_calls_remain_errors_on_reachable_call_and_callable_edges() {
         fn body(definition: DefKey, instructions: Vec<MirInstruction>) -> MirFunction {
             MirFunction {
@@ -4004,7 +4162,7 @@ mod tests {
                 arguments: vec![GenericArgument::Type(Type::Generic(0))],
             }]),
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         };
         let original = Type::Callable {
             safety: crate::Safety::Safe,
@@ -4031,7 +4189,7 @@ mod tests {
                         kind: crate::ConstKind::U32,
                     }],
                 }],
-                tail: Some(EffectTail::Generic(3)),
+                tails: [EffectTail::Generic(3)].into_iter().collect(),
             },
             invocation: Quantity::ONCE,
         };
@@ -4041,7 +4199,7 @@ mod tests {
             &[
                 GenericArgument::Type(Type::Scalar(ScalarType::Text)),
                 GenericArgument::Lifetime(Lifetime::Static),
-                GenericArgument::ConstU32(17),
+                GenericArgument::ConstInteger(17u32.into()),
                 GenericArgument::EffectRow(supplied_row),
             ],
         );
@@ -4063,14 +4221,14 @@ mod tests {
                 ..
             }] if **referent == Type::Scalar(ScalarType::Text)
         ));
-        assert_eq!(*result, Type::ConstU32(17));
-        assert_eq!(effects.tail, None);
+        assert_eq!(*result, Type::ConstInteger(17u32.into()));
+        assert!(effects.tails.is_empty());
         assert!(effects.effects.contains(&EffectInstance {
             definition: outer_effect,
             arguments: vec![
                 GenericArgument::Type(Type::Scalar(ScalarType::Text)),
                 GenericArgument::Lifetime(Lifetime::Static),
-                GenericArgument::ConstU32(17),
+                GenericArgument::ConstInteger(17u32.into()),
             ],
         }));
         assert!(effects.effects.contains(&EffectInstance {
@@ -4086,7 +4244,7 @@ mod tests {
                 ..
             }] if **subject == Type::Scalar(ScalarType::Text)
                 && trait_arguments == &vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))]
-                && item_arguments == &vec![GenericArgument::ConstU32(17)]
+                && item_arguments == &vec![GenericArgument::ConstInteger(17u32.into())]
         ));
     }
 
@@ -4146,6 +4304,7 @@ mod tests {
                                 index: 0,
                                 ty: generic.clone(),
                                 pattern: MirPattern::Array {
+                                    rest: None,
                                     element: generic.clone(),
                                     elements: vec![],
                                 },

@@ -36,6 +36,66 @@ fn runs(source: &str) {
 }
 
 #[test]
+fn associated_effect_row_union_runs_through_artifact_roundtrip() {
+    runs(r#"
+        effect Read { read() -> i64; }
+        effect Offset { offset() -> i64; }
+        trait First { type Effects: EffectRow; }
+        trait Second { type Effects: EffectRow; }
+        struct Value {}
+        impl First for Value { type Effects = {Read}; }
+        impl Second for Value { type Effects = {Offset}; }
+        fn worker() -> i64 / {| <Value as First>::Effects, <Value as Second>::Effects, <Value as First>::Effects} {
+            Read::read() + Offset::offset()
+        }
+        pub fn main() -> i64 {
+            handle worker() {
+                Read::read(k) => k(40),
+                Offset::offset(k) => k(2)
+            }
+        }
+    "#);
+}
+
+#[test]
+fn associated_effect_row_bare_projection_definitions_and_defaults_run() {
+    runs(r#"
+        effect Read { read() -> i64; }
+        trait Capability { type Effects: EffectRow; type Output; }
+        struct Value {}
+        impl Capability for Value { type Effects = {Read}; type Output = i64; }
+        struct Wrapper<T> {}
+        impl<T> Capability for Wrapper<T> where T: Capability {
+            type Effects = <T as Capability>::Effects;
+            type Output = <T as Capability>::Output;
+        }
+        trait Defaulted { type Effects: EffectRow = <Value as Capability>::Effects; }
+        impl Defaulted for Value {}
+        fn worker() -> <Wrapper<Value> as Capability>::Output /
+            {| <Wrapper<Value> as Capability>::Effects, <Value as Defaulted>::Effects} {
+            Read::read()
+        }
+        pub fn main() -> i64 { handle worker() { Read::read(k) => k(42) } }
+    "#);
+}
+
+#[test]
+fn associated_effect_row_union_does_not_grant_missing_permissions() {
+    let source = r#"
+        effect Read { read() -> i64; }
+        effect Other { other() -> i64; }
+        trait Capability { type Effects: EffectRow; }
+        struct Value {}
+        impl Capability for Value { type Effects = {Read}; }
+        fn worker() -> i64 / {| <Value as Capability>::Effects} { Other::other() }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source))
+        .expect_err("a projection must not permit unrelated effects");
+    assert!(error.diagnostics().iter().any(|d| d.code == "G4155"), "{error:?}");
+}
+
+#[test]
 fn generic_positional_payloads_keep_order_and_handler_local_names() {
     runs(
         r#"

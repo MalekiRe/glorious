@@ -239,6 +239,23 @@ impl Builder<'_> {
         self.emit(block, scope, result, ControlOperation::EndScope { scope, value, transferred: None });
         Ok(result)
     }
+    fn forward_result_type(&mut self, block: ControlBlockId, scope: ControlScopeId,
+        value: ControlValue, expected: &Type) -> Result<ControlValue, ControlError> {
+        let actual = self.result.ty(value)?;
+        if actual == expected { return Ok(value); }
+        if !call_type_matches(expected, actual) {
+            return Err(ControlError::Invalid("result forwarding changes its runtime value shape".into()));
+        }
+        // Core checked the directional lifetime contract. Materialize its
+        // representation-preserving forwarding before the CFG join, keeping
+        // every later edge's type equality exact and its ownership transfer
+        // explicit (a static Slice entering a caller-region result is one
+        // example). This does not duplicate the incoming value.
+        let source = self.result.values[value.0 as usize].clone();
+        let result = self.value(expected.clone(), source.source, source.span)?;
+        self.emit(block, scope, result, ControlOperation::Forward(value));
+        Ok(result)
+    }
     fn place(&self, place: &EvaluationPlace, names: &BTreeMap<String, ControlValue>) -> Result<ControlPlace, ControlError> {
         let lookup = |value| self.mapped.get(&value).copied().ok_or_else(|| ControlError::Invalid("missing place operand".into()));
         Ok(match place {
@@ -270,6 +287,27 @@ impl Builder<'_> {
     fn bind_place_pattern(&mut self, pattern: &CorePattern, place: ControlPlace, block: ControlBlockId,
         scope: ControlScopeId, names: &mut BTreeMap<String, ControlValue>, types: &[(String, Type)],
         source: CoreId, span: Span) -> Result<(), ControlError> {
+        fn borrowed(place: &ControlPlace) -> bool {
+            match place {
+                ControlPlace::Deref { .. } => true,
+                ControlPlace::Field { base, .. } => borrowed(base),
+                _ => false,
+            }
+        }
+        let empty_constructor = match pattern {
+            CorePattern::Record { field_count, .. } | CorePattern::Enum { field_count, .. } => *field_count == 0,
+            CorePattern::Tuple(fields) => fields.is_empty(),
+            CorePattern::Array { elements, rest, .. } => crate::pattern::ArrayPatternRest::length(*rest, elements.len()) == Some(0),
+            _ => false,
+        };
+        if empty_constructor && !borrowed(&place) {
+            // Opening an owned empty constructor is a real use. In particular,
+            // an affine/linear zero-sized field must leave a logical move hole
+            // in its parent even though it introduces no payload binders.
+            let consumed = self.value(place.ty(&self.result)?.clone(), source, span)?;
+            self.emit(block, scope, consumed, ControlOperation::Capability(ControlCapabilityOperation::Move(place)));
+            return Ok(());
+        }
         match pattern {
             CorePattern::Bind { name } => {
                 let ty = types.iter().find(|(binding, _)| binding == name).map(|(_, ty)| ty.clone())
@@ -303,10 +341,11 @@ impl Builder<'_> {
                     }, block, scope, names, types, source, span)?;
                 }
             }
-            CorePattern::Array { element, elements } => {
+            CorePattern::Array { element, elements, rest } => {
                 for (index, pattern) in elements.iter().enumerate() {
                     self.bind_place_pattern(pattern, ControlPlace::Field { base: Box::new(place.clone()),
-                        index: index as u32, field_count: elements.len() as u32, ty: element.clone(),
+                        index: crate::pattern::ArrayPatternRest::index(*rest, index) as u32,
+                        field_count: crate::pattern::ArrayPatternRest::length(*rest, elements.len()).ok_or_else(|| ControlError::Invalid("invalid array remainder".into()))? as u32, ty: element.clone(),
                     }, block, scope, names, types, source, span)?;
                 }
             }
@@ -338,7 +377,15 @@ impl Builder<'_> {
             EvalOp::Deref => Op::ReadReference(operands[0]),
             EvalOp::Borrow { unique } => {
                 let EvaluationOperand::Place(place) = &instruction.operands[0] else { return Err(ControlError::Invalid("borrow lacks place".into())); };
-                Op::Borrow { place: self.place(place, names)?, unique: *unique }
+                let lowered = self.place(place, names)?;
+                let mut base = place;
+                while let EvaluationPlace::Field { base: parent, .. } = base { base = parent; }
+                if let EvaluationPlace::Temporary { source, .. } = base {
+                    self.result.source_bindings.insert(crate::placeflow::PlaceBindingOrigin::Temporary {
+                        expression: *source,
+                    }, lowered.root());
+                }
+                Op::Borrow { place: lowered, unique: *unique }
             }
             EvalOp::Move => Op::Move(match &instruction.operands[0] {
                 EvaluationOperand::Place(place) => self.place(place, names)?,
@@ -379,7 +426,10 @@ impl Builder<'_> {
                 else { self.active_labels.remove(brand); }
                 if let Some(previous) = previous_value { self.active_label_values.insert(*brand, previous); }
                 else { self.active_label_values.remove(brand); }
-                if let Some(exit) = exit { self.edge(exit, target, value); }
+                if let Some(exit) = exit {
+                    let value = self.forward_result_type(exit, scope, value, &instruction.ty)?;
+                    self.edge(exit, target, value);
+                }
                 *block = target;
                 return Ok(true);
             }
@@ -417,16 +467,29 @@ impl Builder<'_> {
                         });
                     match forwarded { Some(value) => origin = value, None => break }
                 }
-                if *handles_operations {
+                let completion_handler = if *handles_operations {
                     let handler_index = self.result.handlers.iter().position(|handler| handler.result == origin)
                         .ok_or_else(|| ControlError::Invalid("completion lost its associated operation handler".into()))?;
                     self.result.handlers[handler_index].target = join;
                     self.result.handlers[handler_index].result = result;
+                    // Tail-only and cancellation-only delimiters have no
+                    // returning continuation whose ABI includes completion.
+                    // Keep their existing early delimiter exit, including
+                    // completion arms which leave rather than return.
+                    let returns_to_clause = self.result.handlers[handler_index].clauses.iter()
+                        .any(|clause| matches!(clause.resumption, CoreHandlerResumption::Explicit { .. }));
                     for block in &mut self.result.blocks {
                         if let ControlTerminator::Transfer(ControlTransfer::FinishClause { handler, edge, .. }) = &mut block.terminator
                             && handler.0 as usize == handler_index { edge.target = join; }
+                        if returns_to_clause && let ControlTerminator::Transfer(ControlTransfer::CompleteHandler { handler, edge, .. }) = &block.terminator
+                            && handler.0 as usize == handler_index {
+                            // The protected result still needs its source completion
+                            // transformation before it can return to a resumption.
+                            block.terminator = ControlTerminator::Goto(edge.clone());
+                        }
                     }
-                }
+                    returns_to_clause.then_some(ControlHandlerId(handler_index as u32))
+                } else { None };
                 for (clause_index, arm) in arms.iter().enumerate() {
                     let arm_scope = self.arm_scope(arm.region, completion_scope)?;
                     let selected = self.block(vec![])?;
@@ -452,7 +515,15 @@ impl Builder<'_> {
                     let (exit, result) = self.region(arm.region, selected, &bindings, Some(arm_scope))?;
                     if let Some(exit) = exit {
                         let result = self.finish_arm_scope(arm_scope, exit, result, instruction.source, arm.span)?;
-                        self.edge(exit, join, result);
+                        let result = self.forward_result_type(exit, completion_scope, result, &instruction.ty)?;
+                        if let Some(handler) = completion_handler {
+                            self.transfer(exit, ControlTransfer::CompleteHandler {
+                                handler, value: result,
+                                edge: ControlEdge { target: join, arguments: vec![result] },
+                            });
+                        } else {
+                            self.edge(exit, join, result);
+                        }
                     }
                     test_block = rejected;
                 }
@@ -552,11 +623,14 @@ impl Builder<'_> {
                 return Ok(true);
             }
             EvalOp::Closure { environment, parameters, body, .. } => {
+                let Type::Callable { safety, .. } = &instruction.ty else {
+                    return Err(ControlError::Invalid("closure lacks its frozen callable safety contract".into()));
+                };
                 let mut captures = vec![];
                 let mut child_names = BTreeMap::new();
                 let mut child = Builder { evaluation: self.evaluation, result: ControlMir {
                     definition: crate::mir::lifted_callable_definition(environment.brand),
-                    safety: self.result.safety, unsafe_execution: self.result.unsafe_execution,
+                    safety: *safety, unsafe_execution: self.result.unsafe_execution,
                     parameters: vec![], values: vec![], scopes: vec![], entry: ControlBlockId(0), blocks: vec![],
                     labels: vec![], handlers: vec![], closures: vec![],
                     source_bindings: BTreeMap::new(),

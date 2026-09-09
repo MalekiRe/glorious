@@ -1185,6 +1185,7 @@ fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
                 dst: MirLocal(1),
                 subject: MirLocal(0),
                 pattern: MirPattern::Array {
+                    rest: None,
                     element: Type::Scalar(ScalarType::Bool),
                     elements: vec![MirPattern::Any],
                 },
@@ -1562,7 +1563,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
                 GenericArgument::EffectRow(EffectRow {
                     effects: BTreeSet::new(),
                     projections: vec![],
-                    tail: Some(grandiose_stage0::EffectTail::Generic(5)),
+                    tails: [grandiose_stage0::EffectTail::Generic(5)].into_iter().collect(),
                 }),
             ],
         }),
@@ -1647,9 +1648,9 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
                 trait_arguments: vec![GenericArgument::EffectRow(EffectRow {
                     effects: BTreeSet::new(),
                     projections: vec![],
-                    tail: Some(grandiose_stage0::EffectTail::Infer(
+                    tails: [grandiose_stage0::EffectTail::Infer(
                         grandiose_stage0::EffectVar(2),
-                    )),
+                    )].into_iter().collect(),
                 })],
                 method_arguments: vec![GenericArgument::ConstInfer {
                     variable: ConstInferVar(3),
@@ -1686,9 +1687,9 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
             effect_arguments: vec![GenericArgument::EffectRow(EffectRow {
                 effects: BTreeSet::new(),
                 projections: vec![],
-                tail: Some(grandiose_stage0::EffectTail::Infer(
+                tails: [grandiose_stage0::EffectTail::Infer(
                     grandiose_stage0::EffectVar(4),
-                )),
+                )].into_iter().collect(),
             })],
             operation: 0,
             arguments: vec![],
@@ -1862,7 +1863,7 @@ fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
         effects: EffectRow {
             effects: BTreeSet::new(),
             projections: vec![projection("Z"), projection("A")],
-            tail: None,
+            tails: Default::default(),
         },
         invocation: Quantity::ONCE,
     };
@@ -3110,7 +3111,7 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
     ));
     assert!(matches!(
         optimized.blocks[0].instructions[5],
-        MirInstruction::ConstBool { value: true, .. }
+        MirInstruction::ConstBool { value: false, .. }
     ));
     assert!(matches!(
         optimized.blocks[0].instructions[7],

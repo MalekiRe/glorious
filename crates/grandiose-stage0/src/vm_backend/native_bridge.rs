@@ -22,6 +22,9 @@ use std::{
     sync::Arc,
 };
 
+#[path = "llvm/bridge.rs"]
+pub(super) mod generated;
+
 fn error(message: &'static str) -> VmArtifactError {
     VmArtifactError::NativeAbi { message }
 }
@@ -65,6 +68,7 @@ pub enum VmNativeLayoutShape {
     Scalar,
     Reference,
     Product(Vec<VmNativeLayoutField>),
+    Repeated { element: Box<VmNativeLayout>, count: usize, stride: usize },
     Enum {
         payload_offset: usize,
         variants: Vec<Vec<VmNativeLayoutField>>,
@@ -82,7 +86,7 @@ pub struct VmNativeLayout {
 
 impl From<&NativeLayout> for VmNativeLayout {
     fn from(layout: &NativeLayout) -> Self {
-        let fields = |fields: &[super::native_memory::NativeField]| {
+        let fields = |fields: &super::native_memory::NativeFields| {
             fields
                 .iter()
                 .map(|field| VmNativeLayoutField {
@@ -98,6 +102,8 @@ impl From<&NativeLayout> for VmNativeLayout {
             shape: match &layout.shape {
                 NativeShape::Scalar => VmNativeLayoutShape::Scalar,
                 NativeShape::Reference { .. } => VmNativeLayoutShape::Reference,
+                NativeShape::Product(super::native_memory::NativeFields::Repeated { element, count, stride }) =>
+                    VmNativeLayoutShape::Repeated { element: Box::new(Self::from(element.as_ref())), count: *count, stride: *stride },
                 NativeShape::Product(items) => VmNativeLayoutShape::Product(fields(items)),
                 NativeShape::Enum {
                     payload_offset,
@@ -155,7 +161,8 @@ fn destruction_code_identity(
                     pending.push(*callee);
                     pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
                 }
-                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. } => {
+                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. }
+                | VmInstruction::TailCallOwned { callee, .. } => {
                     pending.push(*callee)
                 }
                 VmInstruction::DeclareFrameCleanup { actions } => {
@@ -239,7 +246,9 @@ fn collect_layout_closure(
                         descriptor.definition == definition && descriptor.arguments == arguments
                     })
                     .ok_or_else(|| error("native import has no concrete nominal descriptor"))?;
-                pending.extend(arguments);
+                pending.extend(arguments.into_iter().filter_map(|argument| match argument {
+                    super::VmGenericArgument::Type(ty) => Some(ty), _ => None,
+                }));
                 pending.extend(descriptor.variants.iter().flatten().cloned());
                 found.insert(key, descriptor.clone());
             }
@@ -249,6 +258,7 @@ fn collect_layout_closure(
                 referent: pointee, ..
             }
             | VmType::Array(pointee)
+            | VmType::FixedArray { element: pointee, .. }
             | VmType::StaticData {
                 element: pointee, ..
             } => pending.push(*pointee),
@@ -319,7 +329,10 @@ pub(super) fn validate_resident_operations(
 }
 
 fn imports(program: &CandidateVmProgram) -> Result<Vec<VmNativeImport>, VmArtifactError> {
-    let mut pending = vec![program.entry];
+    imports_from_roots(program, vec![program.entry])
+}
+
+fn imports_from_roots(program: &CandidateVmProgram, mut pending: Vec<DefKey>) -> Result<Vec<VmNativeImport>, VmArtifactError> {
     let mut seen = BTreeSet::new();
     let mut imports = BTreeMap::new();
     let mut destruction_codes = BTreeMap::new();
@@ -337,7 +350,8 @@ fn imports(program: &CandidateVmProgram) -> Result<Vec<VmNativeImport>, VmArtifa
                     pending.push(*callee);
                     pending.extend(environment.as_ref().and_then(|environment| environment.destructor));
                 }
-                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. } => {
+                VmInstruction::CallOwned { callee, .. } | VmInstruction::Call { callee, .. }
+                | VmInstruction::TailCallOwned { callee, .. } => {
                     pending.push(*callee)
                 }
                 VmInstruction::DeclareFrameCleanup { actions } => {
@@ -452,8 +466,12 @@ impl VmNativeImports {
         &self,
         program: &CandidateVmProgram,
     ) -> Result<Arc<BoundNativeImports>, VmArtifactError> {
+        self.link_contracts(imports(program)?)
+    }
+
+    fn link_contracts(&self, contracts: Vec<VmNativeImport>) -> Result<Arc<BoundNativeImports>, VmArtifactError> {
         let mut linked: BTreeMap<String, BTreeMap<String, Arc<BoundImport>>> = BTreeMap::new();
-        for contract in imports(program)? {
+        for contract in contracts {
             let key = (contract.capability.clone(), contract.symbol.clone());
             let binding = self.bindings.get(&key).ok_or_else(|| {
                 VmArtifactError::HostCallRequiresAuthority {
@@ -557,7 +575,7 @@ fn argument_plan(
         ..
     } = ty
     {
-        if !effects.effects.is_empty() || !effects.projections.is_empty() || effects.tail.is_some()
+        if !effects.effects.is_empty() || !effects.projections.is_empty() || !effects.tails.is_empty()
         {
             return Err(error(
                 "native callback cannot carry outward effects across this boundary",
@@ -580,7 +598,7 @@ fn argument_plan(
 }
 
 fn owned_resident(ty: &VmType) -> bool {
-    matches!(ty, VmType::Tuple(_) | VmType::Nominal { .. })
+    matches!(ty, VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. })
 }
 
 impl VerifiedVmProgram {
@@ -837,6 +855,7 @@ impl VmNativeCall<'_> {
             callee,
             captures,
             plan,
+            additional_depth: 0,
         };
         let result = native(VmNativeCallback {
             context: (&mut context as *mut CallbackContext<'_, '_>).cast(),
@@ -854,6 +873,8 @@ struct CallbackContext<'call, 'vm> {
     callee: DefKey,
     captures: Arc<RuntimeCaptureEnvironment>,
     plan: Arc<CallbackPlan>,
+    /// Generated LLVM frames between the invoking VM and this callback.
+    additional_depth: u32,
 }
 
 impl CallbackContext<'_, '_> {
@@ -883,6 +904,8 @@ impl CallbackContext<'_, '_> {
         let depth = self
             .call
             .depth
+            .checked_add(self.additional_depth)
+            .ok_or_else(|| error("native callback depth overflow"))?
             .checked_add(1)
             .ok_or_else(|| error("native callback depth overflow"))?;
         if depth >= self.call.budget.limits.max_call_depth {

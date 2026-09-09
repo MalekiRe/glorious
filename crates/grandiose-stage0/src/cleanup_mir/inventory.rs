@@ -304,7 +304,8 @@ impl CleanupMir {
                     }
                 }
             }
-            if matches!(
+            if !matches!(&block.terminator.control,
+                CleanupControl::Invoke { contract, .. } if contract.mandatory_tail) && matches!(
                 block.terminator.control,
                 CleanupControl::Invoke { .. }
                     | CleanupControl::Transfer(ControlTransfer::Perform { .. })

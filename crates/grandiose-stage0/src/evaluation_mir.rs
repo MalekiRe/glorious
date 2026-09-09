@@ -7,6 +7,48 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+mod const_value_tests {
+    use super::*;
+    use crate::{ConstKind, CoreExpr, Digest, FileKey, PlaceFlow, ScalarType};
+
+    #[test]
+    fn const_values_are_kind_checked_at_each_mutable_ir_boundary() {
+        let body = TypedBody {
+            safety: crate::Safety::Safe, unsafe_scopes: Default::default(),
+            unsafe_implementations: Default::default(), parameters: vec![],
+            expressions: vec![CoreExpr {
+                kind: CoreKind::ConstValue(GenericArgument::ConstInteger(42u32.into())),
+                ty: Type::Scalar(ScalarType::U32),
+                span: Span { file: FileKey(Digest::of_bytes(b"const-value-boundary")), start: 0, end: 1 },
+            }], root: CoreId(0), diagnostics: vec![], recovered: false,
+        };
+        let evaluation = EvaluationMir::lower(DefKey(Digest::of_bytes(b"const-value-owner")), &body).unwrap();
+        let mut forged = evaluation.clone();
+        forged.regions.iter_mut().flat_map(|region| &mut region.instructions)
+            .find(|instruction| matches!(instruction.operation, EvaluationOperation::ConstValue(_)))
+            .unwrap().ty = Type::Scalar(ScalarType::Usize);
+        assert!(forged.validate().is_err());
+
+        let control = crate::control_mir::ControlMir::lower(&evaluation).unwrap();
+        let mut forged = control.clone();
+        let instruction = forged.blocks.iter_mut().flat_map(|block| &mut block.instructions)
+            .find(|instruction| matches!(instruction.operation, crate::control_mir::ControlOperation::ConstValue(_))).unwrap();
+        instruction.operation = crate::control_mir::ControlOperation::ConstValue(
+            GenericArgument::ConstGeneric { index: 0, kind: ConstKind::Usize });
+        assert!(forged.validate().is_err());
+
+        let ownership = crate::ownership_mir::OwnershipMir::lower(control, &PlaceFlow::analyze(&body), None).unwrap();
+        let mut forged = ownership.clone();
+        let instruction = forged.blocks.iter_mut().flat_map(|block| &mut block.instructions)
+            .find(|instruction| matches!(instruction.operation, crate::ownership_mir::OwnershipOperation::Compute(
+                crate::ownership_mir::OwnershipComputation::ConstValue(_)))).unwrap();
+        instruction.operation = crate::ownership_mir::OwnershipOperation::Compute(
+            crate::ownership_mir::OwnershipComputation::ConstValue(GenericArgument::ConstGeneric { index: 0, kind: ConstKind::Usize }));
+        assert!(forged.validate().is_err());
+    }
+}
+
 use crate::core::{
     CallReferenceOrigin, CallReferenceShape, CallableBrand, CallableId, CaptureEnvironment,
     CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
@@ -30,6 +72,7 @@ pub enum EvaluationPlace {
         ty: Type,
     },
     Temporary {
+        source: CoreId,
         value: EvaluationValue,
         ty: Type,
     },
@@ -53,6 +96,7 @@ pub enum EvaluationOperand {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationCallContract {
+    pub mandatory_tail: bool,
     pub reference_contract: CallReferenceOrigin,
     pub reference_origin: CallReferenceOrigin,
     pub reference_shape: CallReferenceShape,
@@ -87,6 +131,7 @@ pub struct EvaluationCompletionArm {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvaluationOperation {
     Literal(String),
+    ConstValue(GenericArgument),
     ReadLocal(String),
     Resumption {
         id: ResumptionId,
@@ -302,7 +347,7 @@ impl EvaluationMir {
                 }
                 available.insert(instruction.value);
                 instruction.operation.regions(&mut pending);
-                if instruction.ty == Type::Never && index + 1 != region.instructions.len() {
+                if instruction.is_terminal() && index + 1 != region.instructions.len() {
                     return Err(EvaluationError(
                         "instruction after terminal evaluation".into(),
                     ));
@@ -316,7 +361,7 @@ impl EvaluationMir {
                 EvaluationExit::Diverge(value) => (value, true),
             };
             if !available.contains(&value)
-                || diverges != (last.ty == Type::Never)
+                || diverges != last.is_terminal()
                 || (diverges && value != last.value)
             {
                 return Err(EvaluationError(
@@ -350,6 +395,10 @@ impl EvaluationPlace {
     }
 }
 impl EvaluationInstruction {
+    fn is_terminal(&self) -> bool {
+        self.ty == Type::Never || matches!(&self.operation,
+            EvaluationOperation::Call(contract) if contract.mandatory_tail)
+    }
     fn validate_shape(&self) -> Result<(), EvaluationError> {
         use EvaluationOperation as Op;
         let values = self
@@ -358,6 +407,9 @@ impl EvaluationInstruction {
             .all(|operand| matches!(operand, EvaluationOperand::Value(_)));
         let arity = self.operands.len();
         let valid = match &self.operation {
+            Op::ConstValue(argument) => arity == 0
+                && crate::types::integer_const_argument_type(argument).as_ref() == Some(&self.ty)
+                && crate::types::is_canonical_generic_argument_identity(argument),
             Op::Literal(_)
             | Op::ReadLocal(_)
             | Op::Resumption { .. }
@@ -564,6 +616,19 @@ impl Builder<'_> {
         self.region_with_observation(source, false)
     }
 
+    fn borrowed_pattern_subject(&self, mut source: CoreId) -> bool {
+        // Keep malformed cyclic Core bounded; the ordinary expression walk
+        // subsequently reports the cycle through its active-expression set.
+        for _ in 0..self.body.expressions.len() {
+            match self.body.expression(source).kind {
+                CoreKind::Field { base, .. } => source = base,
+                CoreKind::Deref(_) => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
     fn region_with_observation(&mut self, source: CoreId, observational: bool) -> Result<EvaluationRegionId, EvaluationError> {
         let mut sequence = Sequence::default();
         let subject_ty = self.body.expression(source).ty.clone();
@@ -645,7 +710,7 @@ impl Builder<'_> {
             .next_value
             .checked_add(1)
             .ok_or_else(|| EvaluationError("value arena exhausted".into()))?;
-        if ty == Type::Never {
+        if ty == Type::Never || matches!(&operation, EvaluationOperation::Call(contract) if contract.mandatory_tail) {
             sequence.terminal = Some(value);
         }
         sequence.instructions.push(EvaluationInstruction {
@@ -735,6 +800,25 @@ impl Builder<'_> {
         })
     }
 
+    fn borrowed_place(&mut self, id: CoreId, sequence: &mut Sequence) -> Result<EvaluationPlace, EvaluationError> {
+        if let CoreKind::Field { base, index, field_count } = self.body.expression(id).kind {
+            // Borrow the field in its complete temporary owner. Evaluating
+            // the projection as an owned value would move the field out and
+            // change both the owner's destruction and the loan's lifetime.
+            return Ok(EvaluationPlace::Field {
+                base: Box::new(self.borrowed_place(base, sequence)?), index, field_count,
+                ty: self.body.expression(id).ty.clone(),
+            });
+        }
+        Ok(match self.expression_place(id, sequence)? {
+            Some(place) => place,
+            None => EvaluationPlace::Temporary {
+                source: id, value: self.expression(id, sequence)?,
+                ty: self.body.expression(id).ty.clone(),
+            },
+        })
+    }
+
     fn expression(
         &mut self,
         source: CoreId,
@@ -765,6 +849,7 @@ impl Builder<'_> {
         use EvaluationOperation as Op;
         let operation = match expression.kind {
             CoreKind::Literal(value) => Op::Literal(value),
+            CoreKind::ConstValue(value) => Op::ConstValue(value),
             CoreKind::Local(name) => Op::ReadLocal(name),
             CoreKind::Resumption { id, name } => Op::Resumption { id, name },
             CoreKind::Function {
@@ -852,13 +937,7 @@ impl Builder<'_> {
                 Op::Assign
             }
             CoreKind::Borrow { unique, value } => {
-                let place = match self.expression_place(value, sequence)? {
-                    Some(place) => place,
-                    None => EvaluationPlace::Temporary {
-                        value: self.expression(value, sequence)?,
-                        ty: self.body.expression(value).ty.clone(),
-                    },
-                };
+                let place = self.borrowed_place(value, sequence)?;
                 operands.push(EvaluationOperand::Place(place));
                 Op::Borrow { unique }
             }
@@ -879,6 +958,7 @@ impl Builder<'_> {
                 reference_contract,
                 reference_origin,
                 reference_shape,
+                mandatory_tail,
             } => {
                 if matches!(&self.body.expression(callee).ty, Type::Callable { result, .. } if **result == Type::Never)
                 {
@@ -889,6 +969,7 @@ impl Builder<'_> {
                     operands.extend(self.values(&arguments, sequence)?);
                 }
                 Op::Call(EvaluationCallContract {
+                    mandatory_tail,
                     reference_contract,
                     reference_origin,
                     reference_shape,
@@ -914,6 +995,7 @@ impl Builder<'_> {
                     payload_types,
                     terminal,
                     contract: EvaluationCallContract {
+                        mandatory_tail: false,
                         reference_contract,
                         reference_origin,
                         reference_shape,
@@ -937,6 +1019,11 @@ impl Builder<'_> {
                     operands = self.values(&arguments, sequence)?;
                     Op::Intrinsic(operator)
                 }
+            }
+            CoreKind::ReleaseAvailable(_) => {
+                return Err(EvaluationError(
+                    "available release requires sealed runtime-environment disposal before executable lowering".into(),
+                ));
             }
             CoreKind::Block(_) => {
                 let region = self.region(source)?;
@@ -999,7 +1086,11 @@ impl Builder<'_> {
                 refinement_test,
                 ..
             } => {
-                let computation = self.region_with_observation(computation, refinement_test.is_some())?;
+                // A tag-only completion through borrowed storage observes
+                // that storage just like `is`; an empty selected constructor
+                // must not turn the projected view into an owned shell.
+                let observational = refinement_test.is_some() || self.borrowed_pattern_subject(computation);
+                let computation = self.region_with_observation(computation, observational)?;
                 let mut arms = vec![];
                 for contract in clauses {
                     arms.push(EvaluationCompletionArm {

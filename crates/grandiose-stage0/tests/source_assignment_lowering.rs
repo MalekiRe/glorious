@@ -6,9 +6,10 @@
 //! distinction must survive initialisation, replacement, move/reinitialise,
 //! and closure lifting.
 
+mod support;
+
 use grandiose_stage0::{
-    BodySyntax, CompilationMode, CompilationRequest, CompilerBuildIdentity, DeclarationScan,
-    DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath,
+    CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath,
     emit_vm, MirCleanupAction, MirFunction, MirInstruction, MirLocal, MirLowering,
     MirTerminator, PackageKey, PlaceBindingOrigin, PlaceFlow, SourceInput, StageZeroCompiler,
     TypedBody, VmInstruction, VmStorageErasureAction, VmStorageErasureWitness,
@@ -16,37 +17,11 @@ use grandiose_stage0::{
 use std::collections::{BTreeMap, BTreeSet};
 
 fn lower_function(source: &str, function: &str) -> (TypedBody, PlaceFlow, MirLowering) {
-    let package = PackageKey("source-assignment-lowering@0.1.0".into());
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious")
-            .expect("valid logical path")
-            .as_str(),
-    );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some(function))
-        .expect("requested function definition");
-    let body = BodySyntax::parse(
-        &lexed,
-        source,
-        definition.body.expect("requested function body"),
-    );
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (definition, core, _) = support::frontend("source-assignment-lowering@0.1.0", source, function);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
-    let lowered = MirLowering::lower(definition.key, &core, &flow);
+    let lowered = MirLowering::lower(definition, &core, &flow);
     (core, flow, lowered)
 }
 
@@ -198,7 +173,7 @@ fn source_let_initializer_lowers_as_live_temporary_then_first_store() {
 /// ordinary one-write locals.
 #[test]
 fn source_assignment_destroys_an_initialized_place_before_overwrite_store() {
-    let source = "pub fn main() -> i64 { let value = 1; value = 42; value }";
+    let source = "pub fn main() -> i64 { let mut value = 1; value = 42; value }";
     let (_core, _flow, lowered) = lower_main(source);
     let function = lowered
         .function
@@ -280,7 +255,7 @@ fn source_assignment_destroys_an_initialized_place_before_overwrite_store() {
 /// store.
 #[test]
 fn source_assignment_reinitializes_a_moved_place_without_destroying_an_empty_slot() {
-    let source = "pub struct Token { number: i64 } pub fn main() -> i64 { let value = Token { number: 1 }; move value; value = Token { number: 42 }; value.number }";
+    let source = "pub struct Token { number: i64 } pub fn main() -> i64 { let mut value = Token { number: 1 }; move value; value = Token { number: 42 }; value.number }";
     let (_core, _flow, lowered) = lower_main(source);
     let function = lowered.function.unwrap_or_else(|| {
         panic!(
@@ -333,7 +308,7 @@ fn source_assignment_reinitializes_a_moved_place_without_destroying_an_empty_slo
 /// a compiler temporary in that body must never become a Store destination.
 #[test]
 fn lifted_closure_assignment_preserves_a_mapped_addressable_capture_slot() {
-    let source = "pub fn main() -> i64 { let value = 40; let outer = () -> i64 { let inner = () -> i64 { value = value + 2; value }; inner() }; outer() }";
+    let source = "pub fn main() -> i64 { let mut value = 40; let outer = () -> i64 { let inner = () -> i64 { value = value + 2; value }; inner() }; outer() }";
     let (_core, _flow, lowered) = lower_main(source);
     let function = lowered
         .function
@@ -389,7 +364,7 @@ fn lifted_closure_assignment_preserves_a_mapped_addressable_capture_slot() {
 /// register lifetimes.
 #[test]
 fn source_assignment_leave_emits_reverse_storage_dead_cleanup_after_move_and_reinit() {
-    let source = "pub struct Token { number: i64 } pub fn main() -> i64 { label done { let owner = Token { number: 1 }; move owner; owner = Token { number: 2 }; let later = 40; transfer done owner.number + later } }";
+    let source = "pub struct Token { number: i64 } pub fn main() -> i64 { label done { let mut owner = Token { number: 1 }; move owner; owner = Token { number: 2 }; let later = 40; transfer done owner.number + later } }";
     let (_core, _flow, lowered) = lower_main(source);
     let function = lowered.function.unwrap_or_else(|| {
         panic!(
@@ -544,7 +519,7 @@ fn source_assignment_leave_emits_reverse_storage_dead_cleanup_after_move_and_rei
 /// owner before the label target receives it.
 #[test]
 fn source_leave_protects_reinitialized_owner_payload_before_storage_dead() {
-    let source = "pub struct Token { number: i64 } pub fn main() -> Token { label done { let value = Token { number: 1 }; move value; value = Token { number: 42 }; transfer done value } }";
+    let source = "pub struct Token { number: i64 } pub fn main() -> Token { label done { let mut value = Token { number: 1 }; move value; value = Token { number: 42 }; transfer done value } }";
     let (_core, _flow, lowered) = lower_main(source);
     let function = lowered.function.unwrap_or_else(|| {
         panic!(
@@ -616,7 +591,7 @@ fn handler_leave_protects_a_direct_reinitialized_source_owner_payload() {
 
         pub fn escape() -> Token {
             label done {
-                let owner = Token { number: 1 };
+                let mut owner = Token { number: 1 };
                 move owner;
                 owner = Token { number: 42 };
                 handle Ask::ask() {

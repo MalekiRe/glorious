@@ -60,6 +60,20 @@ fn coherence_rejects_unifiable_positive_and_negative_heads() {
 }
 
 #[test]
+fn quantified_requirements_do_not_fabricate_disjoint_conditional_impls() {
+    let coherence = collect(r#"
+        trait Marker {}
+        trait Ready {}
+        trait Choice {}
+        struct Wrap<T> { value: T }
+        impl<T> Ready for Wrap<T> where for<'a> &'a T: Marker {}
+        impl<T> Choice for Wrap<T> where Wrap<T>: Ready, for<'a> &'a T: Marker {}
+        impl<T> Choice for Wrap<T> where for<'a> &'a T: Marker {}
+    "#);
+    assert!(coherence.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3404"), "{coherence:#?}");
+}
+
+#[test]
 fn coherence_rejects_effect_row_generic_heads_that_overlap_a_concrete_row() {
     let coherence = collect(
         "effect Trace { note(); } trait Marker<e: EffectRow> {} impl<e: EffectRow> Marker<e> for i64 {} impl Marker<{Trace}> for i64 {}",
@@ -220,6 +234,26 @@ fn coherence_uses_solver_satisfiability_for_where_bound_overlap() {
             .any(|diagnostic| diagnostic.code == "G3404"),
         "jointly satisfiable bound domains must overlap: {overlapping:#?}"
     );
+}
+
+#[test]
+fn coherence_checks_associated_equalities_in_the_shared_witness() {
+    for (right, overlap) in [("i64", true), ("Text", false)] {
+        let source = format!("trait Source {{ type Item; }} impl<T> Source for T {{ type Item = i64; }} trait Render {{}} impl<T> Render for T where T: Source<Item=i64> {{}} impl<U> Render for U where U: Source<Item={right}> {{}}");
+        let coherence = collect(&source);
+        assert_eq!(coherence.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3404"), overlap, "{source}: {coherence:#?}");
+    }
+    for (right, overlap) in [("{Ask}", true), ("{}", false)] {
+        let source = format!("effect Ask {{ ask() -> i64; }} trait Source {{ type Effects: EffectRow; }} impl<T> Source for T {{ type Effects = {{Ask}}; }} trait Render {{}} impl<T> Render for T where T: Source<Effects={{Ask}}> {{}} impl<U> Render for U where U: Source<Effects={right}> {{}}");
+        let coherence = collect(&source);
+        assert_eq!(coherence.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3404"), overlap, "{source}: {coherence:#?}");
+    }
+}
+
+#[test]
+fn positive_outlives_requirements_do_not_fabricate_disjoint_impl_domains() {
+    let coherence = collect("trait Left {} trait Right {} trait Render {} impl<T> Left for T where T: 'static {} impl<T> Right for T {} impl<T> Render for T where T: Left {} impl<U> Render for U where U: Right {}");
+    assert!(coherence.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3404"), "{coherence:#?}");
 }
 
 #[test]

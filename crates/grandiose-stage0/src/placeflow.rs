@@ -13,6 +13,10 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+mod minimum;
+mod drop;
+use minimum::{MinimumBinding, MinimumDisposition, MinimumHandler};
+
 /// A statically-selected subplace of one local.  PlaceFlow deliberately keeps
 /// dereferences out of this representation: their aliasing is not yet proven
 /// precisely enough to make them disjoint.  Struct-field paths, on the other
@@ -155,6 +159,17 @@ pub struct MovePathId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PlaceBindingId(pub u32);
 
+pub(crate) fn borrowed_temporary_root(expression: CoreId) -> String {
+    format!("<borrowed-temporary-{}>", expression.0)
+}
+
+pub(crate) fn borrowed_place_base(body: &TypedBody, mut expression: CoreId) -> CoreId {
+    while let CoreKind::Field { base, .. } = body.expression(expression).kind {
+        expression = base;
+    }
+    expression
+}
+
 /// Typed lexical storage-scope identity published with one [`PlaceFlow`]
 /// product.  This is deliberately independent from parser/source scopes: it
 /// records exactly the scopes which own addressable bindings and therefore
@@ -189,6 +204,10 @@ pub enum PlaceBindingOrigin {
         index: u32,
     },
     Let {
+        expression: CoreId,
+    },
+    /// Addressable storage introduced by explicitly borrowing an rvalue.
+    Temporary {
         expression: CoreId,
     },
     HandlerBinder {
@@ -393,9 +412,15 @@ pub struct FlowDiagnostic {
 }
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
+    /// Exact manifest-bound abort declaration. This machine leaf has no
+    /// cleanup continuation; arbitrary `!` functions do not gain that proof.
+    pub(crate) abort_primitive: Option<crate::DefKey>,
     /// Lexical trait assumptions checked with this body, inherited by lifted
     /// callables even when their executable identity differs from the owner.
     pub lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+    /// Associated rows are part of a generic Fn's checked lexical contract,
+    /// not recoverable from its uninstantiated Core callee type alone.
+    pub(crate) lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
     /// Frozen lexical storage identities referenced by `move_paths`.
     pub bindings: Vec<PlaceBinding>,
     /// Persistent lexical source-storage arena. `binding_scopes` is dense in
@@ -429,7 +454,7 @@ pub struct PlaceFlow {
 }
 impl PlaceFlow {
     pub fn analyze(body: &TypedBody) -> Self {
-        Self::analyze_root(body, body.root, &body.parameters, None, &[])
+        Self::analyze_root(body, body.root, &body.parameters, None, &[], &[], None, None)
     }
 
     /// Analyze against the sealed interface that determined each type's
@@ -444,7 +469,20 @@ impl PlaceFlow {
         signatures: &ElaboratedInterface,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
     ) -> Self {
-        Self::analyze_root(body, body.root, &body.parameters, Some(signatures), bounds)
+        Self::analyze_root(body, body.root, &body.parameters, Some(signatures), bounds, &[], None, None)
+    }
+
+    /// Reuse only the immutable rule/layout snapshot from this exact sealed
+    /// interface. Each analysis still owns separate proof tables and budgets.
+    pub(crate) fn analyze_with_frozen_solver(
+        body: &TypedBody,
+        signatures: &ElaboratedInterface,
+        bounds: &[(Type, crate::ElaboratedTraitReference)],
+        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
+        solver: &crate::TraitSolver,
+        abort_primitive: Option<crate::DefKey>,
+    ) -> Self {
+        Self::analyze_root(body, body.root, &body.parameters, Some(signatures), bounds, effect_bindings, Some(solver), abort_primitive)
     }
 
     /// Analyze one lifted callable body as an independent storage owner.
@@ -458,7 +496,7 @@ impl PlaceFlow {
         root: CoreId,
         parameters: &[(String, Type)],
     ) -> Self {
-        Self::analyze_root(body, root, parameters, None, &[])
+        Self::analyze_root(body, root, parameters, None, &[], &[], None, None)
     }
 
     pub fn analyze_lifted_with_interface(
@@ -477,7 +515,20 @@ impl PlaceFlow {
         signatures: &ElaboratedInterface,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
     ) -> Self {
-        Self::analyze_root(body, root, parameters, Some(signatures), bounds)
+        Self::analyze_root(body, root, parameters, Some(signatures), bounds, &[], None, None)
+    }
+
+    pub(crate) fn analyze_lifted_with_frozen_solver(
+        body: &TypedBody,
+        root: CoreId,
+        parameters: &[(String, Type)],
+        signatures: &ElaboratedInterface,
+        bounds: &[(Type, crate::ElaboratedTraitReference)],
+        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
+        solver: &crate::TraitSolver,
+        abort_primitive: Option<crate::DefKey>,
+    ) -> Self {
+        Self::analyze_root(body, root, parameters, Some(signatures), bounds, effect_bindings, Some(solver), abort_primitive)
     }
 
     fn analyze_root(
@@ -486,11 +537,17 @@ impl PlaceFlow {
         parameters: &[(String, Type)],
         signatures: Option<&ElaboratedInterface>,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
+        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
+        frozen_solver: Option<&crate::TraitSolver>,
+        abort_primitive: Option<crate::DefKey>,
     ) -> Self {
         let mut a = Analyzer {
             body,
             signatures,
             lexical_bounds: bounds,
+            lexical_effect_bindings: effect_bindings,
+            frozen_solver,
+            abort_primitive,
             states: BTreeMap::new(),
             destructor_paths: BTreeSet::new(),
             drop_solver: None,
@@ -505,6 +562,9 @@ impl PlaceFlow {
             reference_origins: BTreeMap::new(),
             open_referent_holes: BTreeMap::new(),
             moved_places: BTreeSet::new(),
+            minimum_bindings: BTreeMap::new(),
+            minimum_states: vec![MinimumDisposition::default()],
+            minimum_handlers: vec![],
             move_paths: MovePathArena::default(),
             bindings: PlaceBindingArena::default(),
             scopes: vec![BTreeMap::new()],
@@ -538,6 +598,7 @@ impl PlaceFlow {
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
             a.record_destructor_paths(name, ty);
+            a.record_minimum_binding(name, ty, body.expression(root).span);
         }
         // Parameters are caller-owned values, but reference-typed parameter
         // projections still name a stable external loan.  Seed those frozen
@@ -546,6 +607,7 @@ impl PlaceFlow {
         // without inventing a body-local backing place.
         a.record_parameter_reference_origins(parameters);
         a.visit_with_live_after(root, &BTreeSet::new());
+        a.check_minimum_scope(&a.minimum_bindings.keys().cloned().collect(), body.expression(root).span);
         a.reject_open_referent_holes(
             body.expression(root).span,
             "cannot complete a body while a unique-reference referent is moved out",
@@ -584,7 +646,9 @@ impl PlaceFlow {
             })
             .collect();
         Self {
+            abort_primitive,
             lexical_bounds: bounds.to_vec(),
+            lexical_effect_bindings: effect_bindings.to_vec(),
             bindings: a.bindings.into_entries(),
             storage_scopes: a.storage_scopes,
             binding_scopes: a.binding_scopes,
@@ -604,6 +668,9 @@ struct Analyzer<'a> {
     body: &'a TypedBody,
     signatures: Option<&'a ElaboratedInterface>,
     lexical_bounds: &'a [(Type, crate::ElaboratedTraitReference)],
+    lexical_effect_bindings: &'a [crate::ElaboratedAssociatedEffectBinding],
+    frozen_solver: Option<&'a crate::TraitSolver>,
+    abort_primitive: Option<crate::DefKey>,
     states: BTreeMap<String, LocalState>,
     /// Places whose eventual source Drop hook can still observe their owned
     /// reference leaves. They add implicit uses at lexical destruction;
@@ -647,6 +714,9 @@ struct Analyzer<'a> {
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
     moved_places: BTreeSet<Projection>,
+    minimum_bindings: BTreeMap<String, MinimumBinding>,
+    minimum_states: Vec<MinimumDisposition>,
+    minimum_handlers: Vec<MinimumHandler>,
     move_paths: MovePathArena,
     bindings: PlaceBindingArena,
     /// Source spellings remain useful in frozen Core diagnostics, while
@@ -697,14 +767,7 @@ impl Analyzer<'_> {
             Type::Generic(_) | Type::Projection { .. } => return vec![vec![]],
             Type::Nominal { definition, arguments } => {
                 if !active.insert(*definition) { return vec![vec![]]; }
-                let answer = self.drop_solver.get_or_insert_with(|| crate::TraitSolver::new(signatures))
-                    .solve(crate::TraitGoal {
-                        relation: crate::ElaboratedTraitReference {
-                            definition: crate::resolution::language_drop_trait_definition(), arguments: vec![],
-                        },
-                        subject: ty.clone(),
-                    });
-                if !matches!(answer, crate::TraitAnswer::NoSolution | crate::TraitAnswer::Refuted { .. }) {
+                if self.custom_drop_may_apply(ty) {
                     active.remove(definition);
                     return vec![vec![]];
                 }
@@ -716,7 +779,7 @@ impl Analyzer<'_> {
                 layouts
             }
             Type::Tuple(fields) => vec![fields.clone()],
-            Type::Array(element) => return if self.drop_observation_paths(element, active).is_empty() {
+            Type::Array(element) | Type::FixedArray { element, .. } => return if self.drop_observation_paths(element, active).is_empty() {
                 vec![]
             } else { vec![vec![]] },
             _ => return vec![],
@@ -967,9 +1030,10 @@ impl Analyzer<'_> {
         let locals = self.bindings.ids.iter().filter(|(_, binding)|
             self.binding_scopes[binding.0 as usize] == storage_scope)
             .map(|(identity, _)| identity.clone()).collect::<BTreeSet<_>>();
+        self.end_minimum_scope(storage_scope, span);
         let escaping = self.projection_loans.iter().any(|loan|
             !loan.indirect && locals.contains(&loan.place.root) && loan.owner.as_ref().is_some_and(|owner|
-                self.pending_results.iter().any(|id| {
+                !belongs_to_scope(&locals, owner) || self.pending_results.iter().any(|id| {
                     let result = Self::result_owner(*id);
                     owner == &result || owner.starts_with(&(result + "."))
                 })));
@@ -1041,6 +1105,7 @@ impl Analyzer<'_> {
                 origin(u32::try_from(index).expect("branch binder index exceeded identity space")),
             );
             self.record_destructor_paths(&identity, ty);
+            self.record_minimum_binding(&identity, ty, self.body.expression(self.body.root).span);
             self.states.insert(identity, LocalState::Initialized);
         }
         if let Some(name) = resumption {
@@ -1120,6 +1185,7 @@ impl Analyzer<'_> {
     fn visit_expression(&mut self, id: CoreId, live_after: &BTreeSet<String>) {
         let e = self.body.expression(id).clone();
         match e.kind {
+            CoreKind::ConstValue(_) => {},
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
             | CoreKind::LabelValue { .. }
@@ -1209,7 +1275,7 @@ impl Analyzer<'_> {
                     } else if self.projection(value).is_some() {
                         self.read_place(value, self.body.expression(value).span);
                     } else {
-                        self.visit_with_live_after(value, &borrow_live);
+                        self.visit_with_live_after(borrowed_place_base(self.body, value), &borrow_live);
                     }
                     if !self.reborrow_place(value, unique, e.span, binding.clone()) {
                         self.borrow_place(value, unique, e.span, Some(binding.clone()));
@@ -1230,6 +1296,10 @@ impl Analyzer<'_> {
                 // Resolve initializer origins in the old lexical environment:
                 // `let value = value` must refer to the hidden previous owner.
                 self.record_aggregate_reference_origins(&binding, value);
+                // A moved reference-bearing initializer has transferred its
+                // loans to the new binding. Vacant source fields must not
+                // survive as competing children of the same backing loan.
+                self.release_vacated_reference_loans(e.span);
                 self.release_owner_loans(&initializer_owner, e.span);
                 self.ephemeral_borrow_owner = previous_ephemeral;
                 self.activate_binding(
@@ -1238,6 +1308,7 @@ impl Analyzer<'_> {
                     PlaceBindingOrigin::Let { expression: id },
                 );
                 self.record_destructor_paths(&binding, &self.body.expression(value).ty.clone());
+                self.record_minimum_binding(&binding, &self.body.expression(value).ty.clone(), e.span);
                 self.states.insert(binding.clone(), LocalState::Initialized);
                 self.event(FlowEventKind::Initialize(binding), e.span)
             }
@@ -1260,6 +1331,14 @@ impl Analyzer<'_> {
                 }
                 if let CorePlace::Deref { reference, .. } = &place {
                     self.restore_whole_referent_hole(&place, e.span);
+                    // The capability may itself be computed (a call, block,
+                    // or completion). Evaluate it without moving a static
+                    // reference carrier, and retain its result loan through
+                    // the store just as for an ordinary dereference.
+                    self.visit_reference_handle(*reference, live_after);
+                    if Self::abrupt_exit(self.body, *reference).is_some() {
+                        return;
+                    }
                     self.use_deref_reference(*reference, e.span, true);
                 } else {
                     let mut destination = &place;
@@ -1270,6 +1349,10 @@ impl Analyzer<'_> {
                     }
                     if let CorePlace::Deref { reference, .. } = destination {
                         fields.reverse();
+                        self.visit_reference_handle(*reference, live_after);
+                        if Self::abrupt_exit(self.body, *reference).is_some() {
+                            return;
+                        }
                         self.use_projected_deref_reference(*reference, &fields, e.span, true);
                     }
                 }
@@ -1288,6 +1371,14 @@ impl Analyzer<'_> {
                     self.move_place(v, e.span)
                 }
             }
+            CoreKind::ReleaseAvailable(value) => {
+                if e.ty != Type::Unit || !crate::core::available_release_is_authorized(
+                    &self.body.expression(value).ty, self.lexical_bounds,
+                ) {
+                    self.error(e.span, "G4188", "available release lacks its exact Environment and affine erasure contracts".into());
+                }
+                self.visit_with_live_after(value, live_after);
+            }
             CoreKind::IntrinsicCall { arguments, .. } => {
                 // Runtime intrinsics are manifest leaves: their values are
                 // scalar/aggregate Grandiose values, never a reference whose
@@ -1305,7 +1396,10 @@ impl Analyzer<'_> {
                 if let Some(reference) = self.reborrow_reference(value) {
                     self.visit_reference_handle(reference, live_after);
                 } else if self.projection(value).is_none() {
-                    self.visit_with_live_after(value, live_after);
+                    self.visit_with_live_after(borrowed_place_base(self.body, value), live_after);
+                }
+                if Self::abrupt_exit(self.body, value).is_some() {
+                    return;
                 }
                 let owner = Self::result_owner(id);
                 if !self.reborrow_place(value, unique, e.span, owner.clone()) {
@@ -1329,6 +1423,8 @@ impl Analyzer<'_> {
                 reference_shape,
                 ..
             } => {
+                let operands_complete = Self::abrupt_exit(self.body, callee).is_none()
+                    && arguments.iter().all(|argument| Self::abrupt_exit(self.body, *argument).is_none());
                 self.reject_opaque_reference_result(reference_shape, &e.ty, e.span, "call");
                 if let CoreKind::Closure { environment, .. } =
                     self.body.expression(callee).kind.clone()
@@ -1367,10 +1463,16 @@ impl Analyzer<'_> {
                         self.visit_sequence(&values, live_after);
                     }
                 }
+                if operands_complete {
+                    if self.minimum_definitely_aborts(id) { self.minimum_states.clear(); }
+                    else { self.check_minimum_call_suspensions(callee, e.span); }
+                }
             }
             CoreKind::Perform {
                 arguments,
                 reference_shape,
+                effect,
+                operation,
                 ..
             } => {
                 self.reject_open_referent_holes(
@@ -1384,6 +1486,9 @@ impl Analyzer<'_> {
                     "effect operation",
                 );
                 self.visit_sequence(&arguments, live_after);
+                if arguments.iter().all(|argument| Self::abrupt_exit(self.body, *argument).is_none()) {
+                    self.check_minimum_suspension(&effect, operation, e.span);
+                }
             }
             CoreKind::Handle {
                 computation,
@@ -1402,7 +1507,9 @@ impl Analyzer<'_> {
                 // dynamic handler boundary even though the source argument's
                 // spelling is not visible inside the arm.
                 self.collect_local_uses(computation, &mut inside_handler);
+                self.enter_minimum_handler(&clauses);
                 self.visit_pattern_subject(computation, &inside_handler, e.span);
+                let minimum_handler = self.minimum_handlers.pop().expect("active minimum-use handler");
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let incoming_moves = self.moved_places.clone();
@@ -1410,6 +1517,10 @@ impl Analyzer<'_> {
                 let incoming_origins = self.reference_origins.clone();
                 let incoming_holes = self.open_referent_holes.clone();
                 let incoming_refinements = self.refinements.clone();
+                let incoming_minimum = self.minimum_states.clone();
+                let mut minimum_exits = if self.minimum_handler_completes_normally(computation, &clauses) {
+                    vec![incoming_minimum.clone()]
+                } else { vec![] };
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
@@ -1419,6 +1530,7 @@ impl Analyzer<'_> {
                     self.reference_origins = incoming_origins.clone();
                     self.open_referent_holes = incoming_holes.clone();
                     self.refinements = incoming_refinements.clone();
+                    self.minimum_states = self.minimum_clause_inputs(&minimum_handler, &clause, &incoming_minimum);
                     let transfers = self.handler_payload_transfers(computation, &clause);
                     self.begin_scope();
                     let resumption = match &clause.resumption {
@@ -1443,6 +1555,8 @@ impl Analyzer<'_> {
                         }),
                     );
                     self.install_pattern_transfers(transfers);
+                    self.check_custom_drop_payload_patterns(&clause);
+                    self.open_minimum_payload_patterns(&clause);
                     let arm_results = self.pending_results.clone();
                     self.visit_with_live_after(clause.body, live_after);
                     self.preserve_expression_result(id, clause.body);
@@ -1451,6 +1565,7 @@ impl Analyzer<'_> {
                     // but neither its payload nor continuation identity may
                     // become an outer post-state fact.
                     self.end_scope(clause.span);
+                    minimum_exits.push(self.minimum_states.clone());
                     exits.push((
                         self.states.clone(),
                         self.projection_loans.clone(),
@@ -1471,6 +1586,7 @@ impl Analyzer<'_> {
                     self.moved_places = join_handler_moves(&exits, &incoming);
                     self.join_reborrow_facts(&exits, &incoming);
                     self.open_referent_holes = join_handler_referent_holes(&exits, &incoming);
+                    self.join_minimum_exits(minimum_exits, e.span);
                     self.refinements = incoming_refinements;
                 }
             }
@@ -1504,6 +1620,8 @@ impl Analyzer<'_> {
                 let incoming_origins = self.reference_origins.clone();
                 let incoming_holes = self.open_referent_holes.clone();
                 let incoming_refinements = self.refinements.clone();
+                let incoming_minimum = self.minimum_states.clone();
+                let mut minimum_exits = vec![];
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
@@ -1513,9 +1631,11 @@ impl Analyzer<'_> {
                     self.reference_origins = incoming_origins.clone();
                     self.open_referent_holes = incoming_holes.clone();
                     self.refinements = incoming_refinements.clone();
+                    self.minimum_states = incoming_minimum.clone();
                     let transfers = self.pattern_binding_transfers(
                         computation, &clause.pattern, &clause.bindings, true,
                     );
+                    let minimum_place = self.projection(computation);
                     self.begin_scope();
                     // `bindings` includes the positive refinement
                     // environment when this completion arm opens one.  Give
@@ -1535,6 +1655,10 @@ impl Analyzer<'_> {
                         None,
                     );
                     self.install_pattern_transfers(transfers);
+                    self.check_custom_drop_pattern(computation, &clause.pattern, clause.span);
+                    if !self.minimum_definitely_aborts(clause.body) {
+                        self.open_minimum_pattern(computation, minimum_place, &clause.pattern, clause.span);
+                    }
                     if clause_index == 0 && let Some(environment) = &refinement_test {
                         // Producer binders are observational projections, not
                         // reference fields already resident in the subject.
@@ -1563,6 +1687,7 @@ impl Analyzer<'_> {
                     self.release_expression_results(&arm_results, Some(id), clause.span);
                     self.end_scope(clause.span);
                     self.release_owner_loans(&subject_owner, clause.span);
+                    minimum_exits.push(self.minimum_states.clone());
                     exits.push((
                         self.states.clone(),
                         self.projection_loans.clone(),
@@ -1583,6 +1708,7 @@ impl Analyzer<'_> {
                     self.moved_places = join_handler_moves(&exits, &incoming);
                     self.join_reborrow_facts(&exits, &incoming);
                     self.open_referent_holes = join_handler_referent_holes(&exits, &incoming);
+                    self.join_minimum_exits(minimum_exits, e.span);
                     self.refinements = incoming_refinements;
                 }
             }
@@ -1679,6 +1805,7 @@ impl Analyzer<'_> {
             suffixes[index] = future.clone();
             self.collect_local_uses(*value, &mut future);
         }
+        let mut operand_owners = BTreeSet::new();
         for (index, (value, mut future)) in reachable.iter().zip(suffixes).enumerate() {
             // Strict operands remain owned by their parent operation. Only
             // a non-tail block expression discards its result at this point;
@@ -1687,6 +1814,7 @@ impl Analyzer<'_> {
             // whose initializer loans may be retired with their Unit result.
             if discard_prefix && index + 1 < values.len()
                 && !matches!(self.body.expression(*value).ty, Type::Unit | Type::Never) {
+                self.check_minimum_discard(&self.body.expression(*value).ty.clone(), self.body.expression(*value).span);
                 let owner = format!("<temporary-statement-{}>", value.0);
                 let previous = self.ephemeral_borrow_owner.replace(owner.clone());
                 future.insert(owner.clone());
@@ -1698,6 +1826,16 @@ impl Analyzer<'_> {
             } else {
                 self.visit_with_live_after(*value, &future);
             }
+            if !discard_prefix && index + 1 < values.len() && Self::abrupt_exit(self.body, *value).is_none() {
+                // Once evaluated, an operand is no longer in its source
+                // place, but its owner remains resident until the enclosing
+                // operation runs. A later transfer/cancellation must prove
+                // that abandoning this operand is authorized too.
+                operand_owners.insert(self.retain_minimum_operand(*value));
+            }
+        }
+        if reachable.last().is_none_or(|value| Self::abrupt_exit(self.body, *value).is_none()) {
+            self.release_minimum_owners(&operand_owners);
         }
     }
 
@@ -1709,6 +1847,7 @@ impl Analyzer<'_> {
     fn abrupt_exit(body: &TypedBody, id: CoreId) -> Option<AbruptExit> {
         let expression = body.expression(id);
         let structural_exit = match &expression.kind {
+            CoreKind::ConstValue(_) => None,
             CoreKind::Transfer { brand, .. } => Some(AbruptExit::Transfer(*brand)),
             CoreKind::Label { brand, body: child } => match Self::abrupt_exit(body, *child) {
                 Some(AbruptExit::Transfer(target)) if target == *brand => None,
@@ -1718,9 +1857,19 @@ impl Analyzer<'_> {
             | CoreKind::Borrow { value, .. }
             | CoreKind::Deref(value)
             | CoreKind::Move(value)
+            | CoreKind::ReleaseAvailable(value)
             | CoreKind::PatternTest { subject: value, .. }
             | CoreKind::Field { base: value, .. } => Self::abrupt_exit(body, *value),
-            CoreKind::Assign { value, .. } => Self::abrupt_exit(body, *value),
+            CoreKind::Assign { value, place } => Self::abrupt_exit(body, *value).or_else(|| {
+                let mut destination = place;
+                while let CorePlace::Field { base, .. } = destination {
+                    destination = base;
+                }
+                match destination {
+                    CorePlace::Deref { reference, .. } => Self::abrupt_exit(body, *reference),
+                    _ => None,
+                }
+            }),
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
                 Self::first_abrupt_exit(body, values)
             }
@@ -1767,6 +1916,7 @@ impl Analyzer<'_> {
     /// safe, whereas releasing it before a shadow-sensitive use would not be.
     fn collect_local_uses(&self, id: CoreId, uses: &mut BTreeSet<String>) {
         match &self.body.expression(id).kind {
+            CoreKind::ConstValue(_) => {},
             CoreKind::Local(name) => {
                 uses.insert(name.clone());
             }
@@ -1784,6 +1934,7 @@ impl Analyzer<'_> {
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
+            | CoreKind::ReleaseAvailable(base)
             | CoreKind::PatternTest { subject: base, .. } => self.collect_local_uses(*base, uses),
             CoreKind::Let { value, .. } => self.collect_local_uses(*value, uses),
             CoreKind::Assign { place, value } => {
@@ -1899,11 +2050,11 @@ impl Analyzer<'_> {
             Type::Callable { .. } | Type::Generic(_) | Type::Projection { .. }
                 | Type::Infer(_) | Type::Error => false,
             Type::Tuple(fields) => fields.iter().all(|ty| self.result_has_no_capture_carriers(ty, active)),
-            Type::Array(element) | Type::StaticData { element, .. } => self.result_has_no_capture_carriers(element, active),
+            Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => self.result_has_no_capture_carriers(element, active),
             Type::Nominal { definition, arguments } => {
                 if !active.insert(*definition) { return false; }
                 let no_captures = match self.signatures.and_then(|signatures| signatures.definitions.get(definition)) {
-                    Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(fields), .. }) =>
+                    Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(fields) | crate::ElaboratedNominalLayout::TupleStruct(fields), .. }) =>
                         fields.iter().all(|field| crate::core::instantiate_nominal_field_type(&field.ty, arguments)
                             .is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
                     Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Enum(variants), .. }) =>
@@ -1927,7 +2078,8 @@ impl Analyzer<'_> {
     fn is_duplicable(&self, ty: &Type) -> bool {
         self.signatures
             .and_then(|signatures| {
-                let solver = self.ownership_solver.get_or_init(|| crate::TraitSolver::new(signatures));
+                let solver = self.ownership_solver.get_or_init(|| self.frozen_solver
+                    .map_or_else(|| crate::TraitSolver::new(signatures), crate::TraitSolver::fresh_query));
                 signatures.principal_use_interval_with_solver(ty, solver).or_else(|| {
                     signatures.principal_use_interval_with_bounds_and_solver(ty, self.lexical_bounds, solver)
                 })
@@ -1993,7 +2145,9 @@ impl Analyzer<'_> {
         // later projections must not read its vacated carrier. Explicit
         // dereference/reborrow contexts use visit_reference_handle instead.
         self.signatures.is_some()
-            && matches!(ty, Type::Nominal { .. } | Type::Tuple(_) | Type::Array(_)
+            && !self.minimum_owned_by_callable_lane(ty)
+            && matches!(ty, Type::Nominal { .. } | Type::Tuple(_) | Type::Array(_) | Type::FixedArray { .. }
+                | Type::Generic(_) | Type::Projection { .. }
                 | Type::Reference { mutability: crate::Mutability::Unique, .. })
     }
 
@@ -2276,6 +2430,7 @@ impl Analyzer<'_> {
     }
 
     fn record_move(&mut self, place: Projection) {
+        self.minimum_transfer(&place);
         let binding = self.bindings.id(&place.root);
         let spelling = self.bindings.spelling(binding).to_owned();
         self.move_paths.intern(&place, binding, &spelling);
@@ -2302,18 +2457,23 @@ impl Analyzer<'_> {
     }
 
     fn projection(&self, id: CoreId) -> Option<Projection> {
-        match &self.body.expression(id).kind {
+        let projection = match &self.body.expression(id).kind {
             CoreKind::Local(name) => Some(Projection {
                 root: self.resolve_name(name),
                 fields: vec![],
             }),
             CoreKind::Field { base, index, .. } => {
-                let mut projection = self.projection(*base)?;
-                projection.fields.push(*index);
-                Some(projection)
+                self.projection(*base).map(|mut projection| {
+                    projection.fields.push(*index);
+                    projection
+                })
             }
             _ => None,
-        }
+        };
+        projection.or_else(|| {
+            let root = borrowed_temporary_root(id);
+            self.bindings.ids.contains_key(&root).then_some(Projection { root, fields: vec![] })
+        })
     }
 
     fn place_projection(&self, place: &CorePlace) -> Option<Projection> {
@@ -2339,6 +2499,7 @@ impl Analyzer<'_> {
         let Some(place) = self.projection(id) else {
             return;
         };
+        if !self.minimum_shell_available(&place, span) { return; }
         if self.open_referent_holes.contains_key(&place.root) {
             self.error(
                 span,
@@ -2395,6 +2556,7 @@ impl Analyzer<'_> {
     }
 
     fn move_place(&mut self, id: CoreId, span: Span) {
+        if !self.check_custom_drop_projection(id, span) { return; }
         let Some(place) = self.projection(id) else {
             return;
         };
@@ -2402,6 +2564,7 @@ impl Analyzer<'_> {
     }
 
     fn move_projection(&mut self, place: Projection, span: Span) {
+        if !self.minimum_shell_available(&place, span) { return; }
         if self
             .projection_loans
             .iter()
@@ -2453,8 +2616,22 @@ impl Analyzer<'_> {
     }
 
     fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: Option<String>) {
-        let Some(place) = self.projection(id) else {
-            return;
+        let place = match self.projection(id) {
+            Some(place) => place,
+            None => {
+                // Evaluation MIR already materializes this rvalue exactly
+                // once. Give that same storage a frozen identity and retain
+                // its borrowed fields and Drop observations until cleanup.
+                let base = borrowed_place_base(self.body, id);
+                let root = borrowed_temporary_root(base);
+                self.activate_binding(&root, root.clone(), PlaceBindingOrigin::Temporary { expression: base });
+                self.states.insert(root.clone(), LocalState::Initialized);
+                self.event(FlowEventKind::Initialize(root.clone()), self.body.expression(base).span);
+                self.record_aggregate_reference_origins(&root, base);
+                self.record_destructor_paths(&root, &self.body.expression(base).ty.clone());
+                self.record_minimum_binding(&root, &self.body.expression(base).ty.clone(), self.body.expression(base).span);
+                self.projection(id).expect("the temporary's field path has an initialized root")
+            }
         };
         self.borrow_projection(place, unique, span, owner);
     }
@@ -2883,6 +3060,18 @@ impl Analyzer<'_> {
     }
 
     fn reference_loans_from_value_path(&self, id: CoreId, fields: &[u32]) -> BTreeSet<ProjectionLoan> {
+        if let Some(deref) = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) {
+            let parents = self.reference_loans_from_value_path(id, &fields[..deref]);
+            let empty = ElaboratedInterface::default();
+            let mut leaves = vec![];
+            let _ = crate::core::input_reference_leaf_paths(self.signatures.unwrap_or(&empty),
+                &self.body.expression(id).ty, &mut leaves);
+            let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| path == fields) else {
+                return BTreeSet::new();
+            };
+            return self.reference_resident_loans(parents, &fields[deref + 1..],
+                matches!(mutability, crate::Mutability::Unique));
+        }
         if self.pending_results.contains(&id) {
             return self.origin_loans(&projection_key(&Self::result_owner(id), fields));
         }
@@ -2950,6 +3139,36 @@ impl Analyzer<'_> {
             remaining = tail;
         }
         self.reference_loans_from_value(value)
+    }
+
+    fn reference_resident_loans(&self, parents: BTreeSet<ProjectionLoan>, fields: &[u32], unique: bool) -> BTreeSet<ProjectionLoan> {
+        let next = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF);
+        let projection = &fields[..next.unwrap_or(fields.len())];
+        let mut residents = BTreeSet::new();
+        for parent in parents {
+            let mut place = parent.place.clone();
+            place.fields.extend_from_slice(projection);
+            let known = self.origin_loans(&projection_key(&place.root, &place.fields));
+            if !known.is_empty() && (!parent.indirect || !projection.is_empty()) {
+                residents.extend(known.into_iter().map(|mut resident| {
+                    // Copying a shared stored handle preserves its backing
+                    // loan but does not borrow the replaceable handle slot.
+                    // A unique resident still needs that slot's authority.
+                    if !resident.unique { resident.owner = None; }
+                    resident
+                }));
+            } else if parent.external || self.bindings.get(&parent.place.root).is_some_and(|binding|
+                matches!(self.bindings.entries[binding.0 as usize].origin, PlaceBindingOrigin::Parameter { .. })) {
+                // The reference stored in caller storage has a distinct
+                // region from the outer handle. Do not retain the outer
+                // reborrow owner merely because it was used to read it.
+                residents.insert(ProjectionLoan { place, unique, owner: None, ..parent });
+            }
+        }
+        match next {
+            Some(next) => self.reference_resident_loans(residents, &fields[next + 1..], unique),
+            None => residents,
+        }
     }
 
     /// A reference leaf projected through a borrowed aggregate either names
@@ -3076,7 +3295,7 @@ impl Analyzer<'_> {
         let Type::Callable { parameters, effects, .. } = &self.body.expression(*callee).ty else {
             return vec![];
         };
-        if effects.tail.is_some() || !effects.projections.is_empty() {
+        if !effects.tails.is_empty() || !effects.projections.is_empty() {
             return vec![];
         }
         let Some(crate::ElaboratedHeader::Effect(declaration)) =
@@ -3218,10 +3437,14 @@ impl Analyzer<'_> {
                 }
             }
         }
+        self.release_vacated_reference_loans(self.body.expression(self.body.root).span);
+    }
+
+    fn release_vacated_reference_loans(&mut self, span: Span) {
         let vacated = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
             .filter(|owner| self.origin_has_been_moved(owner)).cloned().collect::<BTreeSet<_>>();
         for owner in vacated {
-            self.release_owner_loans(&owner, self.body.expression(self.body.root).span);
+            self.release_owner_loans(&owner, span);
         }
     }
 
@@ -3307,7 +3530,18 @@ impl Analyzer<'_> {
                 key.push_str(&index.to_string());
                 Some(key)
             }
-            CorePlace::Deref { .. } | CorePlace::Error => None,
+            CorePlace::Deref { reference, .. } => {
+                // A unique handle with one known local referent writes that
+                // resident's reference fields. Caller-owned or dynamically
+                // selected referents are not a single lexical assignment.
+                let loans = self.reference_loans_from_value(*reference);
+                if loans.iter().any(|loan| loan.indirect || loan.external) { return None; }
+                let places = loans.into_iter().map(|loan| loan.place).collect::<BTreeSet<_>>();
+                if places.len() != 1 { return None; }
+                let place = places.into_iter().next()?;
+                Some(projection_key(&place.root, &place.fields))
+            }
+            CorePlace::Error => None,
         }
     }
 
@@ -3537,6 +3771,7 @@ impl Analyzer<'_> {
         let Some(projection) = self.place_projection(place) else {
             return;
         };
+        self.check_minimum_assignment(&projection, &place.ty(), span);
         if self
             .projection_loans
             .iter()
@@ -3702,6 +3937,8 @@ pub(crate) fn strict_expression_abrupt(body: &TypedBody, id: CoreId) -> bool {
 /// fail-closed.
 fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
     match value {
+        crate::types::Type::FixedArray { element, length } => contains_open_type_parameter(element)
+            || generic_argument_contains_open_type_parameter(length),
         crate::types::Type::Generic(_) => true,
         crate::types::Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
         crate::types::Type::Array(value)
@@ -3737,7 +3974,7 @@ fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
         | crate::types::Type::RawPointer { .. }
         | crate::types::Type::Never
         | crate::types::Type::Scalar(_)
-        | crate::types::Type::ConstU32(_)
+        | crate::types::Type::ConstInteger(_)
         | crate::types::Type::ConstQuantity(_)
         | crate::types::Type::ConstGeneric { .. }
         | crate::types::Type::Error => false,
@@ -3761,10 +3998,10 @@ fn generic_argument_contains_open_type_parameter(value: &crate::types::GenericAr
                     .any(generic_argument_contains_open_type_parameter)
         }
         crate::types::GenericArgument::Lifetime(_)
-        | crate::types::GenericArgument::ConstU32(_)
+        | crate::types::GenericArgument::ConstInteger(_)
         | crate::types::GenericArgument::ConstQuantity(_)
         | crate::types::GenericArgument::ConstGeneric { .. }
-        | crate::types::GenericArgument::ConstU32Expr(_) => false,
+        | crate::types::GenericArgument::ConstIntegerExpr(_) => false,
         crate::types::GenericArgument::ConstInfer { .. } => true,
     }
 }
@@ -3805,8 +4042,9 @@ fn collect_pattern_binders(
                 prefix.pop();
             }
         }
-        CorePattern::Array { elements, .. } => {
+        CorePattern::Array { elements, rest, .. } => {
             for (index, pattern) in elements.iter().enumerate() {
+                let index = crate::pattern::ArrayPatternRest::index(*rest, index);
                 prefix.push(index as u32);
                 collect_pattern_binders(pattern, prefix, output);
                 prefix.pop();

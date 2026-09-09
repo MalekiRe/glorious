@@ -201,7 +201,7 @@ pub(super) fn lexical_scope_contexts(
                     .unwrap_or_else(|| context.clone());
                 merge_lexical_context(&mut contexts, &mut pending, *target, &exit);
             }
-            RuntimeTerminator::Return { .. } | RuntimeTerminator::Unreachable => {}
+            RuntimeTerminator::Return { .. } | RuntimeTerminator::TailCall { .. } | RuntimeTerminator::Unreachable => {}
         }
     }
     contexts

@@ -1,0 +1,277 @@
+// Exact decimal-to-binary conversion. The private natural integers use base
+// 2^32, not host floating arithmetic. Binary search finds adjacent representable
+// values; comparison with their exact dyadic midpoint implements ties-to-even.
+struct FloatRatio { numerator: Vec<u32>, denominator: Vec<u32>, exponent: i128 }
+fn float_big_from(value: u64) -> Vec<u32> {
+    let mut out = Vec::new();
+    handle value == 0 {
+        true => (),
+        false => {
+            Vec::push(&mut out, as<u32>(value));
+            handle bit_shr(value, 32) == 0 { true => (), false => Vec::push(&mut out, as<u32>(bit_shr(value, 32))) };
+        },
+    };
+    out
+}
+fn float_big_multiply_from(value: &mut Vec<u32>, factor: u64, index: usize, carry: u128) {
+    handle index == Vec::len(& *value) {
+        true => handle carry == 0 {
+            true => (),
+            false => { Vec::push(&mut *value, as<u32>(carry)); tail float_big_multiply_from(value, factor, index + 1, bit_shr(carry, 32)) },
+        },
+        false => {
+            let product = as<u128>(*Vec::get_unchecked(& *value, index)) * as<u128>(factor) + carry;
+            let place = handle Vec::get_mut(&mut *value, index) { Result::Ok(place) => place, _ => __g1_abort() };
+            *place = as<u32>(product);
+            tail float_big_multiply_from(value, factor, index + 1, bit_shr(product, 32))
+        },
+    }
+}
+fn float_big_multiply(value: &mut Vec<u32>, factor: u64) {
+    handle factor == 0 { true => Vec::clear(value), false => float_big_multiply_from(value, factor, 0, 0) }
+}
+fn float_big_add_from(value: &mut Vec<u32>, index: usize, carry: u64) {
+    handle carry == 0 {
+        true => (),
+        false => handle index == Vec::len(& *value) {
+            true => Vec::push(value, as<u32>(carry)),
+            false => {
+                let sum = as<u64>(*Vec::get_unchecked(& *value, index)) + carry;
+                let place = handle Vec::get_mut(&mut *value, index) { Result::Ok(place) => place, _ => __g1_abort() };
+                *place = as<u32>(sum);
+                tail float_big_add_from(value, index + 1, bit_shr(sum, 32))
+            },
+        },
+    }
+}
+fn float_big_power(value: &mut Vec<u32>, factor: u64, count: u128) {
+    handle count == 0 {
+        true => (),
+        false => { float_big_multiply(&mut *value, factor); tail float_big_power(value, factor, count - 1) },
+    }
+}
+fn float_big_shift_words(value: &Vec<u32>, out: &mut Vec<u32>, shift: u32, index: usize, carry: u64) {
+    handle index == Vec::len(value) {
+        true => handle carry == 0 { true => (), false => Vec::push(out, as<u32>(carry)) },
+        false => {
+            let shifted = bit_or(bit_shl(as<u64>(*Vec::get_unchecked(value, index)), shift), carry);
+            Vec::push(&mut *out, as<u32>(shifted));
+            tail float_big_shift_words(value, out, shift, index + 1, bit_shr(shifted, 32))
+        },
+    }
+}
+fn float_big_shift(value: &Vec<u32>, count: u128) -> Vec<u32> {
+    handle Vec::len(value) == 0 { true => return(Vec::new(), @float_big_shift), false => () };
+    let words = count / 32;
+    handle words > as<u128>(bit_not<usize>(0)) { true => __g1_abort(), false => () };
+    let words = as<usize>(words);
+    handle Vec::len(value) == bit_not<usize>(0) { true => __g1_abort(), false => () };
+    handle words > bit_not<usize>(0) - Vec::len(value) - 1 { true => __g1_abort(), false => () };
+    let mut out = Vec::with_capacity(words + Vec::len(value) + 1);
+    Vec::resize(&mut out, words, 0);
+    float_big_shift_words(value, &mut out, as<u32>(count % 32), 0, 0);
+    out
+}
+fn float_big_compare_from(left: &Vec<u32>, right: &Vec<u32>, count: usize) -> Ordering {
+    handle count == 0 {
+        true => Ordering::Equal,
+        false => handle Ord::compare(Vec::get_unchecked(left, count - 1), Vec::get_unchecked(right, count - 1)) {
+            Ordering::Equal => tail float_big_compare_from(left, right, count - 1), order => order,
+        },
+    }
+}
+fn float_big_compare(left: &Vec<u32>, right: &Vec<u32>) -> Ordering {
+    let a = Vec::len(left);
+    let b = Vec::len(right);
+    handle Ord::compare(&a, &b) { Ordering::Equal => float_big_compare_from(left, right, a), order => order }
+}
+fn float_ratio_compare(value: &FloatRatio, mantissa: u64, exponent: i128) -> Ordering {
+    handle mantissa == 0 { true => return(Ordering::Greater, @float_ratio_compare), false => () };
+    let mut right = Clone::clone(&value.denominator);
+    float_big_multiply(&mut right, mantissa);
+    let shift = exponent - value.exponent;
+    handle shift >= 0 {
+        true => { let shifted = float_big_shift(&right, as<u128>(shift)); float_big_compare(&value.numerator, &shifted) },
+        false => { let shifted = float_big_shift(&value.numerator, as<u128>(0 - shift)); float_big_compare(&shifted, &right) },
+    }
+}
+fn float_dyadic(bits: u64, mantissa_bits: u32, bias: i32) -> (u64,i128) {
+    let exponent = bit_shr(bits, mantissa_bits);
+    let fraction = bit_and(bits, bit_shl(as<u64>(1), mantissa_bits) - 1);
+    handle exponent == 0 {
+        true => (fraction, as<i128>(1 - bias) - as<i128>(mantissa_bits)),
+        false => (bit_or(fraction, bit_shl(as<u64>(1), mantissa_bits)), as<i128>(exponent) - as<i128>(bias) - as<i128>(mantissa_bits)),
+    }
+}
+fn float_find_floor(value: &FloatRatio, low: u64, high: u64, mantissa_bits: u32, bias: i32) -> u64 {
+    handle low == high {
+        true => low,
+        false => {
+            let middle = low + (high - low + 1) / 2;
+            let (mantissa, exponent) = float_dyadic(middle, mantissa_bits, bias);
+            handle float_ratio_compare(value, mantissa, exponent) {
+                Ordering::Less => tail float_find_floor(value, low, middle - 1, mantissa_bits, bias),
+                _ => tail float_find_floor(value, middle, high, mantissa_bits, bias),
+            }
+        },
+    }
+}
+fn float_round_ratio(value: &FloatRatio, infinity: u64, mantissa_bits: u32, bias: i32) -> u64 {
+    let lower = float_find_floor(value, 0, infinity - 1, mantissa_bits, bias);
+    let (low_m, low_e) = float_dyadic(lower, mantissa_bits, bias);
+    handle float_ratio_compare(value, low_m, low_e) { Ordering::Equal => return(lower, @float_round_ratio), _ => () };
+    // The bit pattern after max-finite denotes the conceptual finite endpoint
+    // 2^max_exponent here, not an infinity in rational arithmetic.
+    let (high_m, high_e) = float_dyadic(lower + 1, mantissa_bits, bias);
+    let common = min(low_e, high_e);
+    let midpoint = bit_shl(low_m, as<u32>(low_e - common)) + bit_shl(high_m, as<u32>(high_e - common));
+    handle float_ratio_compare(value, midpoint, common - 1) {
+        Ordering::Less => lower,
+        Ordering::Greater => lower + 1,
+        Ordering::Equal => handle bit_and(lower, 1) == 0 { true => lower, false => lower + 1 },
+    }
+}
+fn float_parse_error(offset: usize, kind: FloatParseErrorKind) -> FloatParseError { FloatParseError { offset: offset, kind: kind } }
+fn float_scan_digits(bytes: Slice<u8>, index: usize, dot: Bool, fractional: usize, digits: &mut Vec<u8>)
+    -> Result<(usize,usize),FloatParseError> {
+    handle index == Slice::len(&bytes) {
+        true => Result::Ok((index, fractional)),
+        false => {
+            let byte = *Slice::get_unchecked(bytes, index);
+            handle byte >= 48 and { byte <= 57 } {
+                true => {
+                    Vec::push(&mut *digits, byte - 48);
+                    let fractional = fractional + handle dot { true => 1, false => 0 };
+                    tail float_scan_digits(bytes, index + 1, dot, fractional, digits)
+                },
+                false => handle byte {
+                    46 => handle dot {
+                        true => Result::Err(float_parse_error(index, FloatParseErrorKind::TrailingInput)),
+                        false => tail float_scan_digits(bytes, index + 1, true, fractional, digits),
+                    },
+                    69 => Result::Ok((index, fractional)),
+                    101 => Result::Ok((index, fractional)),
+                    95 => Result::Err(float_parse_error(index, FloatParseErrorKind::InvalidSeparator)),
+                    _ => Result::Err(float_parse_error(index, handle Vec::len(& *digits) == 0 { true => FloatParseErrorKind::InvalidDigit, false => FloatParseErrorKind::TrailingInput })),
+                },
+            }
+        },
+    }
+}
+fn float_scan_exponent(bytes: Slice<u8>, index: usize, magnitude: u128, overflow: Bool) -> Result<(u128,Bool),FloatParseError> {
+    handle index == Slice::len(&bytes) {
+        true => Result::Ok((magnitude, overflow)),
+        false => {
+            let byte = *Slice::get_unchecked(bytes, index);
+            handle byte < 48 or { byte > 57 } {
+                true => Result::Err(float_parse_error(index, FloatParseErrorKind::InvalidExponent)),
+                false => {
+                    let digit = as<u128>(byte - 48);
+                    handle overflow {
+                        true => tail float_scan_exponent(bytes, index + 1, magnitude, true),
+                        false => handle magnitude > (bit_not<u128>(0) - digit) / 10 {
+                            true => tail float_scan_exponent(bytes, index + 1, magnitude, true),
+                            false => tail float_scan_exponent(bytes, index + 1, magnitude * 10 + digit, false),
+                        },
+                    }
+                },
+            }
+        },
+    }
+}
+fn float_first_nonzero(digits: &Vec<u8>, index: usize) -> usize {
+    handle index == Vec::len(digits) {
+        true => index,
+        false => handle *Vec::get_unchecked(digits, index) == 0 { true => tail float_first_nonzero(digits, index + 1), false => index },
+    }
+}
+fn float_last_nonzero(digits: &Vec<u8>, end: usize) -> usize {
+    handle end == 0 {
+        true => 0,
+        false => handle *Vec::get_unchecked(digits, end - 1) == 0 { true => tail float_last_nonzero(digits, end - 1), false => end },
+    }
+}
+fn float_build_natural(digits: &Vec<u8>, index: usize, end: usize, out: &mut Vec<u32>) {
+    handle index == end {
+        true => (),
+        false => {
+            float_big_multiply(&mut *out, 10);
+            float_big_add_from(&mut *out, 0, as<u64>(*Vec::get_unchecked(digits, index)));
+            tail float_build_natural(digits, index + 1, end, out)
+        },
+    }
+}
+fn float_parse_bits(text: Str, width: u32, mantissa_bits: u32, bias: i32, maximum_order: i128, minimum_order: i128)
+    -> Result<u64,FloatParseError> {
+    let bytes = Str::as_bytes(text);
+    let length = Slice::len(&bytes);
+    let sign_mask = bit_shl(as<u64>(1), width - 1);
+    let infinity = bit_shl(bit_shl(as<u64>(1), width - mantissa_bits - 1) - 1, mantissa_bits);
+    handle Slice::lex_compare(bytes, b"nan") { Ordering::Equal => return(Result::Ok(bit_or(infinity, bit_shl(as<u64>(1), mantissa_bits - 1))), @float_parse_bits), _ => () };
+    handle Slice::lex_compare(bytes, b"inf") { Ordering::Equal => return(Result::Ok(infinity), @float_parse_bits), _ => () };
+    handle Slice::lex_compare(bytes, b"-inf") { Ordering::Equal => return(Result::Ok(bit_or(infinity, sign_mask)), @float_parse_bits), _ => () };
+    handle length == 0 { true => return(Result::Err(float_parse_error(0, FloatParseErrorKind::Empty)), @float_parse_bits), false => () };
+    let first = *Slice::get_unchecked(bytes, 0);
+    let negative = first == 45;
+    let sign = handle negative { true => sign_mask, false => 0 };
+    let start = handle first { 43 => 1, 45 => 1, _ => 0 };
+    let mut digits = Vec::new();
+    let (end, fractional) = handle float_scan_digits(bytes, start, false, 0, &mut digits) {
+        Result::Err(error) => return(Result::Err(error), @float_parse_bits), Result::Ok(parts) => parts,
+    };
+    handle Vec::len(&digits) == 0 { true => return(Result::Err(float_parse_error(start, FloatParseErrorKind::Empty)), @float_parse_bits), false => () };
+    let (exponent_negative, magnitude, exponent_overflow) = handle end == length {
+        true => (false, as<u128>(0), false),
+        false => {
+            let start = end + 1;
+            handle start == length { true => return(Result::Err(float_parse_error(start, FloatParseErrorKind::InvalidExponent)), @float_parse_bits), false => () };
+            let first = *Slice::get_unchecked(bytes, start);
+            let index = start + handle first { 43 => 1, 45 => 1, _ => 0 };
+            handle index == length { true => return(Result::Err(float_parse_error(index, FloatParseErrorKind::InvalidExponent)), @float_parse_bits), false => () };
+            handle float_scan_exponent(bytes, index, 0, false) {
+                Result::Err(error) => return(Result::Err(error), @float_parse_bits),
+                Result::Ok((magnitude, overflow)) => (first == 45, magnitude, overflow),
+            }
+        },
+    };
+    let first = float_first_nonzero(&digits, 0);
+    handle first == Vec::len(&digits) { true => return(Result::Ok(sign), @float_parse_bits), false => () };
+    // Beyond this bound an exponent cannot be canceled by any input-sized
+    // significand on the admitted 32/64-bit pointer targets.
+    let excessive = handle exponent_overflow { true => true, false => magnitude > as<u128>(bit_not<usize>(0)) + 4096 };
+    handle excessive {
+        false => (),
+        true => return(handle exponent_negative {
+            true => Result::Ok(sign), false => Result::Err(float_parse_error(length - 1, FloatParseErrorKind::Overflow)),
+        }, @float_parse_bits),
+    };
+    let last = float_last_nonzero(&digits, Vec::len(&digits));
+    let exponent = handle exponent_negative { true => 0 - as<i128>(magnitude), false => as<i128>(magnitude) };
+    let exponent = exponent - as<i128>(fractional) + as<i128>(Vec::len(&digits) - last);
+    let order = exponent + as<i128>(last - first) - 1;
+    handle order > maximum_order { true => return(Result::Err(float_parse_error(length - 1, FloatParseErrorKind::Overflow)), @float_parse_bits), false => () };
+    handle order < minimum_order { true => return(Result::Ok(sign), @float_parse_bits), false => () };
+    let mut numerator = Vec::new();
+    float_build_natural(&digits, first, last, &mut numerator);
+    let mut denominator = float_big_from(1);
+    handle exponent < 0 {
+        true => float_big_power(&mut denominator, 5, as<u128>(0 - exponent)),
+        false => float_big_power(&mut numerator, 5, as<u128>(exponent)),
+    };
+    let ratio = FloatRatio { numerator: numerator, denominator: denominator, exponent: exponent };
+    let rounded = float_round_ratio(&ratio, infinity, mantissa_bits, bias);
+    handle rounded == infinity {
+        true => Result::Err(float_parse_error(length - 1, FloatParseErrorKind::Overflow)),
+        false => Result::Ok(bit_or(rounded, sign)),
+    }
+}
+impl f32 {
+    pub fn parse(text: Str) -> Result<Self,FloatParseError> {
+        handle float_parse_bits(text, 32, 23, 127, 38, -46) { Result::Ok(bits) => Result::Ok(Self::from_bits(as<u32>(bits))), Result::Err(error) => Result::Err(error) }
+    }
+}
+impl f64 {
+    pub fn parse(text: Str) -> Result<Self,FloatParseError> {
+        handle float_parse_bits(text, 64, 52, 1023, 308, -324) { Result::Ok(bits) => Result::Ok(Self::from_bits(bits)), Result::Err(error) => Result::Err(error) }
+    }
+}

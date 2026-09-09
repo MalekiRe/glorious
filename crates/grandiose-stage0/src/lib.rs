@@ -80,7 +80,7 @@ pub use header::{
     AssociatedTypeDefinitionHeader, AssociatedTypeHeader, CallableHeader, EffectHeader,
     EffectOperationHeader, EffectRowHeader, EnumVariantHeader, EnumVariantPayloadHeader,
     FixityForm, FixityHeader, GenericParameters, HeaderDiagnostic, HeaderGenericArgument,
-    HeaderParameter, HeaderParse, HeaderStructuralConst, HeaderStructuralU32Expr, HeaderType,
+    HeaderParameter, HeaderParse, HeaderStructuralConst, HeaderIntegerExpr, HeaderType,
     ImplementationHeader, ImplementationMethodHeader, ImportBindingHeader, ImportHeader,
     InherentImplementationHeader, InherentMethodHeader,
     NominalFieldHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitMethodHeader,
@@ -149,7 +149,7 @@ pub use runtime_manifest::{
     HostImportSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
     TrustedRuntimeManifest,
 };
-pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange};
+pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange, Visibility};
 pub use service::{
     CompilationOutcome, CompileDiagnostic, DiagnosticExplanationFrame, DiagnosticFact,
     RelatedDiagnosticLocation, ServiceError, StageZeroCompiler,
@@ -158,10 +158,11 @@ pub use signature::{
     CallableSignature, ElaboratedAssociatedConst, ElaboratedAssociatedConstDefinition,
     ElaboratedAssociatedEffectBinding, ElaboratedAssociatedEffectRowDefinition,
     ElaboratedAssociatedType, ElaboratedAssociatedTypeBinding, ElaboratedAssociatedTypeDefinition,
+    QuantifiedWhereBound, AssociatedItemContract, OutlivesPredicate,
     ElaboratedEffect, ElaboratedEffectOperation, ElaboratedEnumVariant,
     ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
     ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference, InstantiationError,
-    NominalField, SignatureDiagnostic, intrinsic_available_type_definition,
+    FieldAuthority, NominalField, SignatureDiagnostic, intrinsic_available_type_definition,
     intrinsic_callable_trait_definition, intrinsic_environment_trait_definition,
     intrinsic_label_trait_definition, intrinsic_runs_in_trait_definition,
     is_intrinsic_callable_trait, is_intrinsic_environment_trait, is_intrinsic_label_trait,
@@ -185,7 +186,7 @@ pub use trait_solver::{
 pub use types::{
     ConstInferVar, ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
     EffectVar, GenericArgument, GenericKind, InferContext, InferVar, Lifetime, Mutability,
-    PointerMutability, Safety, ScalarType, StructuralConstError, StructuralU32Expr, Type,
+    PointerMutability, Safety, ScalarType, StructuralConstError, IntegerConst, IntegerConstExpr, Type,
     TypeError,
 };
 pub use useflow::{

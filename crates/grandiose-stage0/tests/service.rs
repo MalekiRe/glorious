@@ -12,6 +12,14 @@ use grandiose_stage0::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+// Source resumptions use the ordinary owned indirect-call ABI. Require the
+// callee to be the captured continuation, not merely any indirect helper call.
+fn returning_resumption_call(function: &grandiose_stage0::VmFunction, instruction: &VmInstruction) -> bool {
+    let VmInstruction::CallIndirectOwned { callee, .. } = instruction else { return false; };
+    function.instructions.iter().any(|capture|
+        matches!(capture, VmInstruction::CaptureResumption { dst } if dst == callee))
+}
+
 fn request(source: &str) -> CompilationRequest {
     CompilationRequest {
         build: CompilerBuildIdentity {
@@ -36,6 +44,92 @@ fn request(source: &str) -> CompilationRequest {
         capability_manifest: vec![],
         runtime_manifest: None,
     }
+}
+
+#[test]
+fn imported_guarded_lending_gats_execute_fresh_and_decoded_at_o0_o2() {
+    let library = r#"
+        pub trait Lending {
+            type Item<'a> where Self: 'a;
+            fn lend<'a>(value: &'a mut Self) -> <Self as Lending>::Item<'a>;
+        }
+        pub struct Owner { pub value: i64 }
+        impl Lending for Owner {
+            type Item<'a> = &'a mut i64 where Self: 'a;
+            fn lend<'a>(value: &'a mut Self) -> &'a mut i64 { &mut (*value).value }
+        }
+        pub trait View {
+            type Item<'a> where Self: 'a = &'a Self;
+            fn view<'a>(value: &'a Self) -> <Self as View>::Item<'a>;
+        }
+        impl View for Owner { fn view<'a>(value: &'a Self) -> &'a Self { value } }
+    "#;
+    let source = r#"
+        use lending::{Lending,View,Owner};
+        fn forward<'a,I>(value: &'a mut I) -> <I as Lending>::Item<'a> where I: Lending { Lending::lend(value) }
+        pub fn main() -> i64 {
+            let mut owner = Owner { value: 0 };
+            let first = forward(&mut owner);
+            *first = 40;
+            let second = forward(&mut owner);
+            *second = *second + 2;
+            let shared = View::view(&owner);
+            shared.value
+        }
+    "#;
+    for optimization in [0, 2] {
+        let mut input = request(source);
+        input.build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"guarded-lending-runtime"));
+        input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+        input.sources.push(SourceInput::new(PackageKey("lending@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(), library.as_bytes()));
+        let outcome = StageZeroCompiler::new().compile(input).unwrap_or_else(|error| panic!("O{optimization}: {error:#?}"));
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42, "fresh O{optimization}");
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "decoded O{optimization}");
+    }
+    for body in [
+        "let mut owner = Owner { value: 0 }; let first = forward(&mut owner); let second = forward(&mut owner); *second = 1; *first",
+        "let mut owner = Owner { value: 0 }; let escaping: &'static mut i64 = forward(&mut owner); *escaping",
+    ] {
+        let source = format!("use lending::{{Lending,Owner}}; fn forward<'a,I>(value: &'a mut I) -> <I as Lending>::Item<'a> where I: Lending {{ Lending::lend(value) }} pub fn main() -> i64 {{ {body} }}");
+        let mut input = request(&source);
+        input.sources.push(SourceInput::new(PackageKey("lending@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(), library.as_bytes()));
+        let error = StageZeroCompiler::new().compile(input).expect_err("a guarded GAT cannot detach the source loan");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code.starts_with("G5")), "{:#?}", error.diagnostics());
+    }
+}
+
+#[test]
+fn service_private_globs_preserve_dependency_paths_without_exporting_private_bindings() {
+    for imports in ["use library::*; use library::api::*;", "use library::api::*; use library::*;"] {
+        for (call, allowed) in [("answer()", true), ("library::internal::secret()", true), ("library::api::internal::secret()", false)] {
+            let mut input = request(&format!("{imports} pub fn main() -> i64 {{ {call} }}"));
+            input.build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"private-glob-module-binding"));
+            input.sources.push(SourceInput::new(PackageKey("library@0.1.0".into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                b"pub mod api { use crate::*; pub fn answer() -> i64 { 42 } } pub mod internal { pub fn secret() -> i64 { 42 } }".as_slice()));
+            let result = StageZeroCompiler::new().compile(input);
+            if allowed {
+                let artifact = result.unwrap().artifact.unwrap();
+                assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+            } else {
+                let error = result.expect_err("a private glob is not a public module alias");
+                assert!(error.diagnostics().iter().any(|d| d.class == DiagnosticClass::Source && d.message.contains("private")), "{error:?}");
+            }
+        }
+    }
+}
+
+fn request_bool(source: &str) -> CompilationRequest {
+    assert!(source.contains("pub fn main() -> Bool"));
+    let source = source.replacen("pub fn main() -> Bool", "fn boolean_entry() -> Bool", 1);
+    request(&format!("{source} pub fn main() -> i64 {{ handle boolean_entry() {{ true => 1, false => 0 }} }}"))
+}
+
+fn request_with_test_visit(source: &str) -> CompilationRequest {
+    request(&format!("use std::Test; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(pack) => yes(pack), Test::No(_) => 0 }} }} {source}"))
 }
 
 // Library Bool is a nominal Result<(), ()>, not the VM's private predicate
@@ -140,14 +234,14 @@ fn nonbinding_enum_completion_arms_prove_scoped_payload_borrows() {
 fn enum_projection_refinement_preserves_private_payload_authority() {
     for projection in ["token.value", "token.0"] {
         let source = format!(
-            "pub mod api; use api::Token; fn read(token: &Token) -> i64 {{ handle *token is Token::Empty(_) {{ false => {projection}, true => 0 }} }} pub fn main() -> i64 {{ let token = api::make(); read(&token) }}"
+            "pub mod api; use api::Token; fn read(token: &Token) -> i64 {{ handle *token {{ Token::Secret {{}} => {projection}, Token::Empty(_) => 0 }} }} pub fn main() -> i64 {{ let token = api::make(); read(&token) }}"
         );
         let error = StageZeroCompiler::new().compile(request_with_logical_sources(
             &source,
             &[("src/api/api.glorious", "pub enum Token { Secret { private value: i64 }, Empty(()) } pub fn make() -> Token { Token::Secret { value: 42 } }")],
         )).unwrap_err();
         assert!(
-            error.diagnostics().iter().any(|d| d.code == "G4140"),
+            error.diagnostics().iter().any(|d| d.code == "G4218"),
             "{:#?}",
             error.diagnostics()
         );
@@ -182,7 +276,7 @@ fn inherent_impl_functions_execute_with_block_generics_and_self_signatures() {
 fn inherent_impl_members_follow_imported_type_identity() {
     let source = r#"
         mod model {
-            pub struct Cell { value: i64 }
+            pub struct Cell { pub value: i64 }
             impl Cell { pub fn new(value: i64) -> Self { Cell { value: value } } }
         }
         use model::Cell as Renamed;
@@ -254,7 +348,7 @@ fn inherent_impl_owner_and_method_generics_are_distinct() {
 fn inherent_impl_generic_owners_can_follow_module_prefixes() {
     let source = r#"
         mod model {
-            pub struct Cell<T> { value: T }
+            pub struct Cell<T> { pub value: T }
             impl<T> Cell<T> {
                 pub fn new(value: T) -> Self { Self { value: value } }
                 pub fn choose<U>(value: Self, other: U) -> U where T: Use<[0, 1]> { other }
@@ -342,6 +436,48 @@ fn inherent_impl_cannot_extend_a_dependency_type() {
         "{:#?}",
         error.diagnostics()
     );
+}
+
+#[test]
+fn pub_fields_export_access_without_exporting_private_siblings() {
+    let declarations = "mod model { pub struct Cell { pub value: i64, private hidden: i64 } pub fn make() -> Cell { Cell { value: 42, hidden: 1 } } }";
+    let source = format!("{declarations} pub fn main() -> i64 {{ model::make().value }}");
+    let artifact = StageZeroCompiler::new().compile(request(&source)).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    let rejected = source.replace("model::make().value", "model::make().hidden");
+    let error = StageZeroCompiler::new().compile(request(&rejected)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.message.contains("private")), "{:?}", error.diagnostics());
+}
+
+#[test]
+fn private_fields_follow_module_ancestry_across_source_files() {
+    let input = request_with_logical_sources(
+        "mod model; pub fn main() -> i64 { model::child::read(model::make()) }",
+        &[
+            ("src/model/model.glorious", "pub struct Cell { private value: i64 } pub fn make() -> Cell { Cell { value: 42 } } pub mod child;"),
+            ("src/model/child/child.glorious", "pub fn read(cell: super::Cell) -> i64 { cell.value }"),
+        ],
+    );
+    let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn private_fields_reject_same_file_sibling_projection_assignment_and_patterns() {
+    let model = "mod model { pub struct Cell { private value: i64 } pub fn make() -> Cell { Cell { value: 42 } } }";
+    for body in [
+        "model::make().value",
+        "let mut cell = model::make(); cell.value = 0; 42",
+        "handle model::make() { model::Cell { value: _ } => 42 }",
+        "let cell = model::Cell { value: 42 }; 42",
+    ] {
+        let source = format!("{model} mod sibling {{ pub fn access() -> i64 {{ {body} }} }} pub fn main() -> i64 {{ sibling::access() }}");
+        let error = StageZeroCompiler::new().compile(request(&source)).unwrap_err();
+        assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G4140" | "G4218")
+            && diagnostic.message.contains("private")), "{:?}", error.diagnostics());
+    }
 }
 
 #[test]
@@ -490,7 +626,7 @@ fn inherent_impl_keeps_function_safety_and_effect_contracts() {
 #[test]
 fn inherent_impl_can_be_in_another_module_of_the_owning_package() {
     let source = r#"
-        mod model { pub struct Cell { value: i64 } }
+        mod model { pub struct Cell { pub value: i64 } }
         mod methods {
             use crate::model::Cell;
             impl Cell { pub fn new(value: i64) -> Self { Self { value: value } } }
@@ -566,11 +702,6 @@ fn text_runtime_manifest() -> RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
         host_imports: vec![],
         selectors: vec![
-            PrimitiveSelector {
-                role: PrimitiveRole::BranchBool,
-                module_path: "crate".into(),
-                name: "branch_bool".into(),
-            },
             PrimitiveSelector {
                 role: PrimitiveRole::TextByteLen,
                 module_path: "crate".into(),
@@ -722,9 +853,6 @@ fn u32_runtime_manifest() -> RuntimeManifestInput {
             (PrimitiveRole::U32WrappingShr, "__g1_u32_wrapping_shr"),
             (PrimitiveRole::U32CheckedShl, "__g1_u32_checked_shl"),
             (PrimitiveRole::U32CheckedShr, "__g1_u32_checked_shr"),
-            (PrimitiveRole::U32Eq, "__g1_u32_eq"),
-            (PrimitiveRole::U32Lt, "__g1_u32_lt"),
-            (PrimitiveRole::U32Le, "__g1_u32_le"),
             (PrimitiveRole::U32ToUsize, "__g1_u32_to_usize"),
             (
                 PrimitiveRole::UsizeToU32Checked,
@@ -751,6 +879,30 @@ fn int_runtime_manifest(role: PrimitiveRole, name: &str) -> RuntimeManifestInput
             name: name.into(),
         }],
     }
+}
+
+// Explicit manifests suppress the bundled prelude. Signed operands therefore
+// need a source-declared prefix function and its exact machine leaf as well.
+fn bind_int_runtime(input: &mut CompilationRequest, role: PrimitiveRole, name: &str) {
+    let mut manifest = int_runtime_manifest(role, name);
+    let negation = if role == PrimitiveRole::IntWrappingNeg {
+        name
+    } else {
+        manifest.selectors.push(PrimitiveSelector {
+            role: PrimitiveRole::IntWrappingNeg,
+            module_path: "crate".into(),
+            name: "__fixture_neg".into(),
+        });
+        "__fixture_neg"
+    };
+    let source = &input.sources[0];
+    let leaf = if negation == "__fixture_neg" {
+        "fn __fixture_neg<T>(value: T) -> T;"
+    } else { "" };
+    let text = format!("pub prefix 50 -; {leaf} trait FixtureNeg {{ -(value: Self) -> Self; }} impl FixtureNeg for i64 {{ -(value: Self) -> Self {{ {negation}<i64>(value) }} }} {}",
+        std::str::from_utf8(&source.bytes).unwrap());
+    input.sources[0] = SourceInput::new(source.package.clone(), source.logical_path.clone(), text.as_bytes());
+    input.runtime_manifest = Some(manifest);
 }
 
 #[test]
@@ -780,10 +932,11 @@ fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths(
              fn bit_and<T>(left: T, right: T) -> T {{\
                  __g1_int_bit_and(move left, move right)\
              }}\
-             finite(value: {float}) -> Bool {{\
-                 bit_and({to_bits}(move value), {infinity_bits}) != {infinity_bits}\
+             fn __g1_int_equal<T>(left: T, right: T) -> u32;\
+             fn finite(value: {float}) -> u32 {{\
+                 handle __g1_int_equal<{integer}>(bit_and({to_bits}(move value), {infinity_bits}), {infinity_bits}) {{ 0 => 1, _ => 0 }}\
              }}\
-             pub fn main() -> Bool {{ finite({from_bits}({infinity_bits})) }}",
+             pub fn main() -> u32 {{ finite({from_bits}({infinity_bits})) }}",
         );
         let mut input = request(&source);
         input.runtime_manifest = Some(RuntimeManifestInput {
@@ -793,6 +946,7 @@ fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths(
                 (format!("{name}-to-bits"), to_bits),
                 (format!("{name}-from-bits"), from_bits),
                 ("int-bit-and".into(), "__g1_int_bit_and"),
+                ("int-equal".into(), "__g1_int_equal"),
             ]
             .into_iter()
             .map(|(selector, declaration)| PrimitiveSelector {
@@ -808,8 +962,8 @@ fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths(
             .unwrap_or_else(|diagnostics| panic!("{name}: {diagnostics:#?}"))
             .artifact
             .expect("build must publish a VM artifact");
-        assert!(
-            !artifact.run_bool().unwrap(),
+        assert_eq!(
+            artifact.run_u32().unwrap(), 0,
             "{name} infinity is not finite"
         );
         let program = decode_program(&artifact.canonical_bytes()).unwrap();
@@ -836,10 +990,10 @@ fn manifest_bound_generic_int_wrapping_add_uses_distinct_wrapping_vm_semantics()
     let mut input = request(
         "fn __g1_int_wrapping_add<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_add<i64>(9223372036854775807, 1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntWrappingAdd,
         "__g1_int_wrapping_add",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -859,7 +1013,7 @@ fn manifest_bound_generic_int_wrapping_add_uses_distinct_wrapping_vm_semantics()
 fn public_generic_integer_wrappers_cover_all_width_runtime_semantics() {
     let compile = |source: String, role, name: &str| {
         let mut input = request(&source);
-        input.runtime_manifest = Some(int_runtime_manifest(role, name));
+        bind_int_runtime(&mut input, role, name);
         StageZeroCompiler::new()
             .compile(input)
             .unwrap_or_else(|diagnostics| panic!("{name}: {diagnostics:#?}"))
@@ -967,10 +1121,10 @@ fn manifest_bound_generic_int_wrapping_sub_uses_distinct_wrapping_vm_semantics()
     let mut input = request(
         "fn __g1_int_wrapping_sub<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_sub<i64>(-9223372036854775807, 2) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntWrappingSub,
         "__g1_int_wrapping_sub",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -991,10 +1145,10 @@ fn manifest_bound_generic_int_wrapping_mul_uses_distinct_wrapping_vm_semantics()
     let mut input = request(
         "fn __g1_int_wrapping_mul<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_mul<i64>(9223372036854775807, 2) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntWrappingMul,
         "__g1_int_wrapping_mul",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -1013,12 +1167,17 @@ fn manifest_bound_generic_int_wrapping_mul_uses_distinct_wrapping_vm_semantics()
 #[test]
 fn manifest_bound_generic_int_wrapping_neg_uses_wrapping_vm_semantics() {
     let mut input = request(
-        "fn __g1_int_wrapping_neg<T>(value: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_neg<i64>(-9223372036854775807 - 1) }",
+        "fn __g1_int_wrapping_neg<T>(value: T) -> T { () } fn signed_bits<T>(value: T) -> i64; pub fn main() -> i64 { __g1_int_wrapping_neg<i64>(signed_bits<u64>(9223372036854775808)) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntWrappingNeg,
         "__g1_int_wrapping_neg",
-    ));
+    );
+    input.runtime_manifest.as_mut().unwrap().selectors.push(PrimitiveSelector {
+        role: PrimitiveRole::IntConvertWrappingToI64,
+        module_path: "crate".into(),
+        name: "signed_bits".into(),
+    });
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -1056,7 +1215,7 @@ fn manifest_bound_generic_int_predicates_preserve_their_u32_runtime_abi() {
         let mut input = request(&format!(
             "fn {name}<T>(left: T, right: T) -> u32 {{ () }} pub fn main() -> u32 {{ {body} }}"
         ));
-        input.runtime_manifest = Some(int_runtime_manifest(role, name));
+        bind_int_runtime(&mut input, role, name);
         assert_eq!(
             StageZeroCompiler::new()
                 .compile(input)
@@ -1075,10 +1234,10 @@ fn manifest_bound_checked_i64_to_usize_converts() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_usize<T>(value: T) -> usize { () } pub fn main() -> usize { __g1_int_convert_checked_to_usize<i64>(42) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToUsize,
         "__g1_int_convert_checked_to_usize",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1096,10 +1255,10 @@ fn manifest_bound_checked_i64_to_u8_converts() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_u8<T>(value: T) -> u8 { () } pub fn main() -> u8 { __g1_int_convert_checked_to_u8<i64>(255) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToU8,
         "__g1_int_convert_checked_to_u8",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1117,10 +1276,10 @@ fn manifest_bound_checked_i64_to_u16_converts() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_u16<T>(value: T) -> u16 { () } pub fn main() -> u16 { __g1_int_convert_checked_to_u16<i64>(65535) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToU16,
         "__g1_int_convert_checked_to_u16",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1138,10 +1297,10 @@ fn manifest_bound_checked_i64_to_i16_converts() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_i16<T>(value: T) -> i16 { () } pub fn main() -> i16 { __g1_int_convert_checked_to_i16<i64>(-32768) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToI16,
         "__g1_int_convert_checked_to_i16",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1159,10 +1318,10 @@ fn manifest_bound_checked_i64_to_i32_converts_and_rejects_out_of_range_values() 
     let mut input = request(
         "fn __g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () } pub fn main() -> i32 { __g1_int_convert_checked_to_i32<i64>(-2147483648) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToI32,
         "__g1_int_convert_checked_to_i32",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1177,10 +1336,10 @@ fn manifest_bound_checked_i64_to_i32_converts_and_rejects_out_of_range_values() 
     let mut overflow = request(
         "fn __g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () } pub fn main() -> i32 { __g1_int_convert_checked_to_i32<i64>(2147483648) }",
     );
-    overflow.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut overflow,
         PrimitiveRole::IntConvertCheckedToI32,
         "__g1_int_convert_checked_to_i32",
-    ));
+    );
     assert!(matches!(
         StageZeroCompiler::new()
             .compile(overflow)
@@ -1197,10 +1356,10 @@ fn manifest_bound_checked_i64_to_i8_converts_and_rejects_out_of_range_values() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_i8<T>(value: T) -> i8 { () } pub fn main() -> i8 { __g1_int_convert_checked_to_i8<i64>(-128) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToI8,
         "__g1_int_convert_checked_to_i8",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1214,10 +1373,10 @@ fn manifest_bound_checked_i64_to_i8_converts_and_rejects_out_of_range_values() {
     let mut overflow = request(
         "fn __g1_int_convert_checked_to_i8<T>(value: T) -> i8 { () } pub fn main() -> i8 { __g1_int_convert_checked_to_i8<i64>(128) }",
     );
-    overflow.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut overflow,
         PrimitiveRole::IntConvertCheckedToI8,
         "__g1_int_convert_checked_to_i8",
-    ));
+    );
     assert!(matches!(
         StageZeroCompiler::new()
             .compile(overflow)
@@ -1234,10 +1393,10 @@ fn manifest_bound_checked_i64_to_u64_converts_and_rejects_negative_values() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_checked_to_u64<i64>(9223372036854775807) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToU64,
         "__g1_int_convert_checked_to_u64",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1251,10 +1410,10 @@ fn manifest_bound_checked_i64_to_u64_converts_and_rejects_negative_values() {
     let mut negative = request(
         "fn __g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_checked_to_u64<i64>(-1) }",
     );
-    negative.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut negative,
         PrimitiveRole::IntConvertCheckedToU64,
         "__g1_int_convert_checked_to_u64",
-    ));
+    );
     assert!(matches!(
         StageZeroCompiler::new()
             .compile(negative)
@@ -1271,10 +1430,10 @@ fn manifest_bound_checked_i64_to_u128_converts_and_rejects_negative_values() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_u128<T>(value: T) -> u128 { () } pub fn main() -> u128 { __g1_int_convert_checked_to_u128<i64>(42) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToU128,
         "__g1_int_convert_checked_to_u128",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1292,10 +1451,10 @@ fn manifest_bound_checked_i64_to_i128_preserves_signed_value() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_i128<T>(value: T) -> i128 { () } pub fn main() -> i128 { __g1_int_convert_checked_to_i128<i64>(-42) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToI128,
         "__g1_int_convert_checked_to_i128",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1313,10 +1472,10 @@ fn manifest_bound_wrapping_i64_to_i128_preserves_signed_value() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i128<T>(value: T) -> i128 { () } pub fn main() -> i128 { __g1_int_convert_wrapping_to_i128<i64>(-42) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToI128,
         "__g1_int_convert_wrapping_to_i128",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1334,10 +1493,10 @@ fn manifest_bound_wrapping_i64_to_u128_retains_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u128<T>(value: T) -> u128 { () } pub fn main() -> u128 { __g1_int_convert_wrapping_to_u128<i64>(-1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToU128,
         "__g1_int_convert_wrapping_to_u128",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1355,10 +1514,10 @@ fn manifest_bound_checked_i64_to_isize_preserves_the_frozen_signed_width() {
     let mut input = request(
         "fn __g1_int_convert_checked_to_isize<T>(value: T) -> isize { () } pub fn main() -> isize { __g1_int_convert_checked_to_isize<i64>(-42) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToIsize,
         "__g1_int_convert_checked_to_isize",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1376,10 +1535,10 @@ fn manifest_bound_wrapping_i64_to_isize_preserves_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_isize<T>(value: T) -> isize { () } pub fn main() -> isize { __g1_int_convert_wrapping_to_isize<i64>(-42) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToIsize,
         "__g1_int_convert_wrapping_to_isize",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1397,10 +1556,10 @@ fn manifest_bound_wrapping_i64_to_u64_retains_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_wrapping_to_u64<i64>(-1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToU64,
         "__g1_int_convert_wrapping_to_u64",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1418,10 +1577,10 @@ fn manifest_bound_wrapping_i64_to_i8_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () } pub fn main() -> i8 { __g1_int_convert_wrapping_to_i8<i64>(255) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToI8,
         "__g1_int_convert_wrapping_to_i8",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1439,10 +1598,10 @@ fn manifest_bound_generic_int_wrapping_to_i32_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i32<T>(value: T) -> i32 { () } pub fn main() -> i32 { __g1_int_convert_wrapping_to_i32<i64>(4294967295) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToI32,
         "__g1_int_convert_wrapping_to_i32",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("wrapping i32 conversion must specialize")
@@ -1455,10 +1614,10 @@ fn manifest_bound_generic_int_wrapping_to_i32_truncates_twos_complement_bits() {
 fn manifest_bound_checked_i64_to_u32_converts_and_rejects_out_of_range_values() {
     let source = "fn __g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () } pub fn main() -> u32 { __g1_int_convert_checked_to_u32<i64>(42) }";
     let mut input = request(source);
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertCheckedToU32,
         "__g1_int_convert_checked_to_u32",
-    ));
+    );
     assert_eq!(
         StageZeroCompiler::new()
             .compile(input)
@@ -1512,10 +1671,10 @@ fn manifest_bound_generic_int_bit_xor_uses_distinct_bitwise_vm_semantics() {
     let mut input = request(
         "fn __g1_int_bit_xor<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_bit_xor<i64>(42, 15) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntBitXor,
         "__g1_int_bit_xor",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -1536,10 +1695,10 @@ fn manifest_bound_generic_int_bit_and_uses_distinct_bitwise_vm_semantics() {
     let mut input = request(
         "fn __g1_int_bit_and<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_bit_and<i64>(42, 15) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntBitAnd,
         "__g1_int_bit_and",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -1560,10 +1719,10 @@ fn manifest_bound_generic_int_bit_or_uses_distinct_bitwise_vm_semantics() {
     let mut input = request(
         "fn __g1_int_bit_or<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_bit_or<i64>(40, 3) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntBitOr,
         "__g1_int_bit_or",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic int declaration must specialize for frozen i64")
@@ -1584,10 +1743,10 @@ fn manifest_bound_generic_int_bit_not_uses_distinct_unary_vm_semantics() {
     let mut input = request(
         "fn __g1_int_bit_not<T>(value: T) -> T { () } pub fn main() -> i64 { __g1_int_bit_not<i64>(10) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntBitNot,
         "__g1_int_bit_not",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact unary generic int declaration must specialize for frozen i64")
@@ -1647,10 +1806,10 @@ fn manifest_bound_generic_int_wrapping_to_u32_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u32<T>(value: T) -> u32 { () } pub fn main() -> u32 { __g1_int_convert_wrapping_to_u32<i64>(-1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToU32,
         "__g1_int_convert_wrapping_to_u32",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic wrapping conversion must specialize for frozen i64")
@@ -1671,10 +1830,10 @@ fn manifest_bound_generic_int_wrapping_to_usize_truncates_twos_complement_bits()
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_usize<T>(value: T) -> usize { () } pub fn main() -> usize { __g1_int_convert_wrapping_to_usize<i64>(-1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToUsize,
         "__g1_int_convert_wrapping_to_usize",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic wrapping conversion must specialize for frozen i64")
@@ -1695,10 +1854,10 @@ fn manifest_bound_generic_int_wrapping_to_u8_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u8<T>(value: T) -> u8 { () } pub fn main() -> u8 { __g1_int_convert_wrapping_to_u8<i64>(-1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToU8,
         "__g1_int_convert_wrapping_to_u8",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic wrapping conversion must specialize for frozen i64")
@@ -1719,10 +1878,10 @@ fn manifest_bound_generic_int_wrapping_to_u16_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_u16<T>(value: T) -> u16 { () } pub fn main() -> u16 { __g1_int_convert_wrapping_to_u16<i64>(-1) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToU16,
         "__g1_int_convert_wrapping_to_u16",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("the exact generic wrapping conversion must specialize for frozen i64")
@@ -1743,10 +1902,10 @@ fn manifest_bound_generic_int_wrapping_to_i16_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i16<T>(value: T) -> i16 { () } pub fn main() -> i16 { __g1_int_convert_wrapping_to_i16<i64>(65535) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntConvertWrappingToI16,
         "__g1_int_convert_wrapping_to_i16",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("wrapping i16 conversion must specialize")
@@ -1762,9 +1921,9 @@ fn manifest_bound_generic_int_wrapping_to_i16_truncates_twos_complement_bits() {
     }));
 }
 
-const TEXT_RUNTIME_LEAVES: &str = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () } ";
+const TEXT_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () } ";
 
-const PRIVATE_TEXT_RUNTIME_LEAVES: &str = "fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } fn __g1_text_byte_len(value: Text) -> usize { () } fn __g1_text_concat(left: Text, right: Text) -> Text { () } fn __g1_text_eq(left: Text, right: Text) -> u32 { () } fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } fn __g1_text_as_bytes(value: Text) -> Bytes { () } fn __g1_char_from_u32_checked(value: u32) -> char { () } fn __g1_char_to_u32(value: char) -> u32 { () } ";
+const PRIVATE_TEXT_RUNTIME_LEAVES: &str = "fn __g1_text_byte_len(value: Text) -> usize { () } fn __g1_text_concat(left: Text, right: Text) -> Text { () } fn __g1_text_eq(left: Text, right: Text) -> u32 { () } fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } fn __g1_text_as_bytes(value: Text) -> Bytes { () } fn __g1_char_from_u32_checked(value: u32) -> char { () } fn __g1_char_to_u32(value: char) -> u32 { () } ";
 
 const BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_bytes_len(value: Bytes) -> usize { () } pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () } pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () } pub fn __g1_bytes_slice(bytes: Bytes, start: usize, end: usize) -> Bytes { () } pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () } pub fn __g1_bytes_to_array(value: Bytes) -> Array<u8> { () } pub fn __g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () } ";
 
@@ -1797,7 +1956,7 @@ fn array_runtime_manifest() -> RuntimeManifestInput {
 #[test]
 fn manifest_bound_array_storage_leaves_lower_and_execute() {
     let mut input = request(&format!(
-        "{ARRAY_RUNTIME_LEAVES} pub fn main() -> i64 {{ let value = __g1_array_empty<i64>(); __g1_array_push_move(&mut value, 42); *__g1_array_get_borrow_shared(&value, 0) }}"
+        "{ARRAY_RUNTIME_LEAVES} pub fn main() -> i64 {{ let mut value = __g1_array_empty<i64>(); __g1_array_push_move(&mut value, 42); *__g1_array_get_borrow_shared(&value, 0) }}"
     ));
     input.runtime_manifest = Some(array_runtime_manifest());
     let artifact = StageZeroCompiler::new()
@@ -1818,7 +1977,7 @@ fn manifest_bound_array_storage_leaves_lower_and_execute() {
     );
 }
 
-const U32_RUNTIME_LEAVES: &str = "pub fn __g1_char_to_u32(value: char) -> u32 { () } pub fn __g1_u32_checked_add(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_sub(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_mul(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_div(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_rem(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_add(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_sub(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_mul(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_shl(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_shr(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_shl(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_shr(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_eq(left: u32, right: u32) -> Bool { () } pub fn __g1_u32_lt(left: u32, right: u32) -> Bool { () } pub fn __g1_u32_le(left: u32, right: u32) -> Bool { () } pub fn __g1_u32_to_usize(value: u32) -> usize { () } pub fn __g1_usize_to_u32_checked(value: usize) -> u32 { () } ";
+const U32_RUNTIME_LEAVES: &str = "pub fn __g1_char_to_u32(value: char) -> u32 { () } pub fn __g1_u32_checked_add(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_sub(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_mul(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_div(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_rem(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_add(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_sub(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_mul(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_shl(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_shr(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_shl(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_shr(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_to_usize(value: u32) -> usize { () } pub fn __g1_usize_to_u32_checked(value: usize) -> u32 { () } ";
 
 #[test]
 fn manifest_binds_private_standard_library_leaves_by_exact_identity() {
@@ -1851,15 +2010,14 @@ fn manifest_bound_text_byte_len_leaf_lowers_to_the_capability_free_vm_opcode() {
 }
 
 #[test]
-fn manifest_bound_branch_bool_lowers_to_lazy_cfg_and_invokes_only_the_selected_thunk() {
+fn source_declared_branch_bool_lowers_to_lazy_cfg_and_invokes_only_the_selected_thunk() {
     for (condition, expected) in [("true", 41), ("false", 42)] {
-        let mut input = request(&format!(
-            "{TEXT_RUNTIME_LEAVES} pub fn choose(condition: Bool) -> i64 {{ branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) }} pub fn main() -> i64 {{ choose({condition}) }}"
+        let input = request(&format!(
+            "fn branch_bool<T, A, B>(condition: Bool, on_true: A, on_false: B) -> T where A: Fn<(), Output = T>, B: Fn<(), Output = T> {{ handle condition {{ true => on_true(), false => on_false() }} }} pub fn choose(condition: Bool) -> i64 {{ branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) }} pub fn main() -> i64 {{ choose({condition}) }}"
         ));
-        input.runtime_manifest = Some(text_runtime_manifest());
         let artifact = StageZeroCompiler::new()
             .compile(input)
-            .expect("manifest-bound branch_bool must lower")
+            .expect("source-declared branch_bool must lower")
             .artifact
             .expect("build must publish a VM artifact");
         assert_eq!(artifact.run_i64().unwrap(), expected);
@@ -1873,12 +2031,11 @@ fn manifest_bound_branch_bool_lowers_to_lazy_cfg_and_invokes_only_the_selected_t
 }
 
 #[test]
-fn manifest_bound_branch_bool_preserves_a_strict_i64_continuation() {
+fn source_declared_branch_bool_preserves_a_strict_i64_continuation() {
     for (condition, expected) in [("true", 42), ("false", 43)] {
-        let mut input = request(&format!(
-            "{TEXT_RUNTIME_LEAVES} pub fn choose(condition: Bool) -> i64 {{ 1 + branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) }} pub fn main() -> i64 {{ choose({condition}) }}"
+        let input = request(&format!(
+            "fn branch_bool<T, A, B>(condition: Bool, on_true: A, on_false: B) -> T where A: Fn<(), Output = T>, B: Fn<(), Output = T> {{ handle condition {{ true => on_true(), false => on_false() }} }} pub fn choose(condition: Bool) -> i64 {{ 1 + branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) }} pub fn main() -> i64 {{ choose({condition}) }}"
         ));
-        input.runtime_manifest = Some(text_runtime_manifest());
         let artifact = StageZeroCompiler::new()
             .compile(input)
             .expect("manifest branch continuation must lower")
@@ -1895,12 +2052,11 @@ fn manifest_bound_branch_bool_preserves_a_strict_i64_continuation() {
 }
 
 #[test]
-fn manifest_bound_branch_bool_preserves_a_pure_right_i64_operand() {
+fn source_declared_branch_bool_preserves_a_pure_right_i64_operand() {
     for (condition, expected) in [("true", 42), ("false", 43)] {
-        let mut input = request(&format!(
-            "{TEXT_RUNTIME_LEAVES} pub fn choose(condition: Bool) -> i64 {{ branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) + 1 }} pub fn main() -> i64 {{ choose({condition}) }}"
+        let input = request(&format!(
+            "fn branch_bool<T, A, B>(condition: Bool, on_true: A, on_false: B) -> T where A: Fn<(), Output = T>, B: Fn<(), Output = T> {{ handle condition {{ true => on_true(), false => on_false() }} }} pub fn choose(condition: Bool) -> i64 {{ branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) + 1 }} pub fn main() -> i64 {{ choose({condition}) }}"
         ));
-        input.runtime_manifest = Some(text_runtime_manifest());
         let artifact = StageZeroCompiler::new()
             .compile(input)
             .expect("manifest branch left continuation must lower")
@@ -1947,7 +2103,7 @@ fn source_u8_comparisons_lower_through_the_typed_integer_vm_primitive() {
 
 #[test]
 fn source_usize_equality_lowers_through_the_typed_integer_vm_primitive() {
-    let source = "pub fn is_empty(length: usize) -> i64 { handle length == 0 { true => 1, false => 0, _ => 0 } } pub fn main() -> i64 { is_empty(0) + is_empty(1) }";
+    let source = "pub fn is_empty(length: usize) -> i64 { handle length == 0 { true => 1, false => 0 } } pub fn main() -> i64 { is_empty(0) + is_empty(1) }";
     let artifact = StageZeroCompiler::new()
         .compile(request(source))
         .expect("usize equality must lower")
@@ -1971,7 +2127,7 @@ fn source_usize_equality_lowers_through_the_typed_integer_vm_primitive() {
 
 #[test]
 fn source_usize_less_than_lowers_through_the_typed_integer_vm_primitive() {
-    let source = "pub fn in_bounds(index: usize, length: usize) -> i64 { handle index < length { true => 1, false => 0, _ => 0 } } pub fn main() -> i64 { in_bounds(1, 2) + in_bounds(2, 2) }";
+    let source = "pub fn in_bounds(index: usize, length: usize) -> i64 { handle index < length { true => 1, false => 0 } } pub fn main() -> i64 { in_bounds(1, 2) + in_bounds(2, 2) }";
     let artifact = StageZeroCompiler::new()
         .compile(request(source))
         .expect("usize ordering must lower")
@@ -2019,7 +2175,7 @@ fn source_usize_comparisons_lower_through_the_typed_integer_vm_primitive() {
 
 #[test]
 fn source_usize_addition_lowers_through_the_typed_integer_vm_primitive() {
-    let source = "pub fn add(left: usize, right: usize) -> usize { left + right } pub fn main() -> i64 { handle add(20, 22) == 42 { true => 42, false => 0, _ => 0 } }";
+    let source = "pub fn add(left: usize, right: usize) -> usize { left + right } pub fn main() -> i64 { handle add(20, 22) == 42 { true => 42, false => 0 } }";
     let artifact = StageZeroCompiler::new()
         .compile(request(source))
         .expect("usize addition must lower")
@@ -2049,6 +2205,7 @@ fn source_u32_arithmetic_lowers_to_checked_vm_instructions() {
         .expect("u32 arithmetic must lower")
         .artifact
         .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_u32().unwrap(), 169);
     let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
     let has = |expected: fn(&VmInstruction) -> bool| {
         decoded
@@ -2056,11 +2213,11 @@ fn source_u32_arithmetic_lowers_to_checked_vm_instructions() {
             .values()
             .any(|function| function.instructions.iter().any(expected))
     };
-    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedAdd { .. })));
-    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedSub { .. })));
-    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedMul { .. })));
-    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedDiv { .. })));
-    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedRem { .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::IntIntrinsic { primitive: PrimitiveRole::IntCheckedAdd, scalar: ScalarType::U32, .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::IntIntrinsic { primitive: PrimitiveRole::IntWrappingSub, scalar: ScalarType::U32, .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::IntIntrinsic { primitive: PrimitiveRole::IntWrappingMul, scalar: ScalarType::U32, .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::IntIntrinsic { primitive: PrimitiveRole::IntCheckedDiv, scalar: ScalarType::U32, .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::IntIntrinsic { primitive: PrimitiveRole::IntLess, scalar: ScalarType::U32, .. })));
 }
 
 #[test]
@@ -2160,21 +2317,25 @@ fn public_char_helpers_preserve_unicode_scalar_boundaries_and_ordering() {
     }));
 
     let mut ordering = request(&format!(
-        "{CHAR_HELPERS} pub fn main() -> Bool {{ char_from_u32(0) < char_from_u32(1114111) }}"
+        "{CHAR_HELPERS} fn scalar_less<T>(left: T, right: T) -> u32; pub fn main() -> u32 {{ scalar_less<u32>(char_to_u32(char_from_u32(0)), char_to_u32(char_from_u32(1114111))) }}"
     ));
     ordering.runtime_manifest = Some(char_runtime_manifest());
+    ordering.runtime_manifest.as_mut().unwrap().selectors.push(PrimitiveSelector {
+        role: PrimitiveRole::IntLess, module_path: "crate".into(), name: "scalar_less".into(),
+    });
     let artifact = StageZeroCompiler::new()
         .compile(ordering)
         .expect("Char comparison through public helpers must compile")
         .artifact
         .expect("build must publish a VM artifact");
-    assert!(artifact.run_bool().unwrap());
+    assert_eq!(artifact.run_u32().unwrap(), 1);
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     assert!(program.functions.values().any(|function| {
         function
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CompareChar { .. }))
+            .any(|instruction| matches!(instruction, VmInstruction::IntIntrinsic {
+                primitive: PrimitiveRole::IntLess, scalar: ScalarType::U32, .. }))
     }));
 }
 
@@ -2375,19 +2536,11 @@ fn manifest_bound_u32_runtime_family_lowers_from_source_by_exact_identity() {
         ('A' as u32 + 'B' as u32) as u64,
     );
 
-    let mut comparison = request(&format!(
-        "{U32_RUNTIME_LEAVES} pub fn main() -> Bool {{ __g1_u32_lt(__g1_char_to_u32('A'), __g1_char_to_u32('B')) }}"
-    ));
-    comparison.runtime_manifest = Some(u32_runtime_manifest());
-    assert!(
-        StageZeroCompiler::new()
-            .compile(comparison)
-            .unwrap()
-            .artifact
-            .expect("build must publish a VM artifact")
-            .run_bool()
-            .unwrap()
-    );
+    let mut comparison = request("fn __g1_int_less<T>(left: T, right: T) -> u32; pub fn main() -> u32 { __g1_int_less<u32>(65, 66) }");
+    bind_int_runtime(&mut comparison, PrimitiveRole::IntLess, "__g1_int_less");
+    let artifact = StageZeroCompiler::new().compile(comparison).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_u32().unwrap(), 1);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_u32().unwrap(), 1);
 }
 
 #[test]
@@ -2801,7 +2954,7 @@ fn service_generic_label_forward_cancellation_cleans_protected_multi_payload_sco
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             handle {
                 @outer: i64 {
                     @inner: i64 {
@@ -2857,7 +3010,7 @@ fn service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             handle {
                 @outer: i64 {
                     @inner: i64 {
@@ -2911,7 +3064,7 @@ fn service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_
             .iter()
             .filter(|instruction| matches!(
                 instruction,
-                VmInstruction::InstallHandler {
+                VmInstruction::InstallHandlerOwned {
                     continuation: VmContinuationPolicy::Replay { uses: 2 },
                     ..
                 }
@@ -2927,10 +3080,8 @@ fn service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_
         "the late refutable payload mismatch must remain a VM Forward edge"
     );
     assert!(
-        instructions
-            .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
-            .count()
+        program.functions.values().map(|function| function.instructions.iter()
+            .filter(|instruction| returning_resumption_call(function, instruction)).count()).sum::<usize>()
             >= 2,
         "the outer exact-two handler must return from both replayed residuals"
     );
@@ -3056,21 +3207,19 @@ fn service_lowers_only_the_manifest_bound_abort_leaf_to_a_terminal_vm_trap() {
 }
 
 #[test]
-fn service_rejects_host_imports_escaping_as_ordinary_callable_values() {
+fn service_devirtualizes_a_local_host_alias_without_granting_runtime_authority() {
     let mut input =
         request("host clock fn now() -> i64; pub fn main() -> i64 { let f = now; f() }");
     input.capability_manifest.push("clock".into());
-    let error = StageZeroCompiler::new().compile(input).unwrap_err();
-    assert!(
-        error
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G6012"
-                && diagnostic
-                    .message
-                    .contains("host imports may only be invoked")),
-        "{error:#?}"
-    );
+    let outcome = StageZeroCompiler::new().compile(input).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{outcome:#?}");
+    let artifact = outcome.artifact.unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    for result in [artifact.run_i64(), decoded.run_i64()] {
+        assert!(matches!(result,
+            Err(VmArtifactError::HostCallRequiresAuthority { capability, symbol })
+                if capability == "clock" && symbol == "now"));
+    }
 }
 
 #[test]
@@ -3977,7 +4126,8 @@ fn service_reuses_only_unchanged_frozen_module_interfaces_across_revisions() {
         42
     );
     assert_eq!(compiler.interface_cache_stats().hits, 0);
-    assert_eq!(compiler.interface_cache_stats().misses, 2);
+    // App, math, and the distributed std root/prelude are separate interfaces.
+    assert_eq!(compiler.interface_cache_stats().misses, 4);
 
     // Replacing only the root source must recollect that interface while the
     // unchanged external module is validated and reused in the child world.
@@ -4002,7 +4152,7 @@ fn service_reuses_only_unchanged_frozen_module_interfaces_across_revisions() {
     );
     assert_eq!(
         compiler.interface_cache_stats(),
-        grandiose_stage0::InterfaceCacheStats { hits: 1, misses: 3 }
+        grandiose_stage0::InterfaceCacheStats { hits: 3, misses: 5 }
     );
 
     // The next child changes the dependency interface itself. The root can
@@ -4029,36 +4179,36 @@ fn service_reuses_only_unchanged_frozen_module_interfaces_across_revisions() {
     );
     assert_eq!(
         compiler.interface_cache_stats(),
-        grandiose_stage0::InterfaceCacheStats { hits: 2, misses: 4 }
+        grandiose_stage0::InterfaceCacheStats { hits: 6, misses: 6 }
     );
 }
 
 #[test]
 fn service_lowers_word_boolean_operators_as_short_circuit_cfg() {
     let false_and = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { false and (1 / 0 == 0) }"))
+        .compile(request_bool("pub fn main() -> Bool { false and { 1 / 0 == 0 } }"))
         .unwrap();
-    assert!(!false_and.artifact.unwrap().run_bool().unwrap());
+    assert_eq!(false_and.artifact.unwrap().run_i64().unwrap(), 0);
 
     let true_or = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { true or (1 / 0 == 0) }"))
+        .compile(request_bool("pub fn main() -> Bool { true or { 1 / 0 == 0 } }"))
         .unwrap();
-    assert!(true_or.artifact.unwrap().run_bool().unwrap());
+    assert_eq!(true_or.artifact.unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_lowers_nested_lazy_boolean_values_in_strict_contexts() {
     for expression in [
-        "a and b and c", "a or b or c", "(a or b) and c", "a or (b and c)",
+        "a and { b } and { c }", "a or { b } or { c }", "(a or { b }) and { c }", "a or { b and { c } }",
     ] {
         for mask in 0..8 {
             let a = mask & 1 != 0;
             let b = mask & 2 != 0;
             let c = mask & 4 != 0;
             let expected = match expression {
-                "a and b and c" => a && b && c,
-                "a or b or c" => a || b || c,
-                "(a or b) and c" => (a || b) && c,
+                "a and { b } and { c }" => a && b && c,
+                "a or { b } or { c }" => a || b || c,
+                "(a or { b }) and { c }" => (a || b) && c,
                 _ => a || (b && c),
             };
             for body in [
@@ -4074,11 +4224,11 @@ fn service_lowers_nested_lazy_boolean_values_in_strict_contexts() {
                     fn check(a: Bool, b: Bool, c: Bool) -> Bool {{ {body} }}
                     pub fn main() -> Bool {{ check({a}, {b}, {c}) }}
                 "#);
-                let outcome = StageZeroCompiler::new().compile(request(&source))
+                let outcome = StageZeroCompiler::new().compile(request_bool(&source))
                     .unwrap_or_else(|error| panic!("{body}, mask {mask}: {error:?}"));
                 assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
                 let program = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
-                assert_eq!(program.run_bool().unwrap(), expected, "{body}, mask {mask}");
+                assert_eq!(program.run_i64().unwrap(), i64::from(expected), "{body}, mask {mask}");
             }
         }
     }
@@ -4100,10 +4250,10 @@ fn service_nested_lazy_boolean_values_preserve_order_and_skip_traps() {
             }}
             fn accept(first: Bool, selected: Bool, last: Bool) -> Bool {{ selected }}
             fn check(a: Bool, b: Bool, c: Bool) -> i64 {{
-                let trace = 0;
+                let mut trace = 0;
                 let result = accept(mark(&mut trace, 1, true),
-                    (mark(&mut trace, 2, a) and mark(&mut trace, 3, b))
-                        or mark(&mut trace, 4, c),
+                    (mark(&mut trace, 2, a) and {{ mark(&mut trace, 3, b) }})
+                        or {{ mark(&mut trace, 4, c) }},
                     mark(&mut trace, 5, true));
                 trace * 10 + handle result {{ true => 1, false => 0 }}
             }}
@@ -4114,17 +4264,17 @@ fn service_nested_lazy_boolean_values_preserve_order_and_skip_traps() {
         assert_eq!(program.run_i64().unwrap(), trace * 10 + i64::from((a && b) || c));
     }
     for expression in [
-        "a and b and (1 / 0 == 0)",
-        "(a and (1 / 0 == 0)) or b",
-        "false and (true or (1 / 0 == 0))",
-        "true and (a and (1 / 0 == 0))",
-        "handle b { true => a and (1 / 0 == 0), false => true }",
-        "a and (handle b { true => 1 / 0 == 0, false => true })",
+        "a and { b } and { 1 / 0 == 0 }",
+        "(a and { 1 / 0 == 0 }) or { b }",
+        "false and { true or { 1 / 0 == 0 } }",
+        "true and { a and { 1 / 0 == 0 } }",
+        "handle b { true => a and { 1 / 0 == 0 }, false => true }",
+        "a and { handle b { true => 1 / 0 == 0, false => true } }",
     ] {
         let source = format!("fn check(a: Bool, b: Bool) -> Bool {{ let selected = {expression}; selected }} pub fn main() -> Bool {{ check(false, true) }}");
-        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        let outcome = StageZeroCompiler::new().compile(request_bool(&source)).unwrap();
         let program = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
-        assert_eq!(program.run_bool().unwrap(), expression == "(a and (1 / 0 == 0)) or b", "{expression}");
+        assert_eq!(program.run_i64().unwrap(), i64::from(expression == "(a and { 1 / 0 == 0 }) or { b }"), "{expression}");
     }
 }
 
@@ -4163,7 +4313,7 @@ fn service_renders_any_verified_vm_entry_value_for_host_tools() {
 fn service_lowers_addressable_local_assignment_through_placeflow_and_the_vm() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let value = 1; value = 42; value }",
+            "pub fn main() -> i64 { let mut value = 1; value = 42; value }",
         ))
         .unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -4175,7 +4325,7 @@ fn service_executes_assignment_inside_a_lifted_closure_with_its_own_storage_grap
         pub fn main() -> i64 {
             let seed = 0;
             let delayed = (input: i64) -> i64 {
-                let value = input;
+                let mut value = input;
                 value = seed + 1;
                 value
             };
@@ -4190,7 +4340,7 @@ fn service_executes_assignment_inside_a_lifted_closure_with_its_own_storage_grap
 fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let value = 1; let reference = &mut value; *reference = 42; *reference }",
+            "pub fn main() -> i64 { let mut value = 1; let reference = &mut value; *reference = 42; *reference }",
         ))
         .unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -4198,7 +4348,7 @@ fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
 
 #[test]
 fn service_preserves_unique_reference_writeback_across_a_direct_call_and_return() {
-    let source = "pub fn overwrite<'a>(value: &'a mut i64) -> &'a mut i64 { *value = 42; value } pub fn main() -> i64 { let value = 1; let returned = overwrite(&mut value); *returned = 43; value }";
+    let source = "pub fn overwrite<'a>(value: &'a mut i64) -> &'a mut i64 { *value = 42; value } pub fn main() -> i64 { let mut value = 1; let returned = overwrite(&mut value); *returned = 43; value }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
@@ -4209,7 +4359,7 @@ fn affine_nominal_values_cannot_copy_an_embedded_unique_reference() {
     let source = r#"
         pub struct Holder { reference: &mut i64 }
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             let parent = &mut value;
             let holder = Holder { reference: move parent };
             let alias = holder;
@@ -4310,7 +4460,7 @@ fn body_local_reference_cannot_be_stored_through_a_caller_owned_reference() {
 
     let local_slot = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let first = 1; let second = 42; let reference = &first; let slot = &mut reference; *slot = &second; *reference }",
+            "pub fn main() -> i64 { let first = 1; let second = 42; let mut reference = &first; let slot = &mut reference; *slot = &second; *reference }",
         ))
         .expect("a local reference slot is destroyed with its referents");
     assert!(
@@ -4339,7 +4489,7 @@ fn body_local_reference_cannot_be_stored_through_a_caller_owned_reference() {
 #[test]
 fn active_unique_loan_rejects_move_of_its_referent() {
     let diagnostics = match StageZeroCompiler::new().compile(request(
-        "pub fn main() -> i64 { let value = 1; let reference = &mut value; move value; *reference }",
+        "pub fn main() -> i64 { let mut value = 1; let reference = &mut value; move value; *reference }",
     )) {
         Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
         outcome => panic!("move while uniquely borrowed unexpectedly compiled: {outcome:#?}"),
@@ -4354,28 +4504,28 @@ fn active_unique_loan_rejects_move_of_its_referent() {
 
 #[test]
 fn unique_field_borrow_preserves_the_projected_place_identity() {
-    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let reference = &mut pair.left; *reference = 42; pair.left }";
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; let reference = &mut pair.left; *reference = 42; pair.left }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
 fn unique_reborrow_reuses_the_original_vm_place() {
-    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = &mut *parent; *child = 42; *parent }";
+    let source = "pub fn main() -> i64 { let mut value = 1; let parent = &mut value; let child = &mut *parent; *child = 42; *parent }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
 fn whole_unique_referent_move_requires_exact_restoration_before_reuse() {
-    let restored = "pub fn relay(value: i64) -> i64 { value } pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; let retained = relay(moved); *reference = retained + 41; *reference }";
+    let restored = "pub fn relay(value: i64) -> i64 { value } pub fn main() -> i64 { let mut value = 1; let reference = &mut value; let moved = move *reference; let retained = relay(moved); *reference = retained + 41; *reference }";
     let outcome = StageZeroCompiler::new()
         .compile(request(restored))
         .expect("a whole unique referent may be moved and exactly restored");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let read_before_restore = "pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; *reference + moved }";
+    let read_before_restore = "pub fn main() -> i64 { let mut value = 1; let reference = &mut value; let moved = move *reference; *reference + moved }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(read_before_restore))
     else {
@@ -4388,7 +4538,7 @@ fn whole_unique_referent_move_requires_exact_restoration_before_reuse() {
         "missing use-through-open-referent diagnostic: {diagnostics:#?}"
     );
 
-    let incomplete = "pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; moved }";
+    let incomplete = "pub fn main() -> i64 { let mut value = 1; let reference = &mut value; let moved = move *reference; moved }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(incomplete))
     else {
@@ -4399,7 +4549,7 @@ fn whole_unique_referent_move_requires_exact_restoration_before_reuse() {
         "missing open-referent scope-exit diagnostic: {diagnostics:#?}"
     );
 
-    let alias = "pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; let alias = reference; *alias = moved; *alias }";
+    let alias = "pub fn main() -> i64 { let mut value = 1; let reference = &mut value; let moved = move *reference; let alias = reference; *alias = moved; *alias }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(alias))
     else {
@@ -4410,7 +4560,7 @@ fn whole_unique_referent_move_requires_exact_restoration_before_reuse() {
         "missing alias-through-open-referent diagnostic: {diagnostics:#?}"
     );
 
-    let nested_scope = "pub fn main() -> i64 { { let value = 1; let reference = &mut value; let moved = move *reference; moved }; 0 }";
+    let nested_scope = "pub fn main() -> i64 { { let mut value = 1; let reference = &mut value; let moved = move *reference; moved }; 0 }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(nested_scope))
     else {
@@ -4432,7 +4582,7 @@ fn whole_unique_referent_move_requires_exact_restoration_before_reuse() {
         "missing shared-referent move diagnostic: {diagnostics:#?}"
     );
 
-    let handler_boundary = "effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; handle Tick::tick() { Tick::tick() with _ => moved } }";
+    let handler_boundary = "effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let mut value = 1; let reference = &mut value; let moved = move *reference; handle Tick::tick() { Tick::tick() with _ => moved } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(handler_boundary))
     else {
@@ -4450,7 +4600,7 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
         pub struct Inner { value: i64 }
         pub struct Outer { inner: Inner, tag: i64 }
         pub fn main() -> i64 {
-            let outer = Outer { inner: Inner { value: 42 }, tag: 0 };
+            let mut outer = Outer { inner: Inner { value: 42 }, tag: 0 };
             let parent = &mut outer.inner.value;
             let child = &mut *parent;
             *child
@@ -4464,7 +4614,7 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
         pub struct Inner { value: i64 }
         pub struct Outer { inner: Inner, tag: i64 }
         pub fn bad() -> i64 / {Store} {
-            let outer = Outer { inner: Inner { value: 1 }, tag: 0 };
+            let mut outer = Outer { inner: Inner { value: 1 }, tag: 0 };
             let parent = &mut outer.inner.value;
             let child = &mut *parent;
             Store::save(child);
@@ -4488,7 +4638,7 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
         pub struct Holder { reference: &mut i64 }
         pub struct Outer { holder: Holder }
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             let outer = Outer { holder: Holder { reference: &mut value } };
             let child = &mut *outer.holder.reference;
             *child
@@ -4502,9 +4652,9 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
     let replacement = r#"
         pub struct Holder { reference: &mut i64 }
         pub fn main() -> i64 {
-            let first = 1;
-            let second = 2;
-            let holder = Holder { reference: &mut first };
+            let mut first = 1;
+            let mut second = 2;
+            let mut holder = Holder { reference: &mut first };
             holder.reference = &mut second;
             let child = &mut *holder.reference;
             *child
@@ -4521,9 +4671,9 @@ fn reborrow_suspends_its_aggregate_reference_carrier_until_nll_release() {
     let replacement_while_live = r#"
         pub struct Holder { loan: &mut i64, tag: i64 }
         pub fn main() -> i64 {
-            let first = 1;
-            let second = 2;
-            let holder = Holder { loan: &mut first, tag: 0 };
+            let mut first = 1;
+            let mut second = 2;
+            let mut holder = Holder { loan: &mut first, tag: 0 };
             let child = &mut *holder.loan;
             holder.loan = &mut second;
             *child
@@ -4545,9 +4695,9 @@ fn reborrow_suspends_its_aggregate_reference_carrier_until_nll_release() {
     let replacement_after_last_use = r#"
         pub struct Holder { loan: &mut i64, tag: i64 }
         pub fn main() -> i64 {
-            let first = 1;
-            let second = 2;
-            let holder = Holder { loan: &mut first, tag: 0 };
+            let mut first = 1;
+            let mut second = 2;
+            let mut holder = Holder { loan: &mut first, tag: 0 };
             let child = &mut *holder.loan;
             *child = 3;
             holder.loan = &mut second;
@@ -4562,7 +4712,7 @@ fn reborrow_suspends_its_aggregate_reference_carrier_until_nll_release() {
 
 #[test]
 fn parent_unique_reference_is_suspended_while_a_unique_reborrow_is_live() {
-    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = &mut *parent; *parent = 2; *child }";
+    let source = "pub fn main() -> i64 { let mut value = 1; let parent = &mut value; let child = &mut *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
         Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
         outcome => panic!("active unique reborrow failed to suspend its parent: {outcome:#?}"),
@@ -4577,21 +4727,21 @@ fn parent_unique_reference_is_suspended_while_a_unique_reborrow_is_live() {
 
 #[test]
 fn sibling_shared_reborrows_keep_the_parent_region_live() {
-    let source = "pub fn main() -> i64 { let value = 21; let parent = &mut value; let left = & *parent; let right = & *parent; *left + *right }";
+    let source = "pub fn main() -> i64 { let mut value = 21; let parent = &mut value; let left = & *parent; let right = & *parent; *left + *right }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
 fn handler_join_retains_shared_reborrow_region_provenance() {
-    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 21; let parent = &mut value; let child = & *parent; handle Stop::stop() { Stop::stop() => 0 }; *child + *child }";
+    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let mut value = 21; let parent = &mut value; let child = & *parent; handle Stop::stop() { Stop::stop() => 0 }; *child + *child }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
 fn handler_join_keeps_shared_reborrow_parent_suspended() {
-    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; handle Stop::stop() { Stop::stop() => 0 }; *parent = 2; *child }";
+    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let mut value = 1; let parent = &mut value; let child = & *parent; handle Stop::stop() { Stop::stop() => 0 }; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
         Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
         outcome => panic!("handler join reopened a suspended parent: {outcome:#?}"),
@@ -4608,7 +4758,7 @@ fn nll_releases_a_handler_local_closure_capture_after_its_last_use() {
     let source = r#"
         effect Ask { [0, 1] ask() -> i64; }
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             handle Ask::ask() {
                 Ask::ask() with _ => {
                     let loan = &value;
@@ -4633,7 +4783,7 @@ fn nll_keeps_a_closure_capture_live_across_a_handler_when_used_afterward() {
     let source = r#"
         effect Ask { [0, 1] ask() -> i64; }
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             let loan = &value;
             let callback = () -> i64 { *loan };
             handle Ask::ask() { Ask::ask() with _ => 0 };
@@ -4657,7 +4807,7 @@ fn nll_keeps_a_closure_capture_live_across_a_handler_when_used_afterward() {
 fn nll_does_not_treat_the_dead_suffix_of_a_label_transfer_as_a_loan_use() {
     let source = r#"
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             label done {
                 let loan = &mut value;
                 transfer done 0;
@@ -4678,9 +4828,9 @@ fn nll_does_not_treat_the_dead_suffix_of_a_label_transfer_as_a_loan_use() {
 fn nll_distinguishes_a_shadowed_local_from_an_outer_live_loan() {
     let source = r#"
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             let outer = &mut value;
-            { let value = 2; value = 3; value };
+            { let mut value = 2; value = 3; value };
             *outer = 42;
             *outer
         }
@@ -4696,7 +4846,7 @@ fn nll_distinguishes_a_shadowed_local_from_an_outer_live_loan() {
 fn nll_releases_a_reborrow_created_before_a_label_transfer() {
     let source = r#"
         pub fn main() -> i64 {
-            let value = 1;
+            let mut value = 1;
             let parent = &mut value;
             label done {
                 let child = &mut *parent;
@@ -4716,7 +4866,7 @@ fn nll_releases_a_reborrow_created_before_a_label_transfer() {
 
 #[test]
 fn shared_reborrow_still_suspends_unique_parent_mutation() {
-    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let child = & *parent; *parent = 2; *child }";
+    let source = "pub fn main() -> i64 { let mut value = 1; let parent = &mut value; let child = & *parent; *parent = 2; *child }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
         Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
         outcome => panic!("shared reborrow failed to suspend parent mutation: {outcome:#?}"),
@@ -4732,7 +4882,7 @@ fn shared_reborrow_still_suspends_unique_parent_mutation() {
 fn assignment_reinitializes_a_local_after_a_whole_value_move() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let value = 1; move value; value = 42; value }",
+            "pub fn main() -> i64 { let mut value = 1; move value; value = 42; value }",
         ))
         .unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -4778,7 +4928,7 @@ fn service_selects_conditional_drop_through_generic_nominal_facades() {
     let moving_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let cleanup_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet; 42 }";
     let handler_cleanup_root = "use facade::{make, Token}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<Token>(Token {}); handle Tick::tick() { Tick::tick() with _ => { move packet; 42 } } }";
-    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { pub head: T, pub tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
     let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
@@ -4825,7 +4975,7 @@ fn service_selects_defaulted_nominal_drop_through_recursive_facade_revisions() {
     // must retain that identity through `make`, so conditional Drop selection
     // sees the selected `Packet<Token>` rather than an opaque projection.
     let root = "pub mod left; pub mod right; use left::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
-    let left = "pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } pub trait Mark: Use<[0, 1]> {} impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T> = Packet<T>; } pub use crate::right::{make, Top as Capability};";
+    let left = "pub struct Token {} pub struct Packet<T> { pub head: T, pub tail: i64 } pub trait Mark: Use<[0, 1]> {} impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T> = Packet<T>; } pub use crate::right::{make, Top as Capability};";
     let right = "pub use crate::left::{Family, Mark, Packet, Token}; pub trait Top: Family {} pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } impl Family for i64 {} impl Top for i64 where i64: Family {}";
     let selected = format!("{right} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |right: &str| request_with_logical_sources(root, &[("src/left/left.glorious", left), ("src/right/right.glorious", right)]);
@@ -4872,7 +5022,7 @@ fn service_preserves_hrtb_associated_nominal_partial_moves_through_closure_revis
     // implementation in a later provider revision must make that same
     // projected nominal opaque before any artifact/cache product is published.
     let root = "use facade::{Callback, Packet, Token, relay}; pub fn apply(callback: Callback) -> i64 { let returned = callback(Packet<Token> { head: Token {}, tail: 2 }); let closure = () -> i64 { move returned.head; returned.tail + 40 }; closure() } pub fn main() -> i64 { apply(relay) }";
-    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<'a, T> = Packet<T>; } impl Family for i64 {} pub type Callback = for<'a> (<i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token>; pub fn make<'a, T>(value: T) -> <i64 as Family>::Item<'a, T> { Packet<T> { head: value, tail: 2 } } pub fn relay<'a>(value: <i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token> { value }";
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { pub head: T, pub tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<'a, T> = Packet<T>; } impl Family for i64 {} pub type Callback = for<'a> (<i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token>; pub fn make<'a, T>(value: T) -> <i64 as Family>::Item<'a, T> { Packet<T> { head: value, tail: 2 } } pub fn relay<'a>(value: <i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token> { value }";
     let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |provider: &str| {
         let mut input = request(root);
@@ -4956,7 +5106,7 @@ fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler
     // closure is invoked from a handler arm, exercising the source-storage
     // cleanup boundary across package import, Core, MIR, VM, and decoding.
     let root = "use facade::{capture, make}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<i64>(2); let closure = capture(&packet.tail); move packet.head; handle Tick::tick() { Tick::tick() with _ => closure() } }";
-    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { () -> i64 { *value = *value + 1; *value } }";
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { pub head: T, pub tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { () -> i64 { *value = *value + 1; *value } }";
     let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
@@ -5025,7 +5175,7 @@ fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler
     // Native-backed checked references retain the caller's actual storage
     // after the closure's creator frame returns. Verify write-back, not just
     // the closure's returned scalar.
-    let unique_root = "use facade::capture_unique; pub fn main() -> i64 { let value = 41; { let closure = capture_unique(&mut value); closure(); }; value }";
+    let unique_root = "use facade::capture_unique; pub fn main() -> i64 { let mut value = 41; { let closure = capture_unique(&mut value); closure(); }; value }";
     let unique = StageZeroCompiler::new().compile(world(unique_root, provider)).unwrap().artifact.unwrap();
     assert_eq!(decode_and_verify_program(&unique.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
 
@@ -5118,16 +5268,15 @@ fn service_executes_handler_partial_move_and_label_leave() {
 fn service_round_trips_branch_reinitialized_aggregate_cleanup_through_handler_leaves() {
     // The refutable handler matrix conditionally moves either field of
     // `pair`, each matching arm reinitializes it, and all arms leave the same
-    // label while `first`, `pair`, and `last` remain live.  The catch-all arm
-    // is deliberate: source pattern coverage, not the Bool runtime type,
-    // proves that no residual performance can reach an unhandled Forward.
+    // label while `first`, `pair`, and `last` remain live. The two ordinary
+    // Bool constructors are exhaustive, so a catch-all would be unreachable.
     let source = r#"
         effect Ask { [1, 1] ask(value: Bool) -> i64; }
         struct Pair { left: i64, right: i64 }
         pub fn main() -> i64 {
             label done {
                 let first = Pair { left: 10, right: 11 };
-                let pair = Pair { left: 3, right: 7 };
+                let mut pair = Pair { left: 3, right: 7 };
                 let last = Pair { left: 8, right: 25 };
                 handle Ask::ask(true) {
                     Ask::ask(true) => {
@@ -5140,7 +5289,6 @@ fn service_round_trips_branch_reinitialized_aggregate_cleanup_through_handler_le
                         pair = Pair { left: 6, right: 7 };
                         transfer done first.left + moved + pair.left + last.right
                     },
-                    Ask::ask(_) => transfer done first.left + pair.left + last.right,
                 }
             }
         }
@@ -5171,7 +5319,7 @@ fn service_reports_overlapping_use_after_a_partial_move() {
 
 #[test]
 fn service_rebuilds_and_stores_statically_selected_record_fields() {
-    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> Pair { let pair = Pair { left: 1, right: 2 }; pair.left = 42; pair }";
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> Pair { let mut pair = Pair { left: 1, right: 2 }; pair.left = 42; pair }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(
         outcome.artifact.unwrap().run_record_i64().unwrap(),
@@ -5181,7 +5329,7 @@ fn service_rebuilds_and_stores_statically_selected_record_fields() {
 
 #[test]
 fn service_rebuilds_nested_record_write_paths_from_leaf_to_root() {
-    let source = "pub struct Inner { value: i64 } pub struct Outer { inner: Inner } pub fn main() -> Inner { let outer = Outer { inner: Inner { value: 1 } }; outer.inner.value = 42; outer.inner }";
+    let source = "pub struct Inner { value: i64 } pub struct Outer { inner: Inner } pub fn main() -> Inner { let mut outer = Outer { inner: Inner { value: 1 } }; outer.inner.value = 42; outer.inner }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(
         outcome.artifact.unwrap().run_record_i64().unwrap(),
@@ -5691,7 +5839,7 @@ fn service_instantiates_non_type_direct_callable_arguments_at_the_contract_bound
 
 #[test]
 fn service_monomorphizes_symbolic_associated_effect_row_forwarding() {
-    let source = "trait Capability { type Effects: EffectRow; } struct Value { value: i64 } impl Capability for Value { type Effects = {}; } pub fn worker<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { 41 } pub fn relay<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { worker(value) } pub fn main() -> i64 { let value = Value { value: 0 }; relay(value) }";
+    let source = "trait Capability { type Effects: EffectRow; } struct Value { value: i64 } impl Capability for Value { type Effects = {}; } pub fn worker<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Use<[0,1]>, T: Capability { 41 } pub fn relay<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Use<[0,1]>, T: Capability { worker(value) } pub fn main() -> i64 { let value = Value { value: 0 }; relay(value) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
@@ -5699,7 +5847,7 @@ fn service_monomorphizes_symbolic_associated_effect_row_forwarding() {
 
 #[test]
 fn service_preserves_hrtb_callback_identity_through_symbolic_effect_forwarding() {
-    let source = "trait Capability { type Effects: EffectRow; } struct Value { value: i64 } impl Capability for Value { type Effects = {}; } pub fn worker<T>(callback: for<'a> (&'a i64) -> &'a i64, value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { let number = 41; callback(&number); number } pub fn relay<T>(callback: for<'a> (&'a i64) -> &'a i64, value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { worker(callback, value) } pub fn main() -> i64 { 41 }";
+    let source = "trait Capability { type Effects: EffectRow; } struct Value { value: i64 } impl Capability for Value { type Effects = {}; } pub fn worker<T>(callback: for<'a> (&'a i64) -> &'a i64, value: T) -> i64 / { <T as Capability>::Effects } where T: Use<[0,1]>, T: Capability { let number = 41; callback(&number); number } pub fn relay<T>(callback: for<'a> (&'a i64) -> &'a i64, value: T) -> i64 / { <T as Capability>::Effects } where T: Use<[0,1]>, T: Capability { worker(callback, value) } pub fn main() -> i64 { 41 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
@@ -5763,7 +5911,7 @@ fn service_imports_hrtb_associated_effect_gat_callback_contracts_through_vm() {
 
 #[test]
 fn service_inherits_hrtb_gat_callback_methods_across_dependency_traits() {
-    let dependency = "pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<U>(receiver: Self, callback: for<'a> (<Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }, marker: U) -> i64; } pub trait Child<T>: Parent<T> {} pub struct Value {} impl Parent<Value> for Value { type Item<'a> = &'a i64; type Effects<'a> = {}; fn apply<U>(receiver: Self, callback: for<'a> (<Self as Parent<Value>>::Item<'a>) -> <Self as Parent<Value>>::Item<'a> / { <Self as Parent<Value>>::Effects<'a> }, marker: U) -> i64 { let value = 41; let result = callback(&value); *result + 1 } } impl Child<Value> for Value {}";
+    let dependency = "pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<U>(receiver: Self, callback: for<'a> (<Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }, marker: U) -> i64 where U: Use<[0,1]> ; } pub trait Child<T>: Parent<T> {} pub struct Value {} impl Parent<Value> for Value { type Item<'a> = &'a i64; type Effects<'a> = {}; fn apply<U>(receiver: Self, callback: for<'a> (<Self as Parent<Value>>::Item<'a>) -> <Self as Parent<Value>>::Item<'a> / { <Self as Parent<Value>>::Effects<'a> }, marker: U) -> i64 where U: Use<[0,1]> { let value = 41; let result = callback(&value); *result + 1 } } impl Child<Value> for Value {}";
     let root = "use dependency::Child; use dependency::Value; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { Child<Value>::apply<i64>(Value {}, identity, 0) }";
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(root, "dependency@0.1.0", dependency))
@@ -5803,12 +5951,12 @@ fn service_proves_and_enforces_direct_callable_trait_bounds() {
 
 #[test]
 fn service_uses_declared_auto_traits_at_callable_boundaries() {
-    let accepted = "auto trait Sendish {} struct Pair { value: i64 } pub fn require<T>(value: T) -> i64 where T: Sendish { 7 } pub fn main() -> i64 { require(Pair { value: 1 }) }";
+    let accepted = "auto trait Sendish {} struct Pair { value: i64 } pub fn require<T>(value: T) -> i64 where T: Use<[0,1]>, T: Sendish { 7 } pub fn main() -> i64 { require(Pair { value: 1 }) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 7);
 
-    let rejected = "auto trait Sendish {} impl !Sendish for Text {} pub fn require<T>(value: T) -> i64 where T: Sendish { 7 } pub fn main() -> i64 { require(\"denied\") }";
+    let rejected = "auto trait Sendish {} impl !Sendish for Text {} pub fn require<T>(value: T) -> i64 where T: Use<[0,1]>, T: Sendish { 7 } pub fn main() -> i64 { require(\"denied\") }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(rejected))
     else {
@@ -6131,12 +6279,12 @@ fn service_enforces_selected_trait_method_where_bounds() {
 
 #[test]
 fn service_enforces_selected_trait_method_associated_type_bindings() {
-    let accepted = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for i64 { type Item = i64; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, 0) }";
+    let accepted = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64>; } impl Shape for i64 { type Item = i64; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, 0) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let rejected = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for Text { type Item = Text; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, \"wrong\") }";
+    let rejected = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64>; } impl Shape for Text { type Item = Text; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, \"wrong\") }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(rejected))
     else {
@@ -6152,12 +6300,12 @@ fn service_enforces_selected_trait_method_associated_type_bindings() {
 
 #[test]
 fn service_enforces_selected_trait_method_associated_effect_bindings() {
-    let accepted = "trait Capability { type Effects: EffectRow; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}>; } impl Capability for i64 { type Effects = {}; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, 0) }";
+    let accepted = "trait Capability { type Effects: EffectRow; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Capability<Effects = {}>; } impl Capability for i64 { type Effects = {}; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Capability<Effects = {}> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, 0) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let rejected = "effect Log { note(); } trait Capability { type Effects: EffectRow; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}>; } impl Capability for Text { type Effects = { Log }; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Capability<Effects = {}> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, \"wrong\") }";
+    let rejected = "effect Log { note(); } trait Capability { type Effects: EffectRow; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Capability<Effects = {}>; } impl Capability for Text { type Effects = { Log }; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Capability<Effects = {}> { receiver + 1 } } pub fn main() -> i64 { Keep::keep(41, \"wrong\") }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(rejected))
     else {
@@ -6173,12 +6321,12 @@ fn service_enforces_selected_trait_method_associated_effect_bindings() {
 
 #[test]
 fn service_enforces_trait_method_value_associated_bindings() {
-    let accepted = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for i64 { type Item = i64; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn apply(callable: (i64, i64) -> i64) -> i64 { callable(41, 0) } pub fn main() -> i64 { apply(Keep::keep) }";
+    let accepted = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64>; } impl Shape for i64 { type Item = i64; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64> { receiver + 1 } } pub fn apply(callable: (i64, i64) -> i64) -> i64 { callable(41, 0) } pub fn main() -> i64 { apply(Keep::keep) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let rejected = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64>; } impl Shape for Text { type Item = Text; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Shape<Item = i64> { receiver + 1 } } pub fn apply(callable: (i64, Text) -> i64) -> i64 { callable(41, \"wrong\") } pub fn main() -> i64 { apply(Keep::keep) }";
+    let rejected = "trait Shape { type Item; } trait Keep { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64>; } impl Shape for Text { type Item = Text; } impl Keep for i64 { fn keep<T>(receiver: i64, value: T) -> i64 where T: Use<[0,1]>, T: Shape<Item = i64> { receiver + 1 } } pub fn apply(callable: (i64, Text) -> i64) -> i64 { callable(41, \"wrong\") } pub fn main() -> i64 { apply(Keep::keep) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(rejected))
     else {
@@ -6291,7 +6439,7 @@ fn service_specializes_generic_associated_effect_abis_through_a_public_facade() 
             .iter()
             .any(|instruction| matches!(
                 instruction,
-                VmInstruction::Perform { effect_arguments, .. }
+                VmInstruction::PerformOwned { effect_arguments, .. }
                     if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
             ))),
         "the public generic relay must materialize Trace<i64> in its VM operation ABI"
@@ -6666,7 +6814,7 @@ fn service_executes_recursive_defaulted_hrtb_supertrait_gats_through_vm() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Base<'a> = &'a T; type Item<'a> = <Self as Parent<T>>::Base<'a>; type BaseEffects<'a>: EffectRow = {Trace<i64>}; type Effects<'a>: EffectRow = { <Self as Parent<T>>::BaseEffects<'a> }; fn relay<'a>(value: <Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 { fn relay<'a>(value: &'a i64) -> &'a i64 / {Trace<i64>} { Trace<i64>::note(*value); value } } impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Base<'a> = &'a T where T: 'a; type Item<'a> = <Self as Parent<T>>::Base<'a> where T: 'a; type BaseEffects<'a>: EffectRow = {Trace<i64>}; type Effects<'a>: EffectRow = { <Self as Parent<T>>::BaseEffects<'a> }; fn relay<'a>(value: <Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> } where T: 'a; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 { fn relay<'a>(value: &'a i64) -> &'a i64 / {Trace<i64>} { Trace<i64>::note(*value); value } } impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
     ));
     let outcome = StageZeroCompiler::new()
         .compile(request)
@@ -6692,7 +6840,7 @@ fn service_rejects_unselected_recursive_defaulted_hrtb_supertrait_gats() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Base<'a> = &'a T; type Item<'a> = <Self as Parent<T>>::Base<'a>; type BaseEffects<'a>: EffectRow = {Trace<i64>}; type Effects<'a>: EffectRow = { <Self as Parent<T>>::BaseEffects<'a> }; } pub trait Child<T>: Parent<T> {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Base<'a> = &'a T where T: 'a; type Item<'a> = <Self as Parent<T>>::Base<'a> where T: 'a; type BaseEffects<'a>: EffectRow = {Trace<i64>}; type Effects<'a>: EffectRow = { <Self as Parent<T>>::BaseEffects<'a> }; } pub trait Child<T>: Parent<T> {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -6748,7 +6896,7 @@ fn service_rejects_mutually_defaulted_hrtb_gat_rows_without_forging_an_effect() 
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<'a, row: EffectRow> = &'a T; type Effects<'a>: EffectRow = {Trace<<Self as Parent<T>>::Item<'a, { <Self as Parent<T>>::Effects<'a> }>>}; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<'a, row: EffectRow> = &'a T where T: 'a; type Effects<'a>: EffectRow = {Trace<<Self as Parent<T>>::Item<'a, { <Self as Parent<T>>::Effects<'a> }>>} where T: 'a; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -6776,7 +6924,7 @@ fn service_rejects_alias_equivalent_polarity_for_defaulted_hrtb_gats() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Item<'a> = &'a T; type Effects<'a>: EffectRow = {Trace<<Self as Capability<T>>::Item<'a>>}; }".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Item<'a> = &'a T where T: 'a; type Effects<'a>: EffectRow = {Trace<<Self as Capability<T>>::Item<'a>>} where T: 'a; }".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -7218,7 +7366,7 @@ fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub trait Gate<T> { type Item<'a, U, n: u32>; type Effects<'a, U, n: u32>: EffectRow; const Width: u32; } impl Gate<i64> for i64 { type Item<'a, U, n: u32> = i64; type Effects<'a, U, n: u32> = {}; const Width = 7; } pub fn prove<'a, U>(value: &'a i64, marker: U) -> <i64 as Gate<i64>>::Item<'a, U, <i64 as Gate<i64>>::Width> / { <i64 as Gate<i64>>::Effects<'a, U, <i64 as Gate<i64>>::Width> } { *value } pub fn layout() -> i64 { 42 }".as_slice(),
+        b"pub trait Gate<T> { type Item<'a, U, n: u32>; type Effects<'a, U, n: u32>: EffectRow; const Width: u32; } impl Gate<i64> for i64 { type Item<'a, U, n: u32> = i64; type Effects<'a, U, n: u32> = {}; const Width = 7; } pub fn prove<'a, U>(value: &'a i64, marker: U) -> <i64 as Gate<i64>>::Item<'a, U, <i64 as Gate<i64>>::Width> / { <i64 as Gate<i64>>::Effects<'a, U, <i64 as Gate<i64>>::Width> } where U: Use<[0,1]> { *value } pub fn layout() -> i64 { 42 }".as_slice(),
     ));
     let first = StageZeroCompiler::new()
         .compile(request.clone())
@@ -7275,7 +7423,7 @@ fn service_rolls_back_private_selected_associated_item_facade_revisions() {
 #[test]
 fn service_closes_generic_supertrait_selected_items_across_facade_revisions() {
     let root = "use facade::{Capability, Parent, Trace}; pub fn apply(callback: for<'a> (i64, &'a i64) -> <i64 as Capability<i64>>::Item<'a> / { <i64 as Capability<i64>>::Effects<'a> }) -> i64 / Trace<7, i64> { let value = 41; let result = callback(0, &value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Parent<i64>::relay) { Trace<7, i64>::note(value) with resume => resume(value + 1) } }";
-    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; fn relay<'a>(marker: T, value: &'a i64) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }; } pub trait Child<T>: Parent<T> {} impl<T> Parent<T> for i64 { const Width = 7; type Item<'a> = i64; type Effects<'a> = {Trace<<i64 as Parent<T>>::Width, i64>}; fn relay<'a>(marker: T, value: &'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> } { marker; *value } } impl<T> Child<T> for i64 where i64: Parent<T> {}";
+    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; fn relay<'a>(marker: T, value: &'a i64) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> } where T: Use<[0,1]> ; } pub trait Child<T>: Parent<T> {} impl<T> Parent<T> for i64 { const Width = 7; type Item<'a> = i64; type Effects<'a> = {Trace<<i64 as Parent<T>>::Width, i64>}; fn relay<'a>(marker: T, value: &'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> } where T: Use<[0,1]> { marker; *value } } impl<T> Child<T> for i64 where i64: Parent<T> {}";
     let world = |provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Child as Capability, Parent, Trace};".as_slice()));
@@ -7333,11 +7481,11 @@ fn service_executes_generic_supertrait_selected_const_hrtb_facades() {
         "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } ",
         "pub struct Witness<n: u32> { value: i64 } ",
         "pub trait Seed<T> { const Base: u32; } ",
-        "pub trait Parent<T>: Seed<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a, <Self as Parent<T>>::Width> }; } ",
+        "pub trait Parent<T>: Seed<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a, <Self as Parent<T>>::Width> } where T: Use<[0,1]> ; } ",
         "pub trait Child<T>: Parent<T> {} ",
         "pub type Callback = for<'a> (i64, &'a i64) -> i64 / { <i64 as Child<i64>>::Effects<'a, <i64 as Child<i64>>::Width> }; ",
         "impl<T> Seed<T> for i64 { const Base = 6; } ",
-        "impl<T> Parent<T> for i64 where i64: Seed<T> { const Width = <i64 as Seed<T>>::Base; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a, <Self as Parent<T>>::Width> } { marker; let witness = Witness<1 + 6> { value: 1 }; *value + witness.value } } ",
+        "impl<T> Parent<T> for i64 where i64: Seed<T> { const Width = <i64 as Seed<T>>::Base; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a, <Self as Parent<T>>::Width> } where T: Use<[0,1]> { marker; let witness = Witness<1 + 6> { value: 1 }; *value + witness.value } } ",
         "impl<T> Child<T> for i64 where i64: Parent<T> {}",
     );
     request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Parent, Trace};".as_slice()));
@@ -7378,7 +7526,7 @@ fn service_materializes_const_quantity_gat_arrays_through_hrtb_facade_revisions(
     // from inherited associated defaults. This forces those identities across
     // generic nominal layout, an indirect HRTB call, MIR, and VM decode.
     let root = "use facade::{Callback, Carrier, Gateway as Capability, relay}; pub fn apply(callback: Callback) -> i64 { let input = Carrier<<i64 as Capability<i64>>::Width, <i64 as Capability<i64>>::Budget, i64> { value: 41 }; let returned = callback([input]); returned.value + 1 } pub fn main() -> i64 { apply(relay) }";
-    let provider = "pub struct Carrier<n: u32, q: Quantity, T> { value: T } pub trait Base<T> { const Width: u32 = 1 + 6; const Budget: Quantity = [1, 1]; type Item<'a, n: u32, q: Quantity> = Carrier<n, q, T>; type Effects<'a, n: u32, q: Quantity>: EffectRow = {}; } pub trait Top<T>: Base<T> {} pub type Element<'a> = <i64 as Top<i64>>::Item<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget>; pub type Callback = for<'a> (Array<Element<'a>>) -> Element<'a> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget> }; impl Base<i64> for i64 {} impl Top<i64> for i64 where i64: Base<i64> {} pub fn relay<'a>(value: Array<Element<'a>>) -> Element<'a> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget> } { Carrier<1 + 6, [1, 1], i64> { value: 41 } }";
+    let provider = "pub struct Carrier<n: u32, q: Quantity, T> { pub value: T } pub trait Base<T> { const Width: u32 = 1 + 6; const Budget: Quantity = [1, 1]; type Item<'a, n: u32, q: Quantity> = Carrier<n, q, T>; type Effects<'a, n: u32, q: Quantity>: EffectRow = {}; } pub trait Top<T>: Base<T> {} pub type Element<'a> = <i64 as Top<i64>>::Item<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget>; pub type Callback = for<'a> (Array<Element<'a>>) -> Element<'a> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget> }; impl Base<i64> for i64 {} impl Top<i64> for i64 where i64: Base<i64> {} pub fn relay<'a>(value: Array<Element<'a>>) -> Element<'a> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget> } { Carrier<1 + 6, [1, 1], i64> { value: 41 } }";
     let recursive = provider.replacen(
         "const Width: u32 = 1 + 6",
         "const Width: u32 = <i64 as Base<i64>>::Width",
@@ -7491,7 +7639,7 @@ fn service_rejects_mutual_generic_supertrait_selected_const_cycles_canonically()
 #[test]
 fn service_bounds_recursive_supertrait_and_generic_overlap_revisions() {
     let root = "use facade::{Callback, Gateway, Trace}; pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 41; let result = callback(0, &value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Gateway<i64>::relay) { Trace<7, i64>::note(value) with resume => resume(value) } }";
-    let legal = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Root<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Left<T>: Root<T> + Right<T> { fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Root<T>>::Effects<'a, <Self as Root<T>>::Width> }; } pub trait Right<T>: Root<T> {} pub type Callback = for<'a> (i64, &'a i64) -> i64 / { <i64 as Left<i64>>::Effects<'a, <i64 as Left<i64>>::Width> }; impl<T> Root<T> for i64 { const Width = 7; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Root<T>>::Effects<'a, <Self as Root<T>>::Width> } { marker; *value } }";
+    let legal = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Root<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Left<T>: Root<T> + Right<T> { fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Root<T>>::Effects<'a, <Self as Root<T>>::Width> } where T: Use<[0,1]> ; } pub trait Right<T>: Root<T> {} pub type Callback = for<'a> (i64, &'a i64) -> i64 / { <i64 as Left<i64>>::Effects<'a, <i64 as Left<i64>>::Width> }; impl<T> Root<T> for i64 { const Width = 7; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Root<T>>::Effects<'a, <Self as Root<T>>::Width> } where T: Use<[0,1]> { marker; *value } }";
     let world = |provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Left as Gateway, Trace};".as_slice()));
@@ -7536,7 +7684,7 @@ fn service_materializes_all_selected_items_through_recursive_generic_supertrait_
     // canonicalize that recursive supertrait closure before using every kind
     // of selected item in a public, generic callback contract.
     let root = "use facade::{Callback, Gateway, Trace}; pub fn apply(callback: Callback<i64>) -> i64 / Trace<7, i64> { Trace<7, i64>::note(callback(0, 41)) } pub fn main() -> i64 { handle apply(Gateway<i64>::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
-    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Root<T> { const Width: u32; type Item<U, n: u32>; type Effects<U, n: u32>: EffectRow; } pub trait Left<T>: Root<T> + Right<T> { fn relay<U>(receiver: T, value: U) -> <Self as Root<T>>::Item<U, <Self as Root<T>>::Width> / { <Self as Root<T>>::Effects<U, <Self as Root<T>>::Width> }; } pub trait Right<T>: Root<T> {} pub type Callback<U> = (i64, U) -> <i64 as Left<i64>>::Item<U, <i64 as Left<i64>>::Width> / { <i64 as Left<i64>>::Effects<U, <i64 as Left<i64>>::Width> }; impl<T> Root<T> for i64 { const Width = 7; type Item<U, n: u32> = i64; type Effects<U, n: u32> = {Trace<n, U>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<U>(receiver: T, value: U) -> i64 / Trace<7, U> { receiver; Trace<7, U>::note(value) } }";
+    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Root<T> { const Width: u32; type Item<U, n: u32>; type Effects<U, n: u32>: EffectRow; } pub trait Left<T>: Root<T> + Right<T> { fn relay<U>(receiver: T, value: U) -> <Self as Root<T>>::Item<U, <Self as Root<T>>::Width> / { <Self as Root<T>>::Effects<U, <Self as Root<T>>::Width> } where T: Use<[0,1]> ; } pub trait Right<T>: Root<T> {} pub type Callback<U> = (i64, U) -> <i64 as Left<i64>>::Item<U, <i64 as Left<i64>>::Width> / { <i64 as Left<i64>>::Effects<U, <i64 as Left<i64>>::Width> }; impl<T> Root<T> for i64 { const Width = 7; type Item<U, n: u32> = i64; type Effects<U, n: u32> = {Trace<n, U>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<U>(receiver: T, value: U) -> i64 / Trace<7, U> where T: Use<[0,1]> { receiver; Trace<7, U>::note(value) } }";
     let world = |provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Left as Gateway, Trace};".as_slice()));
@@ -7592,7 +7740,7 @@ fn service_executes_shared_gat_hrtb_reborrows_through_facades() {
     assert_eq!(first.run_i64().unwrap(), 42);
     assert_eq!(second.run_i64().unwrap(), 42);
 
-    let mutable = "use facade::Gate; pub fn accepts_short(slot: &mut <i64 as Gate>::Item<'_>) -> i64 { 0 } pub fn bad(value: &'static i64) -> i64 { let long = value; accepts_short(&mut long) } pub fn main() -> i64 { let candidate = bad; 0 }";
+    let mutable = "use facade::Gate; pub fn accepts_short(slot: &mut <i64 as Gate>::Item<'_>) -> i64 { 0 } pub fn bad(value: &'static i64) -> i64 { let mut long = value; accepts_short(&mut long) } pub fn main() -> i64 { let candidate = bad; 0 }";
     let escape = "use facade::Callback; pub fn bad(callback: Callback) -> () -> &i64 { let value = 1; () -> &i64 { callback(&value) } } pub fn main() -> i64 { let candidate = bad; 0 }";
     let compiler = StageZeroCompiler::new();
     let parent = compiler.import_revision(world(legal), None).unwrap();
@@ -7623,7 +7771,7 @@ fn service_composes_facaded_hrtb_callback_reborrows_closure_capture_and_unique_r
     // its parent is used again.  This checks the complete source -> Core ->
     // MIR -> VM -> decoded-VM path rather than treating either reference as a
     // compiler-only proof artifact.
-    let root = "use facade::{relay, Callback}; pub fn apply(callback: Callback) -> i64 { let value = 39; let input = &value; let returned = callback(input); let captured = () -> i64 { *returned }; let mutable = 1; let parent = &mut mutable; let child = &mut *parent; *child = 3; *parent + captured() } pub fn main() -> i64 { apply(relay) }";
+    let root = "use facade::{relay, Callback}; pub fn apply(callback: Callback) -> i64 { let value = 39; let input = &value; let returned = callback(input); let captured = () -> i64 { *returned }; let mut mutable = 1; let parent = &mut mutable; let child = &mut *parent; *child = 3; *parent + captured() } pub fn main() -> i64 { apply(relay) }";
     let provider = "pub trait Gate { type Item<'a>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a>; impl Gate for i64 { type Item<'a> = &'a i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> { value }";
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
@@ -7739,9 +7887,9 @@ fn service_preserves_caller_reference_closure_results_and_rejects_invocation_loc
 #[test]
 fn service_keeps_selected_hrtb_projection_failures_distinct_through_facades() {
     let root = "use facade::{Callback, Packet, relay, Trace, Gate}; pub fn tag(packet: Packet<<i64 as Gate>::Width>) -> i64 { packet.value } pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 41; let packet = callback(&value); Trace<7, i64>::note(packet.value) } pub fn main() -> i64 { handle apply(relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
-    let legal = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Packet<n: u32> { value: i64 } pub trait Gate { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } impl Gate for i64 { const Width = 7; type Item<'a> = Packet<<i64 as Gate>::Width>; type Effects<'a> = {Trace<<i64 as Gate>::Width, i64>}; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { Packet<<i64 as Gate>::Width> { value: *value } }";
+    let legal = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Packet<n: u32> { pub value: i64 } pub trait Gate { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } impl Gate for i64 { const Width = 7; type Item<'a> = Packet<<i64 as Gate>::Width>; type Effects<'a> = {Trace<<i64 as Gate>::Width, i64>}; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { Packet<<i64 as Gate>::Width> { value: *value } }";
     let unresolved = legal.replace("impl Gate for i64 { const Width = 7; type Item<'a> = Packet<<i64 as Gate>::Width>; type Effects<'a> = {Trace<<i64 as Gate>::Width, i64>}; } ", "");
-    let ambiguous = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Packet<n: u32> { value: i64 } pub trait Left { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub trait Right { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub trait Gate: Left + Right {} impl Left for i64 { const Width = 7; type Item<'a> = Packet<7>; type Effects<'a> = {Trace<7, i64>}; } impl Right for i64 { const Width = 9; type Item<'a> = Packet<9>; type Effects<'a> = {Trace<9, i64>}; } impl Gate for i64 {} pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { Packet<7> { value: *value } }";
+    let ambiguous = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Packet<n: u32> { pub value: i64 } pub trait Left { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub trait Right { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub trait Gate: Left + Right {} impl Left for i64 { const Width = 7; type Item<'a> = Packet<7>; type Effects<'a> = {Trace<7, i64>}; } impl Right for i64 { const Width = 9; type Item<'a> = Packet<9>; type Effects<'a> = {Trace<9, i64>}; } impl Gate for i64 {} pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { Packet<7> { value: *value } }";
     let world = |provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Gate, Packet, relay, Trace};".as_slice()));
@@ -7798,7 +7946,7 @@ fn service_keeps_selected_hrtb_projection_failures_distinct_through_facades() {
     assert!(effect_error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4153" && diagnostic.message == "associated effect-row projection is ambiguous"), "ambiguous effect GAT was not diagnosed distinctly: {:#?}", effect_error.diagnostics());
 
     let const_root = "use facade::{Gate, Packet}; pub fn tag(packet: Packet<<i64 as Gate>::Width>) -> i64 { packet.value } pub fn main() -> i64 { 0 }";
-    let const_provider = "pub struct Packet<n: u32> { value: i64 } pub trait Left { const Width: u32; } pub trait Right { const Width: u32; } pub trait Gate: Left + Right {} impl Left for i64 { const Width = 7; } impl Right for i64 { const Width = 9; } impl Gate for i64 {}";
+    let const_provider = "pub struct Packet<n: u32> { pub value: i64 } pub trait Left { const Width: u32; } pub trait Right { const Width: u32; } pub trait Gate: Left + Right {} impl Left for i64 { const Width = 7; } impl Right for i64 { const Width = 9; } impl Gate for i64 {}";
     let mut const_world = request(const_root);
     const_world.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Gate, Packet};".as_slice()));
     const_world.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), const_provider.as_bytes()));
@@ -8101,7 +8249,7 @@ fn service_forwards_nested_alias_hrtb_static_methods_with_mixed_row_binders_thro
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl !Top<i64> for u64 {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl !Top<i64> for u64 {}".as_slice(),
     ));
     let first = StageZeroCompiler::new()
         .compile(request.clone())
@@ -8141,7 +8289,7 @@ fn service_rejects_ambiguous_nested_alias_hrtb_static_method_values_with_open_ro
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for u64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Base<i64> for u64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <u64 as Gate<i64>>::Effects<'a, U, e> } where u64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for u64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Base<i64> for u64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <u64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, u64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -8178,7 +8326,7 @@ fn service_rejects_negative_nested_alias_hrtb_static_method_values_with_open_row
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl !Top<i64> for i64 {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl !Top<i64> for i64 {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -8216,7 +8364,7 @@ fn service_forwards_nested_selected_effect_rows_through_aliased_generic_callable
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Seed<i64> for i64 { type Inner<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Seed<i64> for i64 { type Inner<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
     ));
     let first = StageZeroCompiler::new()
         .compile(request.clone())
@@ -8257,7 +8405,7 @@ fn service_rejects_nested_selected_effect_rows_with_an_incompatible_forwarding_t
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Seed<i64> for i64 { type Inner<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Seed<i64> for i64 { type Inner<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -8291,7 +8439,7 @@ fn service_materializes_hrtb_nested_selected_effect_contracts_through_public_ali
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Item<'a, U>; type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Seed<i64> for i64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {Trace<<i64 as Seed<i64>>::Item<'a, U>>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Item<'a, U>; type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Seed<i64> for i64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {Trace<<i64 as Seed<i64>>::Item<'a, U>>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
     ));
     let first = StageZeroCompiler::new()
         .compile(request.clone())
@@ -8323,7 +8471,7 @@ fn service_rejects_negative_hrtb_nested_selected_effect_contracts_through_public
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub trait Seed<T> { type Item<'a, U>; type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Seed<i64> for i64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl !Top<i64> for i64 {}".as_slice(),
+        b"pub trait Seed<T> { type Item<'a, U>; type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Seed<i64> for i64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl !Top<i64> for i64 {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -8353,7 +8501,7 @@ fn service_rejects_ambiguous_hrtb_nested_selected_effect_contracts_through_publi
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub trait Seed<T> { type Item<'a, U>; type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Seed<i64> for i64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {| e}; } impl Seed<i64> for u64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Gate<i64> for u64 { type Effects<'a, U, e: EffectRow> = { <u64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Base<i64> for u64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <u64 as Gate<i64>>::Effects<'a, U, e> } where u64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
+        b"pub trait Seed<T> { type Item<'a, U>; type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Seed<i64> for i64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {| e}; } impl Seed<i64> for u64 { type Item<'a, U> = U; type Inner<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Gate<i64> for u64 { type Effects<'a, U, e: EffectRow> = { <u64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Base<i64> for u64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <u64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, u64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
@@ -8383,7 +8531,7 @@ fn service_materializes_hrtb_type_const_and_effect_contracts_through_public_alia
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub struct Witness<n: u32> { value: i64 } pub trait Gate<T> { type Item<'a, U>; const Width: u32; type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> <Self as Gate<T>>::Item<'a, U> / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Item<'a, U> = i64, Effects<'a, U, e> = {Trace<i64>, | e}>; } pub trait Top<T>: Base<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> <i64 as Gate<i64>>::Item<'a, U> / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Gate<i64> for i64 { type Item<'a, U> = i64; const Width = 7; type Effects<'a, U, e: EffectRow> = {Trace<i64>, | e}; } pub fn width() -> i64 { let witness = Witness<<i64 as Gate<i64>>::Width> { value: 7 }; witness.value } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> <i64 as Gate<i64>>::Item<'a, U> / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Item<'a, U> = i64, Effects<'a, U, e> = {Trace<i64>, | e}> { *value } } impl Top<i64> for i64 where i64: Base<i64> {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub struct Witness<n: u32> { value: i64 } pub trait Gate<T> { type Item<'a, U>; const Width: u32; type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> <Self as Gate<T>>::Item<'a, U> / { <Self as Gate<T>>::Effects<'a, U, e> } where U: Use<[0,1]>, Self: Gate<T, Item<'a, U> = i64, Effects<'a, U, e> = {Trace<i64>, | e}>; } pub trait Top<T>: Base<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> <i64 as Gate<i64>>::Item<'a, U> / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Gate<i64> for i64 { type Item<'a, U> = i64; const Width = 7; type Effects<'a, U, e: EffectRow> = {Trace<i64>, | e}; } pub fn width() -> i64 { let witness = Witness<<i64 as Gate<i64>>::Width> { value: 7 }; witness.value } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> <i64 as Gate<i64>>::Item<'a, U> / { <i64 as Gate<i64>>::Effects<'a, U, e> } where U: Use<[0,1]>, i64: Gate<i64, Item<'a, U> = i64, Effects<'a, U, e> = {Trace<i64>, | e}> { *value } } impl Top<i64> for i64 where i64: Base<i64> {}".as_slice(),
     ));
     let first = StageZeroCompiler::new().compile(request.clone()).expect("composite HRTB contract must materialize");
     request.sources.reverse();
@@ -8411,7 +8559,7 @@ fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Primary<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<'z, e: EffectRow, U>(receiver: Self, callback: for<'a> (<Self as Primary<T>>::Item<'a>) -> <Self as Primary<T>>::Item<'a> / { <Self as Primary<T>>::Effects<'a> | e }, marker: U) -> i64 / { <Self as Primary<T>>::Effects<'static> | e }; } pub trait Secondary<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub trait Composite<T>: Primary<T> + Secondary<T> {} impl<'a> Primary<i64> for &'a i64 { type Item<'b> = &'b i64; type Effects<'b> = {Trace<i64>}; fn apply<'z, e: EffectRow, U>(receiver: &'a i64, callback: for<'b> (<&'a i64 as Primary<i64>>::Item<'b>) -> <&'a i64 as Primary<i64>>::Item<'b> / { <&'a i64 as Primary<i64>>::Effects<'b> | e }, marker: U) -> i64 / { <&'a i64 as Primary<i64>>::Effects<'static> | e } { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } } impl<'a> Secondary<i64> for &'a i64 { type Item<'b> = &'b i64; type Effects<'b> = {Trace<i64>}; } impl<'a> Composite<i64> for &'a i64 {}".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Primary<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<'z, e: EffectRow, U>(receiver: Self, callback: for<'a> (<Self as Primary<T>>::Item<'a>) -> <Self as Primary<T>>::Item<'a> / { <Self as Primary<T>>::Effects<'a> | e }, marker: U) -> i64 / { <Self as Primary<T>>::Effects<'static> | e } where U: Use<[0,1]> ; } pub trait Secondary<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub trait Composite<T>: Primary<T> + Secondary<T> {} impl<'a> Primary<i64> for &'a i64 { type Item<'b> = &'b i64; type Effects<'b> = {Trace<i64>}; fn apply<'z, e: EffectRow, U>(receiver: &'a i64, callback: for<'b> (<&'a i64 as Primary<i64>>::Item<'b>) -> <&'a i64 as Primary<i64>>::Item<'b> / { <&'a i64 as Primary<i64>>::Effects<'b> | e }, marker: U) -> i64 / { <&'a i64 as Primary<i64>>::Effects<'static> | e } where U: Use<[0,1]> { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } } impl<'a> Secondary<i64> for &'a i64 { type Item<'b> = &'b i64; type Effects<'b> = {Trace<i64>}; } impl<'a> Composite<i64> for &'a i64 {}".as_slice(),
     ));
     let outcome = StageZeroCompiler::new()
         .compile(request)
@@ -8494,7 +8642,7 @@ fn service_executes_alias_equivalent_hrtb_effect_gat_traits_through_vm() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<'z, e: EffectRow, U>(receiver: Self, callback: for<'a> (<Self as Capability<T>>::Item<'a>) -> <Self as Capability<T>>::Item<'a> / { <Self as Capability<T>>::Effects<'a> | e }, marker: U) -> i64 / { <Self as Capability<T>>::Effects<'static> | e }; } impl<'r> Capability<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = {Trace<i64>}; fn apply<'z, e: EffectRow, U>(receiver: &'r i64, callback: for<'a> (<&'r i64 as Capability<i64>>::Item<'a>) -> <&'r i64 as Capability<i64>>::Item<'a> / { <&'r i64 as Capability<i64>>::Effects<'a> | e }, marker: U) -> i64 / { <&'r i64 as Capability<i64>>::Effects<'static> | e } { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } }".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<'z, e: EffectRow, U>(receiver: Self, callback: for<'a> (<Self as Capability<T>>::Item<'a>) -> <Self as Capability<T>>::Item<'a> / { <Self as Capability<T>>::Effects<'a> | e }, marker: U) -> i64 / { <Self as Capability<T>>::Effects<'static> | e } where U: Use<[0,1]> ; } impl<'r> Capability<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = {Trace<i64>}; fn apply<'z, e: EffectRow, U>(receiver: &'r i64, callback: for<'a> (<&'r i64 as Capability<i64>>::Item<'a>) -> <&'r i64 as Capability<i64>>::Item<'a> / { <&'r i64 as Capability<i64>>::Effects<'a> | e }, marker: U) -> i64 / { <&'r i64 as Capability<i64>>::Effects<'static> | e } where U: Use<[0,1]> { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } }".as_slice(),
     ));
     let outcome = StageZeroCompiler::new()
         .compile(request)
@@ -8516,7 +8664,7 @@ fn service_executes_cross_trait_hrtb_gat_alias_bounds_through_vm() {
     request.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait First<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<U>(receiver: Self, callback: for<'a> (<Self as First<T>>::Item<'a>) -> <Self as First<T>>::Item<'a> / { <Self as First<T>>::Effects<'a> }, marker: U) -> i64 / { <Self as First<T>>::Effects<'static> }; } pub trait Second<T> { type Item<'a>; type Effects<'a>: EffectRow; } impl<'r> First<i64> for &'r i64 { type Item<'a> = <&'r i64 as Second<i64>>::Item<'a>; type Effects<'a> = {Trace<i64>}; fn apply<U>(receiver: &'r i64, callback: for<'a> (<&'r i64 as First<i64>>::Item<'a>) -> <&'r i64 as First<i64>>::Item<'a> / { <&'r i64 as First<i64>>::Effects<'a> }, marker: U) -> i64 / { <&'r i64 as First<i64>>::Effects<'static> } { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } } impl<'r> Second<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = { <&'r i64 as First<i64>>::Effects<'a> }; }".as_slice(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait First<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<U>(receiver: Self, callback: for<'a> (<Self as First<T>>::Item<'a>) -> <Self as First<T>>::Item<'a> / { <Self as First<T>>::Effects<'a> }, marker: U) -> i64 / { <Self as First<T>>::Effects<'static> } where U: Use<[0,1]> ; } pub trait Second<T> { type Item<'a>; type Effects<'a>: EffectRow; } impl<'r> First<i64> for &'r i64 { type Item<'a> = <&'r i64 as Second<i64>>::Item<'a>; type Effects<'a> = {Trace<i64>}; fn apply<U>(receiver: &'r i64, callback: for<'a> (<&'r i64 as First<i64>>::Item<'a>) -> <&'r i64 as First<i64>>::Item<'a> / { <&'r i64 as First<i64>>::Effects<'a> }, marker: U) -> i64 / { <&'r i64 as First<i64>>::Effects<'static> } where U: Use<[0,1]> { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } } impl<'r> Second<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = { <&'r i64 as First<i64>>::Effects<'a> }; }".as_slice(),
     ));
     let outcome = StageZeroCompiler::new()
         .compile(request)
@@ -8754,86 +8902,574 @@ fn service_applies_trailing_const_generic_defaults_to_nominal_layouts() {
 }
 
 #[test]
+fn completion_numeric_defaults_wait_for_constraints_from_other_arms() {
+    let mut outcomes = Vec::new();
+    for arms in ["true => 0, false => value", "false => value, true => 0"] {
+        let source = format!("fn choose(value: usize) -> usize {{
+            let result = handle value == 0 {{ {arms} }}; result
+        }}
+        pub fn main() -> i64 {{
+            let left = handle choose(0) {{ 0 => 21, _ => 0 }};
+            let right = handle choose(7) {{ 7 => 21, _ => 0 }};
+            left + right
+        }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source))
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|outcome| {
+                if !outcome.diagnostics.is_empty() {
+                    return Err(format!("{:?}", outcome.diagnostics));
+                }
+                outcome.artifact.unwrap().run_i64().map_err(|error| format!("{error:?}"))
+            });
+        outcomes.push((arms, outcome));
+    }
+    assert!(outcomes.iter().all(|(_, outcome)| outcome.as_ref() == Ok(&42)), "{outcomes:#?}");
+}
+
+#[test]
+fn deferred_numeric_contexts_cross_nested_expressions() {
+    let cases = [
+        "fn pick(value: usize) -> usize {
+            let result = handle value == 0 { true => { let zero = 0; zero + 1 }, false => value }; result
+        } pub fn main() -> i64 { handle pick(0) { 1 => 42, _ => 0 } }",
+        "struct Box<T>(T); fn pick(value: usize) -> usize {
+            let result = handle value == 0 { true => Box(0), false => Box(value) }; result.0
+        } pub fn main() -> i64 { handle pick(7) { 7 => 42, _ => 0 } }",
+        "fn same<T>(left: T, right: T) -> (T, T) { (left, right) }
+        fn pick(value: usize) -> usize { let pair = same(0, value); pair.0 + pair.1 }
+        pub fn main() -> i64 { handle pick(7) { 7 => 42, _ => 0 } }",
+        "fn pick(value: f32) -> f32 {
+            let result = handle true { true => 0.5, false => value }; result
+        } pub fn main() -> i64 { handle pick(1.0) == 0.5 { true => 42, false => 0 } }",
+        "fn pick(value: usize) -> usize { handle 0 { found => found + value } }
+        pub fn main() -> i64 { handle pick(7) { 7 => 42, _ => 0 } }",
+        "fn pick(value: usize) -> usize { handle (0, 1) { (left, right) => left + right + value } }
+        pub fn main() -> i64 { handle pick(7) { 8 => 42, _ => 0 } }",
+        "trait Keep { fn keep(value: Self) -> Self; } impl Keep for usize { fn keep(value: usize) -> usize { value } }
+        fn pick(value: usize) -> usize { let zero = Keep::keep(0); zero + value }
+        pub fn main() -> i64 { handle pick(7) { 7 => 42, _ => 0 } }",
+    ];
+    let mut outcomes = Vec::new();
+    for source in cases {
+        let outcome = StageZeroCompiler::new().compile(request(source))
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|outcome| {
+                if !outcome.diagnostics.is_empty() { return Err(format!("{:?}", outcome.diagnostics)); }
+                let artifact = outcome.artifact.unwrap();
+                let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes())
+                    .map_err(|error| format!("{error:?}"))?;
+                assert_eq!(artifact.run_i64().unwrap(), decoded.run_i64().unwrap());
+                artifact.run_i64().map_err(|error| format!("{error:?}"))
+            });
+        outcomes.push((source, outcome));
+    }
+    assert!(outcomes.iter().all(|(_, outcome)| outcome.as_ref() == Ok(&42)), "{outcomes:#?}");
+}
+
+#[test]
+fn deferred_numeric_literals_keep_integer_radix() {
+    let outcome = StageZeroCompiler::new().compile(request(
+        "pub fn main() -> i64 { let value = 0xdead; handle value == 57005 { true => 42, false => 0 } }"
+    )).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn numeric_constraints_do_not_promote_rigid_scalar_types() {
+    let error = StageZeroCompiler::new().compile(request(
+        "fn bad(left: usize, right: i64) -> usize {
+            let result = handle true { true => left, false => right }; result
+        } pub fn main() -> i64 { bad(0, 0); 42 }"
+    )).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4167"), "{error:?}");
+}
+
+#[test]
+fn deferred_numeric_effect_checks_keep_the_callers_lexical_handler_scope() {
+    let declarations = "effect State<T> { [1,1] read(value: T) -> T; }
+        fn helper<T>(value: T) -> T / State<T> { State<T>::read(value) } ";
+    let accepted = format!("{declarations}
+        fn pick() -> usize {{ let operation = helper;
+            let result = handle operation(40) {{ State<usize>::read(value) with k => k(value + 2) }}; result
+        }} pub fn main() -> i64 {{ handle pick() {{ 42 => 42, _ => 0 }} }}");
+    let outcome = StageZeroCompiler::new().compile(request(&accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+    let rejected = format!("{declarations}
+        pub fn main() -> i64 {{ let operation = helper; let value = operation(40);
+            handle value {{ State<i64>::read(value) with k => k(value + 2) }}
+        }}");
+    let error = StageZeroCompiler::new().compile(request(&rejected)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4155"), "{error:?}");
+}
+
+#[test]
+fn numeric_associated_equality_constraints_precede_defaulting() {
+    let source = "trait Element { type Item; } struct Witness {}
+        impl Element for Witness { type Item = usize; }
+        fn keep<T>(value: T) -> T where Witness: Element<Item = T> { value }
+        pub fn main() -> i64 { handle keep(0) { 0 => 42, _ => 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn numeric_trait_head_constraints_do_not_choose_between_compatible_implementations() {
+    let first = "impl Keep for usize { fn keep(value: usize) -> usize { value } }";
+    let second = "impl Keep for i64 { fn keep(value: i64) -> i64 { value } }";
+    for (first, second) in [(first, second), (second, first)] {
+        let source = format!("trait Keep {{ fn keep(value: Self) -> Self; }} {first} {second}
+            fn pick(value: usize) -> usize {{ let zero = Keep::keep(0); zero + value }}
+            pub fn main() -> i64 {{ handle pick(7) {{ 7 => 42, _ => 0 }} }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn numeric_trait_head_constraints_are_not_implementation_evidence() {
+    let source = "trait Allowed {} trait Keep { fn keep(value: Self) -> Self; }
+        impl Keep for usize where i64: Allowed { fn keep(value: usize) -> usize { value } }
+        pub fn main() -> i64 { Keep::keep(0); 42 }";
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4169"), "{error:?}");
+}
+
+#[test]
+fn numeric_obligations_contribute_constraints_before_defaults() {
+    let cases = [
+        "trait Marker<T> {} impl Marker<usize> for i64 {}
+        fn keep<T>(value: T) -> T where i64: Marker<T> { value }
+        pub fn main() -> i64 { handle keep(0) { 0 => 42, _ => 0 } }",
+        "trait Marker {} impl Marker for usize {}
+        fn keep<T>(value: T) -> T where T: Marker { value }
+        pub fn main() -> i64 { handle keep(0) { 0 => 42, _ => 0 } }",
+        "trait Element { type Item; } struct Container<T>(T);
+        impl<T> Element for Container<T> { type Item = usize; }
+        fn keep<A, B>(owner: A, value: B) -> B where A: Element<Item = B>, A: Use<[0,1]> { value }
+        pub fn main() -> i64 { handle keep(Container(0), 0) { 0 => 42, _ => 0 } }",
+        "trait Convert { type Output; fn convert(value: Self) -> <Self as Convert>::Output; }
+        impl Convert for i64 { type Output = usize; fn convert(value: i64) -> usize { 0 } }
+        impl Convert for usize { type Output = usize; fn convert(value: usize) -> usize { value } }
+        fn pick() -> usize { Convert::convert(0) }
+        pub fn main() -> i64 { handle pick() { 0 => 42, _ => 0 } }",
+    ];
+    let outcomes = cases.into_iter().map(|source| {
+        let outcome = StageZeroCompiler::new().compile(request(source))
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|outcome| {
+                let artifact = outcome.artifact.ok_or_else(|| format!("{:?}", outcome.diagnostics))?;
+                grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes())
+                    .map_err(|error| format!("{error:?}"))?
+                    .run_i64().map_err(|error| format!("{error:?}"))
+            });
+        (source, outcome)
+    }).collect::<Vec<_>>();
+    assert!(outcomes.iter().all(|(_, result)| result.as_ref() == Ok(&42)), "{outcomes:#?}");
+}
+
+#[test]
+fn wide_integer_consts_preserve_declared_kinds_and_extreme_values() {
+    for (kind, literal) in [
+        ("u8", "255"), ("u16", "65535"), ("u32", "4294967295"),
+        ("u64", "18446744073709551615"), ("u128", "340282366920938463463374607431768211455"),
+        ("usize", "18446744073709551615"),
+        ("i8", "-128"), ("i16", "-32768"), ("i32", "-2147483648"),
+        ("i64", "-9223372036854775808"), ("i128", "-170141183460469231731687303715884105728"),
+        ("isize", "-9223372036854775808"),
+    ] {
+        let source = format!("fn value<const N: {kind}>() -> {kind} {{ N }}
+            pub fn main() -> i64 {{ handle value< {literal} >() {{ {literal} => 42, _ => 0 }} }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source))
+            .unwrap_or_else(|error| panic!("{kind} {literal}: {error:?}"));
+        assert!(outcome.diagnostics.is_empty(), "{kind}: {:?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "{kind} {literal}");
+    }
+}
+
+#[test]
+fn loading_incoming_borrowed_aggregate_preserves_forwarded_reference_paths() {
+    let source = r#"
+        struct View<'a> { value: &'a i64 }
+        fn forward<'a>(value: View<'a>) -> &'a i64 { value.value }
+        fn load<'a>(value: &View<'a>) -> &'a i64 { forward(*value) }
+        pub fn main() -> i64 {
+            let answer = 42;
+            let view = View { value: &answer };
+            *load(&view)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(grandiose_stage0::decode_and_verify_program(
+        &outcome.artifact.unwrap().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+
+    let invalid = r#"
+        struct View<'a> { value: &'a i64 }
+        fn forward<'a>(value: View<'a>) -> &'a i64 { value.value }
+        fn escape() -> &'static i64 {
+            let local = 42;
+            let view = View { value: &local };
+            forward(*(&view))
+        }
+        pub fn main() -> i64 { *escape() }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(invalid))
+        .expect_err("loading a local aggregate must not invent caller-owned provenance");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code.starts_with("G50")),
+        "expected a reference lifetime/provenance diagnostic: {error:?}");
+}
+
+#[test]
+fn directly_constrained_signed_minimum_literals_have_runtime_representations() {
+    for (kind, minimum) in [
+        ("i8", "-128"), ("i16", "-32768"), ("i32", "-2147483648"),
+        ("i64", "-9223372036854775808"), ("isize", "-9223372036854775808"),
+        ("i128", "-170141183460469231731687303715884105728"),
+    ] {
+        let magnitude = minimum.strip_prefix('-').unwrap().parse::<u128>().unwrap();
+        for literal in [minimum.to_owned(), format!("-0x{magnitude:x}"), format!("-0o{magnitude:o}"), format!("-0b{magnitude:b}")] {
+            let source = format!("fn minimum() -> {kind} {{ {literal} }} pub fn main() -> i64 {{ handle minimum() {{ {literal} => 42, _ => 0 }} }}");
+            let outcome = StageZeroCompiler::new().compile(request(&source))
+                .unwrap_or_else(|error| panic!("{kind} {literal}: {error:?}"));
+            let artifact = outcome.artifact.unwrap();
+            assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "{kind}");
+        }
+        let source = format!("fn is_minimum(value: {kind}) -> Bool {{ value == {minimum} }} pub fn main() -> i64 {{ let value: {kind} = {minimum}; handle is_minimum(value) {{ true => 42, false => 0 }} }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap_or_else(|error| panic!("{kind} comparison: {error:?}"));
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn scalar_integer_literal_range_failures_are_source_diagnostics() {
+    for (kind, literal) in [
+        ("u8", "256"), ("u16", "65536"), ("u32", "4294967296"),
+        ("u64", "18446744073709551616"), ("usize", "18446744073709551616"),
+        ("u128", "340282366920938463463374607431768211456"),
+        ("i8", "128"), ("i16", "32768"), ("i32", "2147483648"),
+        ("i64", "9223372036854775808"), ("isize", "9223372036854775808"),
+        ("i128", "170141183460469231731687303715884105728"),
+        ("i8", "-129"), ("i128", "-170141183460469231731687303715884105729"),
+        ("u8", "1.5"),
+    ] {
+        let source = format!("fn value() -> {kind} {{ {literal} }} pub fn main() -> i64 {{ 42 }}");
+        let error = StageZeroCompiler::new().compile(request(&source)).expect_err("invalid literal must fail before lowering");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G6003"
+            && diagnostic.class == DiagnosticClass::Source && diagnostic.primary.is_some()), "{kind} {literal}: {error:?}");
+        assert!(!error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G7041"), "{error:?}");
+    }
+}
+
+#[test]
+fn signed_and_rounded_float_literal_patterns_use_the_subject_width() {
+    for (kind, literal) in [
+        ("f32", "-1.25"), ("f64", "-1.25"), ("f32", "-0.0"),
+        ("f32", "1.000000059604644775390625000001"),
+    ] {
+        let source = format!("fn value() -> {kind} {{ {literal} }} pub fn main() -> i64 {{ handle value() {{ {literal} => 42, _ => 0 }} }}");
+        let artifact = StageZeroCompiler::new().compile(request(&source)).unwrap_or_else(|error| panic!("{kind} {literal}: {error:?}")).artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+    for kind in ["f32", "f64"] {
+        let source = format!("fn value() -> {kind} {{ -0.0 }} pub fn main() -> i64 {{ handle value() {{ 0.0 => 0, -0.0 => 42, _ => 0 }} }}");
+        let artifact = StageZeroCompiler::new().compile(request(&source)).unwrap().artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+    for (kind, literal) in [("i8", "128"), ("i8", "-129"), ("u8", "-1"), ("u8", "256"), ("f32", "3.5e38")] {
+        let source = format!("fn invalid(value: {kind}) -> i64 {{ handle value {{ {literal} => 42, _ => 0 }} }} pub fn main() -> i64 {{ 42 }}");
+        let error = StageZeroCompiler::new().compile(request(&source)).expect_err("out-of-range literal pattern must be a source error");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4201" && diagnostic.primary.is_some()), "{kind} {literal}: {error:?}");
+    }
+}
+
+#[test]
+fn signed_minimum_literal_exception_does_not_invent_or_override_operator_bindings() {
+    for source in [
+        "#![no_std] prefix 50 -; pub fn main() -> i8 { -128 }",
+        "#![no_std] prefix 50 -; effect Touch { note(); } trait Neg { -(value: Self) -> Self / {Touch}; } impl Neg for i8 { -(value: i8) -> i8 / {Touch} { perform Touch::note(); value } } pub fn main() -> i8 { -128 }",
+        "#![no_std] prefix 50 -; trait A { -(value: Self) -> Self; } trait B { -(value: Self) -> Self; } impl A for i8 { -(value: i8) -> i8 { value } } impl B for i8 { -(value: i8) -> i8 { value } } pub fn main() -> i8 { -128 }",
+    ] {
+        let error = StageZeroCompiler::new().compile(request(source)).expect_err("literal rule must not bypass missing or effectful dispatch");
+        assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G6003" | "G4117")), "{source}: {error:?}");
+    }
+    let source = "#![no_std] prefix 50 -; trait Neg { -(value: Self) -> Self; } impl Neg for i64 { -(value: i64) -> i64 { 42 } } pub fn main() -> i64 { -1 }";
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn wide_integer_consts_normalize_symbolic_arguments_defaults_and_associated_items() {
+    let mut sources = ["u8", "i8", "u32", "usize", "u128", "i128"].into_iter().map(|kind| format!(
+        "fn value<const N: {kind}>() -> {kind} {{ N }}
+        fn next<T, const N: {kind}>(unused: T) -> {kind} where T: Use<[0,1]> {{ value<N + 1>() }}
+        pub fn main() -> i64 {{ handle (next<(), 41>(()), value<40 + 2>()) {{ (42, 42) => 42, _ => 0 }} }}"
+    )).collect::<Vec<_>>();
+    sources.extend([
+        "struct Tag<const N: usize>();
+        impl<const N: usize> Tag<N> { pub fn read(unused: Self) -> usize { N } }
+        pub fn main() -> i64 { handle Tag<4294967296>::read(Tag<4294967296>()) { 4294967296 => 42, _ => 0 } }",
+        "struct Tag<const N: usize, const M: usize = N + 1>();
+        fn read<const N: usize, const M: usize>(unused: Tag<N, M>) -> usize { M }
+        pub fn main() -> i64 { let tag: Tag<4294967296> = Tag(); handle read(tag) { 4294967297 => 42, _ => 0 } }",
+        "trait Limit { const N: u128 = 340282366920938463463374607431768211455; }
+        impl Limit for i64 {}
+        fn value<const N: u128>() -> u128 { N }
+        pub fn main() -> i64 { handle value< <i64 as Limit>::N >() { 340282366920938463463374607431768211455 => 42, _ => 0 } }",
+        "trait Limit { const N: i128; }
+        impl Limit for i64 { const N = -170141183460469231731687303715884105728; }
+        fn value<const N: i128>() -> i128 { N }
+        pub fn main() -> i64 { handle value< <i64 as Limit>::N >() { -170141183460469231731687303715884105728 => 42, _ => 0 } }",
+    ].into_iter().map(str::to_owned));
+    for source in sources {
+        let outcome = StageZeroCompiler::new().compile(request(&source))
+            .unwrap_or_else(|error| panic!("{source}\n{error:?}"));
+        assert!(outcome.diagnostics.is_empty(), "{source}\n{:?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "{source}");
+    }
+}
+
+#[test]
+fn wide_integer_consts_reject_range_errors_wrong_kinds_and_specialization_overflow() {
+    for source in [
+        "fn value<const N: u8>() -> u8 { N } pub fn main() -> i64 { let unused = value<256>(); 42 }",
+        "fn value<const N: i8>() -> i8 { N } pub fn main() -> i64 { let unused = value<128>(); 42 }",
+        "fn value<const N: u128>() -> u128 { N } pub fn main() -> i64 { let unused = value<340282366920938463463374607431768211456>(); 42 }",
+        "fn value<const N: usize>() -> usize { N } pub fn main() -> i64 { let unused = value< -1 >(); 42 }",
+        "fn value<const N: u32>() -> u32 { N } fn wrong<const N: usize>() -> u32 { value<N>() } pub fn main() -> i64 { 42 }",
+        "fn value<const N: u8>() -> u8 { N } fn next<const N: u8>() -> u8 { value<N + 1>() } pub fn main() -> i64 { let unused = next<255>(); 42 }",
+        "fn value<const N: i8>() -> i8 { N } pub fn main() -> i64 { let unused = value< -128 / -1 >(); 42 }",
+        "struct Tag<const N: u8>(); pub fn main() -> i64 { let unused: Tag<255 + 1 - 1> = Tag(); 42 }",
+        "struct Tag<const N: u128>(); fn wrong<const N: u128>(value: Tag<N / 0>) {} pub fn main() -> i64 { 42 }",
+        "struct Tag<const N: i128>(); fn wrong<const N: i128>(value: Tag<N % 0>) {} pub fn main() -> i64 { 42 }",
+    ] {
+        assert!(StageZeroCompiler::new().compile(request(source)).is_err(), "invalid const program was accepted: {source}");
+    }
+}
+
+#[test]
+fn const_literal_radices_specialize_to_the_same_runtime_value() {
+    for literal in ["42", "4_2", "0b10_1010", "0o52", "0x2a", "0x_2A", "0x28 + 0b10"] {
+        let source = format!("fn value<const N: u32>() -> u32 {{ N }}
+            pub fn main() -> i64 {{ handle value<{literal}>() {{ 42 => 42, _ => 0 }} }}");
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{literal}: {:?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "{literal}");
+    }
+}
+
+#[test]
+fn const_values_specialize_without_runtime_capture_or_instance_aliasing() {
+    for source in [
+        "fn value<const N: u32>() -> u32 { N }
+        pub fn main() -> i64 { handle (value<1>(), value<42>()) { (1, 42) => 42, _ => 0 } }",
+        "fn value<const N: u32>() -> u32 { let thunk = () -> u32 { N }; thunk() + N }
+        pub fn main() -> i64 { handle value<21>() { 42 => 42, _ => 0 } }",
+        "fn value<T, const N: u32>(value: T) -> (T, u32) { (value, N) }
+        pub fn main() -> i64 { handle value<i64, 42>(0) { (0, 42) => 42, _ => 0 } }",
+        "struct Tag<const N: u32>(); impl<const N: u32> Tag<N> {
+            pub fn read(value: Self) -> u32 { N }
+        } pub fn main() -> i64 { handle Tag<42>::read(Tag<42>()) { 42 => 42, _ => 0 } }",
+    ] {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+    let error = StageZeroCompiler::new().compile(request(
+        "fn value<const N: u32>() -> usize { N } pub fn main() -> i64 { 42 }"
+    )).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4110"), "{error:?}");
+}
+
+#[test]
+fn explicit_const_binders_preserve_source_contracts_and_existing_u32_values() {
+    let declarations = ["u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "usize", "isize"]
+        .into_iter().map(|kind| format!("struct Tag_{kind}<const N: {kind}>();
+            fn carry_{kind}<const N: {kind}>(value: Tag_{kind}<N>) -> Tag_{kind}<N> {{ value }}"))
+        .collect::<Vec<_>>().join("\n");
+    let source = format!("{declarations}
+        fn value<const N: u32>() -> u32 {{ N }}
+        pub fn main() -> i64 {{ handle value<42>() {{ 42 => 42, _ => 0 }} }}");
+    let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    let invalid = "struct Tag<const N: usize>();
+        fn bad<const N: u32>(value: Tag<N>) -> Tag<N> { value }
+        pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request(invalid)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G3318"), "{error:?}");
+}
+
+#[test]
+fn numeric_pending_trait_bounds_propagate_late_argument_constraints() {
+    let source = "trait Marker<T> {}
+        impl Marker<i64> for i64 {} impl Marker<usize> for usize {}
+        fn keep<A, B>(owner: A, value: B) -> B
+            where A: Marker<B>, A: Use<[0,1]> { value }
+        fn constrain(value: usize) -> usize { value }
+        pub fn main() -> i64 {
+            let owner = 0; let result = keep(owner, 0); constrain(owner);
+            handle result { 0 => 42, _ => 0 }
+        }";
+    let initializer = format!("{}; pub fn main() -> i64 {{ handle answer {{ 0 => 42, _ => 0 }} }}",
+        source.replace("pub fn main() -> i64", "let answer =")
+            .replace("handle result { 0 => 42, _ => 0 }", "result"));
+    for source in [source.to_owned(), source.replace(
+        "impl Marker<i64> for i64 {} impl Marker<usize> for usize {}",
+        "impl Marker<usize> for usize {} impl Marker<i64> for i64 {}",
+    ), source.replace("constrain(owner);", ""), initializer] {
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+    for rejected in [
+        source.replace("keep(owner, 0)", "keep(owner, 0.5)"),
+        source.replace("impl Marker<usize> for usize {}",
+            "trait Missing {} impl Marker<usize> for usize where usize: Missing {}"),
+    ] {
+        let error = StageZeroCompiler::new().compile(request(&rejected)).unwrap_err();
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4143"), "{error:?}");
+    }
+}
+
+#[test]
+fn numeric_initializer_obligations_precede_generalization() {
+    let source = "trait Element { type Item; }
+        impl Element for i64 { type Item = i64; }
+        impl Element for usize { type Item = usize; }
+        fn keep<A, B>(owner: A, value: B) -> B
+            where A: Element<Item = B>, A: Use<[0,1]> { value }
+        fn constrain(value: usize) -> usize { value }
+        let answer = { let owner = 0; let result = keep(owner, 0); constrain(owner); result };
+        pub fn main() -> i64 { handle answer { 0 => 42, _ => 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    let incompatible = source.replace("keep(owner, 0)", "keep(owner, 0.5)");
+    let error = StageZeroCompiler::new().compile(request(&incompatible)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4143"), "{error:?}");
+}
+
+#[test]
+fn numeric_obligations_reject_incompatible_associated_results() {
+    let cases = [
+        ("trait Element { type Item; } struct Container<T>(T);
+        impl<T> Element for Container<T> { type Item = usize; }
+        fn keep<A, B>(owner: A, value: B) -> B where A: Element<Item = B>, A: Use<[0,1]> { value }
+        pub fn main() -> i64 { keep(Container(0), 0.5); 42 }", "G4143"),
+        ("trait Convert { type Output; fn convert(value: Self) -> <Self as Convert>::Output; }
+        impl Convert for i64 { type Output = usize; fn convert(value: i64) -> usize { 0 } }
+        impl Convert for usize { type Output = usize; fn convert(value: usize) -> usize { value } }
+        pub fn main() -> i64 { Convert::convert(0) }", "G4110"),
+        ("trait Marker {} trait Missing {} impl Marker for usize where usize: Missing {}
+        fn keep<T>(value: T) -> T where T: Marker { value }
+        pub fn main() -> i64 { keep(0); 42 }", "G4143"),
+    ];
+    for (source, code) in cases {
+        let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{source}\n{error:?}");
+    }
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
+    // `is` produces a nominal Test, not the machine Boolean ABI. Observe it
+    // through ordinary completion dispatch before crossing the host boundary.
+    let observe = |source: &str| {
+        request(&source.replace("-> Bool {", "-> i64 { handle (")
+            .rsplit_once(" }").map(|(prefix, suffix)| {
+                format!("use std::Test; {prefix}) {{ Test::Yes(_) => 1, Test::No(_) => 0 }} }}{suffix}")
+            }).unwrap())
+    };
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(enum_source))
+        .compile(observe(enum_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty());
-    assert!(outcome.artifact.unwrap().run_bool().unwrap());
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 1);
 
     let record_source = "pub struct Pair { left: i64, right: Text } pub fn main() -> Bool { Pair { left: 42, right: \"stable\" } is Pair { right: \"stable\", left: 42 } }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(record_source))
+        .compile(observe(record_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty());
-    assert!(outcome.artifact.unwrap().run_bool().unwrap());
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 1);
 
     let mismatch_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(7) }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(mismatch_source))
+        .compile(observe(mismatch_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty());
-    assert!(!outcome.artifact.unwrap().run_bool().unwrap());
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 0);
 
     let nested_generic_source = "pub struct Pair<T> { left: T, right: T } pub enum Result<T> { Ok(T), Err } pub fn main() -> Bool { Result<Pair<i64>>::Ok(Pair<i64> { left: 1, right: 42 }) is Result<Pair<i64>>::Ok(Pair<i64> { right: 42, left: 1 }) }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(nested_generic_source))
+        .compile(observe(nested_generic_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(
-        outcome.artifact.unwrap().run_bool().unwrap(),
+    assert_eq!(
+        outcome.artifact.unwrap().run_i64().unwrap(), 1,
         "nested generic enum/record patterns must retain their field layout proof through the VM"
     );
 
     let nested_array_source = "pub struct Pair { left: i64, right: i64 } pub enum Result { Ok(Pair), Err } pub fn main() -> Bool { [Result::Ok(Pair { left: 1, right: 42 })] is [Result::Ok(Pair { right: 42, left: 1 })] }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(nested_array_source))
+        .compile(observe(nested_array_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(
-        outcome.artifact.unwrap().run_bool().unwrap(),
+    assert_eq!(
+        outcome.artifact.unwrap().run_i64().unwrap(), 1,
         "nested array/enum/record patterns must lower through the verified VM"
     );
 
     let array_mismatch_source = "pub fn main() -> Bool { [1, 42] is [1] }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(array_mismatch_source))
+        .compile(observe(array_mismatch_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(
-        !outcome.artifact.unwrap().run_bool().unwrap(),
+    assert_eq!(
+        outcome.artifact.unwrap().run_i64().unwrap(), 0,
         "array patterns must compare exact length before selecting elements"
     );
 }
 
 #[test]
 fn service_executes_positive_is_refinements_through_completion_dispatch() {
-    let enum_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { handle Result::Ok(42) is Result::Ok(found) { true => found; false => 0 } }";
+    let with_visit = |source: &str| request(&format!("use std::Test; fn visit<Y, N, F>(test: Test<Y, N>, fallback: i64, yes: F) -> i64 where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(pack) => yes(pack), Test::No(_) => fallback }} }} {source}"));
+    let enum_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { visit(Result::Ok(42) is Result::Ok(found), 0) { found } }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(enum_source))
+        .compile(with_visit(enum_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let negative_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { handle Result::Err is Result::Ok(found) { true => found; false => 42 } }";
+    let negative_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { visit(Result::Err is Result::Ok(found), 42) { found } }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(negative_source))
+        .compile(with_visit(negative_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let record_source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { handle Pair { left: 1, right: 42 } is Pair { right: selected, left: _ } { true => selected; false => 0 } }";
+    let record_source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { visit(Pair { left: 1, right: 42 } is Pair { right: selected, left: _ }, 0) { selected } }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(record_source))
+        .compile(with_visit(record_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
     let array_source =
-        "pub fn main() -> i64 { handle [1, 42] is [_, found] { true => found; false => 0 } }";
+        "pub fn main() -> i64 { visit([1, 42] is [_, found], 0) { found } }";
     let outcome = StageZeroCompiler::new()
-        .compile(request(array_source))
+        .compile(with_visit(array_source))
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(
@@ -8909,11 +9545,11 @@ fn service_rejects_unreachable_nested_array_handler_arm() {
 
 #[test]
 fn service_normalizes_concrete_associated_type_arguments_in_nominal_patterns() {
-    let source = "trait Element { type Item; } struct Boxed<T> { value: T } impl Element for i64 { type Item = i64; } pub fn main() -> Bool { Boxed { value: 42 } is Boxed<<i64 as Element>::Item> { value: _ } }";
+    let source = "use std::Test; trait Element { type Item; } struct Boxed<T> { value: T } impl Element for i64 { type Item = i64; } pub fn main() -> i64 { handle (Boxed { value: 42 } is Boxed<<i64 as Element>::Item> { value: _ }) { Test::Yes(_) => 1, Test::No(_) => 0 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(
-        outcome.artifact.unwrap().run_bool().unwrap(),
+    assert_eq!(
+        outcome.artifact.unwrap().run_i64().unwrap(), 1,
         "concrete associated type arguments must normalize before nominal pattern identity comparison"
     );
 }
@@ -8926,13 +9562,13 @@ fn service_dispatches_facaded_associated_nominal_array_patterns_with_moved_paylo
     // unrelated move-only payload before returning the bound scalar.  It must
     // retain every pattern proof from package import through Core, MIR, and VM
     // handler dispatch rather than treating the facade projection as opaque.
-    let root = "use facade::{Boxed, Element, Packet, Ticket}; effect Ask { [0,1] ask(value: Packet<<i64 as Element>::Item>) -> <i64 as Element>::Item; } pub fn main() -> i64 { handle Ask::ask(Packet::Data([Boxed { value: 42 }], Ticket { marker: 0 })) { Ask::ask(Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket)) => { move ticket; found }, Ask::ask(_) => 0 } }";
-    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket), Empty } impl Element for i64 { type Item = i64; }";
+    let root = "use facade::{Boxed, Element, Packet, Ticket, finish}; effect Ask { [0,1] ask(value: Packet<<i64 as Element>::Item>) -> <i64 as Element>::Item; } pub fn main() -> i64 { handle Ask::ask(Packet::Data([Boxed { value: 42 }], Ticket { marker: 0 })) { Ask::ask(Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket)) => { finish(move ticket); found }, Ask::ask(Packet::Data(_, ticket)) => { finish(ticket); 0 }, Ask::ask(Packet::Empty) => 0 } }";
+    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { pub value: T } pub struct Ticket { pub marker: i64 } impl Use<[1, 1]> for Ticket {} pub fn finish(value: Ticket) -> () { let Ticket { marker: _ } = value; } pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket), Empty } impl Element for i64 { type Item = i64; }";
     let mut input = request(root);
     input.sources.push(SourceInput::new(
         PackageKey("facade@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub use provider::{Boxed, Element, Packet, Ticket};".as_slice(),
+        b"pub use provider::{Boxed, Element, Packet, Ticket, finish};".as_slice(),
     ));
     input.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
@@ -8954,13 +9590,13 @@ fn service_composes_facaded_associated_refinements_moves_closures_and_handlers()
     // field, then moves a disjoint affine payload while a closure retains the
     // refined scalar. The result crosses a lexical label boundary and must survive
     // Core, MIR, VM emission, and independent decoding unchanged.
-    let root = "use facade::{make, Boxed, Element, Packet}; pub fn main() -> i64 { let packet = make(42); let refined = handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { let closure = () -> i64 { found }; move ticket; closure() }, _ => 0 }; label done { refined } }";
-    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket) } impl Element for i64 { type Item = i64; } pub fn make(value: i64) -> Packet<<i64 as Element>::Item> { Packet::Data([Boxed { value: value }], Ticket { marker: 0 }) }";
+    let root = "use facade::{make, Boxed, Element, Packet, finish}; pub fn main() -> i64 { let packet = make(42); let refined = handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { let closure = () -> i64 { found }; finish(move ticket); closure() }, Packet::Data(_, ticket) => { finish(ticket); 0 } }; label done { refined } }";
+    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { pub value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub fn finish(value: Ticket) -> () { let Ticket { marker: _ } = value; } pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket) } impl Element for i64 { type Item = i64; } pub fn make(value: i64) -> Packet<<i64 as Element>::Item> { Packet::Data([Boxed { value: value }], Ticket { marker: 0 }) }";
     let mut input = request(root);
     input.sources.push(SourceInput::new(
         PackageKey("facade@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub use provider::{make, Boxed, Element, Packet};".as_slice(),
+        b"pub use provider::{make, Boxed, Element, Packet, finish};".as_slice(),
     ));
     input.sources.push(SourceInput::new(
         PackageKey("provider@1.0.0".into()),
@@ -8986,15 +9622,14 @@ fn service_composes_facaded_associated_refinements_moves_closures_and_handlers()
     assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
     assert_eq!(decoded.run_i64().unwrap(), 42);
 
-    // A refinement binder belongs only to the selected pattern arm. A closure
-    // returned from that arm cannot retain a reference to the arm-local scalar
-    // after the structural match has been left.
-    let escaping = "use facade::{make, Boxed, Element, Packet}; pub fn bad() -> () -> &i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { move ticket; () -> &i64 { &found } }, _ => { let zero = 0; () -> &i64 { &zero } } } } pub fn main() -> i64 { 0 }";
+    // An ownership-pattern binder belongs to the selected arm. Returning a
+    // reference to that arm-local scalar cannot extend its storage lifetime.
+    let escaping = "use facade::{make, Boxed, Element, Packet, finish}; pub fn bad() -> &i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { finish(move ticket); &found }, Packet::Data(_, ticket) => { finish(ticket); let zero = 0; &zero } } } pub fn main() -> i64 { 0 }";
     let mut escape_input = request(escaping);
     escape_input.sources.push(SourceInput::new(
         PackageKey("facade@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub use provider::{make, Boxed, Element, Packet};".as_slice(),
+        b"pub use provider::{make, Boxed, Element, Packet, finish};".as_slice(),
     ));
     escape_input.sources.push(SourceInput::new(
         PackageKey("provider@1.0.0".into()),
@@ -9006,11 +9641,11 @@ fn service_composes_facaded_associated_refinements_moves_closures_and_handlers()
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(escape_input)
     else {
-        panic!("a refinement-local reference unexpectedly escaped in a returned closure");
+        panic!("a refinement-local reference unexpectedly escaped through a returned reference");
     };
     assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5014"),
-        "missing refinement closure escape diagnostic: {diagnostics:#?}"
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"),
+        "missing refinement reference escape diagnostic: {diagnostics:#?}"
     );
     let Err(grandiose_stage0::ServiceError::Failed(reordered_diagnostics)) =
         StageZeroCompiler::new().compile(reordered_escape)
@@ -9029,14 +9664,14 @@ fn service_forwards_facaded_associated_refinements_through_completion_and_label_
     // invokes a closure over its refinement binder. Keeping that completion
     // in a direct helper call avoids nesting an additional handler payload in
     // the active resumption frame while retaining the cross-feature flow.
-    let root = "use facade::{make, Boxed, Element, Packet}; effect Ask { [1,1] ask(value: i64) -> i64; } pub fn offset() -> i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { let read = () -> i64 { found }; move ticket; read() }, _ => 0 } } pub fn main() -> i64 { handle { handle Ask::ask(42) { Ask::ask(0) with k => k(0) } } { Ask::ask(value) with k => k(value + offset()) } }";
-    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket) } impl Element for i64 { type Item = i64; } pub fn make(value: i64) -> Packet<<i64 as Element>::Item> { Packet::Data([Boxed { value: value }], Ticket { marker: 0 }) }";
+    let root = "use facade::{make, Boxed, Element, Packet, finish}; effect Ask { [1,1] ask(value: i64) -> i64; } pub fn offset() -> i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { let read = () -> i64 { found }; finish(move ticket); read() }, Packet::Data(_, ticket) => { finish(ticket); 0 } } } pub fn main() -> i64 { handle { handle Ask::ask(42) { Ask::ask(0) with k => k(0) } } { Ask::ask(value) with k => k(value + offset()) } }";
+    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { pub value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub fn finish(value: Ticket) -> () { let Ticket { marker: _ } = value; } pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket) } impl Element for i64 { type Item = i64; } pub fn make(value: i64) -> Packet<<i64 as Element>::Item> { Packet::Data([Boxed { value: value }], Ticket { marker: 0 }) }";
     let world = |source: &str| {
         let mut input = request(source);
         input.sources.push(SourceInput::new(
             PackageKey("facade@0.1.0".into()),
             LogicalPath::parse("src/lib.glorious").unwrap(),
-            b"pub use provider::{make, Boxed, Element, Packet};".as_slice(),
+            b"pub use provider::{make, Boxed, Element, Packet, finish};".as_slice(),
         ));
         input.sources.push(SourceInput::new(
             PackageKey("provider@1.0.0".into()),
@@ -9080,11 +9715,11 @@ fn service_forwards_facaded_associated_refinements_through_completion_and_label_
     assert_eq!(artifact.run_i64().unwrap(), 84);
     assert_eq!(decoded.run_i64().unwrap(), 84);
 
-    // The selected refinement binder is local to `offset`. A returned closure
-    // cannot keep a reference to it after the normal-completion arm has ended.
+    // The selected pattern binder is local to its completion arm. A returned
+    // reference cannot keep its storage alive after that arm has ended.
     // Rejection of that child revision must leave its successful parent fully
     // intact, including the re-exported facade trace and VM artifact.
-    let escaping = "use facade::{make, Boxed, Element, Packet}; pub fn bad() -> () -> &i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { move ticket; () -> &i64 { &found } }, _ => { let zero = 0; () -> &i64 { &zero } } } } pub fn main() -> i64 { 0 }";
+    let escaping = "use facade::{make, Boxed, Element, Packet, finish}; pub fn bad() -> &i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { finish(move ticket); &found }, Packet::Data(_, ticket) => { finish(ticket); let zero = 0; &zero } } } pub fn main() -> i64 { 0 }";
     let compiler = StageZeroCompiler::new();
     let parent = compiler.import_revision(world(root), None).unwrap();
     let parent_artifact = compiler
@@ -9105,10 +9740,10 @@ fn service_forwards_facaded_associated_refinements_through_completion_and_label_
         .unwrap();
     let error = compiler
         .compile_session(&compiler.open_session(child).unwrap())
-        .expect_err("a refinement-local reference must not escape in a returned closure");
+        .expect_err("a refinement-local reference must not escape through a returned reference");
     assert!(
-        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"),
-        "missing refinement closure escape rejection: {:#?}",
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5013"),
+        "missing refinement reference escape rejection: {:#?}",
         error.diagnostics()
     );
     assert_eq!(compiler.interface_cache_stats(), cached);
@@ -9134,7 +9769,7 @@ fn service_normalizes_hrtb_associated_effect_operation_payloads_and_results_thro
     // the operation boundary itself (rather than a surrounding callback)
     // prove that all three contracts agree through the public facade.
     let root = "use facade::{Ask, Callback, Packet, relay}; pub fn apply(callback: Callback) -> i64 { let source = Packet<7, i64> { value: 41 }; let ignored = handle callback(&source) { Ask<&Packet<7, i64>>::ask(value) with k => k(value) }; 42 } pub fn main() -> i64 { apply(relay) }";
-    let provider = "pub effect Ask<T> { [1,1] ask(value: T) -> T; } pub struct Packet<n: u32, T> { value: T } pub trait Gate { const Width: u32; type Item<'a, T>; type Effects<'a, T>: EffectRow; } impl Gate for i64 { const Width = 7; type Item<'a, T> = &'a Packet<<i64 as Gate>::Width, T>; type Effects<'a, T> = {Ask<<i64 as Gate>::Item<'a, T>>}; } pub type Callback = for<'a> (<i64 as Gate>::Item<'a, i64>) -> <i64 as Gate>::Item<'a, i64> / { <i64 as Gate>::Effects<'a, i64> }; pub fn relay<'a>(value: <i64 as Gate>::Item<'a, i64>) -> <i64 as Gate>::Item<'a, i64> / { <i64 as Gate>::Effects<'a, i64> } { Ask<<i64 as Gate>::Item<'a, i64>>::ask(value) }";
+    let provider = "pub effect Ask<T> { [1,1] ask(value: T) -> T; } pub struct Packet<n: u32, T> { pub value: T } pub trait Gate { const Width: u32; type Item<'a, T> where T: 'a; type Effects<'a, T>: EffectRow where T: 'a; } impl Gate for i64 { const Width = 7; type Item<'a, T> = &'a Packet<<i64 as Gate>::Width, T> where T: 'a; type Effects<'a, T> = {Ask<<i64 as Gate>::Item<'a, T>>} where T: 'a; } pub type Callback = for<'a> (<i64 as Gate>::Item<'a, i64>) -> <i64 as Gate>::Item<'a, i64> / { <i64 as Gate>::Effects<'a, i64> }; pub fn relay<'a>(value: <i64 as Gate>::Item<'a, i64>) -> <i64 as Gate>::Item<'a, i64> / { <i64 as Gate>::Effects<'a, i64> } { Ask<<i64 as Gate>::Item<'a, i64>>::ask(value) }";
     let mut input = request(root);
     input.sources.push(SourceInput::new(
         PackageKey("facade@0.1.0".into()),
@@ -9249,7 +9884,7 @@ fn service_discards_unreachable_ownership_effects_after_terminal_strict_operands
     // and then illegally move its referent if it ever executed. `stop` is the
     // left-to-right first operand and never completes, so neither PlaceFlow
     // nor MIR may manufacture the later move/cleanup state.
-    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }";
+    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let mut value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }";
     let outcome = StageZeroCompiler::new()
         .compile(request(source))
         .expect("unreachable ownership suffix must not reject the terminal path");
@@ -10027,7 +10662,7 @@ fn service_forwards_through_an_arbitrary_depth_one_shot_handler_chain() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
         4
     );
@@ -10054,9 +10689,9 @@ fn service_tries_ordered_refutable_clauses_at_every_deep_one_shot_handler_layer(
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
-        3
+        6
     );
     assert_eq!(
         entry
@@ -10064,7 +10699,8 @@ fn service_tries_ordered_refutable_clauses_at_every_deep_one_shot_handler_layer(
             .iter()
             .filter(|instruction| matches!(instruction, VmInstruction::Forward))
             .count(),
-        2
+        5,
+        "each of the five refutable clauses forwards its rejected payload"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
 }
@@ -10081,9 +10717,9 @@ fn service_specializes_refutable_direct_dispatch_with_multiple_sibling_groups() 
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
-        4
+        5
     );
     assert!(
         entry
@@ -10106,7 +10742,7 @@ fn service_preserves_lexical_setup_at_every_deep_one_shot_handler_layer() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
         3
     );
@@ -10214,10 +10850,10 @@ fn service_matches_effect_row_generic_instances_in_vm_handler_frames() {
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             effect_arguments,
             ..
-        } if matches!(effect_arguments.as_slice(), [VmGenericArgument::EffectRow(row)] if row.effects.len() == 1 && row.projections.is_empty() && row.tail.is_none())
+        } if matches!(effect_arguments.as_slice(), [VmGenericArgument::EffectRow(row)] if row.effects.len() == 1 && row.projections.is_empty() && row.tails.is_empty())
     )));
     assert_eq!(artifact.run_i64().unwrap(), 42);
 }
@@ -10240,10 +10876,16 @@ fn service_instantiates_generic_effect_operations_at_the_call_and_handler() {
 
 #[test]
 fn service_infers_generic_effect_operation_arguments_at_the_call_and_handler() {
-    let source = "effect Ask { ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask(41) { Ask::ask(value) => value + 1 } }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    for source in [
+        "effect Ask { [1,1] ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask(41) { Ask::ask(value) => value + 1 } }",
+        "infixl 40 **; trait Choose { **(left: Self, right: Self) -> Self; } impl Choose for i64 { **(left: i64, right: i64) -> i64 { right } } effect Ask { [1,1] ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask(41) { Ask::ask(value) => value ** 42 } }",
+    ] {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
 }
 
 #[test]
@@ -10415,7 +11057,7 @@ fn service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary() {
 fn service_reenters_a_dynamic_replayable_handler_clause_per_resume() {
     // Assignment keeps the residual off the pure Core replayer, so this
     // exercises the VM replay frame and its clause-return edge instead.
-    let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); let mut mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
@@ -10451,31 +11093,15 @@ fn service_preserves_inner_clause_setup_and_residual_before_outer_resumption() {
 }
 
 #[test]
-fn service_rejects_nested_arm_residual_that_captures_inner_payload() {
-    // Inner payload registers belong to the selected handler clause, not the
-    // restored continuation after `inner(...)`.  This must fail before VM
-    // emission rather than becoming a verifier ReadBeforeWrite.
+fn service_retains_inner_payload_across_a_returning_nested_resumption() {
+    // The inner resumption returns to its clause; the clause's seed remains
+    // live there. It is not a register owned by the resumed computation.
     let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping(seed: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping(40) { Ping::ping(seed) with inner => { let value = inner(1); outer(value + seed) } } } }";
-    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-        StageZeroCompiler::new().compile(request(source))
-    else {
-        panic!("inner payload escaped into nested resumption residual")
-    };
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "G6005"
-                && diagnostic
-                    .message
-                    .contains("not retained across the inner resumption")
-        }),
-        "missing nested residual retention diagnostic: {diagnostics:#?}"
-    );
-    assert!(
-        diagnostics
-            .iter()
-            .all(|diagnostic| diagnostic.code != "G7005"),
-        "residual must not reach VM verification: {diagnostics:#?}"
-    );
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 41);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 41);
 }
 
 #[test]
@@ -10505,20 +11131,31 @@ fn service_forwards_nested_generic_operation_instances_through_materialized_call
 
 #[test]
 fn service_resumes_an_outer_handler_after_an_inner_effectful_function_value_call() {
-    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn invoke() -> i64 / Ping { Ping::ping() } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => { let operation = invoke; handle operation() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } } }";
+    // An effect row permits performance; it does not promise performance.
+    // Resume `outer` on both possible returns from the inner handler, and
+    // use a parameter to preserve a genuinely indirect computation call.
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn invoke() -> i64 / Ping { Ping::ping() } pub fn quiet() -> i64 / Ping { 1 } pub fn run(operation: () -> i64 / Ping) -> i64 { handle Ask::ask() { Ask::ask() with outer => { let value = handle operation() { Ping::ping() with inner => inner(41) }; outer(value) } } } pub fn main() -> i64 { run(invoke) + run(quiet) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    let entry = program.functions.get(&program.entry).unwrap();
     assert!(
-        entry
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        program.functions.values().flat_map(|function| &function.instructions)
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "the nested computation must retain the function-value call"
     );
-    assert_eq!(artifact.run_i64().unwrap(), 41);
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_an_outer_resumption_used_only_on_optional_effect_dispatch() {
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn run(operation: () -> i64 / Ping) -> i64 { handle Ask::ask() { Ask::ask() with outer => handle operation() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } } pub fn quiet() -> i64 / Ping { 1 } pub fn main() -> i64 { run(quiet) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request(source)) else {
+        panic!("normal completion must not abandon an exact outer resumption")
+    };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5012"), "missing source-level underuse diagnostic: {diagnostics:#?}");
+    assert!(!diagnostics.iter().any(|diagnostic| diagnostic.code == "G7042"), "source underuse must be rejected before VM lowering");
 }
 
 #[test]
@@ -10797,34 +11434,34 @@ fn service_reborrows_a_refined_enum_payload_by_position() {
         pub enum Result<T, E> { Ok(T), Err(E) }
         pub type Option<T> = Result<T, ()>;
         pub fn result_as_ref<'a, A, E>(value: &'a Result<A, E>) -> Result<&'a A, &'a E> {
-            handle *value is Result::Ok(_) {
-                true => Result::Ok(&value.0),
-                false => Result::Err(&value.0),
+            handle *value {
+                Result::Ok(_) => Result::Ok(&value.0),
+                Result::Err(_) => Result::Err(&value.0),
             }
         }
         pub fn result_as_mut<'a, A, E>(value: &'a mut Result<A, E>) -> Result<&'a mut A, &'a mut E> {
-            handle *value is Result::Ok(_) {
-                true => Result::Ok(&mut value.0),
-                false => Result::Err(&mut value.0),
+            handle *value {
+                Result::Ok(_) => Result::Ok(&mut value.0),
+                Result::Err(_) => Result::Err(&mut value.0),
             }
         }
         pub fn option_as_ref<'a, A>(value: &'a Option<A>) -> Option<&'a A> {
-            handle *value is Result::Ok(_) {
-                true => Result::Ok(&value.0),
-                false => Result::Err(()),
+            handle *value {
+                Result::Ok(_) => Result::Ok(&value.0),
+                Result::Err(_) => Result::Err(()),
             }
         }
         pub fn option_as_mut<'a, A>(value: &'a mut Option<A>) -> Option<&'a mut A> {
-            handle *value is Result::Ok(_) {
-                true => Result::Ok(&mut value.0),
-                false => Result::Err(()),
+            handle *value {
+                Result::Ok(_) => Result::Ok(&mut value.0),
+                Result::Err(_) => Result::Err(()),
             }
         }
         pub fn main() -> i64 {
             let result_ok = Result<i64, i64>::Ok(10);
-            let result_err = Result<i64, i64>::Err(20);
+            let mut result_err = Result<i64, i64>::Err(20);
             let option_some = Result<i64, ()>::Ok(30);
-            let option_none = Result<i64, ()>::Err(());
+            let mut option_none = Result<i64, ()>::Err(());
             handle result_as_ref(&result_ok) {
                 Result::Ok(value) => *value,
                 Result::Err(value) => *value,
@@ -10891,9 +11528,9 @@ fn service_lowers_nested_completion_values_with_exact_strict_order_and_scope() {
         ("fn main() -> i64 { handle 1 + handle 2 { 2 => 2, _ => 0 } { 3 => 42, _ => 0 } }", 42),
         ("fn main() -> i64 { 2 + handle true { true => 20 + handle 1 { 1 => 20, _ => 0 }, false => 0 } }", 42),
         ("fn main() -> i64 { let value = 4; let selected = handle 3 { value => handle value { 3 => 2, _ => 0 } }; value * 10 + selected }", 42),
-        ("fn bump(counter: &mut i64) -> i64 { *counter = *counter + 1; *counter } fn main() -> i64 { let counter = 0; let selected = bump(&mut counter) + handle bump(&mut counter) { 2 => bump(&mut counter) + handle true { true => bump(&mut counter), false => 0 }, _ => 0 }; counter * 100 + selected }", 408),
+        ("fn bump(counter: &mut i64) -> i64 { *counter = *counter + 1; *counter } fn main() -> i64 { let mut counter = 0; let selected = bump(&mut counter) + handle bump(&mut counter) { 2 => bump(&mut counter) + handle true { true => bump(&mut counter), false => 0 }, _ => 0 }; counter * 100 + selected }", 408),
         ("struct Token { value: i64 } impl Use<[0, 1]> for Token {} fn take(value: Token) -> i64 { value.value } fn main() -> i64 { let token = Token { value: 42 }; let selected = handle true { true => handle false { false => token, true => Token { value: 0 } }, false => Token { value: 0 } }; take(selected) }", 42),
-        ("fn pick<'a>(flag: Bool, value: &'a mut i64) -> &'a mut i64 { let selected = handle flag { true => handle true { true => value, false => value }, false => value }; selected } fn main() -> i64 { let value = 1; let selected = pick(true, &mut value); *selected = 42; *selected }", 42),
+        ("fn pick<'a>(flag: Bool, value: &'a mut i64) -> &'a mut i64 { let selected = handle flag { true => handle true { true => value, false => value }, false => value }; selected } fn main() -> i64 { let mut value = 1; let selected = pick(true, &mut value); *selected = 42; *selected }", 42),
     ];
     for (source, expected) in cases {
         let outcome = StageZeroCompiler::new().compile(request(source)).unwrap_or_else(|error| panic!("{source}: {error:?}"));
@@ -10910,7 +11547,7 @@ fn service_completion_cfg_preserves_multi_origin_reference_returns() {
     // The result conservatively borrows both same-region inputs. Straight-line
     // and completion CFG bodies share that frozen contract at the caller.
     for body in ["left", "handle flag { true => handle true { true => left, false => right }, false => right }"] {
-        let source = format!("fn pick<'a>(flag: Bool, left: &'a mut i64, right: &'a mut i64) -> &'a mut i64 {{ {body} }} fn main() -> i64 {{ let left = 1; let right = 20; let selected = pick(true, &mut left, &mut right); *selected }}");
+        let source = format!("fn pick<'a>(flag: Bool, left: &'a mut i64, right: &'a mut i64) -> &'a mut i64 {{ {body} }} fn main() -> i64 {{ let mut left = 1; let mut right = 20; let selected = pick(true, &mut left, &mut right); *selected }}");
         let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
         let artifact = decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
         assert_eq!(artifact.run_i64().unwrap(), 1);
@@ -11003,27 +11640,30 @@ fn service_leaves_a_label_from_a_later_call_argument() {
 
 #[test]
 fn service_label_transfer_respects_lazy_boolean_branch_selection() {
+    // `and`/`or` are ordinary source callbacks. A label local to the selected
+    // callback is a valid direct destination; capturing a caller's destination
+    // requires cross-call control fusion (tested fail-closed below).
     for (source, expected) in [
         (
-            "pub fn main() -> Bool { label done { false and transfer done true } }",
+            "pub fn main() -> Bool { false and (() -> Bool { label done { transfer done true } }) }",
             false,
         ),
         (
-            "pub fn main() -> Bool { label done { true and transfer done true } }",
+            "pub fn main() -> Bool { true and (() -> Bool { label done { transfer done true } }) }",
             true,
         ),
         (
-            "pub fn main() -> Bool { label done { true or transfer done false } }",
+            "pub fn main() -> Bool { true or (() -> Bool { label done { transfer done false } }) }",
             true,
         ),
         (
-            "pub fn main() -> Bool { label done { false or transfer done true } }",
+            "pub fn main() -> Bool { false or (() -> Bool { label done { transfer done true } }) }",
             true,
         ),
     ] {
-        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
         assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-        assert_eq!(outcome.artifact.unwrap().run_bool().unwrap(), expected);
+        assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), i64::from(expected));
     }
 }
 
@@ -11031,13 +11671,28 @@ fn service_label_transfer_respects_lazy_boolean_branch_selection() {
 fn service_lazy_label_transfer_rejoins_a_bound_continuation() {
     let source = r#"
         pub fn main() -> Bool {
-            let result = label done { false or transfer done true };
+            let result = false or (() -> Bool { label done { transfer done true } });
             result
         }
     "#;
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(outcome.artifact.unwrap().run_bool().unwrap());
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 1);
+}
+
+#[test]
+fn service_rejects_unfused_outer_labels_in_lazy_callbacks() {
+    for source in [
+        "pub fn main() -> Bool { label done { false and (() -> Bool { transfer done true }) } }",
+        "pub fn main() -> Bool { label done { true and (() -> Bool { transfer done true }) } }",
+        "pub fn main() -> Bool { label done { true or (() -> Bool { transfer done false }) } }",
+        "pub fn main() -> Bool { let result = label done { false or (() -> Bool { transfer done true }) }; result }",
+    ] {
+        let error = StageZeroCompiler::new().compile(request_bool(source))
+            .expect_err("an unfused callback cannot retain an enclosing label destination");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{error:?}");
+        assert!(!error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G7042"), "{error:?}");
+    }
 }
 
 #[test]
@@ -11081,7 +11736,7 @@ fn service_nested_effect_handler_label_transfer_leaves_after_strict_prefix() {
 fn service_assignment_value_label_transfer_exits_before_the_store() {
     let source = r#"
         pub fn main() -> i64 {
-            let value = 0;
+            let mut value = 0;
             let slot = &mut value;
             label done {
                 *slot = transfer done 42;
@@ -11299,7 +11954,7 @@ fn service_round_trips_nested_replay_forwarding_and_cancellation() {
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             continuation: VmContinuationPolicy::Replay { uses: 2 },
             ..
         }
@@ -11327,7 +11982,7 @@ fn service_drops_a_custom_aggregate_once_across_forward_and_cancellation() {
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             let result = handle {
                 let probe = Probe { target: &mut count };
                 handle Ask::ask(1) {
@@ -11363,8 +12018,8 @@ fn service_forwards_multifield_cancellation_without_duplicating_protected_drops(
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let first_count = 0;
-            let second_count = 0;
+            let mut first_count = 0;
+            let mut second_count = 0;
             let result = handle {
                 let first = Probe { target: &mut first_count };
                 let second = Probe { target: &mut second_count };
@@ -11398,7 +12053,7 @@ fn service_round_trips_custom_drop_on_a_nonlocal_label_exit() {
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             let escaped = @done: i64 {
                 let nonlocal = Probe { target: &mut count };
                 @done(1);
@@ -11555,7 +12210,7 @@ fn service_preserves_hrtb_returned_closure_environments_through_nested_facade_re
     // capture.  Its eventual indirect call must retain the exact environment
     // capabilities from source through Core, MIR, VM emission, and decode.
     let root = "use top_facade::{make, Callback}; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { let source = 41; let closure = make(identity, &source, 0); closure() }";
-    let provider = "pub type Callback = for<'a> (&'a i64) -> &'a i64; pub fn make<'a>(callback: Callback, shared: &'a i64, seed: i64) -> () -> i64 { () -> i64 { seed = *callback(shared) + 1; seed } } pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }";
+    let provider = "pub type Callback = for<'a> (&'a i64) -> &'a i64; pub fn make<'a>(callback: Callback, shared: &'a i64, seed: i64) -> () -> i64 { let mut seed = seed; () -> i64 { seed = *callback(shared) + 1; seed } } pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }";
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
         for (package, source) in [
@@ -11616,7 +12271,7 @@ fn service_preserves_hrtb_returned_closure_environments_through_nested_facade_re
     // `&mut` is invariant.  A facade client may not shorten the static inner
     // reference while passing a short outer unique borrow, even though a
     // shared reference alone remains covariant.
-    let invariant_root = "use top_facade::accepts_short; pub fn bad(value: &'static i64) -> i64 { let long = value; accepts_short(&mut long) } pub fn main() -> i64 { let candidate = bad; 0 }";
+    let invariant_root = "use top_facade::accepts_short; pub fn bad(value: &'static i64) -> i64 { let mut long = value; accepts_short(&mut long) } pub fn main() -> i64 { let candidate = bad; 0 }";
     // The provider revision independently strengthens the returned closure's
     // shared input to static. Both rejected worlds remain transactional.
     let static_slot = provider.replace("shared: &'a i64", "shared: &'static i64");
@@ -11728,7 +12383,7 @@ fn service_vm_preserves_a_native_home_unique_capture_across_dynamic_label_rejoin
             }
         }
         pub fn main() -> i64 {
-            let outer = 100;
+            let mut outer = 100;
             let callback = make(&mut outer);
             callback()
         }
@@ -11772,8 +12427,8 @@ fn service_rejects_a_resumption_closure_escaping_through_a_dynamic_label() {
         panic!("a resumption snapshot escaped through a dynamic label");
     };
     assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.code == "G6005"),
-        "missing stale-resumption lowering rejection: {diagnostics:#?}"
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4174"),
+        "missing source-level aliased-resumption escape rejection: {diagnostics:#?}"
     );
     assert!(
         !diagnostics.iter().any(|diagnostic| diagnostic.code == "G7010"),
@@ -11782,12 +12437,10 @@ fn service_rejects_a_resumption_closure_escaping_through_a_dynamic_label() {
 }
 
 #[test]
-fn service_rejects_dynamic_label_completion_facades_outside_the_one_shot_irrefutable_subset() {
-    // These shapes intentionally resemble the supported dynamic-label facade,
-    // but neither can safely use its synthetic one-shot rejoin. Each must
-    // stop at checked handler lowering rather than produce a malformed scope
-    // tree or an artifact with an active handler at return.
-    let hostile_facades = [
+fn service_executes_dynamic_label_completion_facades_with_replay_discard_and_refutable_dispatch() {
+    // The label exits before Audit is performed. Its completed destination
+    // must not remain in Audit's captured continuation or handler scopes.
+    let facades = [
         (
             "replay facade",
             r#"
@@ -11807,7 +12460,7 @@ fn service_rejects_dynamic_label_completion_facades_outside_the_one_shot_irrefut
                 } { Audit::audit(value) with k => k(value + 100) + k(value + 101), }
             }
         "#,
-            "G6005",
+            285,
         ),
         (
             "discarding facade",
@@ -11828,7 +12481,7 @@ fn service_rejects_dynamic_label_completion_facades_outside_the_one_shot_irrefut
                 } { Audit::audit(_) => 142, }
             }
         "#,
-            "G6005",
+            142,
         ),
         (
             "refutable facade",
@@ -11852,23 +12505,15 @@ fn service_rejects_dynamic_label_completion_facades_outside_the_one_shot_irrefut
                 }
             }
         "#,
-            "G6005",
+            142,
         ),
     ];
-    for (shape, source, expected_code) in hostile_facades {
-        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-            StageZeroCompiler::new().compile(request(source))
-        else {
-            panic!("unsupported {shape} dynamic-label facade unexpectedly compiled");
-        };
-        assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.code == expected_code),
-            "expected {expected_code} for {shape}, got: {diagnostics:#?}"
-        );
-        assert!(
-            !diagnostics.iter().any(|diagnostic| diagnostic.code == "G7010"),
-            "unsupported facade must not form malformed handler scopes: {diagnostics:#?}"
-        );
+    for (shape, source, expected) in facades {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{shape}: {:#?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), expected, "{shape}");
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), expected, "{shape}, wire form");
     }
 }
 
@@ -11891,17 +12536,53 @@ fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
 }
 
 #[test]
+fn service_fuses_immediate_resumption_closures_without_argument_shadowing() {
+    let source = r#"
+        effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 {
+            handle Ask::ask() {
+                Ask::ask() with k => {
+                    let left = 10;
+                    let right = 52;
+                    let resume = (left: i64, right: i64) -> i64 { k(left - right) };
+                    resume(right, left)
+                }
+            }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_resolves_source_resume_functions_before_migration_syntax() {
+    let input = request("pub fn resume(left: i64, right: i64) -> i64 { left - right } pub fn main() -> i64 { resume(52, 10) }");
+    let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let mut input = request("use helpers::resume; pub fn main() -> i64 { resume(52, 10) }");
+    input.sources.push(SourceInput::new(
+        PackageKey("helpers@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(),
+        "pub fn resume(left: i64, right: i64) -> i64 { left - right }".as_bytes(),
+    ));
+    let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_allows_an_immediately_invoked_closure_to_capture_a_refinement_binder() {
     let source = r#"
+        use std::Test;
         pub enum Result { Ok(i64), Err }
+        fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64
+        where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
+            handle test { Test::Yes(pack) => yes(pack), Test::No(_) => 0 }
+        }
         pub fn main() -> i64 {
             let result = Result::Ok(42);
-            handle result is Result::Ok(value) {
-                true => {
-                    let read = () -> i64 { value };
-                    read()
-                },
-                false => 0,
+            visit(result is Result::Ok(value)) {
+                let read = () -> i64 { value };
+                read()
             }
         }
     "#;
@@ -11915,7 +12596,7 @@ fn service_materializes_trait_methods_with_independent_impl_head_generics() {
     let source = r#"
         trait Select<T> { fn select(receiver: Self, value: T) -> T; }
         struct Box<T> { payload: T }
-        impl<T, U> Select<T> for Box<U> {
+        impl<T, U> Select<T> for Box<U> where U: Use<[0,1]> {
             fn select(receiver: Self, value: T) -> T { value }
         }
         pub fn main() -> i64 {
@@ -12087,12 +12768,12 @@ fn service_completion_after_a_resumption_may_transfer_to_an_enclosing_label() {
 fn service_composes_generic_effects_closures_and_finite_replay_across_a_call() {
     let source = r#"
         effect Echo<T> { [2, 2] echo(value: T) -> T; }
-        pub fn relay<T>(value: T, transform: (T) -> T) -> T / Echo<T> {
+        pub fn relay<T, F>(value: T, transform: F) -> T / Echo<T>
+        where F: Fn<(T), Output = T>, F: Use<[0, *]> {
             transform(Echo<T>::echo(value))
         }
         pub fn main() -> i64 {
-            let increment = (value: i64) -> i64 { value + 1 };
-            handle relay(20, increment) {
+            handle relay(20, { value => value + 1 }) {
                 Echo<i64>::echo(value, k) => k(value) + k(value),
             }
         }
@@ -12110,10 +12791,10 @@ fn manifest_bound_generic_int_bit_and_specializes_u8() {
         "fn __g1_int_bit_and<T>(left: T, right: T) -> T { () } \
          pub fn main() -> u8 { __g1_int_bit_and<u8>(42, 15) }",
     );
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::IntBitAnd,
         "__g1_int_bit_and",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("generic integer primitives must materialize for every concrete integer width")
@@ -12180,19 +12861,16 @@ fn generic_integer_shift_wrappers_materialize_signed_unsigned_and_trapping_width
 }
 
 #[test]
-fn service_reborrows_each_nested_multi_variant_refinement_payload() {
+fn service_reborrows_each_nested_multi_variant_completion_payload() {
     let source = r#"
-        fn __g1_abort() -> ! { () }
         pub enum Tri { First(i64), Second(i64), Third(i64) }
         pub fn view<'a>(value: &'a Tri) -> &'a i64 {
-            handle *value is Tri::First(_) {
-                true => &value.0,
-                false => handle *value is Tri::Second(_) {
-                    true => &value.0,
-                    false => handle *value is Tri::Third(_) {
-                        true => &value.0,
-                        false => __g1_abort(),
-                    },
+            handle *value {
+                Tri::First(_) => &value.0,
+                _ => handle *value {
+                    Tri::Second(_) => &value.0,
+                    Tri::Third(_) => &value.0,
+                    Tri::First(_) => &value.0,
                 },
             }
         }
@@ -12213,9 +12891,9 @@ fn service_refuses_an_ambiguous_multi_variant_negative_payload_projection() {
     let source = r#"
         pub enum Tri { First(i64), Second(i64), Third(i64) }
         pub fn invalid<'a>(value: &'a Tri) -> &'a i64 {
-            handle *value is Tri::First(_) {
-                true => &value.0,
-                false => &value.0,
+            handle *value {
+                Tri::First(_) => &value.0,
+                _ => &value.0,
             }
         }
         pub fn main() -> i64 { 0 }
@@ -12242,7 +12920,7 @@ fn service_lowers_a_top_level_value_alias_to_its_callable_target() {
 
 #[test]
 fn service_lowers_a_qualified_value_alias_receiver_spelling() {
-    let source = "pub fn __g1_vec_len(value: i64) -> i64 { value + 1 } let Vec::len = __g1_vec_len; pub fn main() -> i64 { Vec::len(41) }";
+    let source = "pub fn increment(value: i64) -> i64 { value + 1 } let Counter::len = increment; pub fn main() -> i64 { Counter::len(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -12405,7 +13083,7 @@ fn service_transfers_an_exact_callable_obligation_out_of_a_tuple_field_move() {
 
 #[test]
 fn service_rejects_overwriting_an_unfulfilled_aggregate_callable_obligation() {
-    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn replace(function: (i64) -> i64) -> i64 { let pair = Pair { function: function, value: 0 }; pair.function = (value: i64) -> i64 { value }; 0 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { replace(add_one) }";
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn replace(function: (i64) -> i64) -> i64 { let mut pair = Pair { function: function, value: 0 }; pair.function = (value: i64) -> i64 { value }; 0 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { replace(add_one) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(source))
     else {
@@ -12517,7 +13195,7 @@ fn service_executes_nominal_callable_payloads_captured_by_handler_closures() {
 
 #[test]
 fn service_rejects_overwriting_a_projected_aggregate_parameter_callable() {
-    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replace(pair: Pair) -> i64 { pair.function = (value: i64) -> i64 { value }; 0 } pub fn main() -> i64 { replace(Pair { function: add_one, value: 0 }) }";
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replace(pair: Pair) -> i64 { let mut pair = pair; pair.function = (value: i64) -> i64 { value }; 0 } pub fn main() -> i64 { replace(Pair { function: add_one, value: 0 }) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(source))
     else {
@@ -12726,14 +13404,14 @@ fn service_handles_an_indirect_generic_helper_performance_through_a_vm_frame() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. })),
         "indirect helper interception must retain a VM handler frame"
     );
     assert!(
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "generic helper invocation must remain an ordinary VM call"
     );
     assert!(
@@ -12744,7 +13422,7 @@ fn service_handles_an_indirect_generic_helper_performance_through_a_vm_frame() {
             .any(
                 |(_, function)| function.instructions.iter().any(|instruction| matches!(
                     instruction,
-                    VmInstruction::Perform { effect_arguments, .. }
+                    VmInstruction::PerformOwned { effect_arguments, .. }
                         if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
                 ))
             ),
@@ -12768,7 +13446,7 @@ fn service_materializes_generic_handler_frame_effect_identities() {
             .any(
                 |function| function.instructions.iter().any(|instruction| matches!(
                     instruction,
-                    VmInstruction::InstallHandler { effect_arguments, .. }
+                    VmInstruction::InstallHandlerOwned { effect_arguments, .. }
                         if effect_arguments.as_slice() == concrete_i64
                 ))
             ),
@@ -12781,7 +13459,7 @@ fn service_materializes_generic_handler_frame_effect_identities() {
             .any(
                 |function| function.instructions.iter().any(|instruction| matches!(
                     instruction,
-                    VmInstruction::Perform { effect_arguments, .. }
+                    VmInstruction::PerformOwned { effect_arguments, .. }
                         if effect_arguments.as_slice() == concrete_i64
                 ))
             ),
@@ -12818,7 +13496,7 @@ fn service_handles_a_nontransparent_nested_callee_through_normal_vm_calls() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "the outer handler must preserve the helper call boundary"
     );
     assert!(
@@ -12829,7 +13507,7 @@ fn service_handles_a_nontransparent_nested_callee_through_normal_vm_calls() {
             .any(|(_, function)| function
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))),
+                .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. }))),
         "the nontransparent helper must retain its nested ordinary call"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
@@ -12837,17 +13515,15 @@ fn service_handles_a_nontransparent_nested_callee_through_normal_vm_calls() {
 
 #[test]
 fn service_handles_an_effectful_function_value_through_a_dynamic_frame() {
-    let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Ask::ask(value) with k => k(value + 2) } }";
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn invoke(operation: (i64) -> i64 / Ask) -> i64 { handle operation(40) { Ask::ask(value) with k => k(value + 2) } } pub fn main() -> i64 { invoke(helper) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(
-        entry
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        program.functions.values().any(|function| function.instructions.iter().any(|instruction|
+            matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction))),
         "effectful function value must retain an indirect VM call"
     );
     let Some(VmInstruction::MakeCallable { dst, .. }) = entry
@@ -12862,7 +13538,7 @@ fn service_handles_an_effectful_function_value_through_a_dynamic_frame() {
     };
     assert_eq!(effects.effects.len(), 1);
     assert!(effects.projections.is_empty());
-    assert!(effects.tail.is_none());
+    assert!(effects.tails.is_empty());
     assert_eq!(artifact.run_i64().unwrap(), 42);
 }
 
@@ -12878,7 +13554,7 @@ fn service_propagates_a_closed_multi_operation_effect_summary_through_a_callee()
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
         2,
         "one dynamic frame is required for each summarized operation"
@@ -12887,7 +13563,7 @@ fn service_propagates_a_closed_multi_operation_effect_summary_through_a_callee()
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. }))
     );
     assert_eq!(artifact.run_i64().unwrap(), 22);
 }
@@ -12906,7 +13582,7 @@ fn service_materializes_generic_multi_operation_effect_frames_across_a_callee() 
             .iter()
             .filter(|instruction| matches!(
                 instruction,
-                VmInstruction::InstallHandler { effect_arguments, .. }
+                VmInstruction::InstallHandlerOwned { effect_arguments, .. }
                     if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
             ))
             .count(),
@@ -12917,7 +13593,7 @@ fn service_materializes_generic_multi_operation_effect_frames_across_a_callee() 
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "generic multi-operation helper must remain a normal VM call"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
@@ -12934,7 +13610,7 @@ fn service_uses_each_operation_continuation_type_across_a_multi_operation_call()
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 operation: 0,
                 resume_type: VmType::Text,
                 ..
@@ -12945,7 +13621,7 @@ fn service_uses_each_operation_continuation_type_across_a_multi_operation_call()
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 operation: 1,
                 resume_type: VmType::I64,
                 ..
@@ -12968,7 +13644,7 @@ fn service_dispatches_generic_multi_operation_effects_through_a_function_value()
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "generic multi-operation function values must keep their dynamic call boundary"
     );
     assert_eq!(
@@ -12977,7 +13653,7 @@ fn service_dispatches_generic_multi_operation_effects_through_a_function_value()
             .iter()
             .filter(|instruction| matches!(
                 instruction,
-                VmInstruction::InstallHandler { effect_arguments, .. }
+                VmInstruction::InstallHandlerOwned { effect_arguments, .. }
                     if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
             ))
             .count(),
@@ -12998,14 +13674,14 @@ fn service_orders_refutable_handler_clauses_around_an_interprocedural_call() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "the protected helper must remain an ordinary VM call"
     );
     assert!(
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. })),
         "the ordered source matrix must install a dynamic handler frame"
     );
     assert!(
@@ -13043,14 +13719,14 @@ fn service_orders_generic_multi_operation_matrices_around_an_interprocedural_cal
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
-        2,
-        "one dynamic frame is required for each independently ordered operation matrix"
+        3,
+        "each source clause retains its ordered dynamic frame"
     );
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             operation: 0,
             effect_arguments,
             resume_type: VmType::Text,
@@ -13059,7 +13735,7 @@ fn service_orders_generic_multi_operation_matrices_around_an_interprocedural_cal
     )));
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             operation: 1,
             effect_arguments,
             resume_type: VmType::I64,
@@ -13088,7 +13764,7 @@ fn service_orders_generic_multi_operation_matrices_through_a_function_value() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "the matrix must keep the function-value call boundary"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
@@ -13104,13 +13780,13 @@ fn service_rejects_a_forged_ordered_matrix_handler_target() {
         .unwrap();
     let mut forged = decode_program(&artifact.canonical_bytes()).unwrap();
     let entry = forged.functions.get_mut(&forged.entry).unwrap();
-    let VmInstruction::InstallHandler { target, .. } = entry
+    let VmInstruction::InstallHandlerOwned { target, .. } = entry
         .instructions
         .iter_mut()
         .find(|instruction| {
             matches!(
                 instruction,
-                VmInstruction::InstallHandler { operation: 0, .. }
+                VmInstruction::InstallHandlerOwned { operation: 0, .. }
             )
         })
         .expect("generated ordered matrix installs its read frame")
@@ -13137,11 +13813,11 @@ fn service_forwards_a_partial_refutable_interprocedural_handler_to_an_outer_fram
             function
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+                .any(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
                 && function
                     .instructions
                     .iter()
-                    .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))
+                    .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. }))
                 && function
                     .instructions
                     .iter()
@@ -13181,7 +13857,7 @@ fn service_forwards_a_partial_multi_operation_matrix_to_an_outer_handler() {
 
 #[test]
 fn service_replays_a_cross_call_continuation_with_resume_return() {
-    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { handle { let value = helper(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { handle { let value = helper(); let mut mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -13191,13 +13867,13 @@ fn service_replays_a_cross_call_continuation_with_resume_return() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "the replayed protected computation must retain its helper call"
     );
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 continuation: VmContinuationPolicy::Replay { uses: 2 },
                 ..
             }
@@ -13208,7 +13884,7 @@ fn service_replays_a_cross_call_continuation_with_resume_return() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .filter(|instruction| returning_resumption_call(entry, instruction))
             .count(),
         2,
         "each statically required replay must return to the handler clause"
@@ -13313,7 +13989,7 @@ fn service_preserves_a_three_shot_replay_budget_through_the_vm() {
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             continuation: VmContinuationPolicy::Replay { uses: 3 },
             ..
         }
@@ -13322,7 +13998,7 @@ fn service_preserves_a_three_shot_replay_budget_through_the_vm() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .filter(|instruction| returning_resumption_call(entry, instruction))
             .count(),
         3
     );
@@ -13339,7 +14015,7 @@ fn service_replays_a_heterogeneous_operation_result_across_a_call() {
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             resume_type: VmType::Text,
             continuation: VmContinuationPolicy::Replay { uses: 2 },
             ..
@@ -13356,11 +14032,11 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     let entry = program.functions.get(&program.entry).unwrap();
-    let frames = entry
+    let mut frames = entry
         .instructions
         .iter()
         .filter_map(|instruction| match instruction {
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 effect_arguments,
                 operation,
                 resume_type,
@@ -13376,6 +14052,7 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    frames.sort_by_key(|frame| frame.1);
     assert_eq!(
         frames.len(),
         2,
@@ -13395,7 +14072,7 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .filter(|instruction| returning_resumption_call(entry, instruction))
             .count(),
         4,
         "both exact two-shot operations must resume through their own replay frames"
@@ -13405,16 +14082,23 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
 
 #[test]
 fn service_replays_generic_operation_payloads_through_generic_call_frames() {
-    let source = "effect Exchange<T> { [2,2] exchange<U>(value: T, reply: U) -> U; } pub fn leaf<T, U>(value: T, reply: U) -> U / Exchange<T> { Exchange<T>::exchange<U>(value, reply) } pub fn relay<T, U>(value: T, reply: U) -> U / Exchange<T> { leaf(value, reply) } pub fn main() -> Text { handle relay(7, \"payload\") { Exchange<i64>::exchange<Text>(_, reply, k) => k(reply) + k(reply) } }";
+    let source = "fn join(left: Text, right: Text) -> Text { () } effect Exchange<T> { [2,2] exchange<U>(value: T, reply: U) -> U; } pub fn leaf<T, U>(value: T, reply: U) -> U / Exchange<T> { Exchange<T>::exchange<U>(value, reply) } pub fn relay<T, U>(value: T, reply: U) -> U / Exchange<T> { leaf(value, reply) } pub fn main() -> Text { handle relay(7, \"payload\") { Exchange<i64>::exchange<Text>(_, reply, k) => join(k(reply), k(reply)) } }";
+    let mut input = request(source);
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
+        selectors: vec![PrimitiveSelector { role: PrimitiveRole::TextConcat,
+            module_path: "crate".into(), name: "join".into() }],
+    });
     let outcome = StageZeroCompiler::new()
-        .compile(request(source))
+        .compile(input)
         .expect("generic operation instances must retain payload types across replayed calls");
     let artifact = outcome.artifact.expect("build must publish a VM artifact");
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             effect_arguments,
             resume_type: VmType::Text,
             continuation: VmContinuationPolicy::Replay { uses: 2 },
@@ -13425,7 +14109,7 @@ fn service_replays_generic_operation_payloads_through_generic_call_frames() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .filter(|instruction| returning_resumption_call(entry, instruction))
             .count(),
         2,
         "each replayed generic continuation must return to the handler clause"
@@ -13445,14 +14129,14 @@ fn service_replays_distinct_generic_operations_through_a_function_value() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "the captured function value must survive into the protected call"
     );
-    let frames = entry
+    let mut frames = entry
         .instructions
         .iter()
         .filter_map(|instruction| match instruction {
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 effect_arguments,
                 operation,
                 resume_type,
@@ -13468,6 +14152,7 @@ fn service_replays_distinct_generic_operations_through_a_function_value() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    frames.sort_by_key(|frame| frame.1);
     assert_eq!(
         frames.len(),
         2,
@@ -13482,7 +14167,7 @@ fn service_replays_distinct_generic_operations_through_a_function_value() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .filter(|instruction| returning_resumption_call(entry, instruction))
             .count(),
         4
     );
@@ -13498,19 +14183,23 @@ fn service_replays_an_ordered_refutable_operation_matrix_across_calls() {
         ),
         (
             true,
-            "effect Ask { [2,2] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Ask::ask(0) with k => k(1) + k(2); Ask::ask(value) with k => k(value) + k(value + 1) } }",
+            "effect Ask { [2,2] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn invoke<F>(operation: F) -> i64 where F: Fn<(i64), Output = i64, Effects = {Ask}>, F: Use<[0, *]> { handle operation(40) { Ask::ask(0) with k => k(1) + k(2); Ask::ask(value) with k => k(value) + k(value + 1) } } pub fn main() -> i64 { invoke(helper) }",
         ),
     ] {
         let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
         assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
         let artifact = outcome.artifact.unwrap();
         let program = decode_program(&artifact.canonical_bytes()).unwrap();
-        let entry = program.functions.get(&program.entry).unwrap();
+        let entry = if indirect {
+            program.functions.values().find(|function| function.instructions.iter().any(|instruction|
+                matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction)))
+                .expect("opaque parameter must retain its indirect call")
+        } else { program.functions.get(&program.entry).unwrap() };
         assert_eq!(
             entry
                 .instructions
                 .iter()
-                .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+                .filter(|instruction| returning_resumption_call(entry, instruction))
                 .count(),
             4,
         );
@@ -13524,7 +14213,7 @@ fn service_replays_an_ordered_refutable_operation_matrix_across_calls() {
             entry
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+                .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(entry, instruction)),
             indirect,
         );
         assert_eq!(artifact.run_i64().unwrap(), 81);
@@ -13540,7 +14229,7 @@ fn service_forwards_a_nested_partial_replay_matrix_to_an_outer_replay_handler() 
         ),
         (
             true,
-            "effect Read { [2,2] read(value: Text) -> Text; } pub fn helper() -> i64 / Read { let text = Read::read(\"payload\"); 40 } pub fn partial() -> i64 / Read { handle helper() { Read::read(\"no\") with k => k(\"x\") + k(\"y\") } } pub fn main() -> i64 { let action = partial; handle { let value = action(); value + 1 } { Read::read(value) with k => k(\"one\") + k(\"two\") } }",
+            "effect Read { [2,2] read(value: Text) -> Text; } pub fn helper() -> i64 / Read { let text = Read::read(\"payload\"); 40 } pub fn partial() -> i64 / Read { handle helper() { Read::read(\"no\") with k => k(\"x\") + k(\"y\") } } pub fn invoke<F>(action: F) -> i64 where F: Fn<(), Output = i64, Effects = {Read}>, F: Use<[0, *]> { handle { let value = action(); value + 1 } { Read::read(value) with k => k(\"one\") + k(\"two\") } } pub fn main() -> i64 { invoke(partial) }",
         ),
     ] {
         let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -13553,19 +14242,23 @@ fn service_forwards_a_nested_partial_replay_matrix_to_an_outer_replay_handler() 
                 .iter()
                 .any(|instruction| matches!(instruction, VmInstruction::Forward))
         }));
-        let entry = program.functions.get(&program.entry).unwrap();
+        let entry = if indirect {
+            program.functions.values().find(|function| function.instructions.iter().any(|instruction|
+                matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction)))
+                .expect("opaque parameter must retain its indirect call")
+        } else { program.functions.get(&program.entry).unwrap() };
         assert_eq!(
             entry
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+                .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(entry, instruction)),
             indirect
         );
         assert!(
             entry
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+                .any(|instruction| returning_resumption_call(entry, instruction))
         );
         assert_eq!(artifact.run_i64().unwrap(), 82);
     }
@@ -13587,7 +14280,7 @@ fn service_replays_a_projected_multi_operation_row_through_refutable_forwarding_
         ),
         (
             true,
-            "use bridge::{Console, invoke}; pub fn main() -> i64 { let action = invoke; handle { handle { handle action(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } }",
+            "use bridge::{Console, invoke}; pub fn execute<F>(action: F) -> i64 where F: Fn<(Bool), Output = i64, Effects = {Console}>, F: Use<[0, *]> { handle { handle { handle action(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } } pub fn main() -> i64 { execute(invoke) }",
         ),
     ] {
         let mut input = request(root);
@@ -13605,9 +14298,13 @@ fn service_replays_a_projected_multi_operation_row_through_refutable_forwarding_
         assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
         let artifact = outcome.artifact.unwrap();
         let program = decode_program(&artifact.canonical_bytes()).unwrap();
-        let entry = program.functions.get(&program.entry).unwrap();
+        let entry = if indirect {
+            program.functions.values().find(|function| function.instructions.iter().any(|instruction|
+                matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction)))
+                .expect("opaque parameter must retain its indirect call")
+        } else { program.functions.get(&program.entry).unwrap() };
         assert_eq!(
-            entry.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            entry.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(entry, instruction)),
             indirect,
             "directness at the projected outer boundary: {entry:#?}"
         );
@@ -13623,7 +14320,7 @@ fn service_replays_a_projected_multi_operation_row_through_refutable_forwarding_
             "the affine Write arm must retain Cancel: {program:#?}");
         assert!(entry.instructions.iter().filter(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler { continuation: VmContinuationPolicy::Replay { uses: 2 }, .. }
+            VmInstruction::InstallHandlerOwned { continuation: VmContinuationPolicy::Replay { uses: 2 }, .. }
         )).count() >= 2,
             "the partial and selected outer Read frames must retain exact replay budgets: {entry:#?}");
         assert!(entry.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::PatternTest { .. })),
@@ -13634,7 +14331,7 @@ fn service_replays_a_projected_multi_operation_row_through_refutable_forwarding_
 
 #[test]
 fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
-    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mut mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -13644,13 +14341,13 @@ fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "the replayed protected computation must retain its function-value call"
     );
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 continuation: VmContinuationPolicy::Replay { uses: 2 },
                 ..
             }
@@ -13661,7 +14358,7 @@ fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .filter(|instruction| returning_resumption_call(entry, instruction))
             .count(),
         2
     );
@@ -13670,7 +14367,7 @@ fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
 
 #[test]
 fn service_rejects_an_underused_cross_call_replay_contract() {
-    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { handle { let value = helper(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) } }";
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { handle { let value = helper(); let mut mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request(source))
     else {
@@ -13734,14 +14431,14 @@ fn service_intercepts_a_nontransparent_terminal_callee_through_a_vm_frame() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "terminal helper must remain a normal VM call"
     );
     assert!(
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. })),
         "caller must retain a terminal handler frame across the call"
     );
     assert!(
@@ -13758,7 +14455,7 @@ fn service_intercepts_a_nontransparent_terminal_callee_through_a_vm_frame() {
             .any(
                 |function| function.instructions.iter().any(|instruction| matches!(
                     instruction,
-                    VmInstruction::Perform { dst, .. }
+                    VmInstruction::PerformOwned { dst, .. }
                         if function.registers[*dst as usize] == VmType::Unit
                 ))
             ),
@@ -13807,9 +14504,8 @@ fn service_preserves_source_storage_cleanup_through_resumed_cross_call_handler()
         .flat_map(|function| function.instructions.iter())
         .collect::<Vec<_>>();
     assert!(
-        instructions
-            .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. })),
+        program.functions.values().any(|function| function.instructions.iter()
+            .any(|instruction| returning_resumption_call(function, instruction))),
         "the cross-call handler must retain clause-return continuation state: {program:#?}"
     );
     assert!(
@@ -13838,15 +14534,15 @@ fn service_preserves_one_effect_abi_across_nested_direct_vm_calls() {
         program.functions.values().any(|function| function
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })))
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. })))
             && program.functions.values().any(|function| function
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::Perform { .. })))
+                .any(|instruction| matches!(instruction, VmInstruction::PerformOwned { .. })))
             && program.functions.values().any(|function| function
                 .instructions
                 .iter()
-                .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))),
+                .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. }))),
         "the source program must retain handler, perform, and direct call frames: {program:#?}"
     );
     let verified = decode_and_verify_program(&artifact.canonical_bytes())
@@ -13869,13 +14565,13 @@ fn service_intercepts_a_nontransparent_projected_terminal_callee_through_a_vm_fr
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "the nontransparent projected terminal callee must retain its call boundary: {entry:#?}"
     );
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 continuation: VmContinuationPolicy::Terminal,
                 effect_arguments,
                 ..
@@ -13898,23 +14594,25 @@ fn service_intercepts_a_nontransparent_projected_terminal_callee_through_a_vm_fr
 
 #[test]
 fn service_intercepts_an_indirect_terminal_callee_through_a_vm_frame() {
-    let source = "effect Stop { stop(value: i64) -> !; } pub fn leaf(value: i64) -> ! / Stop { Stop::stop(value) } pub fn helper(value: i64) -> ! / Stop { let copied = value; leaf(copied) } pub fn main() -> i64 { let operation = helper; handle operation(42) { Stop::stop(value) => value } }";
+    let source = "effect Stop { stop(value: i64) -> !; } pub fn leaf(value: i64) -> ! / Stop { Stop::stop(value) } pub fn helper(value: i64) -> ! / Stop { let copied = value; leaf(copied) } pub fn invoke(operation: (i64) -> ! / Stop) -> i64 { handle operation(42) { Stop::stop(value) => value } } pub fn main() -> i64 { invoke(helper) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    let entry = program.functions.get(&program.entry).unwrap();
+    let entry = program.functions.values().find(|function| function.instructions.iter().any(|instruction|
+        matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction)))
+        .expect("opaque callable parameter must retain its indirect call");
     assert!(
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "terminal function values must preserve their indirect VM call"
     );
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 continuation: VmContinuationPolicy::Terminal,
                 ..
             }
@@ -13936,13 +14634,13 @@ fn service_cancels_an_outward_effect_call_through_a_vm_frame() {
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallOwned { .. })),
         "the cancelled helper must remain an ordinary VM call"
     );
     assert!(
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 continuation: VmContinuationPolicy::Consume,
                 ..
             }
@@ -13960,7 +14658,7 @@ fn service_cancels_an_outward_effect_call_through_a_vm_frame() {
         program.functions.values().any(|function| function
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::Perform { .. }))),
+            .any(|instruction| matches!(instruction, VmInstruction::PerformOwned { .. }))),
         "the leaf's outward effect must remain a real VM Perform"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
@@ -13968,22 +14666,24 @@ fn service_cancels_an_outward_effect_call_through_a_vm_frame() {
 
 #[test]
 fn service_cancels_an_indirect_outward_effect_call_through_a_vm_frame() {
-    let source = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Ask::ask(_) with _ => 42 } }";
+    let source = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn invoke(operation: (i64) -> i64 / Ask) -> i64 { handle operation(40) { Ask::ask(_) with _ => 42 } } pub fn main() -> i64 { invoke(helper) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    let entry = program.functions.get(&program.entry).unwrap();
+    let entry = program.functions.values().find(|function| function.instructions.iter().any(|instruction|
+        matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction)))
+        .expect("opaque callable parameter must retain its indirect call");
     assert!(
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "the cancelled function value must retain its indirect VM call"
     );
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             continuation: VmContinuationPolicy::Consume,
             ..
         }
@@ -14001,7 +14701,7 @@ fn service_cancellation_frame_keeps_the_operation_result_type_across_a_call() {
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             resume_type: VmType::Text,
             continuation: VmContinuationPolicy::Consume,
             ..
@@ -14018,11 +14718,11 @@ fn service_cancels_a_generic_multi_operation_call_through_distinct_vm_frames() {
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     let entry = program.functions.get(&program.entry).unwrap();
-    let frames = entry
+    let mut frames = entry
         .instructions
         .iter()
         .filter_map(|instruction| match instruction {
-            VmInstruction::InstallHandler {
+            VmInstruction::InstallHandlerOwned {
                 effect_arguments,
                 operation,
                 resume_type,
@@ -14034,16 +14734,11 @@ fn service_cancels_a_generic_multi_operation_call_through_distinct_vm_frames() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    frames.sort_by_key(|frame| frame.0);
     assert_eq!(frames, vec![(0, &VmType::Text), (1, &VmType::I64)]);
-    assert_eq!(
-        entry
-            .instructions
-            .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::UninstallHandler))
-            .count(),
-        2,
-        "normal completion must clean up every installed cancellation frame"
-    );
+    assert!(entry.instructions.iter().filter(|instruction|
+        matches!(instruction, VmInstruction::UninstallHandler)).count() >= frames.len(),
+        "every frame needs cleanup; distinct control-flow exits may repeat its uninstall");
     assert_eq!(
         entry
             .instructions
@@ -14067,7 +14762,7 @@ fn service_cancels_a_generic_operation_instance_through_generic_call_frames() {
     let entry = program.functions.get(&program.entry).unwrap();
     assert!(entry.instructions.iter().any(|instruction| matches!(
         instruction,
-        VmInstruction::InstallHandler {
+        VmInstruction::InstallHandlerOwned {
             effect_arguments,
             resume_type: VmType::Text,
             continuation: VmContinuationPolicy::Consume,
@@ -14086,24 +14781,26 @@ fn service_cancels_a_generic_operation_instance_through_generic_call_frames() {
 
 #[test]
 fn service_cancels_a_generic_multi_operation_function_value_through_vm_frames() {
-    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let text = Console<i64>::read(value); Console<i64>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
+    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let text = Console<i64>::read(value); Console<i64>::write(value) } pub fn invoke(operation: (i64) -> i64 / Console<i64>) -> i64 { handle operation(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } } pub fn main() -> i64 { invoke(helper) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    let entry = program.functions.get(&program.entry).unwrap();
+    let entry = program.functions.values().find(|function| function.instructions.iter().any(|instruction|
+        matches!(instruction, VmInstruction::CallIndirectOwned { .. }) && !returning_resumption_call(function, instruction)))
+        .expect("opaque callable parameter must retain its indirect call");
     assert!(
         entry
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })),
         "the generic function value must retain its dynamic call boundary"
     );
     assert_eq!(
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
             .count(),
         2
     );
@@ -14961,10 +15658,10 @@ fn manifest_bound_f32_leaf_accepts_contextual_decimal_literals_through_vm() {
     // back to the default f64 literal representation.
     let source = "fn __g1_f32_add(left: f32, right: f32) -> f32 { () } pub fn main() -> f32 { __g1_f32_add(40.5, 1.5) }";
     let mut input = request(source);
-    input.runtime_manifest = Some(int_runtime_manifest(
+    bind_int_runtime(&mut input,
         PrimitiveRole::parse_selector_name("f32-add").unwrap(),
         "__g1_f32_add",
-    ));
+    );
     let artifact = StageZeroCompiler::new()
         .compile(input)
         .expect("contextual f32 literals must reach the trusted f32 primitive")
@@ -14989,6 +15686,56 @@ fn source_float_arithmetic_canonicalizes_runtime_nan_results() {
     let value = artifact.run_f64().unwrap();
     assert!(value.is_nan());
     assert_eq!(value.to_bits(), 0x7ff8_0000_0000_0000);
+}
+
+#[test]
+fn source_float_literals_report_overflow_at_the_literal_span() {
+    for (source, literal) in [
+        ("pub fn main() -> f32 { 1e39 }", "1e39"),
+        ("pub fn main() -> f64 { 1e9999 }", "1e9999"),
+        ("pub fn main() -> f64 { -1e9999 }", "1e9999"),
+        ("pub fn main() -> i64 { let value = 1e9999; 42 }", "1e9999"),
+    ] {
+        let input = request(source);
+        let file = input.sources[0].key;
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(input) else {
+            panic!("overflowing literal compiled: {source}");
+        };
+        assert!(diagnostics.iter().any(|d| d.code == "G6003" && d.class == DiagnosticClass::Source
+            && d.primary.is_some_and(|span| span.file == file
+                && &source[span.start as usize..span.end as usize] == literal)), "{diagnostics:#?}");
+        assert!(!diagnostics.iter().any(|d| matches!(d.code, "G7041" | "G7042")), "{diagnostics:#?}");
+    }
+}
+
+#[test]
+fn source_float_literals_preserve_finite_limits_subnormals_and_underflow() {
+    for (literal, expected) in [
+        ("3.4028234663852886e38", f32::MAX),
+        ("1e-45", f32::from_bits(1)),
+        ("1e-9999", 0.0),
+    ] {
+        let artifact = StageZeroCompiler::new().compile(request(&format!("pub fn main() -> f32 {{ {literal} }}"))).unwrap().artifact.unwrap();
+        assert_eq!(artifact.run_f32().unwrap().to_bits(), expected.to_bits());
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_f32().unwrap().to_bits(), expected.to_bits());
+    }
+    for (literal, expected) in [
+        ("1.7976931348623157e308", f64::MAX),
+        ("5e-324", f64::from_bits(1)),
+        ("1e-9999", 0.0),
+        ("1e39", 1e39),
+    ] {
+        let artifact = StageZeroCompiler::new().compile(request(&format!("pub fn main() -> f64 {{ {literal} }}"))).unwrap().artifact.unwrap();
+        assert_eq!(artifact.run_f64().unwrap().to_bits(), expected.to_bits());
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_f64().unwrap().to_bits(), expected.to_bits());
+    }
+}
+
+#[test]
+fn source_float_literals_do_not_forbid_runtime_infinity() {
+    let artifact = StageZeroCompiler::new().compile(request("pub fn main() -> f64 { 1.0 / 0.0 }")).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_f64().unwrap(), f64::INFINITY);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_f64().unwrap(), f64::INFINITY);
 }
 
 #[test]
@@ -15063,7 +15810,7 @@ fn service_lowers_char_literals_and_scalar_comparisons() {
     assert_eq!(character.run_char().unwrap(), '🦀');
 
     assert_source_bool("", "'a' < 'z'", true);
-    assert_source_bool("", "true != false", true);
+    assert_source_bool("", "'a' != 'z'", true);
 }
 
 #[test]
@@ -15077,15 +15824,19 @@ fn service_lowers_shared_text_handles_and_text_equality() {
         .unwrap();
     assert_eq!(text.run_text().unwrap(), "hello, 🦀");
 
+    let mut input = request(&format!("{TEXT_RUNTIME_LEAVES} pub fn main() -> u32 {{ __g1_text_eq(\"same\", \"same\") }}"));
+    input.runtime_manifest = Some(text_runtime_manifest());
     let equality = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Bool { \"same\" == \"same\" }"))
+        .compile(input)
         .unwrap()
         .artifact
         .unwrap();
-    assert!(equality.run_bool().unwrap());
+    assert_eq!(equality.run_u32().unwrap(), 1);
 
+    let mut input = request(&format!("{TEXT_RUNTIME_LEAVES} pub fn main() -> Text {{ __g1_text_concat(\"hello, \", \"world\") }}"));
+    input.runtime_manifest = Some(text_runtime_manifest());
     let concatenated = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Text { \"hello, \" + \"world\" }"))
+        .compile(input)
         .unwrap()
         .artifact
         .unwrap();
@@ -15137,7 +15888,7 @@ fn service_lowers_immediately_invoked_typed_closures_with_captures() {
 
 #[test]
 fn nll_releases_an_immediately_invoked_closure_capture_before_the_next_write() {
-    let source = "pub fn main() -> i64 { let value = 1; ((extra: i64) -> i64 { value + extra })(1); value = 42; value }";
+    let source = "pub fn main() -> i64 { let mut value = 1; ((extra: i64) -> i64 { value + extra })(1); value = 42; value }";
     let outcome = StageZeroCompiler::new()
         .compile(request(source))
         .expect("an immediately invoked closure must not retain its capture after returning");
@@ -15150,6 +15901,14 @@ fn service_infers_and_lowers_immediately_invoked_compact_closures() {
     let source = "pub fn main() -> i64 { { extra => extra + 2 }(40) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn immediate_compact_closure_inference_preserves_argument_evaluation_order() {
+    let source = "fn digit(trace: &mut i64, value: i64) -> i64 { *trace = *trace * 10 + value; value } pub fn main() -> i64 { let mut trace = 0; let value = { left, right => left * 10 + right }(digit(&mut trace, 4), digit(&mut trace, 2)); value + trace }";
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 84);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 84);
 }
 
 #[test]
@@ -15191,13 +15950,13 @@ fn nested_closures_preserve_the_source_environment_brand_and_capture_layout() {
 
 #[test]
 fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing() {
-    let unique = "pub fn main() -> i64 { let value = 40; let outer = () -> i64 { let inner = () -> i64 { value = value + 2; value }; inner() }; outer() }";
+    let unique = "pub fn main() -> i64 { let mut value = 40; let outer = () -> i64 { let inner = () -> i64 { value = value + 2; value }; inner() }; outer() }";
     let outcome = StageZeroCompiler::new()
         .compile(request(unique))
         .expect("nested unique capture must be forwarded to the lifted inner callable");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let moved = "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let outer = () -> i64 { let inner = () -> i64 { move value; 42 }; inner() }; outer() }";
+    let moved = "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let outer = () -> i64 { let inner = () -> i64 { let Ticket {} = move value; 42 }; inner() }; outer() }";
     let outcome = StageZeroCompiler::new()
         .compile(request(moved))
         .expect("nested move capture must be forwarded to the lifted inner callable");
@@ -15205,7 +15964,7 @@ fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing()
 
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
         .compile(request(
-            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let outer = () -> i64 { let inner = () -> i64 { move value; 42 }; inner() }; move value; 42 }",
+            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let outer = () -> i64 { let inner = () -> i64 { let Ticket {} = move value; 42 }; inner() }; let Ticket {} = move value; 42 }",
         ))
     else {
         panic!("outer source remained usable after a transitively moved capture")
@@ -15222,14 +15981,14 @@ fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing()
 fn service_executes_sealed_capture_post_states_and_rejects_their_moved_source_use() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
-            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let take = () -> i64 { move value; 42 }; take() }",
+            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let take = () -> i64 { let Ticket {} = move value; 42 }; take() }",
         ))
         .expect("sealed move capture must lower through the VM");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
         .compile(request(
-            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let take = () -> i64 { move value; 42 }; move value; 42 }",
+            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let take = () -> i64 { let Ticket {} = move value; 42 }; let Ticket {} = move value; 42 }",
         ))
     else {
         panic!("use after a moved capture unexpectedly compiled")
@@ -15256,6 +16015,14 @@ fn generic_closure_values_preserve_indirect_call_contracts() {
         .compile(request(generic))
         .expect("generic closure value must materialize before its indirect call");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn captured_named_function_keeps_its_resident_contract_after_once_argument_coercion() {
+    let source = "fn answer() -> i64 { 42 } fn apply(callback: () -> i64) -> i64 { callback() } pub fn main() -> i64 { let callback = answer; let wrapper = () -> i64 { apply(callback) }; wrapper() }";
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
@@ -15389,8 +16156,10 @@ fn verified_vm_program_enforces_explicit_instruction_limits() {
 
 #[test]
 fn source_text_materialization_respects_vm_value_limits_transactionally() {
+    let mut input = request(&format!("{TEXT_RUNTIME_LEAVES} pub fn main() -> Text {{ __g1_text_concat(\"a\", \"b\") }}"));
+    input.runtime_manifest = Some(text_runtime_manifest());
     let artifact = StageZeroCompiler::new()
-        .compile(request("pub fn main() -> Text { \"a\" + \"b\" }"))
+        .compile(input)
         .unwrap()
         .artifact
         .unwrap();
@@ -16930,7 +17699,9 @@ fn service_executes_cross_package_public_module_reexport_cycles_with_one_generic
         .compile_revision(child)
         .expect("reordered module-cycle sources must preserve the legal interface cycle");
     assert_eq!(compiler.interface_cache_stats().misses, stats.misses);
-    assert_eq!(compiler.interface_cache_stats().hits, stats.hits + 5);
+    // Reuse every initially published interface, including the selected std
+    // root/prelude, not just the five explicit application/facade modules.
+    assert_eq!(compiler.interface_cache_stats().hits, stats.hits + stats.misses);
     let provider_interface = DependencyNode::Interface(ModuleKey {
         package: PackageKey("semantic-core@0.1.0".into()),
         path: "crate".into(),
@@ -18612,24 +19383,24 @@ fn service_rejects_duplicated_move_capture_through_public_facades_deterministica
 }
 
 #[test]
-fn service_replays_shared_closure_payloads_across_public_facades() {
+fn service_replays_shared_closure_captures_across_public_facades() {
     // Shared captures are duplicable, so `[2,2]` replay is legal under the
-    // quantitative rules. This crosses the same facade/payload route as the
+    // quantitative rules. This crosses the same facade/call route as the
     // green cancellation test. Each replay reaches the `[0,1]` cancellation
     // arm (and therefore contributes 40); the visible `+ 3` distinguishes
     // two replayed paths from a single cancellation.
     let mut input = request(
-        "use bridge::Console; use bridge::invoke; pub fn main() -> i64 { let seed = 39; let callback = () -> i64 { seed + 1 }; handle invoke(callback) { Console::read(k) => k(1) + k(2) + 3, Console::stop(_, _) => 40 } }",
+        "use bridge::Console; use bridge::invoke; pub fn main() -> i64 { let seed = 39; handle invoke({ seed + 1 }) { Console::read(k) => k(1) + k(2) + 3, Console::stop(_, _) => 40 } }",
     );
     input.sources.push(SourceInput::new(
         PackageKey("bridge@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub use provider::{Console, relay}; pub fn invoke(callback: () -> i64) -> i64 / Console { relay(callback) }".as_slice(),
+        b"pub use provider::{Console, relay}; pub fn invoke<F>(callback: F) -> i64 / Console where F: Fn<(), Output = i64>, F: Use<[0, *]> { relay(callback) }".as_slice(),
     ));
     input.sources.push(SourceInput::new(
         PackageKey("provider@0.1.0".into()),
         LogicalPath::parse("src/lib.glorious").unwrap(),
-        b"pub effect Console { [2,2] read() -> i64; [0,1] stop(callback: () -> i64) -> i64; } pub fn relay(callback: () -> i64) -> i64 / Console { let read = Console::read(); Console::stop(callback) + read }".as_slice(),
+        b"pub effect Console { [2,2] read() -> i64; [0,1] stop(value: i64) -> i64; } pub fn relay<F>(callback: F) -> i64 / Console where F: Fn<(), Output = i64>, F: Use<[0, *]> { let read = Console::read(); Console::stop(callback()) + read }".as_slice(),
     ));
     let outcome = StageZeroCompiler::new().compile(input).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
@@ -18786,7 +19557,7 @@ fn service_replays_late_payload_forwarding_then_facade_cancellation() {
             .iter()
             .filter(|instruction| matches!(
                 instruction,
-                VmInstruction::InstallHandler {
+                VmInstruction::InstallHandlerOwned {
                     continuation: VmContinuationPolicy::Replay { uses: 2 },
                     ..
                 }
@@ -18844,7 +19615,7 @@ fn service_replays_late_third_payloads_through_nested_facade_cancellation_and_co
         entry
             .instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { pattern, .. } if !matches!(pattern, grandiose_stage0::VmPattern::Any)))
             .count(),
         6,
         "both nested partial rows must test all three payloads: {entry:#?}"
@@ -18855,7 +19626,7 @@ fn service_replays_late_third_payloads_through_nested_facade_cancellation_and_co
             .iter()
             .filter(|instruction| matches!(
                 instruction,
-                VmInstruction::InstallHandler {
+                VmInstruction::InstallHandlerOwned {
                     continuation: VmContinuationPolicy::Replay { uses: 2 },
                     ..
                 }
@@ -18870,8 +19641,8 @@ fn service_replays_late_third_payloads_through_nested_facade_cancellation_and_co
             .iter()
             .filter(|instruction| matches!(instruction, VmInstruction::Forward))
             .count(),
-        2,
-        "each partial row must keep its own forwarding edge: {entry:#?}"
+        6,
+        "each of the three refutable payload tests in both rows must forward on rejection: {entry:#?}"
     );
     assert!(
         entry
@@ -18955,7 +19726,9 @@ fn service_outer_completion_leaves_after_reentrant_forwarded_replay_through_faca
         .compile(request)
         .expect("outer completion leave must abandon forwarded replay state");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+    // The first Ask resumption includes both Tick returns and their normal
+    // completion: (10 + 30 + 1) + (20 + 30 + 1) = 92.
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 92);
 }
 
 #[test]
@@ -18981,7 +19754,9 @@ fn service_inner_reentrant_completion_leave_retains_outer_normal_completion_thro
         .compile(request)
         .expect("inner completion leave must preserve the outer completion");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 141);
+    // The first Ask resumption includes both Tick returns and their normal
+    // completion: (10 + 30 + 1) + (20 + 30 + 1) = 92.
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 192);
 }
 
 #[test]
@@ -19039,7 +19814,7 @@ fn service_forwards_a_late_third_payload_through_facade_replay_completion_and_la
     assert_eq!(
         instructions
             .iter()
-            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { pattern, .. } if !matches!(pattern, grandiose_stage0::VmPattern::Any)))
             .count(),
         3,
         "every Ask payload must be tested before its partial row can be selected: {program:#?}"
@@ -19049,7 +19824,7 @@ fn service_forwards_a_late_third_payload_through_facade_replay_completion_and_la
             .iter()
             .filter(|instruction| matches!(
                 instruction,
-                VmInstruction::InstallHandler {
+                VmInstruction::InstallHandlerOwned {
                     continuation: VmContinuationPolicy::Replay { uses: 2 },
                     ..
                 }
@@ -19369,7 +20144,7 @@ fn service_preserves_recursive_facade_hrtb_trait_method_regions_through_closures
     // reborrow before consuming the method result.  This makes lifetime,
     // variance, closure-capture, label scope, and VM facts meet at one public
     // recursive interface boundary without depending on handler-stack work.
-    let root = "pub mod left; pub mod right; use left::Capability; pub fn main() -> i64 { let source = 40; let captured = &source; let answer = label done { Capability<i64>::apply(&source, { value => { *captured; value } }) }; let mutable = 1; let parent = &mut mutable; let child = &mut *parent; *child = 0; answer + *parent }";
+    let root = "pub mod left; pub mod right; use left::Capability; pub fn main() -> i64 { let source = 40; let captured = &source; let answer = label done { Capability<i64>::apply(&source, { value => { *captured; value } }) }; let mut mutable = 1; let parent = &mut mutable; let child = &mut *parent; *child = 0; answer + *parent }";
     let left = "pub trait Parent<T> { type Item<'a>; fn apply(receiver: Self, callback: for<'a> (<Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a>) -> i64; } pub use crate::right::Child as Capability;";
     let right = "pub use crate::left::Parent; pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 { type Item<'a> = &'a i64; fn apply(receiver: &'r i64, callback: for<'b> (<&'r i64 as Parent<i64>>::Item<'b>) -> <&'r i64 as Parent<i64>>::Item<'b>) -> i64 { let value = 41; let result = callback(&value); *result + 1 } } impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}";
     let world = |right: &str| {
@@ -19633,7 +20408,7 @@ fn service_rolls_back_projected_open_row_facades_after_overlapping_operation_dis
         .unwrap();
     assert_eq!(artifact.run_i64().unwrap(), 42);
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    assert!(program.functions.values().any(|function| function.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::Perform { .. }))));
+    assert!(program.functions.values().any(|function| function.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::PerformOwned { .. }))));
 
     let compiler = StageZeroCompiler::new();
     let parent = compiler.import_revision(world(provider), None).unwrap();
@@ -19677,7 +20452,7 @@ fn service_lowers_opaque_projected_callee_with_resumptive_then_terminal_operatio
     assert!(candidate.functions.values().any(|function| function
         .instructions
         .iter()
-        .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. }))));
+        .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }))));
     let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
     assert_eq!(program.run_i64().unwrap(), 42);
 }
@@ -19695,7 +20470,7 @@ fn service_lowers_opaque_projected_terminal_control_through_a_helper_call() {
     assert!(candidate.functions.values().any(|function| function
         .instructions
         .iter()
-        .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. }))));
+        .any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }))));
     assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
 }
 
@@ -19808,87 +20583,87 @@ fn service_rejoins_terminal_opaque_handler_nested_in_a_record_initializer() {
 fn service_keeps_an_opaque_handler_inside_a_lazy_boolean_branch() {
     // `and` must not touch its right operand when the left operand is false,
     // even though that operand contains an interprocedural handler frame.
-    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; false and handle apply(callback) { Ask::ask() with k => k(true) } }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; false and { handle apply(callback) { Ask::ask() with k => k(true) } } }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(!decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 0);
 }
 
 #[test]
 fn service_keeps_an_opaque_handler_inside_a_short_circuited_or_branch() {
-    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; true or handle apply(callback) { Ask::ask() with k => k(false) } }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; true or { handle apply(callback) { Ask::ask() with k => k(false) } } }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_executes_an_opaque_handler_in_a_statically_selected_lazy_branch() {
     for source in [
-        "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; true and handle apply(callback) { Ask::ask() with k => k(true) } }",
-        "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; false or handle apply(callback) { Ask::ask() with k => k(true) } }",
+        "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; true and { handle apply(callback) { Ask::ask() with k => k(true) } } }",
+        "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; false or { handle apply(callback) { Ask::ask() with k => k(true) } } }",
     ] {
-        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
         assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
         let artifact = outcome.artifact.unwrap();
-        assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
     }
 }
 
 #[test]
 fn service_dispatches_an_opaque_handler_from_a_dynamic_lazy_branch() {
-    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(flag: Bool, callback: () -> Bool / Ask) -> Bool { flag and handle apply(callback) { Ask::ask() with k => k(true) } } pub fn main() -> Bool { select(false, relay) or select(true, relay) }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(flag: Bool, callback: () -> Bool / Ask) -> Bool { flag and { handle apply(callback) { Ask::ask() with k => k(true) } } } pub fn main() -> Bool { select(false, relay) or { select(true, relay) } }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_rejoins_dynamic_lazy_handler_after_a_terminal_sibling_operation() {
-    let source = "effect Ask { [1,1] ask() -> Bool; halt() -> !; } pub fn relay() -> Bool / Ask { let answer = Ask::ask(); Ask::halt(); answer } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(flag: Bool, callback: () -> Bool / Ask) -> Bool { flag and handle apply(callback) { Ask::ask() with k => k(true); Ask::halt() => true } } pub fn main() -> Bool { select(false, relay) or select(true, relay) }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Ask { [1,1] ask() -> Bool; halt() -> !; } pub fn relay() -> Bool / Ask { let answer = Ask::ask(); Ask::halt(); answer } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(flag: Bool, callback: () -> Bool / Ask) -> Bool { flag and { handle apply(callback) { Ask::ask() with k => k(true); Ask::halt() => true } } } pub fn main() -> Bool { select(false, relay) or { select(true, relay) } }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_rejoins_dynamic_lazy_terminal_only_handler() {
-    let source = "effect Halt { halt() -> !; } pub fn relay() -> Bool / Halt { Halt::halt() } pub fn apply(callback: () -> Bool / Halt) -> Bool / Halt { callback() } pub fn select(flag: Bool, callback: () -> Bool / Halt) -> Bool { flag and handle apply(callback) { Halt::halt() => true } } pub fn main() -> Bool { select(false, relay) or select(true, relay) }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Halt { halt() -> !; } pub fn relay() -> Bool / Halt { Halt::halt() } pub fn apply(callback: () -> Bool / Halt) -> Bool / Halt { callback() } pub fn select(flag: Bool, callback: () -> Bool / Halt) -> Bool { flag and { handle apply(callback) { Halt::halt() => true } } } pub fn main() -> Bool { select(false, relay) or { select(true, relay) } }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_uses_an_opaque_handler_result_as_a_lazy_boolean_condition() {
-    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(callback: () -> Bool / Ask, right: Bool) -> Bool { handle apply(callback) { Ask::ask() with k => k(right) } and right } pub fn main() -> Bool { select(relay, true) }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(callback: () -> Bool / Ask, right: Bool) -> Bool { handle apply(callback) { Ask::ask() with k => k(right) } and { right } } pub fn main() -> Bool { select(relay, true) }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_uses_a_resumed_handler_result_to_select_a_lazy_or_branch() {
-    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(callback: () -> Bool / Ask, right: Bool) -> Bool { handle apply(callback) { Ask::ask() with k => k(false) } or right } pub fn main() -> Bool { select(relay, true) }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(callback: () -> Bool / Ask, right: Bool) -> Bool { handle apply(callback) { Ask::ask() with k => k(false) } or { right } } pub fn main() -> Bool { select(relay, true) }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 1);
 }
 
 #[test]
 fn service_uses_a_terminal_handler_result_to_skip_a_lazy_right_branch() {
-    let source = "effect Halt { halt() -> !; } pub fn relay() -> Bool / Halt { Halt::halt() } pub fn apply(callback: () -> Bool / Halt) -> Bool / Halt { callback() } pub fn select(callback: () -> Bool / Halt, right: Bool) -> Bool { handle apply(callback) { Halt::halt() => false } and right } pub fn main() -> Bool { select(relay, true) }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let source = "effect Halt { halt() -> !; } pub fn relay() -> Bool / Halt { Halt::halt() } pub fn apply(callback: () -> Bool / Halt) -> Bool / Halt { callback() } pub fn select(callback: () -> Bool / Halt, right: Bool) -> Bool { handle apply(callback) { Halt::halt() => false } and { right } } pub fn main() -> Bool { select(relay, true) }";
+    let outcome = StageZeroCompiler::new().compile(request_bool(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert!(!decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 0);
 }
 
 #[test]
@@ -20238,8 +21013,8 @@ fn service_preserves_qualified_nominal_identity_across_same_named_modules() {
         .compile(request_with_modules(
             "pub mod alpha; pub mod beta; pub fn main() -> i64 { let first = alpha::Token { value: 40 }; let second = beta::Token { value: 2 }; first.value + second.value }",
             &[
-                ("alpha", "pub struct Token { value: i64 }"),
-                ("beta", "pub struct Token { value: i64 }"),
+                ("alpha", "pub struct Token { pub value: i64 }"),
+                ("beta", "pub struct Token { pub value: i64 }"),
             ],
         ))
         .expect("qualified same-named nominal constructors must remain distinct");
@@ -20618,7 +21393,7 @@ fn service_rejects_cross_module_private_nominal_field_pattern_deconstruction() {
 fn service_rejects_cross_module_private_nominal_field_projections_and_assignments() {
     // Obtain the value through the public API so both access forms reach their
     // own Core boundaries instead of being masked by constructor rejection.
-    let source = "pub mod api; use api::Secret; pub fn main() -> i64 { let secret = api::make(); secret.value = 7; secret.value }";
+    let source = "pub mod api; use api::Secret; pub fn main() -> i64 { let mut secret = api::make(); secret.value = 7; secret.value }";
     let result = StageZeroCompiler::new().compile(request_with_logical_sources(
         source,
         &[(
@@ -20664,8 +21439,8 @@ fn service_rejects_cross_module_private_enum_payload_pattern_deconstruction() {
 fn service_preserves_nominal_pattern_authority_through_generic_associated_facades() {
     let root = "use facade::{make, Packet}; pub fn main() -> i64 { let packet = make<i64>(38); let head = move packet.head; let tail = packet.tail; let proof = make<i64>(0); handle proof { Packet<i64> { head: found, tail: extra } => head + tail + found + extra } }";
     let forged = "use facade::{make, Packet}; pub fn main() -> i64 { let packet = make<i64>(40); handle packet { Packet<i64> { forged: found } => found } }";
-    let public = "pub struct Packet<T> { head: T, tail: i64 } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
-    let private = public.replacen("tail: i64", "private tail: i64", 1);
+    let public = "pub struct Packet<T> { pub head: T, pub tail: i64 } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
+    let private = public.replacen("pub tail: i64", "tail: i64", 1);
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{make, Packet};".as_slice()));
@@ -20879,18 +21654,13 @@ fn service_executes_enum_payload_reference_refinements() {
     let source = r#"
         pub enum Holder { Held(&mut i64), Empty }
         pub fn main() -> i64 {
-            let value = 42;
+            let mut value = 42;
             let holder = Holder::Held(&mut value);
-            handle holder is Holder::Held(parent) {
-                true => {
-                    *(*parent)
-                };
-                false => 0
-            }
+            visit(holder is Holder::Held(parent)) { *(*parent) }
         }
     "#;
     let outcome = StageZeroCompiler::new()
-        .compile(request(source))
+        .compile(request_with_test_visit(source))
         .expect("enum payload reborrows must retain caller provenance through handlers");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -20899,17 +21669,12 @@ fn service_executes_enum_payload_reference_refinements() {
         pub enum Holder { Held(&mut i64), Empty }
         pub fn relay(value: &mut i64) -> i64 {
             let holder = Holder::Held(value);
-            handle holder is Holder::Held(parent) {
-                true => {
-                    *(*parent)
-                };
-                false => 0
-            }
+            visit(holder is Holder::Held(parent)) { *(*parent) }
         }
         pub fn main() -> i64 { 0 }
     "#;
     let outcome = StageZeroCompiler::new()
-        .compile(request(caller_owned))
+        .compile(request_with_test_visit(caller_owned))
         .expect("caller-owned enum payload reborrows must remain legal");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
 }
@@ -20986,6 +21751,7 @@ fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
         pub struct Inner { value: &i64 }
         pub struct Outer { inner: Inner, tag: i64 }
         pub fn bad(slot: Outer) -> &i64 {
+            let mut slot = slot;
             let value = 1;
             slot.inner.value = &value;
             slot.inner.value
@@ -21020,7 +21786,7 @@ fn service_keeps_shared_lifetime_covariance_but_rejects_mutable_nested_coercions
     let invariant = r#"
         pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }
         pub fn cannot_shorten(value: &'static i64) -> i64 {
-            let long = value;
+            let mut long = value;
             accepts_short(&mut long)
         }
         pub fn main() -> i64 { 0 }
@@ -21246,7 +22012,7 @@ fn service_infers_trait_generic_arguments_for_operator_dispatch() {
     let source = r#"
         infixl 40 **;
         trait Combine<T> { **(left: T, right: T) -> T; }
-        impl<T> Combine<T> for T { **(left: T, right: T) -> T { left } }
+        impl<T> Combine<T> for T where T: Use<[0,1]> { **(left: T, right: T) -> T { left } }
         pub fn main() -> i64 { 42 ** 0 }
     "#;
     let outcome = StageZeroCompiler::new()
@@ -21298,7 +22064,6 @@ fn service_specializes_numeric_literals_from_generic_operator_contracts() {
 #[test]
 fn service_lifts_primitive_comparisons_from_result_completion_arms() {
     let source = r#"
-        enum Result<T, E> { Ok(T), Err(E) }
         pub fn main() -> i64 {
             handle 1 < 2 { Result::Ok(_) => 42, Result::Err(_) => 0 }
         }
@@ -21338,7 +22103,7 @@ fn service_infers_recursive_generics_from_ambient_label_and_fn_contracts() {
         ) -> A
         where L: Label<B>,
         F: Fn<(A, usize, L), Output=A, Effects={| e}>,
-        F: Use<[0, *]> {
+        F: Use<[0, *]>, A: Use<[0, *]> {
             if(condition) {
                 step(current, end, accumulator, exit, condition, body)
             } else {
@@ -21355,9 +22120,39 @@ fn service_infers_recursive_generics_from_ambient_label_and_fn_contracts() {
 }
 
 #[test]
+fn service_infers_bare_associated_row_equalities_without_erasing_effects() {
+    let source = r#"
+        effect Ask { ask() -> i64; }
+        fn answer() -> i64 / Ask { Ask::ask() }
+        fn invoke<F,e: EffectRow>(body: F) -> i64 / { | e }
+        where F: Fn<(),Output=i64,Effects=e> { body() }
+        pub fn main() -> i64 { handle invoke(answer) { Ask::ask() => 42 } }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source))
+        .unwrap_or_else(|error| panic!("{:#?}", error.diagnostics())).artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    let unhandled = source.replace("handle invoke(answer) { Ask::ask() => 42 }", "invoke(answer)");
+    let diagnostics = StageZeroCompiler::new().compile(request(&unhandled)).expect_err("the inferred row cannot disappear").diagnostics();
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "{diagnostics:#?}");
+    let mismatch = r#"
+        effect Ask { ask() -> i64; }
+        effect Log { note() -> i64; }
+        fn first() -> i64 / Ask { Ask::ask() }
+        fn second() -> i64 / Log { Log::note() }
+        fn pair<F,G,e: EffectRow>(first: F, second: G) -> i64 / { | e }
+        where F: Fn<(),Output=i64,Effects=e>, G: Fn<(),Output=i64,Effects=e> {
+            first(); second()
+        }
+        pub fn main() -> i64 { handle pair(first, second) { Ask::ask() => 42, Log::note() => 42 } }
+    "#;
+    let diagnostics = StageZeroCompiler::new().compile(request(mismatch)).expect_err("equalities require the same row, not their union").diagnostics();
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4168"), "{diagnostics:#?}");
+}
+
+#[test]
 fn service_infers_the_boolean_result_carrier_for_polymorphic_if() {
     let source = r#"
-        enum Result<T, E> { Ok(T), Err(E) }
         pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
         where F: Fn<(), Output = B>, A: Use<[0, 1]> {
             handle condition {

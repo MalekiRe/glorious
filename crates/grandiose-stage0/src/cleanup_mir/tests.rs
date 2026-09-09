@@ -334,7 +334,7 @@ fn cleanup_rejects_lexical_scope_bypassing_its_plan() {
 #[test]
 fn cleanup_rejects_replacement_without_old_resident_cleanup() {
     let mut body = fixture(
-        "pub fn main(first: () -> i64, second: () -> i64) -> { let slot = move first; slot = second; () }",
+        "pub fn main(first: () -> i64, second: () -> i64) -> { let mut slot = move first; slot = second; () }",
     );
     let operation = body
         .blocks

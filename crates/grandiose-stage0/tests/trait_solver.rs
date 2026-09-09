@@ -36,6 +36,55 @@ fn key(interface: &grandiose_stage0::PackageInterface, name: &str) -> DefKey {
         .key
 }
 
+#[test]
+fn associated_result_guarantees_are_available_to_generic_graph_consumers() {
+    let (interface, signatures) = signatures("trait Eq {} trait Hash {} trait Graph { type Node: Eq + Hash + Use<[0,*]>; }");
+    let owner = TraitGoal { subject: Type::Generic(0), relation: ElaboratedTraitReference { definition: key(&interface, "Graph"), arguments: vec![] } };
+    let node = Type::Projection { subject: Box::new(owner.subject.clone()), trait_definition: owner.relation.definition,
+        trait_arguments: vec![], name: "Node".into(), item_generic_kinds: vec![], item_arguments: vec![] };
+    let solver = TraitSolver::new(&signatures);
+    for name in ["Eq", "Hash"] {
+        let goal = TraitGoal { subject: node.clone(), relation: ElaboratedTraitReference { definition: key(&interface, name), arguments: vec![] } };
+        assert!(matches!(solver.solve_with_assumptions(goal.clone(), &[owner.clone()]), TraitAnswer::Proven { .. }));
+        assert_eq!(solver.solve_with_assumptions(goal, &[]), TraitAnswer::NoSolution);
+    }
+    assert_eq!(solver.principal_use_with_assumptions(&node, &[owner]), Some(Quantity::UNRESTRICTED));
+    assert_eq!(solver.principal_use_with_assumptions(&node, &[]), None);
+}
+
+#[test]
+fn imported_defaulted_gat_domains_require_exact_outlives_evidence() {
+    let library = linked_interface("library@0.1.0", "crate", r#"
+        pub trait Family { type Item<'a> where Self: 'a = &'a Self; }
+        pub struct Owner<'a> { pub value: &'a i64 }
+        impl<'a> Family for Owner<'a> {}
+    "#);
+    let consumer = linked_interface("gat-domain-consumer@0.1.0", "crate", "use library::{Family,Owner}; fn lend<'a,'b>(value: &'b Owner<'a>) -> <Owner<'a> as Family>::Item<'b>; ");
+    let (_, signatures) = linked_signatures(&[library.clone(), consumer]);
+    let owner = Type::Nominal { definition: key(&library, "Owner"), arguments: vec![GenericArgument::Lifetime(Lifetime::Generic(0))] };
+    let goal = TraitGoal { subject: owner.clone(), relation: ElaboratedTraitReference { definition: key(&library, "Family"), arguments: vec![] } };
+    let mut solver = TraitSolver::new(&signatures);
+    assert_eq!(solver.normalize_associated_type_application(goal.clone(), "Item", &[GenericArgument::Lifetime(Lifetime::Generic(1))]), TraitProjectionAnswer::NoSolution);
+    solver.set_outlives_assumptions(vec![grandiose_stage0::OutlivesPredicate::Region { longer: Lifetime::Generic(0), shorter: Lifetime::Generic(1) }]);
+    assert!(matches!(solver.normalize_associated_type_application(goal.clone(), "Item", &[GenericArgument::Lifetime(Lifetime::Generic(1))]),
+        TraitProjectionAnswer::Normalized { ty: Type::Reference { lifetime: Lifetime::Generic(1), referent, .. }, .. } if *referent == owner));
+    solver.set_outlives_assumptions(vec![]);
+    assert_eq!(solver.normalize_associated_type_application(goal, "Item", &[GenericArgument::Lifetime(Lifetime::Generic(1))]), TraitProjectionAnswer::NoSolution);
+}
+
+#[test]
+fn outlives_predicates_are_directional_transitive_and_kind_distinct() {
+    use grandiose_stage0::OutlivesPredicate as P;
+    let region = |index| Lifetime::Generic(index);
+    let facts = vec![P::Region { longer: region(0), shorter: region(1) },
+        P::Region { longer: region(1), shorter: region(2) }, P::Type { subject: Type::Generic(0), lifetime: region(0) }];
+    assert!(P::Region { longer: region(0), shorter: region(2) }.proven_by(&facts));
+    assert!(P::Type { subject: Type::Generic(0), lifetime: region(2) }.proven_by(&facts));
+    assert!(!P::Region { longer: region(2), shorter: region(0) }.proven_by(&facts));
+    assert!(!P::Type { subject: Type::Generic(1), lifetime: region(1) }.proven_by(&facts));
+    assert!(!P::Region { longer: region(0), shorter: Lifetime::Static }.proven_by(&facts));
+}
+
 fn linked_interface(package: &str, module: &str, source: &str) -> PackageInterface {
     let package = PackageKey(package.into());
     let file = FileKey::new(&package, &format!("{module}.glorious"));
@@ -289,9 +338,9 @@ fn supertrait_method_and_associated_items_follow_canonical_instantiated_edges() 
     assert!(matches!(
         solver.normalize_associated_const(goal, "Width", ConstKind::U32),
         TraitConstProjectionAnswer::Normalized {
-            value: GenericArgument::ConstU32(7),
+            value: GenericArgument::ConstInteger(value),
             ..
-        }
+        } if value.as_u32() == Some(7)
     ));
 }
 
@@ -882,7 +931,7 @@ fn tabled_solver_substitutes_structural_const_impl_binders_into_where_obligation
         },
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![GenericArgument::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstInteger(7u32.into())],
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
@@ -898,11 +947,11 @@ fn tabled_solver_matches_structural_const_trait_arguments() {
     let answer = TraitSolver::new(&signatures).solve(TraitGoal {
         relation: ElaboratedTraitReference {
             definition: capacity,
-            arguments: vec![GenericArgument::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstInteger(7u32.into())],
         },
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![GenericArgument::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstInteger(7u32.into())],
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
@@ -955,7 +1004,7 @@ fn trait_solver_rejects_cross_kind_const_substitution() {
         },
         subject: Type::Nominal {
             definition: tag,
-            arguments: vec![GenericArgument::ConstU32(1)],
+            arguments: vec![GenericArgument::ConstInteger(1u32.into())],
         },
     });
     assert!(matches!(answer, TraitAnswer::NoSolution), "{answer:#?}");
@@ -1318,9 +1367,9 @@ fn trait_goal_queries_distinguish_nested_mixed_kind_nominal_arguments() {
         GenericArgument::EffectRow(EffectRow {
             effects: BTreeSet::new(),
             projections: vec![],
-            tail: Some(EffectTail::Generic(3)),
+            tails: [EffectTail::Generic(3)].into_iter().collect(),
         }),
-        GenericArgument::ConstU32(7),
+        GenericArgument::ConstInteger(7u32.into()),
         GenericArgument::ConstQuantity(Quantity::new(2, Some(5)).unwrap()),
     ];
     let fingerprints = arguments
@@ -1535,7 +1584,7 @@ fn associated_effect_rows_compose_prefixed_defaults_and_specializations_with_mix
                     GenericArgument::Lifetime(Lifetime::Static),
                     GenericArgument::EffectRow(caller_row.clone()),
                     GenericArgument::Type(Type::Scalar(ScalarType::Text)),
-                    GenericArgument::ConstU32(7),
+                    GenericArgument::ConstInteger(7u32.into()),
                 ],
             },
             subject: Type::Nominal {
@@ -1548,13 +1597,13 @@ fn associated_effect_rows_compose_prefixed_defaults_and_specializations_with_mix
             GenericArgument::Lifetime(Lifetime::Static),
             GenericArgument::EffectRow(EffectRow::empty()),
             GenericArgument::Type(Type::Scalar(ScalarType::I64)),
-            GenericArgument::ConstU32(8),
+            GenericArgument::ConstInteger(8u32.into()),
         ],
     );
     assert!(matches!(
         answer,
         TraitEffectRowProjectionAnswer::Normalized { row, .. }
-            if row.tail.is_none()
+            if row.tails.is_empty()
                 && row.effects.iter().any(|effect| {
                     effect.definition == tail && effect.arguments.is_empty()
                 })
@@ -1565,7 +1614,7 @@ fn associated_effect_rows_compose_prefixed_defaults_and_specializations_with_mix
                                 GenericArgument::Lifetime(Lifetime::Static),
                                 GenericArgument::EffectRow(EffectRow::empty()),
                                 GenericArgument::Type(Type::Scalar(ScalarType::I64)),
-                                GenericArgument::ConstU32(8),
+                                GenericArgument::ConstInteger(8u32.into()),
                             ]
                 })
     ));
@@ -1589,7 +1638,7 @@ fn associated_effect_rows_compose_prefixed_defaults_and_specializations_with_mix
                         },
                     ])),
                     GenericArgument::Type(Type::Scalar(ScalarType::Text)),
-                    GenericArgument::ConstU32(7),
+                    GenericArgument::ConstInteger(7u32.into()),
                 ],
             },
             subject: Type::Nominal {
@@ -1602,13 +1651,13 @@ fn associated_effect_rows_compose_prefixed_defaults_and_specializations_with_mix
             GenericArgument::Lifetime(Lifetime::Static),
             GenericArgument::EffectRow(EffectRow::empty()),
             GenericArgument::Type(Type::Scalar(ScalarType::I64)),
-            GenericArgument::ConstU32(8),
+            GenericArgument::ConstInteger(8u32.into()),
         ],
     );
     assert!(matches!(
         answer,
         TraitEffectRowProjectionAnswer::Normalized { row, .. }
-            if row.tail.is_none()
+            if row.tails.is_empty()
                 && row.effects.iter().any(|effect| effect.definition == tail)
                 && row.effects.iter().any(|effect| effect.definition == prefix)
     ));
@@ -1769,7 +1818,7 @@ fn associated_item_applications_preserve_mixed_generic_kinds() {
         &[
             GenericArgument::Lifetime(Lifetime::Static),
             GenericArgument::Type(Type::Scalar(ScalarType::Text)),
-            GenericArgument::ConstU32(7),
+            GenericArgument::ConstInteger(7u32.into()),
         ],
     );
     assert!(matches!(
@@ -1808,7 +1857,7 @@ fn associated_item_applications_preserve_mixed_generic_kinds() {
         "Effects",
         &[
             GenericArgument::Lifetime(Lifetime::Static),
-            GenericArgument::ConstU32(9),
+            GenericArgument::ConstInteger(9u32.into()),
         ],
     );
     assert!(matches!(
@@ -1830,7 +1879,7 @@ fn generic_trait_heads_normalize_gats_for_lifetime_and_effect_row_arguments() {
             arguments: vec![],
         }]),
         projections: vec![],
-        tail: None,
+        tails: Default::default(),
     };
     let answer = TraitSolver::new(&signatures).normalize_associated_type_application(
         TraitGoal {
@@ -2031,7 +2080,7 @@ fn recursive_associated_effect_row_normalization_is_rejected() {
                 item_generic_kinds: vec![],
                 item_arguments: vec![],
             }],
-            tail: None,
+            tails: Default::default(),
         }),
         Err(answer) if *answer == TraitEffectRowProjectionAnswer::RecursiveProjection
     ));
@@ -2089,7 +2138,7 @@ fn method_selection_preserves_mixed_method_generic_argument_kinds() {
         &[
             GenericArgument::Lifetime(Lifetime::Static),
             GenericArgument::EffectRow(EffectRow::empty()),
-            GenericArgument::ConstU32(7),
+            GenericArgument::ConstInteger(7u32.into()),
             GenericArgument::ConstQuantity(Quantity::ONCE),
         ],
     );
@@ -2103,7 +2152,7 @@ fn method_selection_preserves_mixed_method_generic_argument_kinds() {
                     arguments: vec![
                         GenericArgument::Lifetime(Lifetime::Static),
                         GenericArgument::EffectRow(EffectRow::empty()),
-                        GenericArgument::ConstU32(7),
+                        GenericArgument::ConstInteger(7u32.into()),
                         GenericArgument::ConstQuantity(Quantity::ONCE),
                     ],
                 }]
@@ -2112,7 +2161,7 @@ fn method_selection_preserves_mixed_method_generic_argument_kinds() {
                         arguments: vec![
                             GenericArgument::Lifetime(Lifetime::Static),
                             GenericArgument::EffectRow(EffectRow::empty()),
-                            GenericArgument::ConstU32(7),
+                            GenericArgument::ConstInteger(7u32.into()),
                             GenericArgument::ConstQuantity(Quantity::ONCE),
                         ],
                     }
@@ -2134,11 +2183,11 @@ fn associated_constants_normalize_overrides_defaults_and_const_generics() {
         TraitGoal {
             relation: ElaboratedTraitReference {
                 definition: width,
-                arguments: vec![GenericArgument::ConstU32(7)],
+                arguments: vec![GenericArgument::ConstInteger(7u32.into())],
             },
             subject: Type::Nominal {
                 definition: boxed,
-                arguments: vec![GenericArgument::ConstU32(7)],
+                arguments: vec![GenericArgument::ConstInteger(7u32.into())],
             },
         },
         "Value",
@@ -2147,15 +2196,15 @@ fn associated_constants_normalize_overrides_defaults_and_const_generics() {
     assert!(matches!(
         default,
         TraitConstProjectionAnswer::Normalized {
-            value: GenericArgument::ConstU32(8),
+            value: GenericArgument::ConstInteger(value),
             ..
-        }
+        } if value.as_u32() == Some(8)
     ));
     let override_value = solver.normalize_associated_const(
         TraitGoal {
             relation: ElaboratedTraitReference {
                 definition: width,
-                arguments: vec![GenericArgument::ConstU32(9)],
+                arguments: vec![GenericArgument::ConstInteger(9u32.into())],
             },
             subject: Type::Scalar(ScalarType::I64),
         },
@@ -2165,9 +2214,9 @@ fn associated_constants_normalize_overrides_defaults_and_const_generics() {
     assert!(matches!(
         override_value,
         TraitConstProjectionAnswer::Normalized {
-            value: GenericArgument::ConstU32(12),
+            value: GenericArgument::ConstInteger(value),
             ..
-        }
+        } if value.as_u32() == Some(12)
     ));
 }
 
@@ -2194,7 +2243,7 @@ fn associated_constants_recursively_normalize_nested_projection_values_and_cycle
         }),
         Ok(Type::Nominal {
             definition: chosen,
-            arguments: vec![GenericArgument::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstInteger(7u32.into())],
         }),
         "a selected associated const must recursively reduce its own projection value"
     );

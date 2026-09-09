@@ -130,7 +130,7 @@ fn unsafe_calls_require_explicit_scopes_even_inside_unsafe_functions() {
 fn unsafe_permission_is_not_captured_by_deferred_callable_or_handler_bodies() {
     for source in [
         "unsafe fn dangerous() -> i64 { 42 } fn main() -> i64 { unsafe { let f = () -> i64 { dangerous() }; f() } }",
-        "unsafe fn dangerous() -> i64 { 42 } fn main() -> i64 { unsafe { let f = { x => dangerous() + x }; f(0) } }",
+        "unsafe fn dangerous() -> i64 { 42 } fn main() -> i64 { unsafe { let f = { x => dangerous() }; f(0) } }",
         "unsafe fn dangerous() -> i64 { 42 } fn run(f: () -> i64) -> i64 { f() } fn main() -> i64 { unsafe { run() { dangerous() } } }",
         "effect Ask { ask() -> i64; } unsafe fn dangerous() -> i64 { 42 } fn main() -> i64 { unsafe { handle Ask::ask() { Ask::ask() => dangerous() } } }",
         "unsafe fn dangerous() -> i64 { 42 } fn main() -> i64 { unsafe { handle 0 { value => dangerous() } } }",
@@ -403,6 +403,8 @@ fn callable_safety_survives_lifted_closures_and_mir_rejects_erased_indirect_perm
         "MIR unsafe indirect call lost its execution requirement"
     );
 
+    // The context supplies the closure's callable safety contract, which must
+    // survive lifting independently of the enclosing function's safety.
     let (core, signatures) = elaborate_main("fn main() -> unsafe () -> i64 { () -> i64 { 42 } }");
     assert_valid_core(&core, &signatures);
     let definition = *signatures.definitions.keys().next().unwrap();
@@ -431,6 +433,21 @@ fn callable_safety_survives_lifted_closures_and_mir_rejects_erased_indirect_perm
         program.validate().is_err(),
         "MIR callable materialization relabelled an unsafe target"
     );
+}
+
+#[test]
+fn a_safe_closure_in_an_unsafe_function_keeps_its_own_callable_contract() {
+    let (core, signatures) = elaborate_main("unsafe fn main() -> () -> i64 { () -> i64 { 42 } }");
+    assert_valid_core(&core, &signatures);
+    let definition = *signatures.definitions.keys().next().unwrap();
+    let lowered = MirLowering::lower(definition, &core, &PlaceFlow::analyze(&core));
+    assert!(lowered.diagnostics.is_empty(), "{lowered:#?}");
+    assert_eq!(lowered.lifted.len(), 1);
+    assert_eq!(lowered.lifted.values().next().unwrap().safety, grandiose_stage0::Safety::Safe);
+    let mut functions = lowered.lifted;
+    functions.insert(definition, lowered.function.unwrap());
+    let program = grandiose_stage0::MirProgram { entry: definition, functions, instances: BTreeMap::new() };
+    assert!(program.validate().is_ok(), "{program:#?}");
 }
 
 #[test]

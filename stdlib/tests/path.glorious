@@ -1,0 +1,36 @@
+use std::path::*;
+fn path<'a>(text: Str<'a>) -> Path<'a> { Path::from_os_str(OsStr::from_str(text)) }
+fn same_path(value: Path, expected: Str) {
+    assert_true(handle OsStr::to_str(Path::as_os_str(value)) { Result::Ok(text) => Eq::eq(&text, &expected), _ => false })
+}
+pub fn main() -> i64 {
+    let mut value = Path::to_owned(path("/a/b"));
+    assert_true(handle PathBuf::push(&mut value, path("../c")) { Result::Ok(_) => true, _ => false });
+    same_path(PathBuf::as_path(&value), "/a/b/../c");
+    assert_true(PathBuf::pop(&mut value));
+    same_path(PathBuf::as_path(&value), "/a/b/..");
+    assert_true(handle PathBuf::push(&mut value, path("/x")) { Result::Ok(_) => true, _ => false });
+    same_path(PathBuf::as_path(&value), "/x");
+    assert_true(handle PathBuf::push(&mut value, path("bad\x00component")) { Result::Err(PathError::InvalidComponent) => true, _ => false });
+    same_path(PathBuf::as_path(&value), "/x");
+    assert_true(handle Path::parent(path("/")) { Result::Err(_) => true, _ => false });
+    handle Path::parent(path("one")) { Result::Ok(parent) => same_path(parent, ""), _ => return(0, @main) };
+    assert_true(handle Path::extension(path("/a/.hidden")) { Result::Err(_) => true, _ => false });
+    assert_true(handle Path::extension(path("/a/file.tar.gz")) {
+        Result::Ok(extension) => handle OsStr::to_str(extension) { Result::Ok(text) => Eq::eq(&text, &"gz"), _ => false }, _ => false,
+    });
+    let mut components = Path::components(path("//a/./../b//"));
+    assert_true(handle Components::next(&mut components) { Result::Ok(PathComponent::Root) => true, _ => false });
+    assert_true(handle Components::next(&mut components) { Result::Ok(PathComponent::Normal(_)) => true, _ => false });
+    assert_true(handle Components::next(&mut components) { Result::Ok(PathComponent::Current) => true, _ => false });
+    assert_true(handle Components::next(&mut components) { Result::Ok(PathComponent::Parent) => true, _ => false });
+    assert_true(handle Components::next(&mut components) { Result::Ok(PathComponent::Normal(_)) => true, _ => false });
+    assert_true(handle Components::next(&mut components) { Result::Err(_) => true, _ => false });
+    let mut native = Vec::new();
+    Vec::push(&mut native, 255);
+    let native = unix::from_bytes(native);
+    assert_true(handle OsStr::to_str(OsString::as_os_str(&native)) { Result::Err(_) => true, _ => false });
+    let native = handle OsString::into_string(native) { Result::Err(native) => native, _ => return(0, @main) };
+    assert_bytes(Vec::as_slice(&unix::into_bytes(native)), b"\xff");
+    42
+}

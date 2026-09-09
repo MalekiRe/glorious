@@ -423,6 +423,11 @@ impl RuntimeMir {
                         ));
                     }
                 }
+                RuntimeTerminator::TailCall { arguments, .. } => {
+                    if arguments.iter().any(|value| !live[value.0 as usize]) {
+                        return Err("mandatory tail transfer reads a dead/uninitialized carrier".into());
+                    }
+                }
                 RuntimeTerminator::Unreachable => {}
             }
         }
@@ -1209,19 +1214,19 @@ impl RuntimeMir {
                 }
             }
             RuntimeOperation::ArrayLen { dst, value } => {
-                if !matches!(self.local_type(*value)?, Type::Array(_)) {
+                if self.local_type(*value)?.array_element().is_none() {
                     return Err("array length requires owned array storage".into());
                 }
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "array length")?;
             }
             RuntimeOperation::ArrayElementIsInitialized { dst, value, index }
             | RuntimeOperation::TakeArrayElement { dst, value, index } => {
-                let Type::Array(element) = self.local_type(*value)? else {
+                let Some(element) = self.local_type(*value)?.array_element() else {
                     return Err("dynamic array projection requires owned array storage".into());
                 };
                 self.require_scalar_locals(&[*index], ScalarType::Usize, "array index")?;
                 if matches!(instruction, RuntimeOperation::TakeArrayElement { .. }) {
-                    if dst == value || self.local_type(*dst)? != element.as_ref() {
+                    if dst == value || self.local_type(*dst)? != element {
                         return Err("array move result does not match element type".into());
                     }
                 } else {
@@ -1455,6 +1460,7 @@ impl RuntimeMir {
                                 projected.extend(fields.get(*index as usize).cloned())
                             }
                             Type::Array(element) => projected.push((**element).clone()),
+                            Type::FixedArray { element, .. } if ty.fixed_array_length().is_some_and(|n| u64::from(*index) < n) => projected.push((**element).clone()),
                             Type::Nominal {
                                 definition,
                                 arguments,
@@ -1708,7 +1714,8 @@ impl RuntimeMir {
             element_type,
         } = instruction
         {
-            if self.local_type(*dst)? != &Type::Array(Box::new(element_type.clone())) {
+            if self.local_type(*dst)?.array_element() != Some(element_type)
+                || !self.local_type(*dst)?.array_accepts_count(fields.len()) {
                 return Err("MIR array destination does not have its array type".into());
             }
             for field in fields {
@@ -1819,10 +1826,11 @@ impl RuntimeMir {
             element_type,
         } = instruction
         {
-            let Type::Array(actual) = self.local_type(*base)? else {
+            let Some(actual) = self.local_type(*base)?.array_element() else {
                 return Err("MIR array projection base is not an array".into());
             };
-            if *index >= *field_count || actual.as_ref() != element_type {
+            if *index >= *field_count || actual != element_type
+                || !self.local_type(*base)?.array_accepts_count(*field_count as usize) {
                 return Err("MIR array projection has inconsistent structural metadata".into());
             }
             if self.local_type(*dst)? != element_type {
@@ -1923,6 +1931,13 @@ impl RuntimeMir {
                     return Err(format!(
                         "MIR return in block {index} does not match function result"
                     ));
+                }
+                Ok(())
+            }
+            RuntimeTerminator::TailCall { arguments, .. } => {
+                for argument in arguments { self.local_type(*argument)?; }
+                if self.captures != 0 {
+                    return Err("mandatory tail transfer retains an undischarged capture environment".into());
                 }
                 Ok(())
             }

@@ -1,0 +1,14 @@
+pub fn main() -> i64 {
+    let mut sources = SourceMap::new();
+    handle SourceMap::insert(&mut sources, owned("unit.glorious"), owned("a😀é\nz")) {
+        Result::Err(_) => assert_true(false),
+        Result::Ok(source) => {
+            assert_true(handle SourceMap::to_utf16(&sources, source, 5) { Result::Ok(location) => location.column_units == 3, _ => false });
+            assert_true(handle SourceMap::from_utf16(&sources, source, Utf16Location { line: 0, column_units: 3 }) { Result::Ok(5) => true, _ => false });
+            assert_true(handle SourceMap::from_utf16(&sources, source, Utf16Location { line: 0, column_units: 2 }) { Result::Err(SourceError::InvalidBoundary) => true, _ => false });
+            assert_true(handle SourceMap::locate(&sources, source, 2) { Result::Err(SourceError::InvalidBoundary) => true, _ => false });
+            assert_true(handle SourceMap::locate(&sources, source, 8) { Result::Ok(location) => location.line == 1, _ => false });
+        },
+    };
+    42
+}

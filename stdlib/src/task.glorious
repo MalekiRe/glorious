@@ -1,0 +1,45 @@
+pub mod task {
+    use crate::*;
+    // Provider IDs are opaque registration keys, never raw callback pointers.
+    // Registration retirement is checked by the Wake provider, not by guessing
+    // whether a formerly borrowed poll context still happens to be allocated.
+    pub struct WakeKey { private provider: u64, private registration: u64, private generation: u64 }
+    pub struct PollContext<'a> { private scope: &'a (), private wake: WakeKey }
+    pub enum FutureStep<T,F> { Ready(T), Pending(F) }
+    pub trait Future {
+        type Output;
+        type Effects: EffectRow;
+        fn poll<'a>(value: Self, context: &mut PollContext<'a>) -> FutureStep<<Self as Future>::Output,Self>
+            / { | <Self as Future>::Effects };
+    }
+    pub effect Await<F> where F: Future { await(value: F) -> <F as Future>::Output; }
+    impl<'a> PollContext<'a> {
+        pub fn wake_key(value: &Self) -> WakeKey {
+            WakeKey { provider: value.wake.provider, registration: value.wake.registration, generation: value.wake.generation }
+        }
+    }
+    pub effect Wake { wake(key: WakeKey) -> Bool; }
+    pub struct Task<'scope,T> { private scope: &'scope (), private provider: u64, private registration: u64 }
+    pub struct LinearTask<'scope,T> { private scope: &'scope (), private provider: u64, private registration: u64 }
+    pub impl<'scope,T> Use<[1,1]> for Task<'scope,T> {}
+    pub impl<'scope,T> Use<[1,1]> for LinearTask<'scope,T> {}
+    pub enum TaskError { Cancelled, Failed, ProviderClosed }
+    pub enum CancelOutcome<T> { Cancelled, Completed(T) }
+    pub effect Spawn {
+        spawn<'scope,'env,E0,E1,T,F,e: EffectRow>(work: F) -> Task<'scope,T>
+        where 'env: 'scope, T: 'scope,
+            E0: Environment<'env>, E1: Environment<'env>,
+            F: Fn<(),Output=T,Effects=e> + RunsIn<E0,(),After=E1> + Use<[0,1]> + 'scope;
+    }
+    pub effect SpawnLinear {
+        spawn_linear<'scope,'env,E0,E1,T,F,e: EffectRow>(work: F) -> LinearTask<'scope,T>
+        where 'env: 'scope, T: 'scope,
+            E0: Environment<'env>, E1: Environment<'env>,
+            F: Fn<(),Output=T,Effects=e> + RunsIn<E0,(),After=E1> + 'scope;
+    }
+    pub effect TaskControl<'scope,T> {
+        join(task: Task<'scope,T>) -> Result<T,TaskError>;
+        cancel_task(task: Task<'scope,T>) -> CancelOutcome<T>;
+    }
+    pub effect LinearTaskControl<'scope,T> { join_linear(task: LinearTask<'scope,T>) -> T; }
+}

@@ -18,6 +18,7 @@ impl SpecializedMir {
                     }
                 }
                 Type::Array(element)
+                | Type::FixedArray { element, .. }
                 | Type::StaticData { element, .. }
                 | Type::Reference {
                     referent: element, ..
@@ -63,7 +64,7 @@ impl SpecializedMir {
                     let header = signatures.definitions.get(definition);
                     let (is_enum, variants) = match header {
                         Some(crate::ElaboratedHeader::Nominal {
-                            layout: crate::signature::ElaboratedNominalLayout::Struct(_),
+                            layout: crate::signature::ElaboratedNominalLayout::Struct(_) | crate::signature::ElaboratedNominalLayout::TupleStruct(_),
                             ..
                         }) => (
                             false,
@@ -199,7 +200,7 @@ pub(crate) fn validate_layout_closure(
                     field(ty, layouts, definitions)?;
                 }
             }
-            Type::Array(ty) => field(ty, layouts, definitions)?,
+            Type::Array(ty) | Type::FixedArray { element: ty, .. } => field(ty, layouts, definitions)?,
             _ => {}
         }
         Ok(())

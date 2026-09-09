@@ -33,7 +33,7 @@ fn scanner_collects_all_top_level_declaration_families_without_parsing_bodies() 
     assert_eq!(scan.declarations.len(), 11);
     assert_eq!(scan.declarations[0].kind, DeclarationKind::Function);
     assert_eq!(scan.declarations[0].name.as_deref(), Some("run"));
-    assert!(scan.declarations[0].visibility_public);
+    assert!(scan.declarations[0].visibility.is_public());
     assert_eq!(scan.declarations[4].kind, DeclarationKind::Implementation);
     assert!(scan.declarations[4].name.is_none());
     assert_eq!(scan.declarations[8].kind, DeclarationKind::Module);
@@ -44,6 +44,28 @@ fn scanner_collects_all_top_level_declaration_families_without_parsing_bodies() 
 fn scanner_rejects_an_unterminated_declaration_structurally() {
     let scan = scan("fn broken(");
     assert_eq!(scan.diagnostics[0].code, "G2002");
+}
+
+#[test]
+fn scanner_preserves_array_headers_and_adjacent_associated_equalities() {
+    for declaration in [
+        "impl<T> Pick for T where T: Source<Item<i64>=i64> { fn pick() {} }",
+        "impl<T> Pick for T where T: Source<Item=<T as Source>::Item> { fn pick() {} }",
+        "impl<T> Pick for T where T: Source<Item<i64>=<T as Source>::Item> { fn pick() {} }",
+        "fn inspect(value: &[i64; 4]) -> [i64; 4] { value }",
+        "impl<T, N: usize> ArrayTrait for [T; N] { fn inspect() {} }",
+    ] {
+        let source = format!("{declaration} fn following() {{ 42 }}");
+        let scanned = scan(&source);
+        assert!(scanned.diagnostics.is_empty(), "{source}: {scanned:#?}");
+        assert_eq!(scanned.declarations.len(), 2, "{source}: {scanned:#?}");
+        assert!(scanned.declarations[0].body.is_some(), "{source}");
+        assert_eq!(scanned.declarations[1].name.as_deref(), Some("following"));
+    }
+    let scanned = scan("type Fixed<T, N: usize> = [T; N]; fn following() { 42 }");
+    assert!(scanned.diagnostics.is_empty(), "{scanned:#?}");
+    assert_eq!(scanned.declarations.len(), 2);
+    assert!(scanned.declarations[0].body.is_none());
 }
 
 #[test]

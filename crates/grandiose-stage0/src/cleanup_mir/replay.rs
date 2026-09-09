@@ -46,7 +46,7 @@ fn escapes_call(body: &CleanupMir, control: &CleanupControl, operation: &Operati
     let CleanupControl::Invoke { callee, .. } = control else { return false; };
     match &body.values[callee.0 as usize].ty {
         Type::Callable { effects, .. } => effects.effects.contains(&operation.0)
-            || effects.tail.is_some() || !effects.projections.is_empty(),
+            || !effects.tails.is_empty() || !effects.projections.is_empty(),
         _ => true,
     }
 }

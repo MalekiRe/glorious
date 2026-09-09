@@ -5,7 +5,7 @@ use grandiose_stage0::{
     EffectRow, EffectRowProjection, EffectTail, EffectVar, ElaboratedInterface, EnvironmentBrand,
     EscapeFlow, FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile,
     Lifetime, LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow,
-    Quantity, RunsInEvidence, ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow,
+    Quantity, RunsInEvidence, ScalarType, Span, IntegerConstExpr, Type, TypedBody, UseFlow,
     implementation_method_key,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +14,17 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
     let (core, _) = core_and_signatures_for(package_name, source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     PlaceFlow::analyze(&core)
+}
+
+#[test]
+fn contextual_byte_slice_literals_retain_element_evidence_across_open_regions() {
+    let core = core_for("contextual-byte-slice@0.1.0",
+        "use std::*; pub fn main<'a>(bytes: Slice<'a,u8>) -> Ordering { Slice::lex_compare(bytes, b\".\") }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(!core.expressions.iter().any(|value| matches!(value.ty, Type::Scalar(ScalarType::Bytes))));
+    let core = core_for("contextual-byte-slice-wrong-element@0.1.0",
+        "use std::*; pub fn main<'a>(bytes: Slice<'a,u16>) -> Ordering { Slice::lex_compare(bytes, b\".\") }");
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4107"), "{:?}", core.diagnostics);
 }
 
 fn freeze_initializers(
@@ -110,6 +121,150 @@ fn frontend_for(package_name: &str, source: &str) -> (DefKey, TypedBody, Elabora
 
 fn core_for(package_name: &str, source: &str) -> TypedBody {
     core_and_signatures_for(package_name, source).0
+}
+
+#[test]
+fn outlives_where_evidence_allows_only_directional_reference_returns() {
+    for (bounds, accepted) in [("where 'a: 'b", true), ("where 'b: 'a", false), ("", false)] {
+        let source = format!("fn main<'a,'b>(value: &'a i64) -> &'b i64 {bounds} {{ value }}");
+        let (core, signatures) = core_and_signatures_for("outlives-reference-return@0.1.0", &source);
+        assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+        assert_eq!(core.diagnostics.is_empty(), accepted, "{source}: {:?}", core.diagnostics);
+    }
+    let (core, signatures) = core_and_signatures_for("outlives-call@0.1.0", r#"
+        fn shorten<'a,'b>(value: &'a i64) -> &'b i64 where 'a: 'b { value }
+        fn main<'a,'b>(value: &'a i64) -> &'b i64 where 'a: 'b { shorten<'a,'b>(value) }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+}
+
+#[test]
+fn graph_associated_result_bounds_support_generic_calls_and_duplication() {
+    let (definition, core, signatures) = frontend_for("graph-generic-consumer@0.1.0", r#"
+        trait Eq {} trait Hash {}
+        trait Graph { type Node: Eq + Hash + Use<[0,*]>; }
+        fn check<T>(value: &T) where T: Eq, T: Hash { }
+        fn main<G>(node: <G as Graph>::Node) -> (<G as Graph>::Node,<G as Graph>::Node) where G: Graph {
+            check(&node); (node,node)
+        }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let grandiose_stage0::ElaboratedHeader::Callable(signature) = &signatures.definitions[&definition] else { panic!(); };
+    let ownership = PlaceFlow::analyze_with_interface_and_bounds(&core, &signatures, &signature.where_bounds);
+    assert!(ownership.diagnostics.is_empty(), "{ownership:#?}");
+    let flow = UseFlow::analyze_with_interface(&core, &ownership, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+}
+
+#[test]
+fn guarded_lending_gats_allow_sequential_loans_and_reject_overlap_and_escape() {
+    let declarations = r#"
+        trait Lending {
+            type Item<'a> where Self: 'a;
+            fn lend<'a>(value: &'a mut Self) -> <Self as Lending>::Item<'a>;
+        }
+        struct Owner { value: i64 }
+        impl Lending for Owner {
+            type Item<'a> = &'a mut i64 where Self: 'a;
+            fn lend<'a>(value: &'a mut Self) -> &'a mut i64 { &mut (*value).value }
+        }
+    "#;
+    let sequential = format!("{declarations} fn main() -> i64 {{ let mut owner = Owner {{ value: 0 }}; let first = Lending::lend(&mut owner); *first = 1; let second = Lending::lend(&mut owner); *second }}");
+    let (core, signatures) = core_and_signatures_for("lending-domain-sequential@0.1.0", &sequential);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert!(core.validate_projection_obligations(&signatures, &[]).is_empty());
+
+    let overlap = format!("{declarations} fn main() -> i64 {{ let mut owner = Owner {{ value: 0 }}; let first = Lending::lend(&mut owner); let second = Lending::lend(&mut owner); *second = 1; *first }}");
+    let (core, signatures) = core_and_signatures_for("lending-domain-overlap@0.1.0", &overlap);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(!flow.diagnostics.is_empty(), "overlapping unique lends were accepted");
+
+    let escape = format!("{declarations} fn main() -> &'static mut i64 {{ let mut owner = Owner {{ value: 0 }}; Lending::lend(&mut owner) }}");
+    let (core, signatures) = core_and_signatures_for("lending-domain-escape@0.1.0", &escape);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5017"), "{:?}", core.diagnostics);
+}
+
+#[test]
+fn guarded_lending_gat_generic_wrapper_uses_input_wellformedness() {
+    let (core, signatures) = core_and_signatures_for("lending-generic-domain@0.1.0", r#"
+        trait Lending {
+            type Item<'a> where Self: 'a;
+            fn lend<'a>(value: &'a mut Self) -> <Self as Lending>::Item<'a>;
+        }
+        fn main<'a,I>(value: &'a mut I) -> <I as Lending>::Item<'a> where I: Lending {
+            Lending::lend(value)
+        }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+}
+
+#[test]
+fn const_value_core_preserves_integer_kinds_and_rejects_forged_metadata() {
+    for kind in (0..=12).filter_map(ConstKind::from_tag).filter(|kind| kind.integer_scalar().is_some()) {
+        let source = format!("fn main<const N: {}>() -> {} {{ N }}", kind.name(), kind.name());
+        let core = core_for("const-core@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{source}: {:?}", core.diagnostics);
+        assert!(core.validate().is_empty());
+        let (index, expression) = core.expressions.iter().enumerate().find(|(_, expression)| matches!(expression.kind, CoreKind::ConstValue(_))).unwrap();
+        assert_eq!(expression.ty, Type::Scalar(kind.integer_scalar().unwrap()));
+        assert!(matches!(&expression.kind, CoreKind::ConstValue(GenericArgument::ConstGeneric { index: 0, kind: found }) if *found == kind));
+
+        let mut forged = core.clone();
+        forged.expressions[index].ty = Type::Unit;
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4186"));
+        let mut forged = core.clone();
+        forged.expressions[index].kind = CoreKind::ConstValue(GenericArgument::ConstInfer { variable: ConstInferVar(0), kind });
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4181"));
+        let mut forged = core.clone();
+        forged.expressions[index].kind = CoreKind::ConstValue(GenericArgument::Type(expression.ty.clone()));
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4186"));
+    }
+    let core = core_for("const-capture@0.1.0",
+        "fn main<const N: u32>() -> u32 { let thunk = () -> u32 { N }; thunk() }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let environment = core.expressions.iter().find_map(|expression| match &expression.kind {
+        CoreKind::Closure { environment, .. } => Some(environment), _ => None,
+    }).unwrap();
+    assert!(environment.captures.is_empty(), "a const binder must not become a runtime capture");
+}
+
+#[test]
+fn mutable_bindings_enforce_lexical_write_and_unique_borrow_authority() {
+    for source in [
+        "fn main() -> i64 { let mut value = 41; value = 42; value }",
+        "fn main() -> i64 { let mut value = 41; let reference = &mut value; *reference = 42; *reference }",
+        "fn main(reference: &mut i64) -> () { *reference = 42; }",
+        "fn main(reference: &mut i64) -> i64 { let child = &mut *reference; *child = 42; *child }",
+        "struct Cell { value: i64 } fn main() -> i64 { let mut cell = Cell { value: 41 }; cell.value = 42; cell.value }",
+        "fn main() -> i64 { let mut value = 41; { let value = 0; }; value = 42; value }",
+        "fn main() -> i64 { let value = 41; let mut value = value; value = 42; value }",
+        "fn main() -> i64 { let mut value = 41; let write = () -> () { value = 42; }; write(); value }",
+    ] {
+        let core = core_for("mutable-positive@0.1.0", source);
+        assert!(core.diagnostics.is_empty(), "{source}: {:#?}", core.diagnostics);
+    }
+    for source in [
+        "fn main() -> i64 { let value = 41; value = 42; value }",
+        "fn main() -> i64 { let value = 41; let reference = &mut value; *reference }",
+        "fn main(value: i64) -> i64 { value = 42; value }",
+        "struct Cell { value: i64 } fn main() -> i64 { let cell = Cell { value: 41 }; cell.value = 42; cell.value }",
+        "struct Cell { value: i64 } fn main() -> i64 { let cell = Cell { value: 41 }; let reference = &mut cell.value; *reference }",
+        "fn main() -> i64 { let mut value = 41; { let value = 0; value = 42; }; value }",
+        "fn main() -> i64 { let value = 41; { let mut value = 0; }; value = 42; value }",
+        "fn main() -> i64 { let value = 41; let write = () -> () { value = 42; }; write(); value }",
+    ] {
+        let core = core_for("mutable-negative@0.1.0", source);
+        assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4220"), "{source}: {:#?}", core.diagnostics);
+    }
 }
 
 fn handler_payload_test_count(mir: &grandiose_stage0::MirFunction) -> usize {
@@ -480,21 +635,18 @@ fn mixed_nominal_constructor_arguments_reach_the_runtime_layout_boundary() {
         "core-mixed-nominal-construction@0.1.0",
         "effect Trace { note(); } pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} pub fn main() -> i64 { Mixed<'static, {Trace}, 7, [1, 2], i64> {}; 0 }",
     );
-    assert!(
-        core.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4123"),
-        "mixed identity did not reach the type-only layout boundary: {:#?}",
-        core.diagnostics
-    );
-    assert!(
-        !core
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4185"),
-        "mixed nominal arguments were rejected before nominal kind validation: {:#?}",
-        core.diagnostics
-    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(&expression.kind, CoreKind::Record { .. })
+            && matches!(&expression.ty, Type::Nominal { arguments, .. }
+                if matches!(arguments.as_slice(), [
+                    GenericArgument::Lifetime(grandiose_stage0::Lifetime::Static),
+                    GenericArgument::EffectRow(row), GenericArgument::ConstInteger(integer),
+                    GenericArgument::ConstQuantity(quantity),
+                    GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+                ] if integer.as_u32() == Some(7) && row.effects.len() == 1 && row.tails.is_empty()
+                    && *quantity == Quantity::new(1, Some(2)).unwrap()))
+    }), "mixed nominal construction must retain every argument kind");
 }
 
 #[test]
@@ -560,7 +712,7 @@ fn typed_core_zonks_implicit_const_callable_specialization_arguments() {
                 &expression.kind,
                 CoreKind::Function { arguments, .. }
                     if arguments == &vec![
-                        GenericArgument::ConstU32(7),
+                        GenericArgument::ConstInteger(7u32.into()),
                         GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap()),
                     ]
             )
@@ -847,7 +999,7 @@ fn typed_core_freezes_open_hrtb_effect_rows_selected_by_a_positive_trait_impl() 
                     Type::Callable { safety: grandiose_stage0::Safety::Safe, lifetime_binders: 1, effects, .. }
                         if effects.effects.is_empty()
                             && effects.projections.len() == 1
-                            && matches!(effects.projections[0].item_arguments.as_slice(), [GenericArgument::Lifetime(Lifetime::Bound { .. }), GenericArgument::EffectRow(EffectRow { tail: Some(EffectTail::Generic(0)), .. })])
+                            && matches!(effects.projections[0].item_arguments.as_slice(), [GenericArgument::Lifetime(Lifetime::Bound { .. }), GenericArgument::EffectRow(EffectRow { tails, .. })] if *tails == std::collections::BTreeSet::from([EffectTail::Generic(0)]))
                 )
         )
     }), "Core must retain the selected HRTB row and its caller-owned generic tail: {:#?}", core.expressions);
@@ -1145,7 +1297,7 @@ fn typed_core_rejects_alias_spelled_delayed_effect_projection_metadata() {
             item_generic_kinds: vec![],
             item_arguments: vec![],
         }],
-        tail: None,
+        tails: Default::default(),
     }
     .canonicalized();
     let mut body = TypedBody {
@@ -1223,7 +1375,7 @@ fn typed_core_rechecks_hrtb_effect_projection_evidence_in_function_metadata() {
             item_generic_kinds: vec![],
             item_arguments: vec![],
         }],
-        tail: None,
+        tails: Default::default(),
     }
     .canonicalized();
     let span = Span {
@@ -1592,7 +1744,7 @@ fn forged_nominal_effect_row_inference_cannot_cross_the_core_or_mir_boundary() {
                 arguments: vec![GenericArgument::EffectRow(EffectRow {
                     effects: BTreeSet::new(),
                     projections: vec![],
-                    tail: Some(EffectTail::Infer(grandiose_stage0::EffectVar(3))),
+                    tails: [EffectTail::Infer(grandiose_stage0::EffectVar(3))].into_iter().collect(),
                 })],
             },
             span,
@@ -1646,7 +1798,7 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
                     GenericArgument::EffectRow(EffectRow {
                         effects: BTreeSet::new(),
                         projections: vec![],
-                        tail: Some(EffectTail::Infer(grandiose_stage0::EffectVar(4))),
+                        tails: [EffectTail::Infer(grandiose_stage0::EffectVar(4))].into_iter().collect(),
                     }),
                 ],
                 method_arguments: vec![GenericArgument::ConstInfer {
@@ -1778,7 +1930,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         effects: EffectRow {
             effects: BTreeSet::new(),
             projections,
-            tail: None,
+            tails: Default::default(),
         },
         invocation: Quantity::ONCE,
     };
@@ -1847,7 +1999,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         trait_arguments: vec![GenericArgument::EffectRow(EffectRow {
             effects: BTreeSet::new(),
             projections: vec![projection("Z"), projection("A")],
-            tail: None,
+            tails: Default::default(),
         })],
         name: "Output".into(),
         item_generic_kinds: vec![],
@@ -1879,7 +2031,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
                 GenericArgument::EffectRow(EffectRow {
                     effects: BTreeSet::new(),
                     projections: vec![],
-                    tail: Some(grandiose_stage0::EffectTail::Generic(7)),
+                    tails: [grandiose_stage0::EffectTail::Generic(7)].into_iter().collect(),
                 }),
             ],
         }),
@@ -1899,9 +2051,9 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         expressions: vec![CoreExpr {
             kind: CoreKind::Function {
                 definition: DefKey(Digest::of_bytes(b"core-forged-structural-const")),
-                arguments: vec![GenericArgument::ConstU32Expr(StructuralU32Expr::Div(
-                    Box::new(StructuralU32Expr::Literal(1)),
-                    Box::new(StructuralU32Expr::Literal(0)),
+                arguments: vec![GenericArgument::ConstIntegerExpr(IntegerConstExpr::binary(grandiose_stage0::types::integer_const::IntegerConstOp::Div,
+                    Box::new(IntegerConstExpr::Literal(1u32.into())),
+                    Box::new(IntegerConstExpr::Literal(0u32.into())),
                 ))],
                 host_import: None,
             },
@@ -2126,7 +2278,7 @@ fn implicit_calls_infer_effect_row_arguments_carried_by_nominals() {
             &expression.kind,
             CoreKind::Function { arguments, .. }
                 if matches!(arguments.as_slice(), [GenericArgument::EffectRow(row)]
-                    if row.tail.is_none() && row.effects.len() == 1)
+                    if row.tails.is_empty() && row.effects.len() == 1)
         )
     }));
 }
@@ -2199,7 +2351,7 @@ fn placeflow_rejects_use_after_move_from_typed_core() {
 #[test]
 fn placeflow_rejects_read_while_a_unique_borrow_is_live() {
     let package = PackageKey("core-unique-borrow-read@0.1.0".into());
-    let source = "pub fn main() -> i64 { let value = 1; let loan = &mut value; value; loan; 0 }";
+    let source = "pub fn main() -> i64 { let mut value = 1; let loan = &mut value; value; loan; 0 }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -2272,7 +2424,7 @@ fn forged_callable_lifetime_relation_cannot_retarget_a_second_argument() {
 fn higher_ranked_callable_relation_survives_local_region_opening() {
     let core = core_for(
         "core-hrtb-distinct-reference-relation@0.1.0",
-        "pub fn main(callback: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) -> i64 { let left = 1; let right = 2; let forwarded = callback(&left, &right); left = 3; *forwarded }",
+        "pub fn main(callback: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) -> i64 { let mut left = 1; let right = 2; let forwarded = callback(&left, &right); left = 3; *forwarded }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let paths = core
@@ -2334,14 +2486,14 @@ fn placeflow_tracks_a_live_field_borrow_back_to_its_root_local() {
 
 #[test]
 fn placeflow_allows_disjoint_field_access_while_a_projection_loan_is_live() {
-    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.right = 3; loan; pair.right }";
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.right = 3; loan; pair.right }";
     let flow = flow_for("core-projection-disjoint@0.1.0", source);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
 
 #[test]
 fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
-    let unique_read = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.left; loan; 0 }";
+    let unique_read = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.left; loan; 0 }";
     let flow = flow_for("core-projection-unique-read@0.1.0", unique_read);
     assert!(
         flow.diagnostics
@@ -2351,7 +2503,7 @@ fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
         flow.diagnostics
     );
 
-    let shared_write = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; pair.left = 3; loan; pair.right }";
+    let shared_write = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; let loan = &pair.left; pair.left = 3; loan; pair.right }";
     let flow = flow_for("core-projection-shared-write@0.1.0", shared_write);
     assert!(
         flow.diagnostics
@@ -2361,7 +2513,7 @@ fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
         flow.diagnostics
     );
 
-    let whole_unique = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; let whole = &mut pair; loan; 0 }";
+    let whole_unique = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; let loan = &pair.left; let whole = &mut pair; loan; 0 }";
     let flow = flow_for("core-projection-whole-conflict@0.1.0", whole_unique);
     assert!(
         flow.diagnostics
@@ -2386,7 +2538,7 @@ fn placeflow_ends_a_named_loan_after_its_last_use() {
 
 #[test]
 fn placeflow_keeps_a_named_unique_loan_live_through_handler_control_flow() {
-    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &mut value; handle Tick::tick() { Tick::tick() => { value; loan; 0 } }; 0 }";
+    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let mut value = 1; let loan = &mut value; handle Tick::tick() { Tick::tick() => { value; loan; 0 } }; 0 }";
     let flow = flow_for("core-nll-handler-live@0.1.0", source);
     assert!(
         flow.diagnostics
@@ -2399,7 +2551,7 @@ fn placeflow_keeps_a_named_unique_loan_live_through_handler_control_flow() {
 
 #[test]
 fn placeflow_propagates_live_loans_across_dynamic_handler_exits() {
-    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &mut value; handle Tick::tick() { Tick::tick() => 0 }; value; loan; 0 }";
+    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let mut value = 1; let loan = &mut value; handle Tick::tick() { Tick::tick() => 0 }; value; loan; 0 }";
     let flow = flow_for("core-nll-handler-exit@0.1.0", source);
     assert!(
         flow.diagnostics
@@ -2412,7 +2564,7 @@ fn placeflow_propagates_live_loans_across_dynamic_handler_exits() {
 
 #[test]
 fn handler_payload_shadowing_keeps_the_outer_loan_across_the_dynamic_join() {
-    let source = "effect Read { read(value: i64) -> i64; } pub fn main(value: i64) -> i64 { let loan = &mut value; handle Read::read(1) { Read::read(value) => { let branch = &mut value; branch; 0 } }; value; loan; 0 }";
+    let source = "effect Read { read(value: i64) -> i64; } pub fn main(seed: i64) -> i64 { let mut value = seed; let loan = &mut value; handle Read::read(1) { Read::read(value) => { let mut value = value; let branch = &mut value; branch; 0 } }; value; loan; 0 }";
     let flow = flow_for("core-handler-payload-place-shadow@0.1.0", source);
     assert!(
         flow.diagnostics
@@ -2460,156 +2612,32 @@ fn placeflow_freezes_distinct_move_path_roots_for_shadowed_bindings() {
 }
 
 #[test]
-fn forged_completion_refinement_shadowing_is_rejected_before_placeflow_or_mir() {
-    let mut core = core_for(
-        "core-forged-completion-refinement-place-shadow@0.1.0",
-        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: i64, result: Result) -> i64 { let loan = &mut value; handle result is Result::Ok(found) { true => { let branch = &mut found; branch; 0 }; false => 0 }; value; loan; 0 }",
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let clause = core
-        .expressions
-        .iter_mut()
-        .find_map(|expression| match &mut expression.kind {
-            CoreKind::Completion { clauses, .. } => Some(&mut clauses[0]),
-            _ => None,
-        })
-        .expect("positive completion arm");
-    assert!(
-        clause.refinement.is_some(),
-        "fixture needs a refinement arm"
-    );
-    clause.bindings[0].0 = "value".into();
-    let refinement = clause.refinement.as_mut().expect("refinement arm");
-    refinement.environment.bindings[0] = "value".into();
-    refinement.environment.binding_types[0].0 = "value".into();
-    for expression in &mut core.expressions {
-        if matches!(&expression.kind, CoreKind::Local(name) if name == "found") {
-            expression.kind = CoreKind::Local("value".into());
-        }
-    }
-    assert!(
-        core.validate()
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4183"),
-        "forged completion refinement escaped Typed Core provenance validation: {:#?}",
-        core.validate()
-    );
-    let valid_flow = PlaceFlow::analyze(&core);
-    let lowered = MirLowering::lower(
-        DefKey(Digest::of_bytes(b"forged-completion-refinement-shadowing")),
-        &core,
-        &valid_flow,
-    );
-    assert!(
-        lowered.function.is_none()
-            && lowered
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "G6000"),
-        "MIR accepted completion refinement with forged provenance: {lowered:#?}"
-    );
-    let flow = PlaceFlow::analyze(&core);
-    assert!(
-        flow.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G5008"),
-        "defensive PlaceFlow analysis must still retain the outer loan: {flow:#?}"
-    );
-    assert!(
-        flow.active_loans
-            .iter()
-            .all(|loan| loan.owner.as_deref() != Some("branch")),
-        "a completion-arm reborrow escaped through the join: {flow:#?}"
-    );
-}
-
-#[test]
-fn typed_core_validation_rejects_completion_refinement_on_a_negative_boolean_arm() {
-    let mut core = core_for(
-        "core-forged-negative-refinement@0.1.0",
-        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let positive = core
-        .expressions
-        .iter()
-        .find_map(|expression| match &expression.kind {
-            CoreKind::Completion { clauses, .. } => clauses[0].refinement.clone(),
-            _ => None,
-        })
-        .expect("positive arm must carry refinement evidence");
-    let negative = core
-        .expressions
-        .iter_mut()
-        .find_map(|expression| match &mut expression.kind {
-            CoreKind::Completion { clauses, .. } => Some(&mut clauses[1]),
-            _ => None,
-        })
-        .expect("negative completion arm");
-    negative.refinement = Some(positive);
-
-    assert!(
-        core.validate().iter().any(|diagnostic| {
-            diagnostic.code == "G4183"
-                && diagnostic
-                    .message
-                    .contains("does not prove the test result true")
-        }),
-        "false branch forged a positive refinement pack: {:#?}",
-        core.validate()
-    );
-    let flow = PlaceFlow::analyze(&core);
-    let lowered = MirLowering::lower(
-        DefKey(Digest::of_bytes(b"forged-negative-completion-refinement")),
-        &core,
-        &flow,
-    );
-    assert!(
-        lowered.function.is_none()
-            && lowered
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.code == "G6000"),
-        "MIR lowered a false arm with forged refinement evidence: {lowered:#?}"
-    );
-}
-
-#[test]
 fn typed_core_validation_rederives_refinement_binding_types_from_pattern_layout() {
     let mut core = core_for(
         "core-forged-refinement-binding-type@0.1.0",
-        "use std::*; pub struct Pair { value: i64 } pub fn main(value: Pair) -> i64 { handle value is Pair { value: found } { true => found; false => 0 } }",
+        "use std::*; pub struct Pair { value: i64 } pub fn main(value: Pair) -> i64 { handle (value is Pair { value: found }) { Test::Yes(_) => 1, Test::No(_) => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let pattern_test = core
         .expressions
         .iter()
-        .position(|expression| matches!(expression.kind, CoreKind::PatternTest { .. }))
+        .position(|expression| matches!(expression.kind, CoreKind::Completion { refinement_test: Some(_), .. }))
         .expect("pattern test");
     let mut forged_environment = match &core.expressions[pattern_test].kind {
-        CoreKind::PatternTest { refinement, .. } => refinement.clone(),
+        CoreKind::Completion { refinement_test: Some(refinement), .. } => refinement.clone(),
         _ => unreachable!(),
     };
     forged_environment.binding_types[0].1 = Type::Scalar(ScalarType::Bool);
-    if let CoreKind::PatternTest { refinement, .. } = &mut core.expressions[pattern_test].kind {
+    if let CoreKind::Completion { refinement_test: Some(refinement), .. } = &mut core.expressions[pattern_test].kind {
         *refinement = forged_environment.clone();
     }
-    let branch = core
-        .expressions
-        .iter_mut()
-        .find_map(|expression| match &mut expression.kind {
-            CoreKind::Completion { clauses, .. } => clauses[0].refinement.as_mut(),
-            _ => None,
-        })
-        .expect("positive completion refinement");
-    branch.environment = forged_environment;
 
     assert!(
         core.validate().iter().any(|diagnostic| {
             diagnostic.code == "G4183"
                 && diagnostic
                     .message
-                    .contains("binding types do not match the originating structural pattern")
+                    .contains("binding-pack producer does not preserve its immediate pattern decision")
         }),
         "forged refinement binder type escaped the frozen structural layout: {:#?}",
         core.validate()
@@ -2620,7 +2648,7 @@ fn typed_core_validation_rederives_refinement_binding_types_from_pattern_layout(
 fn forged_explicit_resumption_shadowing_cannot_erase_an_outer_loan() {
     let mut core = core_for(
         "core-forged-resumption-place-shadow@0.1.0",
-        "effect Ask { [1, 1] ask() -> i64; } pub fn main(value: i64) -> i64 { let loan = &mut value; handle Ask::ask() { Ask::ask() with k => k(0) }; value; loan; 0 }",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main(seed: i64) -> i64 { let mut value = seed; let loan = &mut value; handle Ask::ask() { Ask::ask() with k => k(0) }; value; loan; 0 }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let clause = core
@@ -2650,9 +2678,35 @@ fn forged_explicit_resumption_shadowing_cannot_erase_an_outer_loan() {
 }
 
 #[test]
+fn tuple_projection_validation_rederives_value_and_place_layouts() {
+    let core = core_for("core-tuple-projection-layout@0.1.0",
+        "pub fn main() -> i64 { let mut pair = (1, 2); pair.1 = 42; pair.1 }");
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    for corrupt_type in [false, true] {
+        let mut forged = core.clone();
+        let expression = forged.expressions.iter_mut().find(|expression| matches!(expression.kind, CoreKind::Field { .. })).unwrap();
+        if corrupt_type {
+            expression.ty = Type::Unit;
+        } else if let CoreKind::Field { field_count, .. } = &mut expression.kind {
+            *field_count += 1;
+        }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"));
+
+        let mut forged = core.clone();
+        let place = forged.expressions.iter_mut().find_map(|expression| match &mut expression.kind {
+            CoreKind::Assign { place, .. } => Some(place), _ => None,
+        }).unwrap();
+        let grandiose_stage0::CorePlace::Field { field_count, ty, .. } = place else { panic!("tuple field place") };
+        if corrupt_type { *ty = Type::Unit; } else { *field_count += 1; }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"));
+    }
+}
+
+#[test]
 fn placeflow_releases_a_named_loan_after_a_nested_block_last_use() {
     let source =
-        "pub fn main() -> i64 { let value = 1; let loan = &mut value; { loan; 0 }; value }";
+        "pub fn main() -> i64 { let mut value = 1; let loan = &mut value; { loan; 0 }; value }";
     let flow = flow_for("core-nll-nested-last-use@0.1.0", source);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
@@ -2760,7 +2814,7 @@ fn placeflow_ignores_a_forged_conflicting_suffix_after_a_direct_transfer() {
 fn terminal_strict_operand_does_not_publish_unreachable_move_or_cleanup_facts() {
     let core = core_for(
         "core-terminal-strict-ownership-suffix@0.1.0",
-        "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }",
+        "effect Stop { stop() -> !; } pub fn main() -> i64 { let mut value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64), "{:#?}", core.expressions);
@@ -2795,7 +2849,7 @@ fn terminal_strict_operand_does_not_publish_unreachable_move_or_cleanup_facts() 
 
 #[test]
 fn label_consumed_transfer_preserves_following_strict_ownership_effects() {
-    let source = "use std::*; pub fn main() -> i64 { let value = 0; let result = label done { transfer done 40; 0 }; let loan = &mut value; *loan = 2; result + value }";
+    let source = "use std::*; pub fn main() -> i64 { let mut value = 0; let result = label done { transfer done 40; 0 }; let loan = &mut value; *loan = 2; result + value }";
     let core = core_for("core-label-rejoining-strict-ownership@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -2824,7 +2878,7 @@ fn label_consumed_transfer_preserves_following_strict_ownership_effects() {
 
 #[test]
 fn placeflow_releases_a_dead_let_bound_closure_capture() {
-    let source = "pub fn main() -> i64 { let value = 1; let loan = &value; let saved = () -> &i64 { loan }; value = 2; 0 }";
+    let source = "pub fn main() -> i64 { let mut value = 1; let loan = &value; let saved = () -> &i64 { loan }; value = 2; 0 }";
     let flow = flow_for("core-nll-captured-reference@0.1.0", source);
     assert!(
         flow.events
@@ -2845,7 +2899,7 @@ fn placeflow_releases_a_dead_let_bound_closure_capture() {
 
 #[test]
 fn placeflow_releases_a_dead_handler_arm_closure_capture_after_the_join() {
-    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &value; handle Tick::tick() { Tick::tick() => { let saved = () -> &i64 { loan }; 0 } }; value = 2; 0 }";
+    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let mut value = 1; let loan = &value; handle Tick::tick() { Tick::tick() => { let saved = () -> &i64 { loan }; 0 } }; value = 2; 0 }";
     let flow = flow_for("core-nll-captured-reference-handler@0.1.0", source);
     assert!(
         flow.events
@@ -2917,12 +2971,12 @@ fn placeflow_rejects_whole_or_overlapping_use_after_partial_move() {
 
 #[test]
 fn placeflow_reinitializes_partial_moves_at_field_and_aggregate_boundaries() {
-    let field = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.left = 3; pair.left }";
+    let field = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; move pair.left; pair.left = 3; pair.left }";
     let flow = flow_for("core-partial-move-field-reinit@0.1.0", field);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     assert!(flow.moved_places.is_empty(), "{:#?}", flow.moved_places);
 
-    let aggregate = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair = Pair { left: 3, right: 4 }; pair.left }";
+    let aggregate = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let mut pair = Pair { left: 1, right: 2 }; move pair.left; pair = Pair { left: 3, right: 4 }; pair.left }";
     let flow = flow_for("core-partial-move-aggregate-reinit@0.1.0", aggregate);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     assert!(flow.moved_places.is_empty(), "{:#?}", flow.moved_places);
@@ -2981,7 +3035,7 @@ fn placeflow_tracks_nested_partial_moves_and_respects_projection_loans() {
 
 #[test]
 fn placeflow_rejects_writes_through_a_moved_parent_projection() {
-    let source = "pub struct Pair { left: i64, right: i64 } pub struct Outer { pair: Pair } pub fn main() -> i64 { let outer = Outer { pair: Pair { left: 1, right: 2 } }; move outer.pair; outer.pair.left = 3; 0 }";
+    let source = "pub struct Pair { left: i64, right: i64 } pub struct Outer { pair: Pair } pub fn main() -> i64 { let mut outer = Outer { pair: Pair { left: 1, right: 2 } }; move outer.pair; outer.pair.left = 3; 0 }";
     let flow = flow_for("core-partial-move-parent-write@0.1.0", source);
     assert!(
         flow.diagnostics
@@ -3200,11 +3254,11 @@ fn typed_closures_normalize_structural_const_arithmetic_in_type_contracts() {
     };
     assert!(matches!(
         parameters.as_slice(),
-        [Type::Nominal { arguments, .. }] if arguments == &vec![GenericArgument::ConstU32(3)]
+        [Type::Nominal { arguments, .. }] if arguments == &vec![GenericArgument::ConstInteger(3u32.into())]
     ));
     assert!(matches!(
         result.as_ref(),
-        Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::ConstU32(3)]
+        Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::ConstInteger(3u32.into())]
     ));
 }
 
@@ -3228,11 +3282,11 @@ fn typed_closures_normalize_associated_constants_in_nominal_generic_slots() {
     };
     assert!(matches!(
         parameters.as_slice(),
-        [Type::Nominal { arguments, .. }] if arguments == &vec![GenericArgument::ConstU32(7)]
+        [Type::Nominal { arguments, .. }] if arguments == &vec![GenericArgument::ConstInteger(7u32.into())]
     ));
     assert!(matches!(
         result.as_ref(),
-        Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::ConstU32(7)]
+        Type::Nominal { arguments, .. } if arguments == &vec![GenericArgument::ConstInteger(7u32.into())]
     ));
 }
 
@@ -3263,10 +3317,10 @@ fn typed_closures_retain_mixed_nominal_annotation_identity_through_aliases() {
                     [
                         GenericArgument::Lifetime(Lifetime::Static),
                         GenericArgument::EffectRow(row),
-                        GenericArgument::ConstU32(7),
+                        GenericArgument::ConstInteger(integer),
                         GenericArgument::ConstQuantity(quantity),
                         GenericArgument::Type(Type::Scalar(ScalarType::I64)),
-                    ] if row.effects.len() == 1 && *quantity == Quantity::new(1, Some(2)).unwrap()
+                    ] if integer.as_u32() == Some(7) && row.effects.len() == 1 && *quantity == Quantity::new(1, Some(2)).unwrap()
                 )
         )
     };
@@ -3302,7 +3356,7 @@ fn typed_closures_substitute_mixed_generic_alias_annotation_identity() {
                     GenericArgument::ConstGeneric { index: 2, kind: grandiose_stage0::ConstKind::U32 },
                     GenericArgument::ConstGeneric { index: 3, kind: grandiose_stage0::ConstKind::Quantity },
                     GenericArgument::Type(Type::Generic(4)),
-                ] if row.tail == Some(grandiose_stage0::EffectTail::Generic(1)))
+                ] if row.tails == std::collections::BTreeSet::from([grandiose_stage0::EffectTail::Generic(1)]))
         )
     };
     assert!(matches_generic(&parameters[0]));
@@ -3737,7 +3791,7 @@ fn typed_closure_contracts_preserve_enclosing_open_effect_row_tails() {
     assert!(core.expressions.iter().any(|expression| matches!(
         &expression.ty,
         grandiose_stage0::Type::Callable { effects, .. }
-            if effects.tail == Some(grandiose_stage0::EffectTail::Generic(0))
+            if effects.tails == std::collections::BTreeSet::from([grandiose_stage0::EffectTail::Generic(0)])
     )));
 }
 
@@ -4592,7 +4646,7 @@ fn handler_clause_reintroduces_its_effect_while_preserving_an_open_continuation_
         .as_ref()
         .expect("nonterminal continuation contract");
     assert!(continuation.effects.effects.is_empty());
-    assert_eq!(continuation.effects.tail, Some(EffectTail::Generic(0)));
+    assert_eq!(continuation.effects.tails, std::collections::BTreeSet::from([EffectTail::Generic(0)]));
     assert!(matches!(
         core.expression(clause.body).kind,
         CoreKind::Perform { .. }
@@ -5500,7 +5554,7 @@ fn call_reference_provenance_tracks_tuple_and_nominal_result_paths() {
 fn generic_lifetime_relation_selects_the_precise_call_reference_argument() {
     let core = core_for(
         "core-call-reference-distinct-generic-lifetimes@0.1.0",
-        "pub fn first<'a, 'b>(left: &'a i64, right: &'b i64) -> &'a i64 { left } pub fn main() -> i64 { let left = 1; let right = 2; let forwarded = first(&left, &right); left = 3; *forwarded }",
+        "pub fn first<'a, 'b>(left: &'a i64, right: &'b i64) -> &'a i64 { left } pub fn main() -> i64 { let mut left = 1; let right = 2; let forwarded = first(&left, &right); left = 3; *forwarded }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -5683,7 +5737,7 @@ fn opaque_projection_results_defer_until_their_generic_head_is_instantiated() {
             GenericArgument::EffectRow(EffectRow {
                 effects: BTreeSet::new(),
                 projections: vec![],
-                tail: Some(EffectTail::Generic(2)),
+                tails: [EffectTail::Generic(2)].into_iter().collect(),
             }),
         ],
         name: "Output".into(),
@@ -5913,7 +5967,7 @@ fn forged_perform_effect_row_inference_cannot_cross_the_core_boundary() {
     perform.arguments[0] = GenericArgument::EffectRow(EffectRow {
         effects: BTreeSet::new(),
         projections: vec![],
-        tail: Some(EffectTail::Infer(EffectVar(0))),
+        tails: [EffectTail::Infer(EffectVar(0))].into_iter().collect(),
     });
     assert!(
         core.validate()
@@ -6195,6 +6249,26 @@ fn placeflow_seeds_hidden_reference_leaves_from_the_parameter_interface() {
 }
 
 #[test]
+fn borrowed_nominal_contract_freezes_the_stored_reference_path() {
+    let (mut core, signatures) = core_and_signatures_for("borrowed-nominal-contract@0.1.0",
+        "struct Window<'a> { storage: &'a i64 } fn get<'a,'b>(value: &'b Window<'a>) -> &'a i64 { value.storage } pub fn main<'a>(value: Window<'a>) -> i64 { *get(&value) }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+    assert!(EscapeFlow::analyze_with_interface(&core, &flow, &signatures).diagnostics.is_empty());
+    let (contract, origin) = core.expressions.iter_mut().find_map(|expression| match &mut expression.kind {
+        CoreKind::Call { reference_contract: grandiose_stage0::CallReferenceOrigin::Paths(contract),
+            reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(origin), .. } => Some((contract, origin)),
+        _ => None,
+    }).expect("reference call has frozen paths");
+    assert_eq!(contract.len(), 1);
+    assert_eq!(contract[0].argument_fields, [u32::MAX, 0]);
+    assert_eq!(origin, contract);
+    origin[0].argument_fields = vec![];
+    assert!(core.validate().iter().any(|diagnostic| diagnostic.code == "G4187"));
+}
+
+#[test]
 fn placeflow_seeds_caller_reference_parameter_provenance() {
     let core = core_for(
         "core-caller-parameter-reborrow@0.1.0",
@@ -6232,7 +6306,7 @@ fn placeflow_seeds_caller_reference_parameter_provenance() {
 fn handler_payload_reference_alias_preserves_its_parent_loan() {
     let core = core_for(
         "core-handler-payload-reference-provenance@0.1.0",
-        "effect Relay { [0, 1] relay(value: &mut i64) -> i64; } pub fn main() -> i64 { let value = 1; let parent = &mut value; handle Relay::relay(parent) { Relay::relay(payload) with _ => { let child = &mut *payload; *child } } }",
+        "effect Relay { [0, 1] relay(value: &mut i64) -> i64; } pub fn main() -> i64 { let mut value = 1; let parent = &mut value; handle Relay::relay(parent) { Relay::relay(payload) with _ => { let child = &mut *payload; *child } } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6249,7 +6323,7 @@ fn handler_payload_reference_alias_preserves_its_parent_loan() {
 fn placeflow_allows_and_tracks_a_reborrow_through_an_aggregate_reference_field() {
     let core = core_for(
         "core-aggregate-reference-reborrow@0.1.0",
-        "pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; *child }",
+        "pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let mut value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; *child }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6267,7 +6341,7 @@ fn placeflow_allows_and_tracks_a_reborrow_through_an_aggregate_reference_field()
 fn placeflow_rejects_access_through_aggregate_parent_while_unique_child_reborrow_is_live() {
     let core = core_for(
         "core-aggregate-reference-reborrow-conflict@0.1.0",
-        "use std::*; pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; let observed = *holder.loan; *child + observed }",
+        "use std::*; pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let mut value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; let observed = *holder.loan; *child + observed }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6296,7 +6370,7 @@ fn placeflow_rejects_access_through_aggregate_parent_while_unique_child_reborrow
 fn placeflow_releases_aggregate_reborrows_after_their_last_handler_use() {
     let core = core_for(
         "core-aggregate-reference-reborrow-handler-join@0.1.0",
-        "pub struct Holder { loan: &mut i64, tag: i64 } effect Tick { [1, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; handle Tick::tick() { Tick::tick() => *child }; *holder.loan }",
+        "pub struct Holder { loan: &mut i64, tag: i64 } effect Tick { [1, 1] tick() -> i64; } pub fn main() -> i64 { let mut value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; handle Tick::tick() { Tick::tick() => *child }; *holder.loan }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6313,7 +6387,7 @@ fn placeflow_releases_aggregate_reborrows_after_their_last_handler_use() {
 fn placeflow_preserves_enum_payload_reference_origins_across_handler_boundaries() {
     let core = core_for(
         "core-enum-reference-reborrow-handler@0.1.0",
-        "use std::*; pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder::Held(&mut value); handle holder is Holder::Held(parent) { true => { let child = & *(*parent); handle Tick::tick() { Tick::tick() => *child }; *(*parent) }; false => 0 } }",
+        "use std::*; pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let mut value = 1; let holder = Holder::Held(&mut value); handle holder { Holder::Held(_) => { let parent = &holder.0; let child = & *(*parent); handle Tick::tick() { Tick::tick() => *child }; *(*parent) }; Holder::Empty => 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
@@ -6723,7 +6797,7 @@ fn rigid_lifetime_contracts_reject_short_borrows_at_return_assignment_and_aggreg
 
     let assigned = core_for(
         "core-assignment-outlives@0.1.0",
-        "pub fn main<'a>(slot: &'a i64) -> i64 { let value = 1; slot = &value; 0 }",
+        "pub fn main<'a>(slot: &'a i64) -> i64 { let mut slot = slot; let value = 1; slot = &value; 0 }",
     );
     assert!(
         assigned
@@ -6975,7 +7049,7 @@ fn selected_trait_methods_share_the_call_lifetime_constraint_boundary() {
 fn trait_method_generic_lifetime_relation_freezes_the_selected_payload_path() {
     let core = core_for(
         "core-trait-method-distinct-lifetime-relation@0.1.0",
-        "trait First { fn first<'a, 'b>(receiver: i64, left: &'a i64, right: &'b i64) -> &'a i64; } impl First for i64 { fn first<'a, 'b>(receiver: i64, left: &'a i64, right: &'b i64) -> &'a i64 { left } } pub fn main() -> i64 { let left = 1; let right = 2; let forwarded = First::first(0, &left, &right); left = 3; *forwarded }",
+        "trait First { fn first<'a, 'b>(receiver: i64, left: &'a i64, right: &'b i64) -> &'a i64; } impl First for i64 { fn first<'a, 'b>(receiver: i64, left: &'a i64, right: &'b i64) -> &'a i64 { left } } pub fn main() -> i64 { let mut left = 1; let right = 2; let forwarded = First::first(0, &left, &right); left = 3; *forwarded }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let paths = core
@@ -7306,7 +7380,7 @@ fn partial_move_inside_a_closure_copies_a_duplicable_aggregate_capture_root() {
 fn reading_a_written_capture_preserves_unique_access_to_the_outer_place() {
     for body in ["value = 42; value", "let previous = value; value = 42; previous"] {
         let core = core_for("core-write-capture@0.1.0", &format!(
-            "pub fn main(value: i64) -> i64 {{ let update = () -> i64 {{ {body} }}; update() }}"));
+            "pub fn main(value: i64) -> i64 {{ let mut value = value; let update = () -> i64 {{ {body} }}; update() }}"));
         assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
         let environment = core.expressions.iter().find_map(|expression| match &expression.kind {
             CoreKind::Closure { environment, .. } => Some(environment), _ => None,
@@ -7325,7 +7399,7 @@ fn escapeflow_fails_closed_on_a_forged_nested_aggregate_projection_path() {
             pub struct Inner { value: &i64 }
             pub struct Outer { inner: Inner, tag: i64 }
             pub fn main() -> i64 {
-                let outer = Outer { inner: Inner { value: &0 }, tag: 0 };
+                let mut outer = Outer { inner: Inner { value: &0 }, tag: 0 };
                 let first = 1;
                 outer.inner.value = &first;
                 let second = 2;
@@ -7421,7 +7495,7 @@ fn source_is_constructs_ordinary_test_values_with_sealed_binding_packs() {
         assert!(core.expressions.iter().any(|expression| matches!(&expression.kind, CoreKind::Completion { refinement_test: Some(_), .. })));
         assert_eq!(compile_source(&source).run_i64().unwrap(), expected);
     }
-    let once = "use std::*; fn next(count: &mut i64) -> i64 { *count = *count + 1; 42 } pub fn main() -> i64 { let count = 0; let test = next(&mut count) is 42; handle test { Test::Yes(_) => count, Test::No(_) => 0 } }";
+    let once = "use std::*; fn next(count: &mut i64) -> i64 { *count = *count + 1; 42 } pub fn main() -> i64 { let mut count = 0; let test = next(&mut count) is 42; handle test { Test::Yes(_) => count, Test::No(_) => 0 } }";
     assert_eq!(compile_source(once).run_i64().unwrap(), 1);
     let observed = "use std::*; struct Owner { value: i64 } pub fn main() -> i64 { let owner = Owner { value: 42 }; let test = owner is found; handle test { Test::Yes(_) => owner.value, Test::No(_) => 0 } }";
     assert_eq!(compile_source(observed).run_i64().unwrap(), 42);
@@ -7437,7 +7511,7 @@ fn contextual_binding_pack_arguments_activate_source_binders() {
         "let owner = Owner { value: 21 }; let observed = visit(owner is found) { found.value }; let moved = owner; observed + moved.value",
         "let test = identity(42 is found); visit(test) { found }",
     ] {
-        let source = format!("use std::*; struct Owner {{ value: i64 }} impl Use<[0, 1]> for Owner {{}} fn identity<T>(value: T) -> T {{ value }} fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} pub fn main() -> i64 {{ {main} }}");
+        let source = format!("use std::*; struct Owner {{ value: i64 }} impl Use<[0, 1]> for Owner {{}} fn identity<T>(value: T) -> T {{ value }} fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64>, N: Use<[0,1]> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} pub fn main() -> i64 {{ {main} }}");
         let core = core_for("core-hidden-binding-context@0.1.0", &source);
         assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
         assert!(core.expressions.iter().any(|expression| matches!(&expression.kind,
@@ -7463,9 +7537,9 @@ fn contextual_binding_pack_arguments_do_not_activate_foreign_or_negative_binders
 #[test]
 fn contextual_binding_packs_support_shared_arguments_and_explicit_user_parameters() {
     for source in [
-        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(&Y), Output = i64> { handle test { Test::Yes(value) => yes(&value), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }",
+        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(&Y), Output = i64>, Y: Use<[0,1]>, N: Use<[0,1]> { handle test { Test::Yes(value) => yes(&value), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }",
         "use std::*; fn invoke<P, F>(pack: P, extra: i64, body: F) -> i64 where F: Fn<(P, i64), Output = i64> { body(pack, extra) } pub fn main() -> i64 { handle (40 is found) { Test::Yes(pack) => invoke(pack, 2, (extra: i64) -> i64 { found + extra }), Test::No(_) => 0 } }",
-        "use std::*; fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N), Output = i64> { handle test { Test::Yes(_) => 0, Test::No(value) => no(value) } } pub fn main() -> i64 { reject(41 is 42) { 42 } }",
+        "use std::*; fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N), Output = i64>, Y: Use<[0,1]> { handle test { Test::Yes(_) => 0, Test::No(value) => no(value) } } pub fn main() -> i64 { reject(41 is 42) { 42 } }",
     ] {
         assert_eq!(compile_source(source).run_i64().unwrap(), 42);
     }
@@ -7535,7 +7609,7 @@ fn frozen_binding_pack_projections_reject_forged_field_contracts() {
 #[test]
 fn higher_ranked_binding_pack_callbacks_open_the_hidden_argument_lifetime() {
     for callback in ["invoke(pack) { found }", "invoke(pack, () -> i64 { found })"] {
-        let source = format!("use std::*; fn invoke<P>(pack: P, body: for<'a> (&'a P) -> i64) -> i64 {{ body(&pack) }} pub fn main() -> i64 {{ handle (42 is found) {{ Test::Yes(pack) => {callback}, Test::No(_) => 0 }} }}");
+        let source = format!("use std::*; fn invoke<P>(pack: P, body: for<'a> (&'a P) -> i64) -> i64 where P: Use<[0,1]> {{ body(&pack) }} pub fn main() -> i64 {{ handle (42 is found) {{ Test::Yes(pack) => {callback}, Test::No(_) => 0 }} }}");
         let core = core_for("core-higher-ranked-hidden-pack@0.1.0", &source);
         assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
         let closure = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Closure { .. })).unwrap();
@@ -7557,13 +7631,21 @@ fn source_is_pack_producers_reject_forged_construction_and_reused_carriers() {
     let core = core_for("core-is-pack-producer-proof@0.1.0", "use std::*; pub fn main() -> i64 { handle (42 is found) { Test::Yes(_) => 1, Test::No(_) => 0 } }");
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let producer = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Completion { refinement_test: Some(_), .. })).unwrap();
-    for mutation in 0..3 {
+    for mutation in 0..5 {
         let mut forged = core.clone();
         let CoreKind::Completion { clauses, refinement_test, .. } = &mut forged.expressions[producer].kind else { unreachable!() };
         match mutation {
             0 => refinement_test.as_mut().unwrap().binding_types[0].1 = Type::Scalar(ScalarType::Bool),
             1 => clauses[0].body = clauses[1].body,
             2 => *refinement_test = None,
+            // A failed test must never manufacture the positive binding pack.
+            3 => clauses[1].body = clauses[0].body,
+            // Binder spellings cannot be changed independently of their proof.
+            4 => {
+                let environment = refinement_test.as_mut().unwrap();
+                environment.bindings[0] = "different".into();
+                environment.binding_types[0].0 = "different".into();
+            }
             _ => unreachable!(),
         }
         assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"));
@@ -7604,67 +7686,8 @@ fn refinement_binder_keys_are_generative_and_standalone_evidence_is_checked() {
 }
 
 #[test]
-fn positive_is_completion_arm_opens_nominal_refinement_bindings() {
-    let core = core_for(
-        "core-is-nominal-refinement-branch@0.1.0",
-        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let clauses = core
-        .expressions
-        .iter()
-        .find_map(|expression| match &expression.kind {
-            CoreKind::Completion { clauses, .. } => Some(clauses),
-            _ => None,
-        })
-        .expect("completion branch over the is test");
-    assert!(clauses[0].refinement.is_some());
-    assert_eq!(
-        clauses[0].bindings,
-        [("found".into(), Type::Scalar(ScalarType::I64))]
-    );
-    assert!(clauses[1].refinement.is_none());
-    let flow = PlaceFlow::analyze(&core);
-    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
-    assert!(
-        !flow.final_states.contains_key("found"),
-        "branch-local refinement binder escaped its post-state join: {flow:#?}"
-    );
-}
-
-#[test]
-fn negative_is_completion_arm_cannot_observe_positive_refinement_bindings() {
-    let core = core_for(
-        "core-is-refinement-negative-scope@0.1.0",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => found } }",
-    );
-    assert!(
-        core.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4104"),
-        "negative refinement branch unexpectedly resolved a positive-only binder: {:#?}",
-        core.diagnostics
-    );
-}
-
-#[test]
-fn is_refinement_binders_cannot_shadow_incoming_post_state_names() {
-    let core = core_for(
-        "core-is-refinement-post-state-shadow@0.1.0",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { let found = 7; handle value is Result::Ok(found) { true => found; false => 0 } }",
-    );
-    assert!(
-        core.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4170"),
-        "ambiguous refinement post-state shadowing was accepted: {:#?}",
-        core.diagnostics
-    );
-}
-
-#[test]
 fn copied_refinement_bindings_can_be_captured_by_returned_closures() {
-    let source = "use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B> { handle test { Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) } } pub fn main() -> i64 { let delayed = map(42 is found) { (ignored: i64) -> i64 { found } }; handle delayed { Result::Ok(callable) => callable(0), Result::Err(_) => 0 } }";
+    let source = "use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B>, N: Use<[0,1]> { handle test { Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) } } pub fn main() -> i64 { let delayed = map(42 is found) { (ignored: i64) -> i64 { found } }; handle delayed { Result::Ok(callable) => callable(0), Result::Err(_) => 0 } }";
     assert_eq!(compile_source(source).run_i64().unwrap(), 42);
 }
 
@@ -7675,24 +7698,31 @@ fn binding_pack_callbacks_infer_outputs_independently_of_known_inputs() {
         "let mapped = map(40 is found) { (found, 2) }; handle mapped { Result::Ok((left, right)) => left + right, Result::Err(_) => 0 }",
         "let mapped = map(41 is 42) { 7 }; handle mapped { Result::Ok(value) => value, Result::Err(_) => 42 }",
     ] {
-        let source = format!("use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B> {{ handle test {{ Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) }} }} pub fn main() -> i64 {{ {main} }}");
+        let source = format!("use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B>, N: Use<[0,1]> {{ handle test {{ Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) }} }} pub fn main() -> i64 {{ {main} }}");
         assert_eq!(compile_source(&source).run_i64().unwrap(), 42, "{main}");
     }
 }
 
 #[test]
-fn is_refinement_binders_cannot_escape_in_nested_closures() {
+fn an_unused_nested_closure_does_not_escape_its_refinement_context() {
     let core = core_for(
         "core-is-refinement-closure-escape@0.1.0",
-        "use std::*; pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => { let delayed = (ignored: i64) -> i64 { found }; 0 }; false => 0 } }",
+        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { let delayed = (ignored: i64) -> i64 { found }; 0 } }",
     );
-    assert!(
-        core.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4171"),
-        "refinement binder unexpectedly escaped in a closure: {:#?}",
-        core.diagnostics
-    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+}
+
+#[test]
+fn resumption_capture_aliases_respect_immediate_calls_and_lexical_shadowing() {
+    for branch in [
+        "let saved = k; let invoke = (value: i64) -> i64 { saved(value) }; invoke(42)",
+        "let saved = k; let saved = 42; let read = () -> i64 { saved }; k(read())",
+    ] {
+        let source = format!("effect Ask {{ [1, 1] ask() -> i64; }} pub fn main() -> i64 {{ handle Ask::ask() {{ Ask::ask() with k => {{ {branch} }} }} }}");
+        let core = core_for("core-scoped-resumption-aliases@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{branch}: {:#?}", core.diagnostics);
+    }
 }
 
 #[test]
@@ -7893,54 +7923,6 @@ fn binary_operand_transfer_emits_a_cleanup_carrying_leave_edge() {
             .run_i64()
             .unwrap(),
         42
-    );
-}
-
-#[test]
-fn lazy_label_transfer_uses_a_boolean_join_for_the_skipped_branch() {
-    let core = core_for(
-        "core-lazy-label-transfer@0.1.0",
-        "use std::*; pub fn main() -> Bool { label done { false or transfer done true } }",
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let flow = PlaceFlow::analyze(&core);
-    let owner = core
-        .expressions
-        .iter()
-        .find_map(|expression| match expression.kind {
-            CoreKind::Label { brand, .. } => Some(brand.owner),
-            _ => None,
-        })
-        .expect("label owner");
-    let mir = MirLowering::lower(owner, &core, &flow)
-        .function
-        .expect("lazy label transfer lowers");
-    assert!(matches!(
-        &mir.blocks[0].terminator,
-        grandiose_stage0::MirTerminator::SwitchBool {
-            then_target,
-            then_arguments,
-            else_target,
-            else_arguments,
-            ..
-        } if *then_target == grandiose_stage0::MirBlockId(2)
-            && then_arguments.len() == 1
-            && *else_target == grandiose_stage0::MirBlockId(1)
-            && else_arguments.is_empty()
-    ));
-    assert!(matches!(
-        &mir.blocks[1].terminator,
-        grandiose_stage0::MirTerminator::Leave { target, cleanup, .. }
-            if *target == grandiose_stage0::MirBlockId(2)
-                && cleanup.moved_places == flow.moved_places
-                && cleanup.active_loans == flow.active_loans
-    ));
-    assert_eq!(mir.blocks[2].parameters.len(), 1);
-    assert!(
-        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
-            .unwrap()
-            .run_bool()
-            .unwrap()
     );
 }
 
@@ -8416,7 +8398,7 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
         pub fn main() -> i64 {
             label done {
                 let first = Pair { left: 10, right: 11 };
-                let pair = Pair { left: 3, right: 7 };
+                let mut pair = Pair { left: 3, right: 7 };
                 let last = Pair { left: 8, right: 25 };
                 handle Ask::ask(true) {
                     Ask::ask(true) => {
@@ -8503,7 +8485,7 @@ fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancell
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub fn main() -> i64 {
-            let count = 41;
+            let mut count = 41;
             let result = handle {
                 let probe = Probe { target: &mut count };
                 handle Ask::ask(1) { Ask::ask(0, _) => 0 }
@@ -8752,7 +8734,7 @@ fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             handle {
                 @outer: i64 {
                     @inner: i64 {
@@ -8827,7 +8809,7 @@ fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() 
             drop(&mut self) -> { *self.target = *self.target + 1; }
         }
         pub main() -> i64 {
-            let count = 40;
+            let mut count = 40;
             handle {
                 @outer: i64 {
                     @inner: i64 {

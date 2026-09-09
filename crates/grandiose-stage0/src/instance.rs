@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    ConstKind, DefKey, Digest, EffectRow, EffectTail, GenericArgument, GenericKind, InferContext,
+    ConstKind, DefKey, Digest, EffectRow, GenericArgument, GenericKind, InferContext,
     Lifetime, Quantity, Type, TypeError,
 };
 
@@ -93,14 +93,18 @@ impl InstanceKey {
                     canonical_substitution.push(2);
                     encode_lifetime(*value, &mut canonical_substitution);
                 }
-                (GenericKind::Const(ConstKind::U32), InstanceArgument::ConstU32(value)) => {
+                (GenericKind::Const(kind), InstanceArgument::ConstInteger(value)) if *kind == value.kind() => {
                     canonical_substitution.push(3);
-                    canonical_substitution.extend_from_slice(&value.to_le_bytes());
+                    canonical_substitution.extend_from_slice(&value.canonical_bytes());
                 }
-                (GenericKind::Const(ConstKind::U32), InstanceArgument::ConstU32Expr(_)) => {
+                (GenericKind::Const(kind), InstanceArgument::ConstIntegerExpr(value))
+                    if value.scalar().ok() == kind.integer_scalar() => {
                     return Err(InstanceKeyError::NonConcreteConst { slot });
                 }
                 (GenericKind::Const(_), InstanceArgument::ConstInfer { .. }) => {
+                    return Err(InstanceKeyError::NonConcreteConst { slot });
+                }
+                (GenericKind::Const(expected), InstanceArgument::ConstGeneric { kind, .. }) if expected == kind => {
                     return Err(InstanceKeyError::NonConcreteConst { slot });
                 }
                 (
@@ -164,11 +168,11 @@ fn instance_argument_depth(value: &InstanceArgument) -> usize {
         InstanceArgument::Type(value) => type_depth(value),
         InstanceArgument::EffectRow(value) => effect_row_depth(value),
         InstanceArgument::Lifetime(_)
-        | InstanceArgument::ConstU32(_)
+        | InstanceArgument::ConstInteger(_)
         | InstanceArgument::ConstQuantity(_)
         | InstanceArgument::ConstGeneric { .. }
         | InstanceArgument::ConstInfer { .. } => 1,
-        InstanceArgument::ConstU32Expr(value) => structural_u32_depth(value),
+        InstanceArgument::ConstIntegerExpr(value) => structural_u32_depth(value),
         InstanceArgument::ConstProjection {
             subject,
             trait_arguments,
@@ -180,14 +184,11 @@ fn instance_argument_depth(value: &InstanceArgument) -> usize {
     }
 }
 
-fn structural_u32_depth(value: &crate::StructuralU32Expr) -> usize {
+fn structural_u32_depth(value: &crate::IntegerConstExpr) -> usize {
     match value {
-        crate::StructuralU32Expr::Literal(_) | crate::StructuralU32Expr::Param(_) => 1,
-        crate::StructuralU32Expr::Add(left, right)
-        | crate::StructuralU32Expr::Sub(left, right)
-        | crate::StructuralU32Expr::Mul(left, right)
-        | crate::StructuralU32Expr::Div(left, right)
-        | crate::StructuralU32Expr::Rem(left, right) => {
+        crate::IntegerConstExpr::Literal(_) | crate::IntegerConstExpr::Param { .. } => 1,
+        crate::IntegerConstExpr::Neg(value) => nested_depth([structural_u32_depth(value)]),
+        crate::IntegerConstExpr::Binary { left, right, .. } => {
             nested_depth([structural_u32_depth(left), structural_u32_depth(right)])
         }
     }
@@ -217,6 +218,7 @@ fn effect_row_depth(value: &EffectRow) -> usize {
 
 fn type_depth(value: &Type) -> usize {
     match value {
+        Type::FixedArray { element, length } => nested_depth([type_depth(element), instance_argument_depth(length)]),
         Type::Nominal { arguments, .. } => {
             nested_depth(arguments.iter().map(instance_argument_depth))
         }
@@ -251,7 +253,7 @@ fn type_depth(value: &Type) -> usize {
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
@@ -262,10 +264,9 @@ fn type_depth(value: &Type) -> usize {
 
 fn normalize_instance_argument(argument: InstanceArgument) -> InstanceArgument {
     match argument {
-        InstanceArgument::ConstU32Expr(value) => match value.clone().normalized() {
-            Ok(crate::StructuralU32Expr::Literal(value)) => InstanceArgument::ConstU32(value),
-            Ok(value) => InstanceArgument::ConstU32Expr(value),
-            Err(_) => InstanceArgument::ConstU32Expr(value),
+        InstanceArgument::ConstIntegerExpr(value) => match value.clone().normalized() {
+            Ok(value) => crate::types::integer_const_argument(Ok(value)),
+            Err(_) => InstanceArgument::ConstIntegerExpr(value),
         },
         argument => argument,
     }
@@ -315,7 +316,7 @@ fn closed_effect_row_fingerprint(
     value: &EffectRow,
     slot: usize,
 ) -> Result<Digest, InstanceKeyError> {
-    if value.tail.is_some() || !value.projections.is_empty() {
+    if !value.tails.is_empty() || !value.projections.is_empty() {
         return Err(InstanceKeyError::OpenEffectRow { slot });
     }
     let wrapper = Type::Callable {
@@ -331,6 +332,8 @@ fn closed_effect_row_fingerprint(
 
 fn is_concrete_type(value: &Type) -> bool {
     match value {
+        Type::FixedArray { element, length } => is_concrete_type(element) && is_concrete_generic_argument(length)
+            && value.fixed_array_length().is_some(),
         Type::Generic(_) | Type::ConstGeneric { .. } | Type::Infer(_) | Type::Error => false,
         Type::Nominal { arguments, .. } => arguments.iter().all(is_concrete_generic_argument),
         Type::Tuple(arguments) => arguments.iter().all(is_concrete_type),
@@ -354,14 +357,14 @@ fn is_concrete_type(value: &Type) -> bool {
         } => {
             parameters.iter().all(is_concrete_type)
                 && is_concrete_type(result)
-                && effects.tail.is_none()
+                && effects.tails.is_empty()
                 && effects.projections.is_empty()
                 && effects
                     .effects
                     .iter()
                     .all(|effect| effect.arguments.iter().all(is_concrete_generic_argument))
         }
-        Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstU32(_) | Type::ConstQuantity(_) => {
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstInteger(_) | Type::ConstQuantity(_) => {
             true
         }
     }
@@ -371,7 +374,7 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
     match value {
         GenericArgument::Type(value) => is_concrete_type(value),
         GenericArgument::EffectRow(value) => {
-            value.tail.is_none()
+            value.tails.is_empty()
                 && value.projections.is_empty()
                 && value
                     .effects
@@ -384,8 +387,8 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
                 Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
             )
         }
-        GenericArgument::ConstU32(_) | GenericArgument::ConstQuantity(_) => true,
-        GenericArgument::ConstU32Expr(_) => false,
+        GenericArgument::ConstInteger(_) | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::ConstIntegerExpr(_) => false,
         GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -401,7 +404,7 @@ fn encode_lifetime(value: Lifetime, output: &mut Vec<u8>) {
             output.extend_from_slice(&index.to_le_bytes());
         }
         Lifetime::Elided => output.push(2),
-        Lifetime::Generic(_) | Lifetime::Infer(_) => unreachable!("validated concrete lifetime"),
+        Lifetime::Generic(_) | Lifetime::Infer(_) | Lifetime::Placeholder(_) => unreachable!("validated concrete lifetime"),
     }
 }
 
@@ -692,10 +695,6 @@ impl Default for SummaryLimits {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SummaryError {
-    IncompatibleEffectTails {
-        left: EffectTail,
-        right: EffectTail,
-    },
     DidNotConverge {
         component: Vec<InstanceKey>,
         limit: usize,
@@ -728,19 +727,12 @@ impl Default for CallSummary {
 }
 impl CallSummary {
     fn join_effects(left: &EffectRow, right: &EffectRow) -> Result<EffectRow, SummaryError> {
-        let tail = match (left.tail, right.tail) {
-            (Some(left), Some(right)) if left != right => {
-                return Err(SummaryError::IncompatibleEffectTails { left, right });
-            }
-            (Some(tail), _) | (_, Some(tail)) => Some(tail),
-            (None, None) => None,
-        };
         let mut effects = left.clone();
         effects.effects.extend(right.effects.iter().cloned());
         effects
             .projections
             .extend(right.projections.iter().cloned());
-        effects.tail = tail;
+        effects.tails.extend(right.tails.iter().copied());
         effects.canonicalize();
         Ok(effects)
     }
@@ -879,10 +871,28 @@ pub fn solve_call_summaries(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Digest, EffectTail, ScalarType, StructuralU32Expr};
+    use crate::{Digest, EffectTail, ScalarType, IntegerConstExpr};
 
     fn definition(name: &[u8]) -> DefKey {
         DefKey(Digest::of_bytes(name))
+    }
+
+    #[test]
+    fn closed_integer_instance_identity_preserves_every_declared_kind() {
+        use crate::IntegerConst;
+        let kinds: Vec<_> = (0..=12).filter_map(ConstKind::from_tag)
+            .filter(|kind| kind.integer_scalar().is_some()).collect();
+        let mut fingerprints = std::collections::BTreeSet::new();
+        for &actual in &kinds {
+            let value = IntegerConst::new(actual.integer_scalar().unwrap(), false, 42, 64).unwrap();
+            for &expected in &kinds {
+                let key = InstanceKey::new(definition(b"integer-kind"),
+                    &[GenericKind::Const(expected)], vec![InstanceArgument::ConstInteger(value)]);
+                assert_eq!(key.is_ok(), actual == expected, "{actual:?} into {expected:?}");
+                if let Ok(key) = key { assert!(fingerprints.insert(key.fingerprint())); }
+            }
+        }
+        assert_eq!(fingerprints.len(), 12);
     }
 
     #[test]
@@ -963,7 +973,7 @@ mod tests {
             &kinds,
             vec![
                 InstanceArgument::Type(Type::Scalar(ScalarType::I64)),
-                InstanceArgument::ConstU32(1),
+                InstanceArgument::ConstInteger(1u32.into()),
             ],
         )
         .unwrap();
@@ -972,7 +982,7 @@ mod tests {
             &kinds,
             vec![
                 InstanceArgument::Type(Type::Scalar(ScalarType::Text)),
-                InstanceArgument::ConstU32(1),
+                InstanceArgument::ConstInteger(1u32.into()),
             ],
         )
         .unwrap();
@@ -981,7 +991,7 @@ mod tests {
             &kinds,
             vec![
                 InstanceArgument::Type(Type::Scalar(ScalarType::I64)),
-                InstanceArgument::ConstU32(2),
+                InstanceArgument::ConstInteger(2u32.into()),
             ],
         )
         .unwrap();
@@ -1035,7 +1045,7 @@ mod tests {
             vec![InstanceArgument::EffectRow(EffectRow {
                 effects: BTreeSet::new(),
                 projections: vec![],
-                tail: Some(EffectTail::Generic(0)),
+                tails: [EffectTail::Generic(0)].into_iter().collect(),
             })],
         );
         assert!(matches!(
@@ -1046,7 +1056,7 @@ mod tests {
         let symbolic_const = InstanceKey::new(
             definition(b"count"),
             &[GenericKind::Const(ConstKind::U32)],
-            vec![InstanceArgument::ConstU32Expr(StructuralU32Expr::Param(0))],
+            vec![InstanceArgument::ConstIntegerExpr(IntegerConstExpr::Param { index: 0, scalar: crate::ScalarType::U32 })],
         );
         assert!(matches!(
             symbolic_const,
@@ -1060,21 +1070,21 @@ mod tests {
         let structural = InstanceKey::new(
             definition(b"count"),
             &kinds,
-            vec![InstanceArgument::ConstU32Expr(StructuralU32Expr::Add(
-                Box::new(StructuralU32Expr::Literal(1)),
-                Box::new(StructuralU32Expr::Literal(2)),
+            vec![InstanceArgument::ConstIntegerExpr(IntegerConstExpr::binary(crate::types::integer_const::IntegerConstOp::Add,
+                Box::new(IntegerConstExpr::Literal(1u32.into())),
+                Box::new(IntegerConstExpr::Literal(2u32.into())),
             ))],
         )
         .unwrap();
         let literal = InstanceKey::new(
             definition(b"count"),
             &kinds,
-            vec![InstanceArgument::ConstU32(3)],
+            vec![InstanceArgument::ConstInteger(3u32.into())],
         )
         .unwrap();
 
         assert_eq!(structural, literal);
-        assert_eq!(structural.arguments(), &[InstanceArgument::ConstU32(3)]);
+        assert_eq!(structural.arguments(), &[InstanceArgument::ConstInteger(3u32.into())]);
     }
 
     #[test]
@@ -1454,7 +1464,7 @@ mod tests {
             effects: EffectRow {
                 effects: BTreeSet::new(),
                 projections: vec![],
-                tail: Some(EffectTail::Generic(0)),
+                tails: [EffectTail::Generic(0)].into_iter().collect(),
             },
             ..CallSummary::default()
         };
@@ -1462,17 +1472,12 @@ mod tests {
             effects: EffectRow {
                 effects: BTreeSet::new(),
                 projections: vec![],
-                tail: Some(EffectTail::Generic(1)),
+                tails: [EffectTail::Generic(1)].into_iter().collect(),
             },
             ..CallSummary::default()
         };
-        assert!(matches!(
-            left.join(&right),
-            Err(SummaryError::IncompatibleEffectTails {
-                left: EffectTail::Generic(0),
-                right: EffectTail::Generic(1),
-            })
-        ));
+        assert_eq!(left.join(&right).unwrap().effects.tails,
+            BTreeSet::from([EffectTail::Generic(0), EffectTail::Generic(1)]));
     }
 
     #[test]

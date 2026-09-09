@@ -6,10 +6,11 @@ use crate::vm_backend::{VmEffectRow, VmGenericArgument, VmPattern};
 
 fn closed_type(ty: &VmType) -> Result<(), VmArtifactError> {
     match ty {
-        VmType::Generic(_) | VmType::ConstGeneric { .. } | VmType::ConstU32Expr(_) => {
+        VmType::Generic(_) | VmType::ConstGeneric { .. } | VmType::ConstIntegerExpr(_) => {
             Err(invalid("VM LIR retains a non-concrete type or const"))
         }
         VmType::Array(element)
+        | VmType::FixedArray { element, .. }
         | VmType::StaticData { element, .. }
         | VmType::Reference {
             referent: element, ..
@@ -17,10 +18,8 @@ fn closed_type(ty: &VmType) -> Result<(), VmArtifactError> {
         | VmType::RawPointer {
             pointee: element, ..
         } => closed_type(element),
-        VmType::Tuple(types)
-        | VmType::Nominal {
-            arguments: types, ..
-        } => closed_types(types),
+        VmType::Tuple(types) => closed_types(types),
+        VmType::Nominal { arguments, .. } => closed_arguments(arguments),
         VmType::Callable {
             parameters,
             result,
@@ -50,7 +49,7 @@ fn closed_type(ty: &VmType) -> Result<(), VmArtifactError> {
         | VmType::Char
         | VmType::Text
         | VmType::Bytes
-        | VmType::ConstU32(_)
+        | VmType::ConstInteger(_)
         | VmType::ConstQuantity { .. } => Ok(()),
     }
 }
@@ -65,12 +64,12 @@ fn closed_arguments(arguments: &[VmGenericArgument]) -> Result<(), VmArtifactErr
             VmGenericArgument::Type(ty) => closed_type(ty)?,
             VmGenericArgument::EffectRow(row) => closed_row(row)?,
             VmGenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
-            | VmGenericArgument::ConstU32(_)
+            | VmGenericArgument::ConstInteger(_)
             | VmGenericArgument::ConstQuantity { .. } => {}
             VmGenericArgument::Lifetime(_)
-            | VmGenericArgument::ConstU32Expr(_)
+            | VmGenericArgument::ConstIntegerExpr(_)
             | VmGenericArgument::ConstGeneric { .. } => {
-                return Err(invalid("VM LIR retains a non-concrete protocol argument"));
+                return Err(invalid("VM LIR retains a non-concrete generic argument"));
             }
         }
     }
@@ -78,7 +77,7 @@ fn closed_arguments(arguments: &[VmGenericArgument]) -> Result<(), VmArtifactErr
 }
 
 fn closed_row(row: &VmEffectRow) -> Result<(), VmArtifactError> {
-    if row.tail.is_some() || !row.projections.is_empty() {
+    if !row.tails.is_empty() || !row.projections.is_empty() {
         return Err(invalid("VM LIR retains an open or projected effect row"));
     }
     for effect in &row.effects {
@@ -98,7 +97,7 @@ fn closed_pattern(pattern: &VmPattern) -> Result<(), VmArtifactError> {
     match pattern {
         VmPattern::Any | VmPattern::Literal(_) => Ok(()),
         VmPattern::Tuple(patterns) => patterns.iter().try_for_each(closed_pattern),
-        VmPattern::Array { element, elements } => {
+        VmPattern::Array { element, elements, .. } => {
             closed_type(element)?;
             elements.iter().try_for_each(closed_pattern)
         }
@@ -129,10 +128,12 @@ fn closed_instruction(instruction: &VmInstruction) -> Result<(), VmArtifactError
         | VmInstruction::MakeRecord {
             field_types: types, ..
         }
+        | VmInstruction::MakeRecordOwned { field_types: types, .. }
+        | VmInstruction::MakeEnumOwned { field_types: types, .. }
         | VmInstruction::MakeEnum {
             field_types: types, ..
         } => closed_types(types),
-        VmInstruction::MakeArray { element_type, .. }
+        VmInstruction::MakeArray { element_type, .. } | VmInstruction::MakeArrayOwned { element_type, .. }
         | VmInstruction::ProjectArray { element_type, .. }
         | VmInstruction::ArrayGetBorrowShared { element_type, .. }
         | VmInstruction::ArrayEmpty { element_type, .. }
@@ -186,7 +187,7 @@ impl VmLirProgram {
             closed_types(&function.registers)?;
             closed_type(&function.result)?;
             for descriptor in &function.nominal_copy_descriptors {
-                closed_types(&descriptor.arguments)?;
+                closed_arguments(&descriptor.arguments)?;
                 for variant in &descriptor.variants {
                     closed_types(variant)?;
                 }

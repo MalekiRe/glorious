@@ -10,6 +10,12 @@ use super::{
 
 pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
     match value {
+        VmInstruction::TailCallOwned { callee, arguments } => {
+            output.push(211);
+            output.extend_from_slice(&callee.0.as_bytes());
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments { output.extend_from_slice(&argument.to_le_bytes()); }
+        }
         VmInstruction::DeclareFrameCleanup { actions } => {
             output.push(200);
             output.extend_from_slice(&(actions.len() as u64).to_le_bytes());
@@ -203,20 +209,20 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
-        VmInstruction::MakeTuple { dst, fields } => {
-            output.push(33);
+        VmInstruction::MakeTupleOwned { dst, fields } | VmInstruction::MakeTuple { dst, fields } => {
+            output.push(if matches!(value, VmInstruction::MakeTupleOwned { .. }) { 213 } else { 33 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
             for field in fields {
                 output.extend_from_slice(&field.to_le_bytes());
             }
         }
-        VmInstruction::MakeArray {
+        VmInstruction::MakeArrayOwned { dst, fields, element_type } | VmInstruction::MakeArray {
             dst,
             fields,
             element_type,
         } => {
-            output.push(37);
+            output.push(if matches!(value, VmInstruction::MakeArrayOwned { .. }) { 214 } else { 37 });
             output.extend_from_slice(&dst.to_le_bytes());
             encode_type(element_type, output);
             output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
@@ -224,13 +230,13 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&field.to_le_bytes());
             }
         }
-        VmInstruction::MakeRecord {
+        VmInstruction::MakeRecordOwned { dst, definition, fields, field_types } | VmInstruction::MakeRecord {
             dst,
             definition,
             fields,
             field_types,
         } => {
-            output.push(34);
+            output.push(if matches!(value, VmInstruction::MakeRecordOwned { .. }) { 215 } else { 34 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&definition.0.as_bytes());
             output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
@@ -441,14 +447,14 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             }
             encode_cleanup_proof(cleanup, output);
         }
-        VmInstruction::MakeEnum {
+        VmInstruction::MakeEnumOwned { dst, definition, variant, fields, field_types } | VmInstruction::MakeEnum {
             dst,
             definition,
             variant,
             fields,
             field_types,
         } => {
-            output.push(36);
+            output.push(if matches!(value, VmInstruction::MakeEnumOwned { .. }) { 216 } else { 36 });
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&definition.0.as_bytes());
             output.extend_from_slice(&variant.to_le_bytes());
@@ -479,12 +485,13 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&flag.to_le_bytes());
         }
         VmInstruction::Copy { dst, src }
-        | VmInstruction::Store { dst, src }
+        | VmInstruction::Store { dst, src } | VmInstruction::StoreOwned { dst, src }
         | VmInstruction::Move { dst, src } => {
             output.push(match value {
                 VmInstruction::Copy { .. } => 1,
                 VmInstruction::Move { .. } => 2,
                 VmInstruction::Store { .. } => 38,
+                VmInstruction::StoreOwned { .. } => 212,
                 _ => unreachable!("instruction family matched above"),
             });
             output.extend_from_slice(&dst.to_le_bytes());
@@ -1151,8 +1158,13 @@ fn encode_pattern(value: &VmPattern, output: &mut Vec<u8>) {
                 encode_pattern(value, output);
             }
         }
-        VmPattern::Array { element, elements } => {
+        VmPattern::Array { element, elements, rest } => {
             output.push(5);
+            output.push(u8::from(rest.is_some()));
+            if let Some(rest) = rest {
+                output.extend_from_slice(&rest.prefix.to_le_bytes());
+                output.extend_from_slice(&rest.omitted.to_le_bytes());
+            }
             encode_type(element, output);
             output.extend_from_slice(&(elements.len() as u64).to_le_bytes());
             for value in elements {

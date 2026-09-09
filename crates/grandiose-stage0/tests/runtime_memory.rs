@@ -16,6 +16,8 @@ const DECLARATIONS: &str = r#"
     unsafe fn reallocate(pointer: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8;
     unsafe fn deallocate(pointer: *mut u8, size: usize, alignment: usize) -> ();
     unsafe fn is_null<T>(pointer: *mut T) -> u32;
+    fn pointer_eq<T>(left: *const T, right: *const T) -> u32;
+    fn pointer_address<T>(pointer: *const T) -> usize;
     unsafe fn offset<T>(pointer: *mut T, count: usize) -> *mut T;
     unsafe fn offset_const<T>(pointer: *const T, count: usize) -> *const T;
     unsafe fn cast<T, U>(pointer: *mut T) -> *mut U;
@@ -133,6 +135,343 @@ fn compile(source: &str) -> VerifiedVmProgram {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     outcome.artifact.unwrap()
+}
+
+#[test]
+fn mandatory_tail_preserves_incoming_storage_after_typed_memory_updates() {
+    for source in [
+        r#"
+            fn read_value(value: &mut i64) -> i64 { *value }
+            fn relay(value: &mut i64) -> i64 {
+                unsafe { write(as_raw_unique(&mut *value), 42) };
+                tail read_value(value)
+            }
+            pub fn main() -> i64 { let mut value = 0; relay(&mut value) }
+        "#,
+        r#"
+            struct Storage { pointer: *mut i64 }
+            fn replace_storage(storage: &mut Storage) {
+                unsafe {
+                    let pointer = cast<u8, i64>(allocate(8, 8));
+                    write(pointer, 42);
+                    deallocate(cast<i64, u8>(storage.pointer), 8, 8);
+                    (*storage).pointer = pointer;
+                }
+            }
+            fn finish(storage: &mut Storage) -> i64 {
+                unsafe {
+                    let value = read(as_const(storage.pointer));
+                    deallocate(cast<i64, u8>(storage.pointer), 8, 8);
+                    value
+                }
+            }
+            fn relay(storage: &mut Storage) -> i64 {
+                replace_storage(&mut *storage);
+                tail finish(storage)
+            }
+            pub fn main() -> i64 {
+                unsafe {
+                    let pointer = cast<u8, i64>(allocate(8, 8));
+                    write(pointer, 0);
+                    let mut storage = Storage { pointer: pointer };
+                    relay(&mut storage)
+                }
+            }
+        "#,
+    ] {
+        for optimization in ["0", "2"] {
+            let mut request = request(source);
+            request.codegen_options.insert("optimization-level".into(), optimization.into());
+            let program = StageZeroCompiler::new().compile(request)
+                .unwrap_or_else(|error| panic!("{source}: {:#?}", error.diagnostics())).artifact.unwrap();
+            let decoded = decode_and_verify_program(&program.canonical_bytes()).unwrap();
+            for program in [&program, &decoded] {
+                // SAFETY: the fixtures initialize, consume, and release each
+                // allocated resident before its storage is retired.
+                assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits::default()) }.unwrap(), 42);
+            }
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_rejects_current_frame_pointers_written_into_surviving_storage() {
+    for update in [
+        "(*storage).pointer = pointer;",
+        "write(as_raw_unique(&mut storage.pointer), pointer);",
+        "install(&mut *storage, pointer);",
+        "copy(as_raw_shared(&pointer), as_raw_unique(&mut storage.pointer), 1);",
+        "copy_nonoverlapping(as_raw_shared(&pointer), as_raw_unique(&mut storage.pointer), 1);",
+    ] {
+        let source = format!(r#"
+            struct Storage {{ pointer: *mut i64 }}
+            fn install(storage: &mut Storage, pointer: *mut i64) {{
+                unsafe {{ write(as_raw_unique(&mut storage.pointer), pointer) }}
+            }}
+            fn finish(storage: &mut Storage) -> i64 {{
+                unsafe {{ read(as_const(storage.pointer)) }}
+            }}
+            fn relay(storage: &mut Storage) -> i64 {{
+                let mut local = 42;
+                unsafe {{
+                    let pointer = as_raw_unique(&mut local);
+                    {update}
+                }};
+                tail finish(storage)
+            }}
+            pub fn main() -> i64 {{
+                unsafe {{
+                    let mut storage = Storage {{ pointer: null<i64>() }};
+                    relay(&mut storage)
+                }}
+            }}
+        "#);
+        let diagnostics = StageZeroCompiler::new().compile(request(&source))
+            .expect_err("a memory-write or helper summary cannot hide an outgoing frame pointer")
+            .diagnostics();
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G7042"
+            && diagnostic.message.contains("mandatory tail carrier has no frame-independent provenance proof")),
+            "{source}: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn mandatory_tail_preserves_incoming_memory_across_local_early_return_helpers() {
+    let source = r#"
+        struct Storage { pointer: *mut i64 }
+        fn observe(storage: &Storage, early: Bool) -> i64 {
+            handle early { true => return(1, @observe), false => () };
+            2
+        }
+        fn finish(storage: &Storage) -> i64 { unsafe { read(as_const(storage.pointer)) } }
+        fn relay(storage: &Storage) -> i64 {
+            observe(storage, true);
+            observe(storage, false);
+            tail finish(storage)
+        }
+        pub fn main() -> i64 {
+            unsafe {
+                let pointer = cast<u8,i64>(allocate(8, 8));
+                write(pointer, 42);
+                let storage = Storage { pointer: pointer };
+                let answer = relay(&storage);
+                deallocate(cast<i64,u8>(pointer), 8, 8);
+                answer
+            }
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        for program in [&artifact, &decoded] {
+            // SAFETY: the fixture initializes and frees its sole allocation.
+            assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_preserves_incoming_memory_across_proven_short_circuit_callbacks() {
+    let source = r#"
+        struct Storage { pointer: *mut i64 }
+        fn finish(storage: &Storage) -> i64 { unsafe { read(as_const(storage.pointer)) } }
+        fn relay(storage: &Storage, value: u8) -> i64 {
+            let selected = value >= 48 and { value <= 57 };
+            handle selected { true => (), false => () };
+            tail finish(storage)
+        }
+        pub fn main() -> i64 {
+            unsafe {
+                let pointer = cast<u8,i64>(allocate(8, 8));
+                write(pointer, 42);
+                let storage = Storage { pointer: pointer };
+                relay(&storage, 0);
+                relay(&storage, 99);
+                let answer = relay(&storage, 50);
+                deallocate(cast<i64,u8>(pointer), 8, 8);
+                answer
+            }
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        for program in [&artifact, &decoded] {
+            // SAFETY: the fixture initializes and frees its sole allocation.
+            assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_rejects_reference_mutation_hidden_in_an_invoked_callback() {
+    for invoke in ["action()", "invoke(action)"] {
+        let source = format!(r#"
+            struct Storage {{ pointer: *mut i64 }}
+            fn invoke<F>(action: F) where F: Fn<(), Output = ()> {{ action() }}
+            fn finish(storage: &Storage) -> i64 {{ unsafe {{ read(as_const(storage.pointer)) }} }}
+            fn relay(storage: &mut Storage) -> i64 {{
+                let mut local = 42;
+                let pointer = unsafe {{ as_raw_unique(&mut local) }};
+                let destination = unsafe {{ as_raw_unique(&mut storage.pointer) }};
+                let action = () -> () {{ unsafe {{ write(destination, pointer) }} }};
+                {invoke};
+                tail finish(storage)
+            }}
+            pub fn main() -> i64 {{
+                let mut storage = Storage {{ pointer: unsafe {{ null<i64>() }} }};
+                relay(&mut storage)
+            }}
+        "#);
+        for optimization in ["0", "2"] {
+            let mut input = request(&source);
+            input.codegen_options.insert("optimization-level".into(), optimization.into());
+            let diagnostics = StageZeroCompiler::new().compile(input)
+                .expect_err("callable invocation must not hide a pointer to the outgoing frame").diagnostics();
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G7042"
+                && diagnostic.message.contains("no frame-independent provenance proof")), "{diagnostics:#?}");
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_keeps_incoming_proof_across_local_scratch_owner_mutation() {
+    let source = r#"
+        struct Storage { pointer: *mut i64 }
+        fn rewrite(storage: &mut Storage) {
+            let pointer = storage.pointer;
+            unsafe { write(as_raw_unique(&mut storage.pointer), pointer) }
+        }
+        fn finish(storage: &Storage) -> i64 { unsafe { read(as_const(storage.pointer)) } }
+        fn relay(storage: &Storage) -> i64 {
+            let mut scratch = Storage { pointer: storage.pointer };
+            rewrite(&mut scratch);
+            tail finish(storage)
+        }
+        pub fn main() -> i64 {
+            unsafe {
+                let pointer = cast<u8,i64>(allocate(8, 8));
+                write(pointer, 42);
+                let storage = Storage { pointer: pointer };
+                let answer = relay(&storage);
+                deallocate(cast<i64,u8>(pointer), 8, 8);
+                answer
+            }
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(input).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the fixture allocates, initializes and frees its sole native resident.
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
+fn mandatory_tail_memory_copies_and_resize_preserve_scalar_residents() {
+    for copy in ["copy", "copy_nonoverlapping"] {
+        let source = format!(r#"
+            struct Storage {{ pointer: *mut i64 }}
+            fn update(storage: &mut Storage, remaining: usize) -> i64 {{
+                handle remaining {{
+                    0 => unsafe {{
+                        let value = read(as_const(storage.pointer));
+                        deallocate(cast<i64, u8>(storage.pointer), 16, 8);
+                        value
+                    }},
+                    _ => {{
+                        unsafe {{
+                            let source = cast<u8, i64>(allocate(8, 8));
+                            write(source, 42);
+                            {copy}(as_const(source), storage.pointer, 1);
+                            deallocate(cast<i64, u8>(source), 8, 8);
+                        }};
+                        tail update(storage, remaining - 1)
+                    }},
+                }}
+            }}
+            fn relay(storage: &mut Storage) -> i64 {{
+                unsafe {{
+                    (*storage).pointer = cast<u8, i64>(reallocate(cast<i64, u8>(storage.pointer), 8, 8, 16));
+                }};
+                tail update(storage, 42)
+            }}
+            pub fn main() -> i64 {{
+                unsafe {{
+                    let pointer = cast<u8, i64>(allocate(8, 8));
+                    write(pointer, 0);
+                    let mut storage = Storage {{ pointer: pointer }};
+                    relay(&mut storage)
+                }}
+            }}
+        "#);
+        for optimization in ["0", "2"] {
+            let mut request = request(&source);
+            request.codegen_options.insert("optimization-level".into(), optimization.into());
+            let program = StageZeroCompiler::new().compile(request)
+                .unwrap_or_else(|error| panic!("{source}: {:#?}", error.diagnostics())).artifact.unwrap();
+            let decoded = decode_and_verify_program(&program.canonical_bytes()).unwrap();
+            for program in [&program, &decoded] {
+                // SAFETY: scalar residents are duplicable and every allocation
+                // is released with its current size after its last access.
+                assert_eq!(unsafe { program.run_i64_with_unsafe(VmExecutionLimits {
+                    max_call_depth: 16, ..VmExecutionLimits::default()
+                }) }.unwrap(), 42);
+            }
+        }
+    }
+}
+
+#[test]
+fn address_inspection_preserves_null_dangling_cast_and_one_past_addresses() {
+    let candidate = compile(r#"
+        fn inspect(first: *const i64, next: *const i64, end: *const i64,
+                   round_trip: *const i64, empty: *const i64, aligned: *const i64) -> i64 {
+            let equal = pointer_eq(first, first) + pointer_eq(first, round_trip) + pointer_eq(empty, empty);
+            let distinct = pointer_eq(first, next) + pointer_eq(first, end) + pointer_eq(empty, aligned);
+            handle equal == 3 { false => 0, true => handle distinct == 0 {
+                false => 0, true => handle pointer_address(empty) == 0 {
+                    false => 0, true => handle pointer_address(next) - pointer_address(first) == size_of<i64>() {
+                        false => 0, true => handle pointer_address(end) - pointer_address(first) == 2 * size_of<i64>() {
+                            false => 0, true => handle pointer_address(aligned) % align_of<i64>() == 0 { false => 0, true => 42 },
+                        },
+                    },
+                },
+            } }
+        }
+        pub fn main() -> i64 {
+            unsafe {
+                // No residents are initialized or read: only addresses are inspected.
+                let allocation = allocate(16, 8);
+                let first = as_const(cast<u8, i64>(allocation));
+                let result = inspect(first, offset_const(first, 1), offset_const(first, 2),
+                    cast_const<u8, i64>(cast_const<i64, u8>(first)), as_const(null<i64>()), as_const(dangling<i64>()));
+                deallocate(allocation, 16, 8);
+                result
+            }
+        }
+    "#);
+    let decoded = decode_and_verify_program(&candidate.canonical_bytes()).unwrap();
+    for program in [&candidate, &decoded] {
+        // SAFETY: the source forms only in-range/one-past pointers and releases
+        // its allocation without reading uninitialized storage.
+        assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+    let mut malformed = grandiose_stage0::decode_program(&candidate.canonical_bytes()).unwrap();
+    let instruction = malformed.functions.values_mut().flat_map(|function| &mut function.instructions)
+        .find(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::MemoryIntrinsic {
+            primitive: MemoryPrimitive::PointerEq, ..
+        })).expect("source must lower to the manifest-bound equality operation");
+    let grandiose_stage0::VmInstruction::MemoryIntrinsic { primitive, .. } = instruction else { unreachable!() };
+    *primitive = MemoryPrimitive::PointerAddress;
+    malformed.fingerprint = malformed.computed_fingerprint();
+    assert!(grandiose_stage0::verify_vm_program(malformed).is_err(), "the two-argument equality encoding is not a valid address operation");
 }
 
 #[test]
@@ -329,7 +668,7 @@ fn source_native_views_keep_owner_loans_and_split_disjoint_mutable_windows() {
                 let pointer = cast<u8, i64>(bytes);
                 write(pointer, 40);
                 write(offset(pointer, 1), 0);
-                let owner = Owner {{ pointer: pointer, length: 2 }};
+                let mut owner = Owner {{ pointer: pointer, length: 2 }};
                 let result = handle split(window_mut(&mut owner), 1) {{
                     Maybe::None => 0,
                     Maybe::Some((left, right)) => handle first_mut(left) {{
@@ -649,7 +988,7 @@ fn native_reference_return_preserves_storage_and_does_not_freeze_a_snapshot() {
         pub fn main() -> i64 {
             unsafe {
                 let bytes = allocate(size_of<i64>(), align_of<i64>());
-                let owner = Owner { pointer: cast<u8, i64>(bytes) };
+                let mut owner = Owner { pointer: cast<u8, i64>(bytes) };
                 write(owner.pointer, 40);
                 *relay(get_mut(&mut owner)) = 42;
                 let result = *get(&owner);

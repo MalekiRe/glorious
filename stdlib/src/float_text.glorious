@@ -1,0 +1,95 @@
+// Exact finite formatting uses decimal integer arithmetic, never a rounded
+// floating multiply/divide. A binary rational m*2^-q becomes m*5^q / 10^q.
+// Decimal digits are little-endian bytes; bounded scalar widths cap q at 1074.
+fn float_decimal_digits(value: u64, out: &mut Vec<u8>) {
+    Vec::push(&mut *out, as<u8>(value % 10));
+    handle value < 10 { true => (), false => tail float_decimal_digits(value / 10, out) }
+}
+fn float_decimal_multiply(digits: &mut Vec<u8>, factor: u8, index: usize, carry: u8) {
+    handle index == Vec::len(& *digits) {
+        true => handle carry == 0 { true => (), false => Vec::push(digits, carry) },
+        false => {
+            let product = *Vec::get_unchecked(& *digits, index) * factor + carry;
+            let place = handle Vec::get_mut(&mut *digits, index) { Result::Ok(place) => place, Result::Err(_) => __g1_abort() };
+            *place = product % 10;
+            tail float_decimal_multiply(digits, factor, index + 1, product / 10)
+        },
+    }
+}
+fn float_decimal_power(digits: &mut Vec<u8>, factor: u8, exponent: u32) {
+    handle exponent == 0 {
+        true => (),
+        false => { float_decimal_multiply(&mut *digits, factor, 0, 0); tail float_decimal_power(digits, factor, exponent - 1) },
+    }
+}
+fn float_decimal_low(digits: &Vec<u8>, index: usize) -> usize {
+    handle index + 1 == Vec::len(digits) {
+        true => index,
+        false => handle *Vec::get_unchecked(digits, index) == 0 {
+            true => tail float_decimal_low(digits, index + 1), false => index,
+        },
+    }
+}
+fn float_write_decimal(digits: &Vec<u8>, remaining: usize, end: usize, out: &mut String) {
+    handle remaining == end {
+        true => (),
+        false => {
+            Vec::push(&mut out.storage, 48 + *Vec::get_unchecked(digits, remaining - 1));
+            tail float_write_decimal(digits, remaining - 1, end, out)
+        },
+    }
+}
+fn float_write_exponent(value: u32, out: &mut String) {
+    handle value >= 10 { true => float_write_exponent(value / 10, &mut *out), false => () };
+    Vec::push(&mut out.storage, 48 + as<u8>(value % 10))
+}
+fn float_format_exact(bits: u64, width: u32, mantissa_bits: u32, bias: i32) -> String {
+    let sign_mask = bit_shl(as<u64>(1), width - 1);
+    let negative = bit_and(bits, sign_mask) != 0;
+    let fraction_mask = bit_shl(as<u64>(1), mantissa_bits) - 1;
+    let exponent_mask = bit_shl(as<u64>(1), width - mantissa_bits - 1) - 1;
+    let fraction = bit_and(bits, fraction_mask);
+    let exponent = bit_and(bit_shr(bits, mantissa_bits), exponent_mask);
+    handle exponent == exponent_mask {
+        false => (),
+        true => return(handle fraction == 0 {
+            false => Str::to_string("nan"),
+            true => handle negative { true => Str::to_string("-inf"), false => Str::to_string("inf") },
+        }, @float_format_exact),
+    };
+    handle bit_and(bits, sign_mask - 1) == 0 {
+        true => return(handle negative { true => Str::to_string("-0e+0"), false => Str::to_string("0e+0") }, @float_format_exact),
+        false => (),
+    };
+    let mantissa = handle exponent == 0 { true => fraction, false => bit_or(fraction, bit_shl(as<u64>(1), mantissa_bits)) };
+    let power = handle exponent == 0 { true => 1 - bias, false => as<i32>(exponent) - bias };
+    let power = power - as<i32>(mantissa_bits);
+    let mut digits = Vec::new();
+    float_decimal_digits(mantissa, &mut digits);
+    let scale = handle power < 0 {
+        true => { float_decimal_power(&mut digits, 5, as<u32>(0 - power)); as<usize>(0 - power) },
+        false => { float_decimal_power(&mut digits, 2, as<u32>(power)); as<usize>(0) },
+    };
+    let high = Vec::len(&digits);
+    let low = float_decimal_low(&digits, 0);
+    let mut output = String::new();
+    handle negative { true => Vec::push(&mut output.storage, 45), false => () };
+    Vec::push(&mut output.storage, 48 + *Vec::get_unchecked(&digits, high - 1));
+    handle high - low > 1 {
+        true => { Vec::push(&mut output.storage, 46); float_write_decimal(&digits, high - 1, low, &mut output); },
+        false => (),
+    };
+    Vec::push(&mut output.storage, 101);
+    let exponent = as<i32>(high) - as<i32>(scale) - 1;
+    handle exponent < 0 {
+        true => { Vec::push(&mut output.storage, 45); float_write_exponent(as<u32>(0 - exponent), &mut output); },
+        false => { Vec::push(&mut output.storage, 43); float_write_exponent(as<u32>(exponent), &mut output); },
+    };
+    output
+}
+impl f32 {
+    pub fn format_exact(value: Self) -> String { float_format_exact(as<u64>(Self::to_bits(value)), 32, 23, 127) }
+}
+impl f64 {
+    pub fn format_exact(value: Self) -> String { float_format_exact(Self::to_bits(value), 64, 52, 1023) }
+}

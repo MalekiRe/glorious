@@ -4,9 +4,39 @@ No milestone or compatibility contract is considered passed just because its
 types exist. The executable source tests currently exercise kernel components
 and initial source products, not a complete compilation pipeline.
 
-## Current source-authoring revalidation (September 7)
+## Current source-authoring revalidation (September 8)
 
-The latest full source gate passes all 60 tests in 415.72 seconds after adding
+The later cache-56 regression run includes all 60 GSC2 source tests
+(`target/integer-const-literal-baseline-v1.log`). The source test target
+completes in 512.59 seconds with zero passes and 60 failures, all during
+production-closure compilation rather than VM execution. The repeated
+diagnostics include immutable locals/parameters requiring audited mutable
+bindings (`G4220`), cross-module private-field access (`G4140`), and further
+inference, assignment, coverage, and temporary-loan failures. The normal
+100-error diagnostic cap is reached with 63 additional errors suppressed.
+No visibility, mutation, or ownership checks were relaxed. This completed
+source-test result supersedes isolated probes as a current failure baseline;
+it is not a successful authoring gate or self-hosting milestone.
+
+September 8 revalidation supersedes the green source checkpoint below. A full
+workspace test attempt reached GSC2 failures and exhausted its 590-second
+budget before completing the workspace; it is not a completed acceptance run.
+The isolated `gsc2_byte_buffer_writes_a_complete_word` probe also fails while
+checking the complete production source closure. Its initial diagnostics
+identify world-fingerprint accesses to fields made private by the language's
+private-by-default rule, not a byte-buffer execution failure.
+
+The identity wrappers and runtime-manifest input records now explicitly grant
+crate-scoped field access; their previously explicit private fields remain
+private. The follow-up probe in `target/tuple-gsc2-visibility-v2.log` advances
+past those world-fingerprint failures and finds further source migration work:
+registry accesses to query/engine records and mutable locals still written
+with immutable `let`. It fails after 108.11 seconds with the normal diagnostic
+limit, not by weakening visibility, mutability, ownership, or runtime gates.
+The remaining source APIs and bindings require audited migration and full
+source-gate revalidation. Self-hosting and release readiness remain unproven.
+
+The last completed source gate (September 7) passed all 60 tests in 415.72 seconds after adding
 the lossless lexical provider and its typed registry family
 (`target/compiler-check/run-8wjo_51m/report.json`). All 62 execution records
 retain the existing 12 workers/limits and `release_ready: false`; all 36

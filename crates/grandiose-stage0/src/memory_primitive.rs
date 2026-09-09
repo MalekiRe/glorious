@@ -35,10 +35,12 @@ pub enum MemoryPrimitive {
     /// a value's obligations. Linear erasure is an unsafe caller obligation.
     Forget,
     StaticBytesLen,
+    PointerEq,
+    PointerAddress,
 }
 
 impl MemoryPrimitive {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 27] = [
         Self::SizeOf,
         Self::AlignOf,
         Self::Null,
@@ -64,6 +66,8 @@ impl MemoryPrimitive {
         Self::StaticBytesAddress,
         Self::Forget,
         Self::StaticBytesLen,
+        Self::PointerEq,
+        Self::PointerAddress,
     ];
 
     pub const fn selector_name(self) -> &'static str {
@@ -93,6 +97,8 @@ impl MemoryPrimitive {
             Self::StaticBytesAddress => "memory-static-bytes-address",
             Self::Forget => "memory-forget",
             Self::StaticBytesLen => "memory-static-bytes-len",
+            Self::PointerEq => "memory-pointer-eq",
+            Self::PointerAddress => "memory-pointer-address",
         }
     }
 
@@ -102,9 +108,10 @@ impl MemoryPrimitive {
 
     pub fn safety(self) -> Safety {
         match self {
-            Self::SizeOf | Self::AlignOf | Self::StaticBytesLen => Safety::Safe,
-            // All raw-pointer operations require explicit unsafe scopes,
-            // including address-only construction and conversion.
+            Self::SizeOf | Self::AlignOf | Self::StaticBytesLen
+                | Self::PointerEq | Self::PointerAddress => Safety::Safe,
+            // Address inspection grants no access authority. Other primitive
+            // pointer operations retain their explicit unsafe contracts.
             _ => Safety::Unsafe,
         }
     }
@@ -137,6 +144,8 @@ impl MemoryPrimitive {
             ),
             Self::Deallocate => (0, vec![byte_pointer, count.clone(), count], Type::Unit),
             Self::IsNull => (1, vec![writable(t)], Type::Scalar(ScalarType::U32)),
+            Self::PointerEq => (1, vec![readable(t.clone()), readable(t)], Type::Scalar(ScalarType::U32)),
+            Self::PointerAddress => (1, vec![readable(t)], count),
             Self::Offset => (1, vec![writable(t.clone()), count], writable(t)),
             Self::OffsetConst => (1, vec![readable(t.clone()), count], readable(t)),
             Self::Cast => (2, vec![writable(t)], writable(Type::Generic(1))),
@@ -197,9 +206,9 @@ impl MemoryPrimitive {
             result,
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,
-            where_bounds: vec![],
+            where_bounds: vec![], where_outlives: vec![],
             where_associated_type_bindings: vec![],
-            where_associated_effect_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
         }
     }
 
@@ -271,7 +280,8 @@ mod tests {
             assert_eq!(instance.generics, 0);
             assert!(instance.generic_kinds.is_empty());
             assert_eq!(instance.safety, primitive.safety());
-            assert_eq!(instance.safety == Safety::Safe, index < 2 || primitive == MemoryPrimitive::StaticBytesLen);
+            assert_eq!(instance.safety == Safety::Safe, index < 2 || matches!(primitive,
+                MemoryPrimitive::StaticBytesLen | MemoryPrimitive::PointerEq | MemoryPrimitive::PointerAddress));
             assert_eq!(instance.effects, EffectRow::empty());
             let mut excessive = types.clone();
             excessive.push(concrete.clone());

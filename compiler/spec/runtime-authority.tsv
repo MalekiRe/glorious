@@ -179,3 +179,5 @@ memory-static-utf8-address	204
 memory-static-bytes-address	205
 memory-forget	206
 memory-static-bytes-len	207
+memory-pointer-eq	208
+memory-pointer-address	209

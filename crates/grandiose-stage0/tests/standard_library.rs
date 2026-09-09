@@ -58,6 +58,17 @@ fn request(application: &str) -> CompilationRequest {
     }
 }
 
+fn request_with_linear_vec_finish(application: &str) -> CompilationRequest {
+    let application = format!("{application}\nfn finish<T>(value: Vec<T>) -> () {{ handle Vec::finish_empty(value) {{ Result::Ok(_) => (), Result::Err(value) => finish(value) }} }}");
+    let mut request = request(&application);
+    let library = grandiose_stage0::service::STANDARD_LIBRARY_FRAGMENTS.iter()
+        .filter(|(path, _)| matches!(*path, "src/lib.glorious" | "src/foundation.glorious" | "src/memory.glorious"))
+        .map(|(_, source)| *source).collect::<Vec<_>>().join("\n");
+    request.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(), library.as_bytes());
+    request
+}
+
 #[test]
 fn borrowed_subviews_keep_the_named_input_region_across_helper_returns() {
     for application in [
@@ -70,12 +81,12 @@ fn borrowed_subviews_keep_the_named_input_region_across_helper_returns() {
         fn chars<'a>(value: Str<'a>) -> Chars<'a> { Str::chars(value) }
         fn iter<'a>(value: Slice<'a, u8>) -> SliceIter<'a, u8> { Slice::iter(value) }
         pub fn main() -> i64 {
-            let owner = String::new(); String::push_str(&mut owner, "a*Z");
+            let mut owner = String::new(); String::push_str(&mut owner, "a*Z");
             handle text(String::as_str(&owner)) {
                 Result::Err(_) => -1, Result::Ok(text) => handle split(Str::as_bytes(text)) {
                     Result::Err(_) => -2, Result::Ok((left, right)) => handle view(left) {
                         Result::Err(_) => -3, Result::Ok(view) => {
-                            let iterator = iter(view); let characters = chars(text);
+                            let mut iterator = iter(view); let mut characters = chars(text);
                             handle Chars::next(&mut characters) {
                                 Result::Err(_) => -4, Result::Ok(_) => handle SliceIter::next(&mut iterator) {
                                     Result::Err(_) => -5, Result::Ok(value) => as<i64>(*value) + as<i64>(Slice::len(&right)) - 1,
@@ -97,7 +108,7 @@ fn borrowed_subviews_keep_the_named_input_region_across_helper_returns() {
         }
         fn iter<'a>(value: SliceMut<'a, i64>) -> SliceIter<'a, i64> { SliceMut::iter(value) }
         pub fn main() -> i64 {
-            let owner = Vec<i64>::new(); Vec::push(&mut owner, 20); Vec::push(&mut owner, 22);
+            let mut owner = Vec<i64>::new(); Vec::push(&mut owner, 20); Vec::push(&mut owner, 22);
             handle split(Vec::as_mut_slice(&mut owner)) {
                 Result::Err(_) => -1, Result::Ok((left, right)) => handle window(left) {
                     Result::Err(_) => -2, Result::Ok(left) => {
@@ -140,8 +151,8 @@ fn source_linear_collection_stack_costs() {
         let literal = "a".repeat(length);
         for (name, body) in [
             ("compare", format!(r#"handle Slice::lex_compare(Str::as_bytes("{literal}"), Str::as_bytes("{literal}")) {{ Ordering::Equal => {length}, _ => 0 }}"#)),
-            ("utf8", format!(r#"let bytes = Vec<u8>::new(); Vec::extend_from_slice(&mut bytes, b"{literal}"); handle String::from_utf8(bytes) {{ Result::Ok(value) => as<i64>(String::len(&value)), Result::Err(_) => 0 }}"#)),
-            ("resize", format!("let bytes = Vec<u8>::new(); Vec::resize(&mut bytes, {length}, 97); as<i64>(Vec::len(&bytes))")),
+            ("utf8", format!(r#"let mut bytes = Vec<u8>::new(); Vec::extend_from_slice(&mut bytes, b"{literal}"); handle String::from_utf8(bytes) {{ Result::Ok(value) => as<i64>(String::len(&value)), Result::Err(_) => 0 }}"#)),
+            ("resize", format!("let mut bytes = Vec<u8>::new(); Vec::resize(&mut bytes, {length}, 97); as<i64>(Vec::len(&bytes))")),
         ] {
             let source = format!("use std::*; pub fn main() -> i64 {{ {body} }}");
             let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
@@ -189,7 +200,7 @@ fn utf8_balanced_validation_preserves_boundaries_first_error_and_owned_bytes() {
     let source = format!(r#"
         use std::*;
         fn check(input: Slice<u8>) -> i64 {{
-            let bytes = Vec<u8>::new();
+            let mut bytes = Vec<u8>::new();
             Vec::extend_from_slice(&mut bytes, input);
             handle String::from_utf8(bytes) {{
                 Result::Ok(value) => as<i64>(String::len(&value)) + 1,
@@ -257,9 +268,9 @@ fn source_clones_create_independent_nested_collection_owners() {
             }
         }
         pub fn main() -> i64 {
-            let original = Vec<String>::new();
+            let mut original = Vec<String>::new();
             Vec::push(&mut original, Str::to_string("a"));
-            let copied = Clone::clone(&original);
+            let mut copied = Clone::clone(&original);
             extend_first(&mut original);
             Vec::push(&mut copied, Str::to_string("c"));
             let expected_copy = Str::to_string("a");
@@ -292,7 +303,7 @@ fn source_vec_destruction_releases_allocations_before_execution_ends() {
             handle remaining {
                 0 => 42,
                 _ => {
-                    { let value = Vec<u8>::with_capacity(32); Vec::push(&mut value, as<u8>(7)); () };
+                    { let mut value = Vec<u8>::with_capacity(32); Vec::push(&mut value, as<u8>(7)); () };
                     churn(remaining - 1)
                 },
             }
@@ -611,7 +622,7 @@ fn source_copyable_referent_projection_and_explicit_copy_have_distinct_drop_owne
 fn source_owned_closure_captures_destroy_vector_residents_and_independent_copies() {
     for invoke in ["", "pending();"] {
         check_vec_drop_action(&format!(r#"{{
-            let values = Vec<DropProbe>::new();
+            let mut values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe {{ target: target }});
             let pending = move (values) {{ Vec::len(&values) }};
             {invoke}
@@ -779,7 +790,7 @@ fn nonlocal_label_cleanup_preserves_partial_capture_moves() {
 #[test]
 fn source_vec_destruction_calls_element_hooks_before_releasing_the_buffer() {
     check_vec_drop_action(r#"{
-        let values = Vec<DropProbe>::new();
+        let mut values = Vec<DropProbe>::new();
         Vec::push(&mut values, DropProbe { target: target });
         Vec::push(&mut values, DropProbe { target: target });
         ()
@@ -789,7 +800,7 @@ fn source_vec_destruction_calls_element_hooks_before_releasing_the_buffer() {
 #[test]
 fn source_vec_truncation_preserves_reverse_hook_order_across_uneven_ranges() {
     check_vec_drop_action(r#"{
-        let values = Vec<OrderedDropProbe>::new();
+        let mut values = Vec<OrderedDropProbe>::new();
         Vec::push(&mut values, OrderedDropProbe { target: target, digit: 1 });
         Vec::push(&mut values, OrderedDropProbe { target: target, digit: 2 });
         Vec::push(&mut values, OrderedDropProbe { target: target, digit: 3 });
@@ -806,7 +817,7 @@ fn source_vec_truncation_preserves_reverse_hook_order_across_uneven_ranges() {
 #[test]
 fn source_vec_balanced_destruction_keeps_reverse_order_across_chunk_boundaries() {
     check_vec_drop_action(r#"{
-        let values = Vec<OrderedDropProbe>::new();
+        let mut values = Vec<OrderedDropProbe>::new();
         Vec::push(&mut values, OrderedDropProbe { target: target, digit: 1 });
         Vec::push(&mut values, OrderedDropProbe { target: target, digit: 2 });
         Vec::push(&mut values, OrderedDropProbe { target: target, digit: 3 });
@@ -832,7 +843,7 @@ fn source_vec_runs_zero_sized_user_destructors_with_only_header_bytes() {
         impl Use<[0, 1]> for Stop {{}}
         impl Drop for Stop {{ drop(&mut self) -> {{ __g1_abort(); }} }}
         pub fn zero_sized_drop_fixture() -> i64 {{
-            {{ let values = Vec<Stop>::new(); Vec::push(&mut values, Stop {{}}); () }};
+            {{ let mut values = Vec<Stop>::new(); Vec::push(&mut values, Stop {{}}); () }};
             42
         }}
     "#, include_str!("../../../stdlib/src/lib.glorious"));
@@ -850,46 +861,46 @@ fn source_vec_runs_zero_sized_user_destructors_with_only_header_bytes() {
 fn source_vec_destruction_follows_nested_owners_moves_and_partial_consumption() {
     for (action, expected) in [
         (r#"{
-            let nested = Vec<DropProbe>::new();
+            let mut nested = Vec<DropProbe>::new();
             Vec::push(&mut nested, DropProbe { target: target });
-            let outer = Vec<Vec<DropProbe>>::new(); Vec::push(&mut outer, nested); ()
+            let mut outer = Vec<Vec<DropProbe>>::new(); Vec::push(&mut outer, nested); ()
         }"#, 1),
         (r#"{
-            let first = Vec<DropProbe>::new(); let second = Vec<DropProbe>::new();
+            let mut first = Vec<DropProbe>::new(); let mut second = Vec<DropProbe>::new();
             Vec::push(&mut first, DropProbe { target: target });
             Vec::push(&mut second, DropProbe { target: target });
             Vec::append(&mut first, second); ()
         }"#, 2),
         (r#"{
-            let values = Vec<DropProbe>::new();
+            let mut values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe { target: target });
             Vec::push(&mut values, DropProbe { target: target });
             let extracted = Vec::pop(&mut values);
             discard(values); discard(extracted)
         }"#, 2),
         (r#"{
-            let values = Vec<DropProbe>::new();
+            let mut values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe { target: target });
             Vec::push(&mut values, DropProbe { target: target });
             values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe { target: target }); ()
         }"#, 3),
         (r#"{
-            let values = Vec<DropProbe>::new();
+            let mut values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe { target: target });
             Vec::push(&mut values, DropProbe { target: target });
             Vec::push(&mut values, DropProbe { target: target });
             Vec::truncate(&mut values, 1); Vec::truncate(&mut values, 1); ()
         }"#, 3),
         (r#"{
-            let values = Vec<DropProbe>::new();
+            let mut values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe { target: target });
             Vec::push(&mut values, DropProbe { target: target });
-            let iterator = Vec::into_iter(values);
+            let mut iterator = Vec::into_iter(values);
             VecIntoIter::next(&mut iterator); ()
         }"#, 2),
         (r#"@done: () {
-            let values = Vec<DropProbe>::new();
+            let mut values = Vec<DropProbe>::new();
             Vec::push(&mut values, DropProbe { target: target });
             @done(())
         }"#, 1),
@@ -906,7 +917,7 @@ fn zero_sized_vec_residents_require_only_header_bytes_during_destruction() {
             handle remaining { 0 => (), _ => { Vec::push(&mut *value, ()); fill(value, remaining - 1) } }
         }
         pub fn main() -> i64 {
-            { let values = Vec<()>::new(); fill(&mut values, 32); () };
+            { let mut values = Vec<()>::new(); fill(&mut values, 32); () };
             42
         }
     "#;
@@ -966,14 +977,14 @@ fn byte_cursor_fixed_width_reads_preserve_unaligned_windows_and_failed_positions
         fn check(bytes: Slice<u8>, offset: usize, width: usize, expected: u64) -> i64 {{
             handle Slice::slice(bytes, Range<usize> {{ start: 0, end: offset + width }}) {{
                 Result::Err(_) => 0,
-                Result::Ok(window) => {{ let cursor = ByteCursor::new(); read(&mut cursor, window, offset, width, expected) }},
+                Result::Ok(window) => {{ let mut cursor = ByteCursor::new(); read(&mut cursor, window, offset, width, expected) }},
             }}
         }}
         fn sample() -> Slice<'static, u8> {{ b"{literal}" }}
         pub fn main() -> i64 {{
             let literal = sample();
-            let owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, literal);
-            let score = as<i64>(0);
+            let mut owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, literal);
+            let mut score = as<i64>(0);
             {checks}
             score
         }}
@@ -1040,7 +1051,7 @@ fn standard_lifetime_generic_trait_method_preserves_nested_map_call_instances() 
             get<'a>(value: &'a World, key: u64) -> Option<&'a usize> { lookup(value, key) }
         }
         fn main() -> i64 {
-            let map = HashMap<u64, usize>::new();
+            let mut map = HashMap<u64, usize>::new();
             HashMap::insert(&mut map, as<u64>(10), as<usize>(32));
             let world = World { values: map };
             handle Lookup::get(&world, 10) { Result::Err(_) => 0, Result::Ok(value) => as<i64>(*value) }
@@ -1064,7 +1075,7 @@ fn standard_lifetime_generic_trait_method_does_not_extend_a_local_map_owner() {
             get<'a>(value: &'a World, key: u64) -> Option<&'a usize> { lookup(value, key) }
         }
         fn escape() -> Option<&'static usize> {
-            let map = HashMap<u64, usize>::new();
+            let mut map = HashMap<u64, usize>::new();
             HashMap::insert(&mut map, as<u64>(10), as<usize>(32));
             let world = World { values: map }; Lookup::get(&world, 10)
         }
@@ -1096,9 +1107,9 @@ fn standard_string_traits_use_exact_bytes_and_resolve_hash_collisions() {
     let application = format!(r#"
         use std::*;
         fn equal(a: i64, b: i64) -> i64 {{ handle a == b {{ true => 1, false => 0 }} }}
-        fn text(bytes: Slice<u8>) -> String {{ let owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, bytes);
+        fn text(bytes: Slice<u8>) -> String {{ let mut owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, bytes);
             handle String::from_utf8(owned) {{ Result::Ok(value) => value, Result::Err(_) => String::new() }} }}
-        fn hash(value: &String) -> usize {{ let state = Hasher::new(); Hash::hash(value, &mut state); Hasher::finish(state) }}
+        fn hash(value: &String) -> usize {{ let mut state = Hasher::new(); Hash::hash(value, &mut state); Hasher::finish(state) }}
         fn order(value: Ordering) -> i64 {{ handle value {{ Ordering::Less => -1, Ordering::Equal => 0, Ordering::Greater => 1 }} }}
         fn is_equal(value: Bool) -> i64 {{ handle value {{ true => 1, false => 0 }} }}
         fn pair(a: Slice<u8>, b: Slice<u8>, expected: i64, a_hash: usize, b_hash: usize) -> i64 {{
@@ -1113,15 +1124,15 @@ fn standard_string_traits_use_exact_bytes_and_resolve_hash_collisions() {
         }}
         fn maps() -> i64 {{
             let a = Str::to_string("Ab"); let b = Str::to_string("BA");
-            let score = equal(as<i64>(hash(&a)), as<i64>(hash(&b))) * equal(is_equal(Eq::eq(&a, &b)), 0);
-            let map = HashMap<String, usize>::new();
+            let mut score = equal(as<i64>(hash(&a)), as<i64>(hash(&b))) * equal(is_equal(Eq::eq(&a, &b)), 0);
+            let mut map = HashMap<String, usize>::new();
             HashMap::insert(&mut map, a, as<usize>(11)); HashMap::insert(&mut map, b, as<usize>(22));
             score = score + lookup(&map, "Ab", 11) + lookup(&map, "BA", 22);
             let previous = HashMap::insert(&mut map, Str::to_string("Ab"), as<usize>(33));
             score + old(previous) + lookup(&map, "Ab", 33) + equal(as<i64>(HashMap::len(&map)), 2)
         }}
         fn old(value: Option<usize>) -> i64 {{ handle value {{ Result::Ok(value) => equal(as<i64>(value), 11), _ => 0 }} }}
-        main() -> i64 {{ let score = as<i64>(0); {cases} score + maps() }}
+        main() -> i64 {{ let mut score = as<i64>(0); {cases} score + maps() }}
     "#);
     let outcome = StageZeroCompiler::new().compile(request(&application)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
@@ -1151,7 +1162,7 @@ fn standard_slice_of_owned_strings_preserves_nested_view_provenance() {
             }
         }
         main() -> i64 {
-            let values = Vec<Capability>::new(); let expected = Vec<String>::new();
+            let mut values = Vec<Capability>::new(); let mut expected = Vec<String>::new();
             Vec::push(&mut values, Capability { value: Str::to_string("a") });
             Vec::push(&mut values, Capability { value: Str::to_string("é") });
             Vec::push(&mut expected, Str::to_string("a")); Vec::push(&mut expected, Str::to_string("é"));
@@ -1171,7 +1182,7 @@ fn slice_element_accessors_preserve_the_explicit_input_lifetime() {
         fn first<'a>(values: Slice<'a, i64>) -> Option<&'a i64> { Slice::get(values, 0) }
         fn direct<'a>(values: Slice<'a, i64>) -> &'a i64 { Slice::get_unchecked(values, 0) }
         main() -> i64 {
-            let values = Vec<i64>::new(); Vec::push(&mut values, 7);
+            let mut values = Vec<i64>::new(); Vec::push(&mut values, 7);
             let result = first(Vec::as_slice(&values));
             handle result { Result::Err(_) => 0, Result::Ok(value) => *value + *direct(Vec::as_slice(&values)) }
         }
@@ -1199,7 +1210,7 @@ fn hash_map_resident_views_borrow_move_only_values_without_exposing_mutable_keys
             }
         }
         main() -> i64 {
-            let values = HashMap<String, Payload>::new();
+            let mut values = HashMap<String, Payload>::new();
             HashMap::insert(&mut values, Str::to_string("Ab"), Payload { number: 11 });
             HashMap::insert(&mut values, Str::to_string("BA"), Payload { number: 22 });
             let first = total(HashMap::entries(&values), 0, 0);
@@ -1221,7 +1232,7 @@ fn hash_map_resident_views_do_not_escape_the_map_owner() {
     let source = r#"
         use std::*;
         fn escape<'a>() -> &'a String {
-            let values = HashMap<String, String>::new();
+            let mut values = HashMap<String, String>::new();
             HashMap::insert(&mut values, Str::to_string("a"), Str::to_string("b"));
             let entries = HashMap::entries(&values);
             let entry = Slice::get_unchecked(entries, 0);
@@ -1283,7 +1294,7 @@ fn standard_take_uses_a_receiverless_default_constructor() {
             r#"
                 use std::*;
                 pub fn main() -> i64 {
-                    let value = 7;
+                    let mut value = 7;
                     let previous = take(&mut value);
                     previous + value
                 }
@@ -1299,7 +1310,7 @@ fn default_and_take_cover_empty_standard_library_collections() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let previous = take(&mut values);
             Vec::len(&previous) + Vec::len(&values)
@@ -1338,7 +1349,7 @@ fn option_get_or_insert_default_constructs_only_a_vacant_resident() {
         use std::*;
         pub fn empty_i64() -> Option<i64> { None }
         pub fn main() -> i64 {
-            let value = empty_i64();
+            let mut value = empty_i64();
             let inserted = Option::get_or_insert_default(&mut value);
             *inserted = 42;
             handle value {
@@ -1358,7 +1369,7 @@ fn source_vec_capacity_preflight_matches_allocation_and_zero_sized_storage() {
         use std::*;
         fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
         pub fn main() -> i64 {
-            let bytes = Vec<u8>::new();
+            let mut bytes = Vec<u8>::new();
             let score = check(Vec<u8>::initial_capacity(0) == 0);
             let first = Vec::reserved_capacity(&bytes, 1);
             let score = score + check(first == 4) + check(Vec::capacity(&bytes) == 0);
@@ -1374,7 +1385,7 @@ fn source_vec_capacity_preflight_matches_allocation_and_zero_sized_storage() {
             let score = score + check(exact == 24);
             Vec::reserve(&mut bytes, 20);
             let score = score + check(Vec::capacity(&bytes) == exact) + check(Vec::len(&bytes) == 4);
-            let units = Vec<()>::new();
+            let mut units = Vec<()>::new();
             let score = score + check(Vec<()>::initial_capacity(0) == Vec::capacity(&units))
                 + check(Vec<()>::initial_capacity(3) == Vec::capacity(&units))
                 + check(Vec::reserved_capacity(&units, 3) == Vec::capacity(&units));
@@ -1398,7 +1409,7 @@ fn source_vec_backing_byte_preflight_uses_the_actual_padded_layout() {
         struct Padded { byte: u8, word: u64 }
         fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
         pub fn main() -> i64 {
-            let bytes = Vec<u8>::new(); let words = Vec<u32>::new(); let padded = Vec<Padded>::new(); let units = Vec<()>::new();
+            let mut bytes = Vec<u8>::new(); let mut words = Vec<u32>::new(); let mut padded = Vec<Padded>::new(); let mut units = Vec<()>::new();
             let score = check(Vec::backing_bytes(&bytes) == 0) + check(Vec::reserved_backing_bytes(&bytes, 1) == 4)
                 + check(Vec::reserved_backing_bytes(&words, 1) == 16) + check(Vec::reserved_backing_bytes(&padded, 1) == 64)
                 + check(Vec::backing_bytes(&units) == 0) + check(Vec::reserved_backing_bytes(&units, 1000) == 0);
@@ -1419,7 +1430,7 @@ fn byte_buffer_word_store_preserves_unaligned_offsets_limits_and_endianness() {
     let source = r#"use std::*;
         fn check(value: Bool) -> i64 { handle value { true => 1, false => -1000 } }
         pub fn main() -> i64 {
-            let buffer = ByteBuf::new(17); ByteBuf::push(&mut buffer, 99);
+            let mut buffer = ByteBuf::new(17); ByteBuf::push(&mut buffer, 99);
             let score = check(handle ByteBuf::put_u64(&mut buffer, 578437695752307201) { Result::Ok(_) => true, _ => false });
             let score = score + check(handle ByteBuf::put_u64(&mut buffer, 18446744073709551615) { Result::Ok(_) => true, _ => false });
             let score = score + check(handle ByteBuf::put_u64(&mut buffer, 0) { Result::Err(ByteError::Limit) => true, _ => false });
@@ -1443,10 +1454,10 @@ fn source_vec_native_profile_matches_backing_growth_copy_and_disposal() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let bytes = Vec<u8>::with_capacity(4);
+            let mut bytes = Vec<u8>::with_capacity(4);
             Vec::extend_from_slice(&mut bytes, b"abcd");
             Vec::push(&mut bytes, as<u8>(101));
-            let copy = Vec<u8>::new();
+            let mut copy = Vec<u8>::new();
             Vec::extend_from_slice(&mut copy, Vec::as_slice(&bytes));
             as<i64>(Vec::len(&bytes) + Vec::len(&copy))
         }
@@ -1469,7 +1480,7 @@ fn source_vec_native_profile_matches_backing_growth_copy_and_disposal() {
     assert!(!native.counters_saturated);
 
     let zero = StageZeroCompiler::new().compile(request(
-        "use std::*; pub fn main() -> i64 { let values = Vec<()>::new(); Vec::resize(&mut values, 5, ()); as<i64>(Vec::len(&values)) }"
+        "use std::*; pub fn main() -> i64 { let mut values = Vec<()>::new(); Vec::resize(&mut values, 5, ()); as<i64>(Vec::len(&values)) }"
     )).unwrap();
     assert!(zero.diagnostics.is_empty(), "{:#?}", zero.diagnostics);
     // SAFETY: the source stdlib owns the logical zero-sized residents.
@@ -1485,7 +1496,7 @@ fn bundled_vec_resize_copies_only_duplicable_fill_values() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::resize(&mut values, 3, 7);
             Vec::resize(&mut values, 1, 0);
             handle Vec::pop(&mut values) {
@@ -1516,7 +1527,7 @@ fn bundled_stable_sort_keeps_equal_values_in_source_order() {
             }
         }
         pub fn main() -> i64 {
-            let values = Vec<Entry>::new();
+            let mut values = Vec<Entry>::new();
             Vec::push(&mut values, Entry { key: 2, tag: 10 });
             Vec::push(&mut values, Entry { key: 1, tag: 20 });
             Vec::push(&mut values, Entry { key: 2, tag: 30 });
@@ -1560,7 +1571,7 @@ fn bundled_vec_partition_by_uses_a_reusable_source_predicate() {
         use std::*;
         pub fn below_two(value: &i64) -> Bool { *value < 2 }
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 3);
             Vec::push(&mut values, 1);
             Vec::push(&mut values, 2);
@@ -1592,7 +1603,7 @@ fn bundled_vec_partition_by_accepts_a_duplicable_capturing_closure() {
         use std::*;
         pub fn main() -> usize {
             let threshold = 2;
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 3);
             Vec::push(&mut values, 1);
             Vec::push(&mut values, 2);
@@ -1656,7 +1667,7 @@ fn bundled_vec_sort_unstable_accepts_standard_byte_ordering() {
     let source = r#"
         use std::*;
         pub fn sort_bytes(three: u8, one: u8, two: u8) -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, three);
             Vec::push(&mut values, one);
             Vec::push(&mut values, two);
@@ -1815,7 +1826,7 @@ fn bundled_vec_get_mut_checks_the_index_before_materializing_a_unique_borrow() {
     let source = r#"
         use std::*;
         pub fn missing_index_is_err() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 4);
             handle Vec::get_mut(&mut values, 1) {
                 Result::Ok(_) => 0,
@@ -1823,7 +1834,7 @@ fn bundled_vec_get_mut_checks_the_index_before_materializing_a_unique_borrow() {
             }
         }
         pub fn present_index_yields_a_unique_borrow() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 4);
             handle Vec::get_mut(&mut values, 0) {
                 Result::Ok(item) => { *item = 9; 1 },
@@ -1852,12 +1863,12 @@ fn bundled_option_lazy_insertion_only_constructs_an_empty_slot() {
         pub fn build() -> i64 { 7 }
         pub fn empty_value() -> Option<i64> { None }
         pub fn occupied() -> i64 {
-            let value = Some(4);
+            let mut value = Some(4);
             let stored = Option::get_or_insert_with(&mut value, build);
             *stored
         }
         pub fn empty() -> i64 {
-            let value = empty_value();
+            let mut value = empty_value();
             let stored = Option::get_or_insert_with(&mut value, build);
             *stored
         }
@@ -1878,7 +1889,7 @@ fn bundled_hash_map_accepts_i64_keys_through_the_standard_hash_impl() {
     let source = r#"
         use std::*;
         pub fn lookup(key: i64) -> i64 {
-            let values = HashMap::new();
+            let mut values = HashMap::new();
             HashMap::insert(&mut values, key, 42);
             handle HashMap::get(&values, &key) {
                 Result::Ok(value) => *value,
@@ -1933,7 +1944,7 @@ fn bundled_hash_map_accepts_byte_and_character_keys() {
     let source = r#"
         use std::*;
         pub fn byte_value(key: u8) -> i64 {
-            let bytes = HashMap::new();
+            let mut bytes = HashMap::new();
             HashMap::insert(&mut bytes, key, 10);
             handle HashMap::get(&bytes, &key) {
                 Result::Ok(value) => *value,
@@ -1941,7 +1952,7 @@ fn bundled_hash_map_accepts_byte_and_character_keys() {
             }
         }
         pub fn char_value(key: char) -> i64 {
-            let chars = HashMap::new();
+            let mut chars = HashMap::new();
             HashMap::insert(&mut chars, key, 32);
             handle HashMap::get(&chars, &key) {
                 Result::Ok(value) => *value,
@@ -2009,9 +2020,9 @@ fn native_resident_field_replacement_runs_one_cleanup_plan() {
         struct Slot { values: Vec<i64> }
         fn clear(slot: &mut Slot) -> { (*slot).values = Vec::new(); }
         pub fn main() -> usize {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 42);
-            let slots = Vec<Slot>::new();
+            let mut slots = Vec<Slot>::new();
             Vec::push(&mut slots, Slot { values: values });
             handle Vec::get_mut(&mut slots, 0) {
                 Result::Ok(slot) => clear(slot), Result::Err(_) => (),
@@ -2032,7 +2043,7 @@ fn hasher_is_source_defined_and_deterministic() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let state = Hasher::new();
+            let mut state = Hasher::new();
             Hasher::write_usize(&mut state, 7);
             Hasher::finish(state)
         }
@@ -2050,7 +2061,7 @@ fn hasher_wraps_both_multiplication_and_addition() {
         .map(|input| format!("Hasher::write_usize(&mut state, {input});"))
         .collect::<String>();
     let source = format!(
-        "use std::*; pub fn main() -> usize {{ let state = Hasher::new(); {writes} Hasher::finish(state) }}"
+        "use std::*; pub fn main() -> usize {{ let mut state = Hasher::new(); {writes} Hasher::finish(state) }}"
     );
     let expected = inputs.into_iter().fold(5381_usize, |state, input| {
         state.wrapping_mul(33).wrapping_add(input)
@@ -2069,8 +2080,8 @@ fn hash_trait_dispatches_to_the_standard_library_scalar_implementation() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let state = Hasher::new();
-            let values = Vec<i64>::new();
+            let mut state = Hasher::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let input = Vec::len(&values);
             Hash::hash(&input, &mut state);
@@ -2138,10 +2149,10 @@ fn nested_map_vector_views_preserve_the_explicit_owner_lifetime() {
             }
         }
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 19);
             initialize(&mut values);
-            let store = Store { rows: HashMap::new() };
+            let mut store = Store { rows: HashMap::new() };
             HashMap::insert(&mut store.rows, 7, Row { values: values });
             update(&mut store);
             handle item(&store, 7) {
@@ -2163,7 +2174,7 @@ fn named_vector_view_lifetimes_do_not_allow_local_owner_escape() {
     let source = r#"
         use std::*;
         pub fn escape<'a>() -> &'a i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 42);
             Vec::get_unchecked(&values, 0)
         }
@@ -2185,7 +2196,7 @@ fn nested_unique_field_reborrow_reaches_a_vec_push_call() {
             Vec::push(&mut (*holder).entries, item)
         }
         pub fn main() -> usize {
-            let holder = Holder { entries: Vec<i64>::new() };
+            let mut holder = Holder { entries: Vec<i64>::new() };
             push(&mut holder, 42);
             Vec::len(&holder.entries)
         }
@@ -2205,8 +2216,8 @@ fn generic_nested_unique_field_reborrow_reaches_a_vec_push_call() {
             Vec::push(&mut (*holder).entries, Entry { key: key, value: item })
         }
         pub fn main() -> usize {
-            let holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
-            let values = Vec<i64>::new();
+            let mut holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let key = Vec::len(&values);
             push(&mut holder, key, 42);
@@ -2225,13 +2236,13 @@ fn generic_hash_dispatch_before_a_vec_push_runs() {
         pub struct Entry<K, V> { key: K, value: V }
         pub struct Holder<K, V> { entries: Vec<Entry<K, V>> }
         pub fn push<K, V>(holder: &mut Holder<K, V>, key: K, item: V) -> () where K: Hash {
-            let state = Hasher::new();
+            let mut state = Hasher::new();
             Hash::hash(&key, &mut state);
             Vec::push(&mut (*holder).entries, Entry { key: key, value: item })
         }
         pub fn main() -> usize {
-            let holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
-            let values = Vec<i64>::new();
+            let mut holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let key = Vec::len(&values);
             push(&mut holder, key, 42);
@@ -2262,13 +2273,13 @@ fn generic_hash_map_style_recursive_lookup_runs_on_an_empty_vec() {
             }
         }
         pub fn find<K, V>(holder: &Holder<K, V>, key: &K) -> Option<usize> where K: Eq, K: Hash {
-            let state = Hasher::new();
+            let mut state = Hasher::new();
             Hash::hash(key, &mut state);
             find_from(holder, key, 0)
         }
         pub fn main() -> usize {
             let holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let key = Vec::len(&values);
             handle find(&holder, &key) { Result::Err(_) => 42, Result::Ok(_) => 0 }
@@ -2297,8 +2308,8 @@ fn generic_hash_map_style_lookup_then_push_runs() {
                 },
             }
         }
-        pub fn insert<K, V>(holder: &mut Holder<K, V>, key: K, item: V) -> () where K: Eq, K: Hash {
-            let state = Hasher::new();
+        pub fn insert<K, V>(holder: &mut Holder<K, V>, key: K, item: V) -> () where K: Eq, K: Hash, K: Use<[0,1]>, V: Use<[0,1]> {
+            let mut state = Hasher::new();
             Hash::hash(&key, &mut state);
             handle find_from(& *holder, &key, 0) {
                 Result::Err(_) => Vec::push(&mut (*holder).entries, Entry { key: key, value: item }),
@@ -2306,8 +2317,8 @@ fn generic_hash_map_style_lookup_then_push_runs() {
             }
         }
         pub fn main() -> usize {
-            let holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
-            let values = Vec<i64>::new();
+            let mut holder = Holder<usize, i64> { entries: Vec<Entry<usize, i64>>::new() };
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let key = Vec::len(&values);
             insert(&mut holder, key, 42);
@@ -2324,8 +2335,8 @@ fn hash_map_insert_remove_and_contains_are_source_defined() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let map = HashMap<usize, i64>::new();
-            let values = Vec<i64>::new();
+            let mut map = HashMap<usize, i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let key = Vec::len(&values);
             HashMap::insert(&mut map, key, 42);
@@ -2348,8 +2359,8 @@ fn hash_map_get_borrows_from_the_map_not_the_lookup_key() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let map = HashMap<usize, i64>::new();
-            let values = Vec<i64>::new();
+            let mut map = HashMap<usize, i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 7);
             let key = Vec::len(&values);
             HashMap::insert(&mut map, key, 42);
@@ -2369,7 +2380,7 @@ fn hash_set_is_a_source_defined_deterministic_collection() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let set = HashSet<usize>::new();
+            let mut set = HashSet<usize>::new();
             let probe = HashSet::len(&set) + 7;
             let first = HashSet::insert(&mut set, 7);
             let duplicate = HashSet::insert(&mut set, 7);
@@ -2465,7 +2476,7 @@ fn hash_tables_preserve_affine_values_across_growth_collisions_and_relocation() 
             }
         }
         pub fn main() -> i64 {
-            let map = HashMap<Key, Payload>::new();
+            let mut map = HashMap<Key, Payload>::new();
             fill(&mut map, 0);
             let replaced = replace_seven(&mut map);
             let first = remove(&mut map, 0);
@@ -2520,7 +2531,7 @@ fn hash_tables_preserve_the_original_affine_set_resident_on_duplicate_insert() {
             }
         }
         pub fn main() -> i64 {
-            let set = HashSet<Key>::new();
+            let mut set = HashSet<Key>::new();
             HashSet::insert(&mut set, Key { code: 1, payload: 10 });
             HashSet::insert(&mut set, Key { code: 2, payload: 20 });
             handle HashSet::insert(&mut set, Key { code: 1, payload: 99 }) {
@@ -2603,7 +2614,7 @@ fn hash_tables_probe_past_tombstones_and_reuse_empty_tables() {
                 },
             }
         }
-        pub fn main() -> i64 { let map = HashMap<Key, i64>::new(); repeat(&mut map, 20) }
+        pub fn main() -> i64 { let mut map = HashMap<Key, i64>::new(); repeat(&mut map, 20) }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     let bytes = outcome.artifact.unwrap().canonical_bytes();
@@ -2653,7 +2664,7 @@ fn hash_table_mutable_lookup_and_entry_removal_preserve_the_resident_key() {
             }
         }
         pub fn main() -> i64 {
-            let map = HashMap<Key, Item>::new();
+            let mut map = HashMap<Key, Item>::new();
             HashMap::insert(&mut map, Key { code: 1, stamp: 10 }, Item { value: 7 });
             let key = Key { code: 1, stamp: 0 };
             handle HashMap::insert(&mut map, Key { code: 1, stamp: 99 }, Item { value: 32 }) {
@@ -2711,14 +2722,14 @@ fn vec_drain_moves_a_checked_window_into_the_owned_iterator() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 10);
             Vec::push(&mut values, 20);
             Vec::push(&mut values, 30);
             let range = Range { start: Vec::len(&values) - 2, end: Vec::len(&values) };
             handle Vec::drain(&mut values, range) {
                 Result::Err(_) => 0,
-                Result::Ok(iterator) => handle VecIntoIter::next(&mut iterator) {
+                Result::Ok(iterator) => { let mut iterator = iterator; handle VecIntoIter::next(&mut iterator) {
                     Result::Err(_) => 0,
                     Result::Ok(first) => handle VecIntoIter::next(&mut iterator) {
                         Result::Err(_) => 0,
@@ -2727,7 +2738,7 @@ fn vec_drain_moves_a_checked_window_into_the_owned_iterator() {
                             Result::Ok(remaining) => first + second + remaining,
                         },
                     },
-                },
+                } },
             }
         }
     "#;
@@ -2741,7 +2752,7 @@ fn source_defined_slice_search_and_vec_algorithms_preserve_ordered_results() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 1);
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 2);
@@ -2773,14 +2784,14 @@ fn conditional_move_of_generic_value_keeps_the_selected_arm_live() {
     let source = r#"
         use std::*;
         pub struct Holder<T> { entries: Vec<T> }
-        pub fn insert<T>(holder: &mut Holder<T>, item: T) -> () {
+        pub fn insert<T>(holder: &mut Holder<T>, item: T) -> () where T: Use<[0,1]> {
             handle false {
                 false => Vec::push(&mut (*holder).entries, item),
                 true => (),
             }
         }
         pub fn main() -> usize {
-            let holder = Holder<i64> { entries: Vec<i64>::new() };
+            let mut holder = Holder<i64> { entries: Vec<i64>::new() };
             insert(&mut holder, 42);
             Vec::len(&holder.entries)
         }
@@ -2795,7 +2806,7 @@ fn result_branch_move_of_generic_value_keeps_the_selected_arm_live() {
     let source = r#"
         use std::*;
         pub struct Holder<T> { entries: Vec<T> }
-        pub fn insert<T>(holder: &mut Holder<T>, item: T) -> () {
+        pub fn insert<T>(holder: &mut Holder<T>, item: T) -> () where T: Use<[0,1]> {
             let missing = Result<usize, ()>::Err(());
             handle missing {
                 Result::Err(_) => Vec::push(&mut (*holder).entries, item),
@@ -2803,7 +2814,7 @@ fn result_branch_move_of_generic_value_keeps_the_selected_arm_live() {
             }
         }
         pub fn main() -> usize {
-            let holder = Holder<i64> { entries: Vec<i64>::new() };
+            let mut holder = Holder<i64> { entries: Vec<i64>::new() };
             insert(&mut holder, 42);
             Vec::len(&holder.entries)
         }
@@ -2819,14 +2830,14 @@ fn returned_non_reference_result_releases_a_shared_reborrow_before_mutation() {
         use std::*;
         pub struct Holder<T> { entries: Vec<T> }
         pub fn probe<T>(holder: &Holder<T>) -> Option<usize> { Result::Err(()) }
-        pub fn insert<T>(holder: &mut Holder<T>, item: T) -> () {
+        pub fn insert<T>(holder: &mut Holder<T>, item: T) -> () where T: Use<[0,1]> {
             handle probe(& *holder) {
                 Result::Err(_) => Vec::push(&mut (*holder).entries, item),
                 Result::Ok(_) => (),
             }
         }
         pub fn main() -> usize {
-            let holder = Holder<i64> { entries: Vec<i64>::new() };
+            let mut holder = Holder<i64> { entries: Vec<i64>::new() };
             insert(&mut holder, 42);
             Vec::len(&holder.entries)
         }
@@ -2992,7 +3003,7 @@ fn bundled_vec_owns_native_storage_in_source() {
         r#"
             use std::*;
             pub fn main() -> i64 {
-                let values = Vec::new();
+                let mut values = Vec::new();
                 Vec::push(&mut values, 20);
                 Vec::push(&mut values, 22);
                 handle Vec::pop(&mut values) {
@@ -3030,7 +3041,7 @@ fn bundled_vec_exposes_borrowed_element_access_through_library_functions() {
             r#"
                 use std::*;
                 pub fn main() -> i64 {
-                    let values = Vec::new();
+                    let mut values = Vec::new();
                     Vec::push(&mut values, 40);
                     *Vec::get_unchecked(&values, 0) + 2
                 }
@@ -3046,7 +3057,7 @@ fn bundled_vec_uses_source_capacity_helper() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let values = Vec::with_capacity(4);
+            let mut values = Vec::with_capacity(4);
             Vec::push(&mut values, 17);
             Vec::capacity(&values)
         }
@@ -3061,7 +3072,7 @@ fn bundled_vec_exposes_an_ordinary_borrowed_slice_view() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 17);
             let view = Vec::as_slice(&values);
             Slice::len(&view)
@@ -3077,7 +3088,7 @@ fn bundled_slice_get_checks_its_window_and_preserves_the_borrow() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 40);
             let view = Vec::as_slice(&values);
             handle Slice::get(view, 0) {
@@ -3096,7 +3107,7 @@ fn bundled_slice_subslice_is_checked_and_uses_the_same_backing_storage() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 10);
             Vec::push(&mut values, 32);
             let view = Vec::as_slice(&values);
@@ -3116,7 +3127,7 @@ fn bundled_slice_split_at_returns_two_checked_views() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 20);
             Vec::push(&mut values, 22);
             handle Slice::split_at(Vec::as_slice(&values), 1) {
@@ -3135,7 +3146,7 @@ fn bundled_mut_slice_exposes_checked_unique_element_borrows() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             let view = Vec::as_mut_slice(&mut values);
             handle SliceMut::get(view, 0) {
@@ -3157,7 +3168,7 @@ fn bundled_mut_slice_split_at_returns_two_disjoint_mutable_views() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 22);
             let view = Vec::as_mut_slice(&mut values);
@@ -3186,7 +3197,7 @@ fn bundled_vec_get_is_checked() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 40);
             handle Vec::get(&values, 1) {
                 Result::Ok(value) => *value,
@@ -3204,7 +3215,7 @@ fn bundled_vec_first_and_last_are_source_defined_checked_borrows() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 40);
             handle Vec::first(&values) {
@@ -3226,7 +3237,7 @@ fn bundled_vec_swap_moves_elements_out_and_restores_them() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 40);
             Vec::swap(&mut values, 0, 1);
@@ -3243,7 +3254,7 @@ fn bundled_vec_swap_remove_transfers_the_selected_element() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 40);
             handle Vec::swap_remove(&mut values, 0) {
@@ -3262,7 +3273,7 @@ fn bundled_vec_insert_and_remove_preserve_element_order() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 40);
             handle Vec::insert(&mut values, 1, 7) {
@@ -3286,9 +3297,9 @@ fn bundled_vec_insert_from_slice_copies_a_borrowed_window() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let source = Vec::new();
+            let mut source = Vec::new();
             Vec::push(&mut source, 2);
-            let destination = Vec::new();
+            let mut destination = Vec::new();
             Vec::push(&mut destination, 40);
             handle Vec::insert_from_slice(&mut destination, 0, Vec::as_slice(&source)) {
                 Result::Err(_) => 0,
@@ -3310,17 +3321,19 @@ fn bundled_vec_append_transfers_exact_linear_elements() {
         impl Use<[1, 1]> for Ticket {}
 
         pub fn main() -> i64 {
-            let destination = Vec::new();
-            let source = Vec::new();
+            let mut destination = Vec::new();
+            let mut source = Vec::new();
             Vec::push(&mut source, Ticket { value: 42 });
             Vec::append(&mut destination, source);
-            handle Vec::pop(&mut destination) {
-                Result::Ok(ticket) => ticket.value,
+            let result = handle Vec::pop(&mut destination) {
+                Result::Ok(Ticket { value: result }) => result,
                 Result::Err(_) => 0,
-            }
+            };
+            finish(destination);
+            result
         }
     "#;
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let outcome = StageZeroCompiler::new().compile(request_with_linear_vec_finish(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
@@ -3330,7 +3343,7 @@ fn bundled_vec_truncate_and_clear_discard_affine_or_duplicable_residents() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 40);
             Vec::truncate(&mut values, 1);
@@ -3350,7 +3363,7 @@ fn bundled_vec_clear_discards_duplicable_residents() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, 2);
             Vec::clear(&mut values);
             Vec::len(&values)
@@ -3368,7 +3381,7 @@ fn bundled_vec_clear_rejects_exact_linear_residents() {
         struct Ticket { value: i64 }
         impl Use<[1, 1]> for Ticket {}
         pub fn main() -> () {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, Ticket { value: 42 });
             Vec::clear(&mut values)
         }
@@ -3386,20 +3399,22 @@ fn bundled_vec_reverse_preserves_exact_linear_elements() {
         struct Ticket { value: i64 }
         impl Use<[1, 1]> for Ticket {}
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, Ticket { value: 2 });
             Vec::push(&mut values, Ticket { value: 40 });
             Vec::reverse(&mut values);
-            handle Vec::pop(&mut values) {
+            let result = handle Vec::pop(&mut values) {
                 Result::Err(_) => 0,
-                Result::Ok(first) => handle Vec::pop(&mut values) {
+                Result::Ok(Ticket { value: first }) => handle Vec::pop(&mut values) {
                     Result::Err(_) => 0,
-                    Result::Ok(second) => first.value + second.value,
+                    Result::Ok(Ticket { value: second }) => first + second,
                 },
-            }
+            };
+            finish(values);
+            result
         }
     "#;
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let outcome = StageZeroCompiler::new().compile(request_with_linear_vec_finish(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
@@ -3411,22 +3426,24 @@ fn bundled_vec_split_off_transfers_an_exact_linear_suffix() {
         struct Ticket { value: i64 }
         impl Use<[1, 1]> for Ticket {}
         pub fn main() -> i64 {
-            let values = Vec::new();
+            let mut values = Vec::new();
             Vec::push(&mut values, Ticket { value: 2 });
             Vec::push(&mut values, Ticket { value: 40 });
-            handle Vec::split_off(&mut values, 1) {
+            let result = handle Vec::split_off(&mut values, 1) {
                 Result::Err(_) => 0,
-                Result::Ok(tail) => handle Vec::pop(&mut values) {
+                Result::Ok(tail) => { let mut tail = tail; let result = handle Vec::pop(&mut values) {
                     Result::Err(_) => 0,
-                    Result::Ok(left) => handle Vec::pop(&mut tail) {
+                    Result::Ok(Ticket { value: left }) => handle Vec::pop(&mut tail) {
                         Result::Err(_) => 0,
-                        Result::Ok(right) => left.value + right.value,
+                        Result::Ok(Ticket { value: right }) => left + right,
                     },
-                },
-            }
+                }; finish(tail); result },
+            };
+            finish(values);
+            result
         }
     "#;
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let outcome = StageZeroCompiler::new().compile(request_with_linear_vec_finish(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
@@ -3436,7 +3453,7 @@ fn bundled_vec_deque_is_a_source_level_fifo_wrapper() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = VecDeque::new();
+            let mut values = VecDeque::new();
             VecDeque::push_back(&mut values, 40);
             VecDeque::push_front(&mut values, 2);
             handle VecDeque::pop_front(&mut values) {
@@ -3458,10 +3475,10 @@ fn bundled_stack_and_work_list_are_source_level_lifo_wrappers() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let stack = Stack::new();
+            let mut stack = Stack::new();
             Stack::push(&mut stack, 2);
             Stack::push(&mut stack, 40);
-            let work = WorkList::new();
+            let mut work = WorkList::new();
             WorkList::push(&mut work, 2);
             WorkList::push(&mut work, 40);
             handle Stack::pop(&mut stack) {
@@ -3499,7 +3516,7 @@ fn string_insert_splices_utf8_at_a_character_boundary() {
     let source = r#"
         use std::*;
         pub fn main() -> u8 {
-            let value = Str::to_string("ho");
+            let mut value = Str::to_string("ho");
             handle String::insert(&mut value, 1, "ell") {
                 Result::Err(_) => 0,
                 Result::Ok(_) => handle Slice::get(Str::as_bytes(String::as_str(&value)), 2) {
@@ -3519,7 +3536,7 @@ fn string_insert_rejects_a_non_character_boundary() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let value = Str::to_string("aé");
+            let mut value = Str::to_string("aé");
             handle String::insert(&mut value, 2, "x") {
                 Result::Err(StringRangeError::NotCharBoundary) => String::len(&value),
                 _ => 0,
@@ -3536,11 +3553,11 @@ fn string_pop_removes_one_complete_utf8_character() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let value = Str::to_string("aé");
+            let mut value = Str::to_string("aé");
             handle String::pop(&mut value) {
                 Result::Err(_) => 0,
                 Result::Ok(last) => {
-                    let rendered = String::new();
+                    let mut rendered = String::new();
                     String::push(&mut rendered, last);
                     String::len(&value) + String::len(&rendered)
                 },
@@ -3557,8 +3574,8 @@ fn str_chars_iterates_complete_utf8_characters_from_static_data() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let chars = Str::chars("aé");
-            let output = String::new();
+            let mut chars = Str::chars("aé");
+            let mut output = String::new();
             handle Chars::next(&mut chars) {
                 Result::Err(_) => 0,
                 Result::Ok(first) => {
@@ -3634,11 +3651,11 @@ fn str_chars_uses_the_same_iterator_for_dynamic_string_storage() {
         pub fn main() -> usize {
             let text = Str::to_string("é");
             let view = String::as_str(&text);
-            let chars = Str::chars(view);
+            let mut chars = Str::chars(view);
             handle Chars::next(&mut chars) {
                 Result::Err(_) => 0,
                 Result::Ok(character) => {
-                    let output = String::new();
+                    let mut output = String::new();
                     String::push(&mut output, character);
                     String::len(&output)
                 },
@@ -3752,7 +3769,7 @@ fn empty_string_views_survive_nested_vector_extraction_and_calls() {
     let source = r#"
         use std::*;
         fn owned(value: Slice<u8>) -> Vec<u8> {
-            let bytes = Vec<u8>::new();
+            let mut bytes = Vec<u8>::new();
             Vec::extend_from_slice(&mut bytes, value);
             bytes
         }
@@ -3766,7 +3783,7 @@ fn empty_string_views_survive_nested_vector_extraction_and_calls() {
             }
         }
         pub fn main() -> usize {
-            let inputs = Vec<Vec<u8>>::new();
+            let mut inputs = Vec<Vec<u8>>::new();
             Vec::push(&mut inputs, owned(b""));
             handle Vec::get(&inputs, 0) { Result::Err(_) => 0, Result::Ok(bytes) => digest(Clone::clone(bytes)) }
         }
@@ -3806,7 +3823,7 @@ fn blake3_returns_the_complete_digest_for_empty_text_and_binary_input() {
         fn padded_input() -> Slice<'static, u8> { @PADDED@ }
         pub fn main() -> i64 {
             let padded = padded_input();
-            let owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, padded);
+            let mut owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, padded);
             hash(@INPUT@) + hash_window(padded) + hash_window(Vec::as_slice(&owned))
         }
     "#;
@@ -3957,7 +3974,7 @@ fn source_blake3_releases_input_loans_and_hashes_mutated_owned_storage() {
             }}
         }}
         pub fn main() -> i64 {{
-            let input = Vec<u8>::new();
+            let mut input = Vec<u8>::new();
             Vec::extend_from_slice(&mut input, {});
             let before = check(&input, {});
             let changed = handle Vec::get_mut(&mut input, 1025) {{
@@ -3994,7 +4011,7 @@ fn string_push_encodes_a_char_into_its_vec_backing() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let value = String::new();
+            let mut value = String::new();
             String::push(&mut value, 'A');
             String::push(&mut value, 'é');
             Str::len_bytes(String::as_str(&value))
@@ -4010,14 +4027,14 @@ fn vec_extend_from_slice_and_string_push_str_copy_borrowed_bytes() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let bytes = Vec::new();
+            let mut bytes = Vec::new();
             Vec::push(&mut bytes, 65);
-            let source_bytes = Vec::new();
+            let mut source_bytes = Vec::new();
             Vec::push(&mut source_bytes, 65);
             let bytes_view = Vec::as_slice(&source_bytes);
             Vec::extend_from_slice(&mut bytes, bytes_view);
 
-            let value = String::new();
+            let mut value = String::new();
             String::push_str(&mut value, "hé");
             Vec::len(&bytes) + Str::len_bytes(String::as_str(&value))
         }
@@ -4032,7 +4049,7 @@ fn vec_extend_from_slice_rejects_a_live_view_of_its_destination() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let bytes = Vec::new();
+            let mut bytes = Vec::new();
             Vec::push(&mut bytes, 65);
             let bytes_view = Vec::as_slice(&bytes);
             Vec::extend_from_slice(&mut bytes, bytes_view);
@@ -4065,7 +4082,7 @@ fn string_from_utf8_validates_its_vec_storage_without_a_text_scalar() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let bytes = Vec<u8>::new();
+            let mut bytes = Vec<u8>::new();
             Vec::push(&mut bytes, 104);
             Vec::push(&mut bytes, 105);
             handle String::from_utf8(bytes) {
@@ -4084,7 +4101,7 @@ fn string_from_utf8_returns_its_bytes_and_valid_prefix_on_error() {
     let source = r#"
         use std::*;
         pub fn main() -> usize {
-            let bytes = Vec<u8>::new();
+            let mut bytes = Vec<u8>::new();
             Vec::push(&mut bytes, 97);
             Vec::push(&mut bytes, 255);
             handle String::from_utf8(bytes) {
@@ -4137,7 +4154,7 @@ fn option_is_the_source_defined_temporary_slot_without_default() {
             use std::*;
             struct Ticket { value: i64 }
             pub fn main() -> i64 {
-                let slot = Some(Ticket { value: 41 });
+                let mut slot = Some(Ticket { value: 41 });
                 let previous = Option::insert(&mut slot, Ticket { value: 1 });
                 let replacement = Option::take(&mut slot);
                 handle previous {
@@ -4163,7 +4180,7 @@ fn option_replace_preserves_the_complete_previous_state() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let slot = Some(40);
+            let mut slot = Some(40);
             handle Option::replace(&mut slot, 2) {
                 Result::Ok(previous) => previous + 1,
                 Result::Err(_) => 0,
@@ -4180,7 +4197,7 @@ fn option_insertion_helpers_borrow_the_resident_value() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let empty = None;
+            let mut empty = None;
             let inserted = Option::get_or_insert(&mut empty, 20);
             *inserted = *inserted + 1;
             handle empty {
@@ -4199,10 +4216,10 @@ fn bundled_vec_iter_lends_elements_in_source_defined_order() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 20);
             Vec::push(&mut values, 22);
-            let iterator = Vec::iter(&values);
+            let mut iterator = Vec::iter(&values);
             handle SliceIter::next(&mut iterator) {
                 Result::Err(_) => 0,
                 Result::Ok(first) => {
@@ -4225,10 +4242,10 @@ fn bundled_vec_into_iter_transfers_elements_in_source_defined_order() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 20);
             Vec::push(&mut values, 22);
-            let iterator = Vec::into_iter(values);
+            let mut iterator = Vec::into_iter(values);
             handle VecIntoIter::next(&mut iterator) {
                 Result::Err(_) => 0,
                 Result::Ok(first) => handle VecIntoIter::next(&mut iterator) {
@@ -4248,7 +4265,7 @@ fn bundled_mut_slice_subslice_transfers_the_unique_view() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 1);
             Vec::push(&mut values, 2);
             Vec::push(&mut values, 3);
@@ -4439,7 +4456,7 @@ fn string_remove_checks_character_boundaries_and_moves_one_utf8_scalar() {
     let source = r#"
         use std::*;
         pub fn main() -> u32 {
-            let value = Str::to_string("aé!");
+            let mut value = Str::to_string("aé!");
             handle String::remove(&mut value, 1) {
                 Result::Err(_) => 0,
                 Result::Ok(character) => char_to_u32(character),
@@ -4456,7 +4473,7 @@ fn string_remove_rejects_a_utf8_continuation_offset() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let value = Str::to_string("aé");
+            let mut value = Str::to_string("aé");
             handle String::remove(&mut value, 2) {
                 Result::Ok(_) => 0,
                 Result::Err(StringRangeError::NotCharBoundary) => 42,
@@ -4474,10 +4491,10 @@ fn bundled_mut_slice_iter_consumes_the_unique_view_and_lends_elements() {
     let source = r#"
         use std::*;
         pub fn main() -> i64 {
-            let values = Vec<i64>::new();
+            let mut values = Vec<i64>::new();
             Vec::push(&mut values, 20);
             Vec::push(&mut values, 22);
-            let iterator = SliceMut::iter(Vec::as_mut_slice(&mut values));
+            let mut iterator = SliceMut::iter(Vec::as_mut_slice(&mut values));
             handle SliceIter::next(&mut iterator) {
                 Result::Err(_) => 0,
                 Result::Ok(first) => {

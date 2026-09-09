@@ -1,0 +1,74 @@
+pub enum IoErrorKind {
+    NotFound, PermissionDenied, AlreadyExists, NotDirectory, IsDirectory,
+    InvalidInput, InvalidData, UnexpectedEof, WriteZero, Interrupted,
+    WouldBlock, TimedOut, BrokenPipe, Unsupported, ResourceLimit, Other,
+}
+pub struct IoError { pub kind: IoErrorKind, pub native_code: Option<i64> }
+pub struct Duration { private seconds: u64, private nanos: u32 }
+pub struct Instant { private clock: u64, private elapsed: Duration }
+pub struct SystemTime { private seconds: i64, private nanos: u32 }
+pub enum TimeError { Overflow, BeforeOrigin, DifferentClock, Unsupported, Host(IoError) }
+impl Duration {
+    pub fn zero() -> Self { Duration { seconds: 0, nanos: 0 } }
+    pub fn from_parts(seconds: u64, nanos: u32) -> Result<Self,TimeError> {
+        handle nanos >= 1000000000 {
+            true => Result::Err(TimeError::Overflow),
+            false => Result::Ok(Duration { seconds: seconds, nanos: nanos }),
+        }
+    }
+    pub fn seconds(value: Self) -> u64 { value.seconds }
+    pub fn subsec_nanos(value: Self) -> u32 { value.nanos }
+    pub fn checked_add(left: Self, right: Self) -> Option<Self> {
+        let nanos = left.nanos + right.nanos;
+        let carry = as<u64>(nanos / 1000000000);
+        let seconds = wrapping_add(left.seconds, right.seconds);
+        handle seconds < left.seconds {
+            true => None,
+            false => handle carry > bit_not<u64>(0) - seconds {
+                true => None,
+                false => Some(Duration { seconds: seconds + carry, nanos: nanos % 1000000000 }),
+            },
+        }
+    }
+    pub fn checked_sub(left: Self, right: Self) -> Option<Self> {
+        handle left.seconds < right.seconds {
+            true => None,
+            false => handle left.nanos < right.nanos {
+                false => Some(Duration { seconds: left.seconds - right.seconds, nanos: left.nanos - right.nanos }),
+                true => handle left.seconds == right.seconds {
+                    true => None,
+                    false => Some(Duration { seconds: left.seconds - right.seconds - 1, nanos: left.nanos + 1000000000 - right.nanos }),
+                },
+            },
+        }
+    }
+}
+impl Instant {
+    pub fn checked_add(value: Self, duration: Duration) -> Result<Self,TimeError> {
+        handle Duration::checked_add(value.elapsed, duration) {
+            Result::Err(_) => Result::Err(TimeError::Overflow),
+            Result::Ok(elapsed) => Result::Ok(Instant { clock: value.clock, elapsed: elapsed }),
+        }
+    }
+    pub fn duration_since(value: Self, earlier: Self) -> Result<Duration,TimeError> {
+        handle value.clock == earlier.clock {
+            false => Result::Err(TimeError::DifferentClock),
+            true => handle Duration::checked_sub(value.elapsed, earlier.elapsed) {
+                Result::Err(_) => Result::Err(TimeError::BeforeOrigin), Result::Ok(duration) => Result::Ok(duration),
+            },
+        }
+    }
+    pub fn compare(left: Self, right: Self) -> Result<Ordering,TimeError> {
+        handle left.clock == right.clock {
+            false => Result::Err(TimeError::DifferentClock),
+            true => Result::Ok(handle Ord::compare(&left.elapsed.seconds, &right.elapsed.seconds) {
+                Ordering::Equal => Ord::compare(&left.elapsed.nanos, &right.elapsed.nanos), order => order,
+            }),
+        }
+    }
+}
+pub effect Clock {
+    monotonic_now() -> Result<Instant,TimeError>;
+    system_now() -> Result<SystemTime,TimeError>;
+    sleep(duration: Duration) -> Result<(),TimeError>;
+}

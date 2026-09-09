@@ -1,0 +1,15 @@
+pub fn main() -> i64 {
+    assert_true(handle Duration::from_parts(0, 1000000000) { Result::Err(_) => true, _ => false });
+    let a = handle Duration::from_parts(1, 900000000) { Result::Ok(value) => value, _ => Duration::zero() };
+    let b = handle Duration::from_parts(2, 200000000) { Result::Ok(value) => value, _ => Duration::zero() };
+    let sum = handle Duration::checked_add(a, b) { Result::Ok(value) => value, _ => Duration::zero() };
+    assert_true(Duration::seconds(sum) == 4);
+    assert_true(Duration::subsec_nanos(sum) == 100000000);
+    let difference = handle Duration::checked_sub(b, a) { Result::Ok(value) => value, _ => Duration::zero() };
+    assert_true(Duration::seconds(difference) == 0);
+    assert_true(Duration::subsec_nanos(difference) == 300000000);
+    assert_true(handle Duration::checked_sub(a, b) { Result::Err(_) => true, _ => false });
+    let max = handle Duration::from_parts(18446744073709551615, 999999999) { Result::Ok(value) => value, _ => Duration::zero() };
+    assert_true(handle Duration::checked_add(max, a) { Result::Err(_) => true, _ => false });
+    42
+}

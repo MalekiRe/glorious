@@ -1,34 +1,19 @@
+mod support;
+
 use grandiose_stage0::control_mir::{
     ControlError, ControlMir, ControlOperation, ControlTerminator,
 };
 use grandiose_stage0::evaluation_mir::EvaluationMir;
 use grandiose_stage0::{
-    BodySyntax, CompilationMode, CompilationRequest, CompilerBuildIdentity, DeclarationScan,
-    DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath,
-    PackageKey, SourceInput, StageZeroCompiler, TypedBody,
+    CompilationMode, CompilationRequest, CompilerBuildIdentity, Digest, LogicalPath,
+    PackageKey, SourceInput, StageZeroCompiler,
 };
 use std::collections::BTreeMap;
 
 fn control(source: &str) -> Result<ControlMir, ControlError> {
-    let package = PackageKey("control-mir@0.1.0".into());
-    let lexed = LexedFile::lex(FileKey::new(&package, "src/main.glorious"), source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .unwrap();
-    let syntax = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &syntax,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (definition, core, _) = support::frontend("control-mir@0.1.0", source, "main");
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    ControlMir::lower(&EvaluationMir::lower(definition.key, &core).unwrap())
+    ControlMir::lower(&EvaluationMir::lower(definition, &core).unwrap())
 }
 
 fn run(source: &str) -> i64 {
@@ -60,12 +45,12 @@ fn run(source: &str) -> i64 {
 
 #[test]
 fn nested_lazy_values_have_explicit_joins() {
-    let mir = control("pub fn main(a: Bool, b: Bool, c: Bool) -> Bool { (a or b) and c }").unwrap();
+    let mir = control("pub fn main(a: Bool, b: Bool, c: Bool) -> Bool { (a or { b }) and { c } }").unwrap();
     mir.validate().unwrap();
     assert_eq!(
         mir.blocks()
             .iter()
-            .filter(|block| matches!(block.terminator, ControlTerminator::SwitchBool { .. }))
+            .filter(|block| matches!(block.terminator, ControlTerminator::Invoke { continuation: Some(_), .. }))
             .count(),
         2
     );
@@ -176,7 +161,7 @@ fn all_structured_regions_compose_without_source_shape_dispatch() {
         "struct Pair { first: i64, second: i64 } pub fn main(value: Pair) -> i64 { let loan = &value.second; *loan }",
         "pub fn main(target: &mut i64, rhs: () -> i64) -> i64 { *target = rhs(); 0 }",
         "pub fn main() -> i64 { let callable = (value: i64) -> i64 { value + 1 }; callable(41) }",
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { Test::Yes(_) => 1; Test::No(_) => 0 } }",
         "pub fn main() -> i64 { label done { transfer done 42 } }",
         "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { 1 + handle Ask::ask() { Ask::ask() => 41 } }",
         "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { 1 + handle Ask::ask() { Ask::ask() with _ => 41 } }",
@@ -187,7 +172,7 @@ fn all_structured_regions_compose_without_source_shape_dispatch() {
 fn production_mixed_strict_and_lazy_contexts_preserve_short_circuiting() {
     for (condition, expected) in [(false, 0), (true, 1)] {
         let source = format!(
-            "fn choose(value: Bool) -> i64 {{ handle value {{ true => 1; false => 0 }} }} pub fn main() -> i64 {{ let condition = {condition}; choose((condition and true) or (false and (1 / 0 == 0))) }}"
+            "fn choose(value: Bool) -> i64 {{ handle value {{ true => 1; false => 0 }} }} pub fn main() -> i64 {{ let condition = {condition}; choose((condition and {{ true }}) or {{ false and {{ 1 / 0 == 0 }} }}) }}"
         );
         control(&source).unwrap();
         assert_eq!(run(&source), expected);

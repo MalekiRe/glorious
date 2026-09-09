@@ -1,0 +1,20 @@
+pub fn main() -> i64 {
+    let hex = hex_encode(b"\x00\x01\xab\xff");
+    assert_bytes(Str::as_bytes(String::as_str(&hex)), b"0001abff");
+    handle hex_decode("0001ABff") { Result::Ok(bytes) => assert_bytes(Vec::as_slice(&bytes), b"\x00\x01\xab\xff"), _ => assert_true(false) };
+    assert_true(handle hex_decode("abc") { Result::Err(error) => handle error.kind { HexErrorKind::OddLength => error.offset == 3, _ => false }, _ => false });
+    let options = Base64Options { alphabet: Base64Alphabet::Standard, padding: Padding::Required };
+    let text = base64_encode(b"foobar", options);
+    assert_bytes(Str::as_bytes(String::as_str(&text)), b"Zm9vYmFy");
+    let text = base64_encode(b"f", options);
+    assert_bytes(Str::as_bytes(String::as_str(&text)), b"Zg==");
+    handle base64_decode("Zg==", options) { Result::Ok(bytes) => assert_bytes(Vec::as_slice(&bytes), b"f"), _ => assert_true(false) };
+    assert_true(handle base64_decode("Zh==", options) { Result::Err(error) => handle error.kind { Base64ErrorKind::NonCanonicalTail => true, _ => false }, _ => false });
+    assert_true(handle base64_decode("Zg", options) { Result::Err(_) => true, _ => false });
+    let options = Base64Options { alphabet: Base64Alphabet::UrlSafe, padding: Padding::Forbidden };
+    let text = base64_encode(b"\xfb\xff", options);
+    assert_bytes(Str::as_bytes(String::as_str(&text)), b"-_8");
+    handle base64_decode("-_8", options) { Result::Ok(bytes) => assert_bytes(Vec::as_slice(&bytes), b"\xfb\xff"), _ => assert_true(false) };
+    assert_true(handle base64_decode("-_8=", options) { Result::Err(_) => true, _ => false });
+    42
+}

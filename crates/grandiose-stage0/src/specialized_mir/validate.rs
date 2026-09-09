@@ -31,9 +31,9 @@ fn closed_arguments(arguments: &[GenericArgument]) -> Result<(), SpecializedErro
             GenericArgument::Type(_) => crate::GenericKind::Type,
             GenericArgument::EffectRow(_) => crate::GenericKind::EffectRow,
             GenericArgument::Lifetime(_) => crate::GenericKind::Lifetime,
-            GenericArgument::ConstU32(_) | GenericArgument::ConstU32Expr(_) => {
-                crate::GenericKind::Const(crate::ConstKind::U32)
-            }
+            GenericArgument::ConstInteger(value) => crate::GenericKind::Const(value.kind()),
+            GenericArgument::ConstIntegerExpr(value) => value.scalar().ok().and_then(crate::ConstKind::from_integer_scalar)
+                .map(crate::GenericKind::Const).unwrap_or(crate::GenericKind::Type),
             GenericArgument::ConstQuantity(_) => {
                 crate::GenericKind::Const(crate::ConstKind::Quantity)
             }
@@ -59,7 +59,7 @@ fn closed_row(row: &crate::EffectRow) -> Result<(), SpecializedError> {
 }
 fn closed_pattern(pattern: &crate::CorePattern) -> Result<(), SpecializedError> {
     match pattern {
-        crate::CorePattern::Array { element, elements } => {
+        crate::CorePattern::Array { element, elements, .. } => {
             closed_type(element)?;
             for pattern in elements {
                 closed_pattern(pattern)?;

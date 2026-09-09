@@ -322,6 +322,10 @@ fn collect_generic_names(
         HeaderType::Path(path) if path.len() == 1 && declared.contains(&path[0]) => {
             used.insert(path[0].clone());
         }
+        HeaderType::FixedArray { element, length } => {
+            collect_generic_names(element, declared, used);
+            collect_generic_argument_names(&HeaderGenericArgument::StructuralConst((**length).clone()), declared, used);
+        }
         HeaderType::Application(base, arguments) => {
             collect_generic_names(base, declared, used);
             for argument in arguments {
@@ -363,9 +367,7 @@ fn collect_generic_names(
             for effect in &effects.effects {
                 collect_generic_names(effect, declared, used);
             }
-            if let Some(tail) = &effects.tail
-                && declared.contains(tail)
-            {
+            for tail in effects.tails.iter().filter(|tail| declared.contains(*tail)) {
                 used.insert(tail.clone());
             }
         }
@@ -415,9 +417,7 @@ fn collect_generic_argument_names(
             for effect in &value.effects {
                 collect_generic_names(effect, declared, used);
             }
-            if let Some(tail) = &value.tail
-                && declared.contains(tail)
-            {
+            for tail in value.tails.iter().filter(|tail| declared.contains(*tail)) {
                 used.insert(tail.clone());
             }
         }
@@ -428,14 +428,31 @@ fn collect_generic_argument_names(
             for effect in &value.effects {
                 collect_generic_names(effect, declared, used);
             }
-            if let Some(tail) = &value.tail
-                && declared.contains(tail)
-            {
+            for tail in value.tails.iter().filter(|tail| declared.contains(*tail)) {
                 used.insert(tail.clone());
             }
         }
-        HeaderGenericArgument::U32(_)
-        | HeaderGenericArgument::StructuralConst(_)
+        HeaderGenericArgument::StructuralConst(value) => {
+            use crate::header::{HeaderStructuralConst as Const, HeaderIntegerExpr as Expr};
+            fn expression(value: &Expr, declared: &BTreeSet<String>, used: &mut BTreeSet<String>) {
+                match value {
+                    Expr::Param(name) if declared.contains(name) => { used.insert(name.clone()); }
+                    Expr::Neg(value) => expression(value, declared, used),
+                    Expr::Add(left, right) | Expr::Sub(left, right) | Expr::Mul(left, right)
+                    | Expr::Div(left, right) | Expr::Rem(left, right) => {
+                        expression(left, declared, used); expression(right, declared, used);
+                    }
+                    _ => {}
+                }
+            }
+            match value {
+                Const::Generic(name) if declared.contains(name) => { used.insert(name.clone()); }
+                Const::IntegerExpression(value) => expression(value, declared, used),
+                Const::Projection(value) => collect_generic_names(value, declared, used),
+                _ => {}
+            }
+        }
+        HeaderGenericArgument::Integer(_)
         | HeaderGenericArgument::Quantity(_)
         | HeaderGenericArgument::Lifetime(_) => {}
     }
@@ -490,6 +507,9 @@ fn implementations_may_overlap(
     else {
         return false;
     };
+    if !solve_overlap_effect_unions(&mut bindings) {
+        return false;
+    }
     let witness = TraitGoal {
         relation: crate::ElaboratedTraitReference {
             definition: left.relation.definition,
@@ -497,6 +517,33 @@ fn implementations_may_overlap(
         },
         subject,
     };
+    // An overlap witness is existential. Positive outlives requirements
+    // cannot separate two heads: every free region can be chosen static and
+    // every free value type can be chosen to contain no shorter borrow.
+    // Install that witness before querying conditional trait implementations,
+    // otherwise a missing lexical `T: 'static` fact masquerades as disjointness.
+    let mut outlives = vec![];
+    for (index, kind) in left.generic_kinds.iter().chain(&right.generic_kinds).enumerate() {
+        match kind {
+            crate::GenericKind::Type => outlives.push(crate::OutlivesPredicate::Type {
+                subject: resolve_overlap_type(&Type::Generic(index as u32), &bindings),
+                lifetime: crate::Lifetime::Static,
+            }),
+            crate::GenericKind::Lifetime => {
+                let GenericArgument::Lifetime(longer) = resolve_overlap_argument(
+                    &GenericArgument::Lifetime(crate::Lifetime::Generic(index as u32)), &bindings) else { unreachable!(); };
+                outlives.push(crate::OutlivesPredicate::Region { longer, shorter: crate::Lifetime::Static });
+            },
+            _ => {},
+        }
+    }
+    solver.set_outlives_assumptions(outlives);
+    // Universal requirements are facts of this common existential domain,
+    // not a reason to invent disjointness when a conditional impl needs one.
+    // Inconsistent universal domains remain conservatively overlapping.
+    solver.set_universal_assumptions(left.universal_bounds.iter().chain(&right.universal_bounds)
+        .map(|bound| bound.map_terms(|argument| resolve_overlap_argument(&argument, &bindings))).collect());
+    if !overlap_associated_equalities(&left, &right, &mut bindings, &mut solver) { return false; }
     left.where_bounds
         .iter()
         .chain(&right.where_bounds)
@@ -549,7 +596,69 @@ fn normalize_overlap_implementation(
             (subject, relation)
         })
         .collect();
+    map_implementation_associated_constraints(&mut implementation, |argument| normalize_overlap_argument(argument, solver));
     implementation
+}
+
+fn map_implementation_associated_constraints(
+    implementation: &mut ElaboratedImplementation,
+    mut map: impl FnMut(GenericArgument) -> GenericArgument,
+) {
+    implementation.universal_bounds = implementation.universal_bounds.iter().map(|bound| bound.map_terms(&mut map)).collect();
+    let contract = crate::AssociatedItemContract {
+        where_bounds: vec![], where_outlives: implementation.where_outlives.clone(),
+        type_bindings: implementation.where_associated_type_bindings.clone(),
+        effect_bindings: implementation.where_associated_effect_bindings.clone(),
+    }.map_terms(map);
+    implementation.where_outlives = contract.where_outlives;
+    implementation.where_associated_type_bindings = contract.type_bindings;
+    implementation.where_associated_effect_bindings = contract.effect_bindings;
+}
+
+/// Associated equalities constrain the same existential overlap witness as
+/// the implementation heads. A shared projection cannot simultaneously be
+/// two incompatible types or effect rows.
+fn overlap_associated_equalities(
+    left: &ElaboratedImplementation, right: &ElaboratedImplementation,
+    bindings: &mut OverlapBindings, solver: &mut TraitSolver,
+) -> bool {
+    let mut types = BTreeMap::<Vec<u8>, Type>::new();
+    for binding in left.where_associated_type_bindings.iter().chain(&right.where_associated_type_bindings) {
+        let subject = resolve_overlap_type(&binding.subject, bindings);
+        let relation = resolve_overlap_relation(&binding.relation, bindings);
+        let arguments = binding.item_arguments.iter().map(|argument| resolve_overlap_argument(argument, bindings)).collect::<Vec<_>>();
+        let projection = Type::Projection { subject: Box::new(subject.clone()), trait_definition: relation.definition,
+            trait_arguments: relation.arguments.clone(), name: binding.name.clone(),
+            item_generic_kinds: binding.item_generic_kinds.clone(), item_arguments: arguments.clone() };
+        let value = resolve_overlap_type(&binding.value, bindings);
+        if let crate::TraitProjectionAnswer::Normalized { ty, .. } = solver.normalize_associated_type_application(
+            TraitGoal { subject, relation }, &binding.name, &arguments) {
+            if unify_overlap_type(&value, &ty, bindings).is_none() { return false; }
+        }
+        let key = crate::types::canonical_type_encoding(&projection);
+        if let Some(previous) = types.get(&key) {
+            if unify_overlap_type(previous, &value, bindings).is_none() { return false; }
+        } else { types.insert(key, value); }
+    }
+    let mut effects = BTreeMap::<Vec<u8>, crate::EffectRow>::new();
+    for binding in left.where_associated_effect_bindings.iter().chain(&right.where_associated_effect_bindings) {
+        let subject = resolve_overlap_type(&binding.subject, bindings);
+        let relation = resolve_overlap_relation(&binding.relation, bindings);
+        let arguments = binding.item_arguments.iter().map(|argument| resolve_overlap_argument(argument, bindings)).collect::<Vec<_>>();
+        let projection = Type::Projection { subject: Box::new(subject.clone()), trait_definition: relation.definition,
+            trait_arguments: relation.arguments.clone(), name: binding.name.clone(),
+            item_generic_kinds: binding.item_generic_kinds.clone(), item_arguments: arguments.clone() };
+        let GenericArgument::EffectRow(value) = resolve_overlap_argument(&GenericArgument::EffectRow(binding.value.clone()), bindings) else { unreachable!(); };
+        if let crate::TraitEffectRowProjectionAnswer::Normalized { row, .. } = solver.normalize_associated_effect_row_application(
+            TraitGoal { subject, relation }, &binding.name, &arguments) {
+            if unify_overlap_argument(&GenericArgument::EffectRow(value.clone()), &GenericArgument::EffectRow(row), bindings).is_none() { return false; }
+        }
+        let key = crate::types::canonical_type_encoding(&projection);
+        if let Some(previous) = effects.get(&key) {
+            if unify_overlap_argument(&GenericArgument::EffectRow(previous.clone()), &GenericArgument::EffectRow(value), bindings).is_none() { return false; }
+        } else { effects.insert(key, value); }
+    }
+    solve_overlap_effect_unions(bindings)
 }
 
 fn normalize_overlap_argument(
@@ -572,6 +681,64 @@ struct OverlapBindings {
     types: BTreeMap<u32, Type>,
     lifetimes: BTreeMap<u32, crate::Lifetime>,
     effect_rows: BTreeMap<u32, crate::EffectRow>,
+    effect_equations: Vec<(crate::EffectRow, crate::EffectRow)>,
+}
+
+/// Coherence needs an existential witness, not a unique inferred partition.
+/// For each known effect atom, row equality is equality of two disjunctions
+/// of membership variables. Propagate forced absence from an empty side;
+/// assigning every remaining variable presence is a maximal satisfying
+/// witness. Unknown atoms can all be absent. This is polynomial and retains
+/// correlations between operands appearing in several head arguments.
+fn solve_overlap_effect_unions(bindings: &mut OverlapBindings) -> bool {
+    let equations = std::mem::take(&mut bindings.effect_equations);
+    let equations: Vec<_> = equations.into_iter().map(|(left, right)|
+        (resolve_overlap_effect_row(&left, bindings), resolve_overlap_effect_row(&right, bindings)))
+        .collect();
+    let mut atoms = BTreeMap::new();
+    let mut variables = BTreeSet::new();
+    for row in equations.iter().flat_map(|(left, right)| [left, right]) {
+        for tail in &row.tails {
+            let crate::EffectTail::Generic(index) = tail else { return false; };
+            variables.insert(*index);
+        }
+        for effect in &row.effects {
+            let atom = crate::EffectRow::closed_instances([effect.clone()]);
+            atoms.insert(crate::types::canonical_generic_arguments_encoding(&[GenericArgument::EffectRow(atom.clone())]), atom);
+        }
+        for projection in &row.projections {
+            let atom = crate::EffectRow { effects: BTreeSet::new(), projections: vec![projection.clone()], tails: BTreeSet::new() };
+            atoms.insert(crate::types::canonical_generic_arguments_encoding(&[GenericArgument::EffectRow(atom.clone())]), atom);
+        }
+    }
+    let mut assignments: BTreeMap<_, _> = variables.iter().map(|index| (*index, crate::EffectRow::empty())).collect();
+    for atom in atoms.values() {
+        let contains = |row: &crate::EffectRow| atom.effects.iter().all(|effect| row.effects.contains(effect))
+            && atom.projections.iter().all(|projection| row.projections.contains(projection));
+        let mut absent = BTreeSet::new();
+        loop {
+            let previous = absent.len();
+            for (left, right) in &equations {
+                for (source, target) in [(left, right), (right, left)] {
+                    if !contains(source) && source.tails.iter().all(|tail| match tail {
+                        crate::EffectTail::Generic(index) => absent.contains(index), _ => false,
+                    }) {
+                        if contains(target) { return false; }
+                        for tail in &target.tails {
+                            let crate::EffectTail::Generic(index) = tail else { return false; };
+                            absent.insert(*index);
+                        }
+                    }
+                }
+            }
+            if previous == absent.len() { break; }
+        }
+        for index in variables.difference(&absent) {
+            assignments.get_mut(index).unwrap().extend(atom.clone());
+        }
+    }
+    bindings.effect_rows.extend(assignments);
+    true
 }
 
 fn unify_overlap_argument(
@@ -627,8 +794,8 @@ fn unify_overlap_argument(
         (GenericArgument::Lifetime(left), GenericArgument::Lifetime(right)) if left == right => {
             Some(GenericArgument::Lifetime(*left))
         }
-        (GenericArgument::ConstU32(left), GenericArgument::ConstU32(right)) if left == right => {
-            Some(GenericArgument::ConstU32(*left))
+        (GenericArgument::ConstInteger(left), GenericArgument::ConstInteger(right)) if left == right => {
+            Some(GenericArgument::ConstInteger(*left))
         }
         (GenericArgument::ConstQuantity(left), GenericArgument::ConstQuantity(right))
             if left == right =>
@@ -672,11 +839,26 @@ fn unify_overlap_effect_row(
     right: &crate::EffectRow,
     bindings: &mut OverlapBindings,
 ) -> Option<crate::EffectRow> {
-    if let Some(index) = pure_generic_effect_row(left) {
-        return bind_overlap_effect_row(index, right, bindings);
-    }
-    if let Some(index) = pure_generic_effect_row(right) {
-        return bind_overlap_effect_row(index, left, bindings);
+    if !left.tails.is_empty() || !right.tails.is_empty() {
+        if left.tails.iter().chain(&right.tails).any(|tail| matches!(tail, crate::EffectTail::Infer(_))) {
+            return None;
+        }
+        // Fixed instances may determine ordinary generic arguments before
+        // their memberships become atoms (Trace<T> versus Trace<i64>).
+        for expected in &left.effects {
+            for found in &right.effects {
+                if expected.definition != found.definition || expected.arguments.len() != found.arguments.len() { continue; }
+                let mut trial = bindings.clone();
+                if expected.arguments.iter().zip(&found.arguments)
+                    .map(|(left, right)| unify_overlap_argument(left, right, &mut trial))
+                    .collect::<Option<Vec<_>>>().is_some() {
+                    *bindings = trial;
+                    break;
+                }
+            }
+        }
+        bindings.effect_equations.push((left.clone(), right.clone()));
+        return Some(left.clone());
     }
     if left.effects.len() != right.effects.len()
         || left.projections.len() != right.projections.len()
@@ -757,78 +939,16 @@ fn unify_overlap_effect_row(
                 .collect::<Option<Vec<_>>>()?,
         });
     }
-    let tail = unify_overlap_effect_tail(left.tail, right.tail, &mut row_bindings)?;
     let result = crate::EffectRow {
         effects,
         projections,
-        tail,
+        tails: BTreeSet::new(),
     }
     .canonicalized();
     *bindings = row_bindings;
     Some(result)
 }
 
-/// Unify the residual of two already-aligned effect rows.  A declaration row
-/// variable denotes an arbitrary residual, so `{Trace | e}` and
-/// `{Trace | f}` overlap even when `e` and `f` occupy distinct implementation
-/// binder slots.  Record the smallest witness (`e = f`), represented as a
-/// pure row, rather than treating slot identity as semantic evidence of
-/// disjointness.
-fn unify_overlap_effect_tail(
-    left: Option<crate::EffectTail>,
-    right: Option<crate::EffectTail>,
-    bindings: &mut OverlapBindings,
-) -> Option<Option<crate::EffectTail>> {
-    match (left, right) {
-        (left, right) if left == right => Some(left),
-        (Some(crate::EffectTail::Generic(left)), Some(crate::EffectTail::Generic(right))) => {
-            let row = crate::EffectRow {
-                effects: BTreeSet::new(),
-                projections: vec![],
-                tail: Some(crate::EffectTail::Generic(right)),
-            };
-            bind_overlap_effect_row(left, &row, bindings)?;
-            Some(Some(crate::EffectTail::Generic(right)))
-        }
-        (Some(crate::EffectTail::Generic(index)), None) => {
-            bind_overlap_effect_row(index, &crate::EffectRow::empty(), bindings)?;
-            Some(None)
-        }
-        (None, Some(crate::EffectTail::Generic(index))) => {
-            bind_overlap_effect_row(index, &crate::EffectRow::empty(), bindings)?;
-            Some(None)
-        }
-        // Body-local inference tails cannot appear in a frozen interface;
-        // retaining this conservative arm prevents malformed fixtures from
-        // manufacturing an overlap proof.
-        _ => None,
-    }
-}
-
-fn pure_generic_effect_row(value: &crate::EffectRow) -> Option<u32> {
-    (value.effects.is_empty() && value.projections.is_empty())
-        .then_some(value.tail)
-        .flatten()
-        .and_then(|tail| match tail {
-            crate::EffectTail::Generic(index) => Some(index),
-            crate::EffectTail::Infer(_) => None,
-        })
-}
-
-fn bind_overlap_effect_row(
-    index: u32,
-    value: &crate::EffectRow,
-    bindings: &mut OverlapBindings,
-) -> Option<crate::EffectRow> {
-    match bindings.effect_rows.get(&index) {
-        Some(previous) if previous != value => None,
-        Some(previous) => Some(previous.clone()),
-        None => {
-            bindings.effect_rows.insert(index, value.clone());
-            Some(value.clone())
-        }
-    }
-}
 
 fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings) -> Option<Type> {
     let left = resolve_overlap_type(left, bindings);
@@ -865,6 +985,10 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             .map(|(left, right)| unify_overlap_type(left, right, bindings))
             .collect::<Option<Vec<_>>>()
             .map(Type::Tuple),
+        (Type::FixedArray { element: left, length: ln }, Type::FixedArray { element: right, length: rn }) => Some(Type::FixedArray {
+            element: Box::new(unify_overlap_type(left, right, bindings)?),
+            length: Box::new(unify_overlap_argument(ln, rn, bindings)?),
+        }),
         (Type::Array(left), Type::Array(right)) => {
             unify_overlap_type(left, right, bindings).map(|value| Type::Array(Box::new(value)))
         }
@@ -1035,6 +1159,8 @@ fn bind_overlap_type(index: u32, value: Type, bindings: &mut OverlapBindings) ->
 
 fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings) -> bool {
     match resolve_overlap_type(value, bindings) {
+        Type::FixedArray { element, length } => contains_overlap_generic(&element, index, bindings)
+            || contains_overlap_argument_generic(&length, index, bindings),
         Type::Generic(found) => found == index,
         Type::Nominal { arguments, .. } => arguments
             .iter()
@@ -1072,7 +1198,7 @@ fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
-        | Type::ConstU32(_)
+        | Type::ConstInteger(_)
         | Type::ConstQuantity(_)
         | Type::ConstGeneric { .. }
         | Type::Infer(_)
@@ -1099,8 +1225,8 @@ fn contains_overlap_argument_generic(
         }
         GenericArgument::EffectRow(_)
         | GenericArgument::Lifetime(_)
-        | GenericArgument::ConstU32(_)
-        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstInteger(_)
+        | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
@@ -1135,14 +1261,7 @@ fn resolve_overlap_argument(
             .copied()
             .map(GenericArgument::Lifetime)
             .unwrap_or_else(|| argument.clone()),
-        GenericArgument::EffectRow(value) => {
-            if let Some(index) = pure_generic_effect_row(value)
-                && let Some(row) = bindings.effect_rows.get(&index)
-            {
-                return GenericArgument::EffectRow(row.clone());
-            }
-            argument.clone()
-        }
+        GenericArgument::EffectRow(value) => GenericArgument::EffectRow(resolve_overlap_effect_row(value, bindings)),
         GenericArgument::ConstProjection {
             subject,
             trait_definition,
@@ -1187,6 +1306,10 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(resolve_overlap_type(value, bindings))),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(resolve_overlap_type(element, bindings)),
+            length: Box::new(resolve_overlap_argument(length, bindings)),
+        },
         Type::RawPointer { mutability, pointee } => Type::RawPointer {
             mutability: *mutability,
             pointee: Box::new(resolve_overlap_type(pointee, bindings)),
@@ -1252,12 +1375,7 @@ fn resolve_overlap_effect_row(
     value: &crate::EffectRow,
     bindings: &OverlapBindings,
 ) -> crate::EffectRow {
-    if let Some(index) = pure_generic_effect_row(value)
-        && let Some(row) = bindings.effect_rows.get(&index)
-    {
-        return row.clone();
-    }
-    crate::EffectRow {
+    let mut row = crate::EffectRow {
         effects: value
             .effects
             .iter()
@@ -1290,9 +1408,12 @@ fn resolve_overlap_effect_row(
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
-    }
-    .canonicalized()
+        tails: value.tails.clone(),
+    };
+    row.substitute_tails(|tail| match tail {
+        crate::EffectTail::Generic(index) => bindings.effect_rows.get(&index).cloned(), _ => None,
+    });
+    row
 }
 
 fn rebase_implementation_generics(
@@ -1312,6 +1433,7 @@ fn rebase_implementation_generics(
             )
         })
         .collect();
+    map_implementation_associated_constraints(&mut implementation, |argument| rebase_overlap_argument(&argument, offset));
     implementation
 }
 
@@ -1349,6 +1471,9 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(rebase_overlap_type(value, offset))),
+        Type::FixedArray { element, length } => Type::FixedArray {
+            element: Box::new(rebase_overlap_type(element, offset)), length: Box::new(rebase_overlap_argument(length, offset)),
+        },
         Type::RawPointer { mutability, pointee } => Type::RawPointer {
             mutability: *mutability,
             pointee: Box::new(rebase_overlap_type(pointee, offset)),
@@ -1477,12 +1602,12 @@ fn rebase_overlap_effect_row(value: &crate::EffectRow, offset: u32) -> crate::Ef
                     .collect(),
             })
             .collect(),
-        tail: value.tail.map(|tail| match tail {
+        tails: value.tails.iter().copied().map(|tail| match tail {
             crate::EffectTail::Generic(index) => {
                 crate::EffectTail::Generic(index.saturating_add(offset))
             }
             crate::EffectTail::Infer(index) => crate::EffectTail::Infer(index),
-        }),
+        }).collect(),
     }
     .canonicalized()
 }
@@ -1522,7 +1647,7 @@ mod frozen_overlap_tests {
                     arguments: vec![GenericArgument::Type(Type::Generic(0))],
                 }]),
                 projections: vec![],
-                tail: Some(EffectTail::Generic(tail)),
+                tails: [EffectTail::Generic(tail)].into_iter().collect(),
             },
             invocation: Quantity::ONCE,
         }
@@ -1554,7 +1679,7 @@ mod frozen_overlap_tests {
                 },
             ]),
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         };
         let right = EffectRow {
             effects: BTreeSet::from([
@@ -1568,7 +1693,7 @@ mod frozen_overlap_tests {
                 },
             ]),
             projections: vec![],
-            tail: None,
+            tails: Default::default(),
         };
         assert!(super::unify_overlap_effect_row(&left, &right, &mut bindings).is_none());
         assert!(

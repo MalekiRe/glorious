@@ -9,7 +9,7 @@ fn semantic_callable_brands_and_runs_in_evidence_are_fresh_and_sealed() {
             right(value: i64) -> i64 { value }
             pub fn main() -> i64 {
                 let shared = 1;
-                let unique = 2;
+                let mut unique = 2;
                 let moved = 3;
                 let empty = () -> i64 { 0 };
                 let by_shared = () -> i64 { shared };
@@ -142,8 +142,8 @@ fn semantic_inferred_closure_capture_moves_an_owned_nonduplicable_value() {
                 let ticket = Ticket {};
                 let deferred = () -> Ticket { ticket };
                 let again = ticket;
-                move deferred;
-                move again;
+                let Ticket {} = deferred();
+                let Ticket {} = again;
                 42
             }
         "#,
@@ -177,7 +177,7 @@ fn semantic_plain_owned_arguments_do_not_require_move_spelling() {
         pub fn main() -> i64 {
             let ticket = Ticket {};
             let ticket = relay(ticket);
-            move ticket;
+            let Ticket {} = ticket;
             42
         }
     "#;
@@ -199,8 +199,8 @@ fn semantic_plain_owned_argument_cannot_be_used_after_implicit_move() {
                 let ticket = Ticket {};
                 let forwarded = relay(ticket);
                 let again = relay(ticket);
-                move forwarded;
-                move again;
+                let Ticket {} = forwarded;
+                let Ticket {} = again;
                 42
             }
         "#,
@@ -355,9 +355,9 @@ fn semantic_drop_runs_once_on_normal_and_nonlocal_cleanup() {
             }
         }
         pub main() -> i64 {
-            let first = 19;
+            let mut first = 19;
             { let normal = Probe { target: &mut first }; () };
-            let second = 20;
+            let mut second = 20;
             let escaped = @done: i64 {
                 let nonlocal = Probe { target: &mut second };
                 @done(1);

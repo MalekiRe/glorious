@@ -207,7 +207,7 @@ fn source_vec_pushes_with_capacity_do_not_materialize_growth_only_registers() {
                 }}
             }}
             pub fn main() -> i64 {{
-                let values = Vec<usize>::with_capacity(1024);
+                let mut values = Vec<usize>::with_capacity(1024);
                 fill(&mut values, 0);
                 handle Vec::len(&values) == {count} {{
                     false => 0,

@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{DefKey, Digest, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
     ElaboratedTraitReference, GenericArgument, GenericKind, InstanceKey, TraitAnswer, TraitGoal, TraitSolver, Type};
+mod selection;
+pub(crate) use selection::custom_drop_may_apply;
 #[cfg(test)]
 use crate::{CoreId, MirBlock, MirBlockId, MirControlTables, MirFunction, MirInstruction,
     MirLocal, MirLocalDecl, MirPattern, MirScopeId, MirTerminator, Mutability, Safety, ScalarType};
@@ -130,7 +132,8 @@ impl<'a> Planner<'a> {
                 }
                 _ => return Err("destruction nominal has no declaration-owned layout".into()),
             },
-            Type::Array(element) => match self.discover(element)? {
+            Type::FixedArray { .. } if ty.fixed_array_length() == Some(0) => Shape::Leaf,
+            Type::Array(element) | Type::FixedArray { element, .. } => match self.discover(element)? {
                 Some(glue) => Shape::Array {
                     element: (**element).clone(),
                     glue,

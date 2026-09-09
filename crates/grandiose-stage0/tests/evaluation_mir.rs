@@ -1,32 +1,14 @@
+mod support;
+
 use grandiose_stage0::evaluation_mir::{
     EvaluationExit, EvaluationMir, EvaluationOperand, EvaluationOperation as Op, EvaluationPlace,
 };
-use grandiose_stage0::{
-    BodySyntax, DeclarationScan, DefinitionIndex, ElaboratedInterface, FileKey, InterfaceSet,
-    LexedFile, PackageKey, Type, TypedBody,
-};
+use grandiose_stage0::Type;
 
 fn normalize(source: &str) -> EvaluationMir {
-    let package = PackageKey("evaluation-mir@0.1.0".into());
-    let file = FileKey::new(&package, "src/main.glorious");
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .unwrap();
-    let syntax = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &syntax,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
+    let (definition, core, _) = support::frontend("evaluation-mir@0.1.0", source, "main");
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let result = EvaluationMir::lower(definition.key, &core).unwrap();
+    let result = EvaluationMir::lower(definition, &core).unwrap();
     result.validate().unwrap();
     result
 }
@@ -57,23 +39,14 @@ fn strict_calls_are_ordered_before_their_aggregate() {
 
 #[test]
 fn lazy_rhs_is_a_deferred_region() {
-    let mir = normalize("fn probe() -> Bool { true } pub fn main() -> Bool { false and probe() }");
+    let mir = normalize("fn probe() -> Bool { true } pub fn main() -> Bool { false and { probe() } }");
     let root = &mir.regions()[mir.entry().0 as usize];
-    assert!(
-        !root
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction.operation, Op::Call(_)))
-    );
-    let lazy = root.instructions.last().unwrap();
-    let Op::LazyBoolean {
-        conjunction: true,
-        right,
-    } = lazy.operation
-    else {
-        panic!("{lazy:?}");
-    };
-    assert_eq!(lazy.operands.len(), 1);
+    // `and` is an ordinary library call; only the thunk construction is
+    // strict. Its probe call must remain in the separate closure region.
+    assert_eq!(root.instructions.iter().filter(|instruction|
+        matches!(instruction.operation, Op::Call(_))).count(), 1);
+    let right = root.instructions.iter().find_map(|instruction|
+        match instruction.operation { Op::Closure { body, .. } => Some(body), _ => None }).unwrap();
     assert!(
         mir.regions()[right.0 as usize]
             .instructions
@@ -181,13 +154,13 @@ fn closure_body_is_not_evaluated_at_construction() {
         !root
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction.operation, Op::Intrinsic(_)))
+            .any(|instruction| matches!(instruction.operation, Op::TraitMethod { .. }))
     );
     assert!(
         mir.regions()[body.0 as usize]
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction.operation, Op::Intrinsic(_)))
+            .any(|instruction| matches!(instruction.operation, Op::TraitMethod { .. }))
     );
 }
 
@@ -232,48 +205,41 @@ fn normalizing_the_same_core_is_deterministic() {
 #[test]
 fn completion_refinement_keeps_once_evaluated_subject_provenance() {
     let mir = normalize(
-        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+        "pub enum Result { Ok(i64), Err } fn probe() -> Result { Result::Ok(42) } pub fn main() -> i64 { handle probe() is Result::Ok(found) { Test::Yes(_) => 1; Test::No(_) => 0 } }",
     );
     let root = &mir.regions()[mir.entry().0 as usize];
     let Op::Completion { computation, arms, .. } = &root.instructions.last().unwrap().operation else {
         panic!("{root:?}");
     };
     assert_eq!(arms.len(), 2);
-    let refinement = arms.iter().find_map(|arm| arm.refinement.as_ref()).unwrap();
     let subject = &mir.regions()[computation.0 as usize];
-    assert!(
-        subject
-            .instructions
-            .iter()
-            .any(|instruction| instruction.source == refinement.subject)
-    );
+    // `is` constructs an ordinary Test by an inner pattern completion. The
+    // outer completion observes that carrier without calling `probe` again.
+    let tested_region = subject.instructions.iter().find_map(|instruction|
+        match instruction.operation { Op::Completion { computation, .. } => Some(computation), _ => None }).unwrap();
+    assert_eq!(mir.regions()[tested_region.0 as usize].instructions.iter().filter(|instruction|
+        matches!(&instruction.operation, Op::Call(_))).count(), 1);
+    assert_eq!(mir.regions().iter().flat_map(|region| &region.instructions).filter(|instruction|
+        matches!(&instruction.operation, Op::Call(_))).count(), 1);
     for arm in arms {
         assert!(
             !mir.regions()[arm.region.0 as usize]
                 .instructions
                 .iter()
-                .any(|instruction| instruction.source == refinement.subject)
+                .any(|instruction| matches!(&instruction.operation, Op::Call(_)))
         );
     }
 }
 
 #[test]
 fn label_transfer_is_terminal_only_inside_its_delimited_region() {
-    let mir = normalize("pub fn main() -> Bool { label done { false or transfer done true } }");
+    let mir = normalize("pub fn main() -> Bool { label done { transfer done true } }");
     let root = &mir.regions()[mir.entry().0 as usize];
     let Op::Label { brand, body } = root.instructions.last().unwrap().operation else {
         panic!("{root:?}");
     };
     assert!(matches!(root.exit, EvaluationExit::Yield(_)));
-    let region = &mir.regions()[body.0 as usize];
-    let Op::LazyBoolean {
-        conjunction: false,
-        right,
-    } = region.instructions.last().unwrap().operation
-    else {
-        panic!("{region:?}");
-    };
-    let transfer = &mir.regions()[right.0 as usize];
+    let transfer = &mir.regions()[body.0 as usize];
     assert_eq!(
         transfer.instructions.last().unwrap().operation,
         Op::Transfer(brand)

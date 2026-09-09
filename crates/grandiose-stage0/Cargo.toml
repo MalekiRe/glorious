@@ -14,4 +14,6 @@ path = "src/main.rs"
 
 [dependencies]
 blake3 = "1"
+grandiose-compiler-base = { path = "../grandiose-compiler-base" }
+grandiose-syntax = { path = "../grandiose-syntax" }
 grandiose-runtime = { path = "../grandiose-runtime" }

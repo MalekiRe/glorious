@@ -369,7 +369,7 @@ fn semantic_runs_in_borrowed_access_matches_sealed_capture_authority() {
 
         pub main() -> i64 {
             let observed = 40;
-            let updated = 1;
+            let mut updated = 1;
             observe(() -> i64 { observed })
                 + update(() -> i64 { updated = updated + 1; updated })
         }
@@ -410,15 +410,15 @@ fn semantic_shared_runs_in_cannot_claim_a_moving_environment() {
 fn semantic_runs_in_access_is_expressed_with_ordinary_types() {
     let source = r#"
         owned<E, F, S>(body: F) ->
-        where F: RunsIn<E, (), After = S>
+        where F: RunsIn<E, (), After = S>, F: Use<[0, 1]>
         {}
 
         shared<'e, E, F, S>(body: F) ->
-        where F: RunsIn<&'e E, (), After = S>
+        where F: RunsIn<&'e E, (), After = S>, F: Use<[0, 1]>
         {}
 
         unique<'e, E, F, S>(body: F) ->
-        where F: RunsIn<&'e mut E, (), After = S>
+        where F: RunsIn<&'e mut E, (), After = S>, F: Use<[0, 1]>
         {}
 
         pub main() -> i64 { 42 }

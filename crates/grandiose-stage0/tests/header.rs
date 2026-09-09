@@ -4,6 +4,122 @@ use grandiose_stage0::{
     PackageKey, ParsedHeader, Quantity,
 };
 
+fn trait_bound(bound: &grandiose_stage0::WhereBoundHeader) -> (&HeaderType, &grandiose_stage0::TraitRefHeader) {
+    let grandiose_stage0::header::PredicateHeader::Trait { subject, relation } = &bound.predicate else { panic!("expected trait predicate"); };
+    (subject, relation)
+}
+
+fn parse_higher_ranked_header(source: &str) -> HeaderParse {
+    let package = PackageKey("higher-ranked-header@0.1.0".into());
+    let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    HeaderParse::parse(&lexed, source, &scan.declarations[0])
+}
+
+#[test]
+fn nominal_where_predicates_are_retained_instead_of_skipped() {
+    for source in [
+        "struct Cache<I> where I: Iterator { item: <I as Iterator>::Item }",
+        "enum Cache<I> where I: Iterator { Full(<I as Iterator>::Item) }",
+        "struct Cache<I> where I: Iterator (<I as Iterator>::Item);",
+    ] {
+        let parsed = parse_higher_ranked_header(source);
+        assert!(parsed.diagnostics.is_empty(), "{source}: {parsed:#?}");
+        let ParsedHeader::Nominal { where_bounds, .. } = parsed.header else { panic!("nominal"); };
+        assert_eq!(where_bounds.len(), 1);
+        assert_eq!(trait_bound(&where_bounds[0]).1.path, ["Iterator"]);
+    }
+}
+
+#[test]
+fn higher_ranked_where_binder_owns_subject_relation_and_equalities() {
+    let parsed = parse_higher_ranked_header(
+        "fn call<F>() where for<'a> &'a F: Fn<(&'a i64,), Output = &'a i64, Effects={}>, F: Use<[0,1]> {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else { panic!("callable") };
+    assert_eq!(header.generics.names, ["F"]);
+    assert_eq!(header.where_bounds.len(), 2);
+    let bound = &header.where_bounds[0];
+    assert_eq!(bound.universal.as_ref().unwrap().names, ["'a"]);
+    assert!(matches!(trait_bound(bound).0, HeaderType::Reference { lifetime: Some(name), .. } if name == "'a"));
+    assert!(matches!(&trait_bound(bound).1.arguments[0], HeaderGenericArgument::Type(HeaderType::Tuple(items))
+        if matches!(&items[0], HeaderType::Reference { lifetime: Some(name), .. } if name == "'a")));
+    assert!(matches!(&trait_bound(bound).1.arguments[1], HeaderGenericArgument::AssociatedTypeBinding { value, .. }
+        if matches!(value.as_ref(), HeaderType::Reference { lifetime: Some(name), .. } if name == "'a")));
+    assert!(matches!(&trait_bound(bound).1.arguments[2], HeaderGenericArgument::AssociatedEffectBinding { .. }));
+    assert!(header.where_bounds[1].universal.is_none());
+}
+
+#[test]
+fn higher_ranked_where_binder_preserves_kinds_and_nested_callable_scope() {
+    let parsed = parse_higher_ranked_header(
+        "fn call<F>() where for<'a, e: EffectRow, const n: u32> F: Rel<'a, {|e}, n, Output=for<'b> (&'b i64) -> &'b i64> {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else { panic!("callable") };
+    let bound = &header.where_bounds[0];
+    assert_eq!(bound.universal.as_ref().unwrap().kinds(), [
+        grandiose_stage0::GenericKind::Lifetime,
+        grandiose_stage0::GenericKind::EffectRow,
+        grandiose_stage0::GenericKind::Const(ConstKind::U32),
+    ]);
+    assert!(matches!(&trait_bound(bound).1.arguments[3], HeaderGenericArgument::AssociatedTypeBinding { value, .. }
+        if matches!(value.as_ref(), HeaderType::Callable { lifetime_binders, .. } if lifetime_binders == &["'b"])));
+}
+
+#[test]
+fn higher_ranked_where_binders_do_not_become_declaration_generics() {
+    let parsed = parse_higher_ranked_header(
+        "fn call<'a, F>() where for<'a> F: First<'a>, for<'a> F: Second<'a>, F: Third<'a> {}",
+    );
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else { panic!("callable") };
+    assert_eq!(header.generics.names, ["'a", "F"]);
+    assert_eq!(header.where_bounds[0].universal.as_ref().unwrap().names, ["'a"]);
+    assert_eq!(header.where_bounds[1].universal.as_ref().unwrap().names, ["'a"]);
+    assert!(header.where_bounds[2].universal.is_none());
+}
+
+#[test]
+fn higher_ranked_where_binders_reject_defaults_duplicates_and_missing_lists() {
+    for binders in ["for", "for<>", "for<'a, 'a>", "for<'a = 'static>", "for<n: u32 = 1>", "for<e: EffectRow = {}>"] {
+        let parsed = parse_higher_ranked_header(&format!("fn call<F>() where {binders} F: Rel {{}}"));
+        assert!(parsed.diagnostics.iter().any(|diagnostic| diagnostic.code == "G3334"), "{binders}: {parsed:#?}");
+    }
+}
+
+#[test]
+fn effect_row_union_parses_associated_projections_and_a_parameter() {
+    for row in [
+        "{| <T as First>::Effects, e, <T as Second>::Effects,}",
+        "{Trace | e, <T as First>::Effects, <T as Second>::Effects}",
+    ] {
+        let source = format!("fn call<T, e: EffectRow>() / {row} {{}}");
+        let package = PackageKey("projection-row@0.1.0".into());
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), &source);
+        let scan = DeclarationScan::scan(&lexed, &source);
+        let parsed = HeaderParse::parse(&lexed, &source, &scan.declarations[0]);
+        assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+        let ParsedHeader::Function(header) = parsed.header else { panic!("callable") };
+        assert_eq!(header.effects.tails.as_slice(), ["e"]);
+        assert_eq!(header.effects.effects.iter().filter(|term| matches!(term, HeaderType::Projection { .. })).count(), 2);
+    }
+}
+
+#[test]
+fn effect_row_union_rejects_empty_or_repeated_separator() {
+    for row in ["{|}", "{|e|e}", "{|<T as First>::Effects <T as Second>::Effects}"] {
+        let source = format!("fn call<T, e: EffectRow>() / {row} {{}}");
+        let package = PackageKey("invalid-row@0.1.0".into());
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), &source);
+        let scan = DeclarationScan::scan(&lexed, &source);
+        let parsed = HeaderParse::parse(&lexed, &source, &scan.declarations[0]);
+        assert!(!parsed.diagnostics.is_empty(), "accepted {row}");
+    }
+}
+
 #[test]
 fn effect_payloads_parse_positional_types_without_callable_binders() {
     let package = PackageKey("positional-effects@0.1.0".into());
@@ -52,7 +168,7 @@ fn inherent_method_unit_type_arguments_do_not_scan_into_method_bodies() {
     let ParsedHeader::InherentImplementation(header) = parsed.header else {
         panic!("expected inherent impl")
     };
-    assert!(header.methods[0].public);
+    assert!(header.methods[0].visibility.is_public());
     assert!(
         matches!(header.methods[0].signature.result, Some(HeaderType::Application(_, ref args))
         if matches!(args.as_slice(), [HeaderGenericArgument::Type(HeaderType::Tuple(values))] if values.is_empty()))
@@ -186,7 +302,7 @@ fn nominal_headers_retain_structural_u32_arguments() {
     assert!(matches!(
         header.result,
         Some(HeaderType::Application(_, arguments))
-            if arguments == vec![HeaderGenericArgument::U32(7)]
+            if arguments == vec![HeaderGenericArgument::Integer("7".into())]
     ));
 }
 
@@ -204,7 +320,7 @@ fn trait_references_retain_explicit_lifetime_arguments() {
     };
     assert!(matches!(
         header.where_bounds.as_slice(),
-        [bound] if bound.relation.arguments == vec![HeaderGenericArgument::Lifetime("'a".into())]
+        [bound] if trait_bound(bound).1.arguments == vec![HeaderGenericArgument::Lifetime("'a".into())]
     ));
 }
 
@@ -224,8 +340,8 @@ fn trait_references_retain_explicit_effect_row_arguments() {
         header.where_bounds.as_slice(),
         [bound]
             if matches!(
-                bound.relation.arguments.as_slice(),
-                [HeaderGenericArgument::EffectRow(row)] if row.effects.is_empty() && row.tail.as_deref() == Some("e")
+                trait_bound(bound).1.arguments.as_slice(),
+                [HeaderGenericArgument::EffectRow(row)] if row.effects.is_empty() && row.tails.as_slice() == ["e"]
             )
     ));
 }
@@ -257,7 +373,45 @@ fn nominal_headers_retain_structural_quantity_arguments() {
 }
 
 #[test]
-fn nominal_headers_normalize_structural_const_arithmetic() {
+fn structural_header_literals_accept_radices_and_digit_separators() {
+    let package = PackageKey("header-const-radices@0.1.0".into());
+    for literal in ["42", "4_2", "0b10_1010", "0o52", "0x2a", "0x_2A"] {
+        let source = format!("fn tag() -> Tag<{literal}> {{ tag }} fn budget() -> Budget<[{literal}, {literal} + 1]> {{ budget }} fn symbolic<const N: u32>() -> Tag<N + {literal}> {{ tag }}");
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), &source);
+        assert!(lexed.diagnostics.is_empty(), "{literal}: {lexed:?}");
+        let scan = DeclarationScan::scan(&lexed, &source);
+        let parsed = scan.declarations.iter().map(|declaration| {
+            let parsed = HeaderParse::parse(&lexed, &source, declaration);
+            assert!(parsed.diagnostics.is_empty(), "{literal}: {parsed:?}");
+            let ParsedHeader::Function(header) = parsed.header else { panic!("function") };
+            header
+        }).collect::<Vec<_>>();
+        assert!(matches!(&parsed[0].result, Some(HeaderType::Application(_, arguments)) if arguments == &vec![HeaderGenericArgument::Integer(literal.into())]));
+        assert!(matches!(&parsed[1].result, Some(HeaderType::Application(_, arguments)) if arguments == &vec![HeaderGenericArgument::Quantity(Quantity::new(42, Some(43)).unwrap())]));
+        assert!(matches!(&parsed[2].result, Some(HeaderType::Application(_, arguments)) if matches!(&arguments[0], HeaderGenericArgument::StructuralConst(_))));
+    }
+}
+
+#[test]
+fn structural_header_radix_literals_defer_range_checks_to_declared_kind() {
+    let package = PackageKey("header-const-radix-range@0.1.0".into());
+    for literal in ["0x1_0000_0000", "0xffff_ffff_ffff_ffff + 1", "0x1_0000_0000_0000_0000", "0b1 / 0o0"] {
+        let source = format!("fn tag() -> Tag<{literal}> {{ tag }}");
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), &source);
+        let scan = DeclarationScan::scan(&lexed, &source);
+        let parsed = HeaderParse::parse(&lexed, &source, &scan.declarations[0]);
+        assert!(parsed.diagnostics.is_empty(), "{literal}: {parsed:?}");
+        let typed_source = format!("struct Tag<const N: u32>; {source}");
+        let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), &typed_source);
+        let scan = DeclarationScan::scan(&lexed, &typed_source);
+        let interface = grandiose_stage0::InterfaceSet::collect(package.clone(), "crate", &lexed, &typed_source, &scan).interface;
+        let signatures = grandiose_stage0::ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4134"), "{literal}: {:?}", signatures.diagnostics);
+    }
+}
+
+#[test]
+fn nominal_headers_preserve_integer_arithmetic_and_normalize_quantities() {
     let package = PackageKey("header-structural-const-arithmetic@0.1.0".into());
     let source = "pub fn tag() -> Tag<1 + 2 * 3> { tag } pub fn budget() -> Budget<[1 + 2, 2 * 4]> { budget }";
     let file = FileKey::new(&package, "src/lib.glorious");
@@ -272,7 +426,17 @@ fn nominal_headers_normalize_structural_const_arithmetic() {
     assert!(matches!(
         first.result,
         Some(HeaderType::Application(_, arguments))
-            if arguments == vec![HeaderGenericArgument::U32(7)]
+            if arguments == vec![HeaderGenericArgument::StructuralConst(
+                grandiose_stage0::HeaderStructuralConst::IntegerExpression(
+                    grandiose_stage0::HeaderIntegerExpr::Add(
+                        Box::new(grandiose_stage0::HeaderIntegerExpr::Literal("1".into())),
+                        Box::new(grandiose_stage0::HeaderIntegerExpr::Mul(
+                            Box::new(grandiose_stage0::HeaderIntegerExpr::Literal("2".into())),
+                            Box::new(grandiose_stage0::HeaderIntegerExpr::Literal("3".into()))
+                        ))
+                    )
+                )
+            )]
     ));
 
     let second = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
@@ -288,27 +452,16 @@ fn nominal_headers_normalize_structural_const_arithmetic() {
 }
 
 #[test]
-fn structural_const_arithmetic_reports_overflow_and_division_by_zero() {
+fn structural_const_arithmetic_is_not_evaluated_before_kind_selection() {
     let package = PackageKey("header-structural-const-arithmetic-errors@0.1.0".into());
     let source = "pub fn overflow() -> Tag<4294967295 + 1> { overflow } pub fn zero() -> Tag<8 / 0> { zero }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
     let overflow = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
-    assert!(
-        overflow
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G3222"),
-        "{overflow:#?}"
-    );
+    assert!(overflow.diagnostics.is_empty(), "{overflow:#?}");
     let zero = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
-    assert!(
-        zero.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G3228"),
-        "{zero:#?}"
-    );
+    assert!(zero.diagnostics.is_empty(), "{zero:#?}");
 }
 
 #[test]
@@ -483,7 +636,7 @@ fn nominal_layouts_are_parsed_as_interface_facts() {
 
     let pair = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
     assert!(pair.diagnostics.is_empty(), "{pair:#?}");
-    let ParsedHeader::Nominal { generics, layout } = pair.header else {
+    let ParsedHeader::Nominal { generics, layout, .. } = pair.header else {
         panic!("expected struct nominal header")
     };
     assert_eq!(generics, ["T"]);
@@ -527,6 +680,30 @@ fn nominal_headers_accept_line_separated_variants_and_private_fields() {
     assert!(
         matches!(layout, NominalLayoutHeader::Enum(variants) if variants.len() == 2 && variants[0].name == "Continue")
     );
+}
+
+#[test]
+fn nominal_fields_accept_pub_on_records_and_named_enum_payloads() {
+    let package = PackageKey("header-pub-fields@0.1.0".into());
+    let source = "pub struct Record { pub value: i64, private hidden: i64 } pub enum Event { Value { pub value: i64, private hidden: i64 } }";
+    let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    for declaration in &scan.declarations {
+        let parsed = HeaderParse::parse(&lexed, source, declaration);
+        assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+        let ParsedHeader::Nominal { layout, .. } = parsed.header else { panic!("nominal header"); };
+        let fields = match &layout {
+            NominalLayoutHeader::Struct(fields) => fields,
+            NominalLayoutHeader::Enum(variants) => match &variants[0].payload {
+                EnumVariantPayloadHeader::Struct(fields) => fields,
+                _ => panic!("named payload"),
+            },
+            _ => panic!("record layout"),
+        };
+        assert_eq!(fields.iter().map(|field| (field.name.as_str(), !field.visibility.is_public())).collect::<Vec<_>>(),
+            [("value", false), ("hidden", true)]);
+        assert!(source[fields[0].span.start as usize..fields[0].span.end as usize].starts_with("pub value"));
+    }
 }
 
 #[test]
@@ -647,7 +824,7 @@ fn callable_where_bounds_preserve_named_type_and_effect_bindings() {
         panic!("expected callable header");
     };
     assert!(matches!(
-        header.where_bounds[0].relation.arguments.as_slice(),
+        trait_bound(&header.where_bounds[0]).1.arguments.as_slice(),
         [
             HeaderGenericArgument::Type(HeaderType::Tuple(values)),
             HeaderGenericArgument::AssociatedTypeBinding { name, value, .. },
@@ -656,8 +833,27 @@ fn callable_where_bounds_preserve_named_type_and_effect_bindings() {
             && name == "Output"
             && matches!(value.as_ref(), HeaderType::Path(path) if path == &["i64"])
             && effects == "Effects"
-            && row.tail.as_deref() == Some("e")
+            && row.tails.as_slice() == ["e"]
     ));
+}
+
+#[test]
+fn associated_bindings_accept_adjacent_type_delimiters() {
+    let package = PackageKey("header-adjacent-associated-bindings@0.1.0".into());
+    for source in [
+        "fn select<I,J>() where J: Iterator<Item=<I as Iterator>::Item> {}",
+        "fn select<I,J>() where J: Iterator<Item=&'static I> {}",
+        "fn select<I,J>() where J: Iterator<Item< I>=J> {}",
+    ] {
+        let file = FileKey::new(&package, "src/lib.glorious");
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+        assert!(parsed.diagnostics.is_empty(), "{source}: {parsed:#?}");
+        let ParsedHeader::Function(header) = parsed.header else { panic!("expected function"); };
+        assert!(matches!(trait_bound(&header.where_bounds[0]).1.arguments.as_slice(),
+            [HeaderGenericArgument::AssociatedTypeBinding { name, .. }] if name == "Item"));
+    }
 }
 
 #[test]

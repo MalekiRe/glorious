@@ -439,7 +439,7 @@ fn gsc2_dependency_keys_preserve_canonical_byte_and_variant_order() {
         &[grandiose_stage0::GenericKind::Const(
             grandiose_stage0::ConstKind::U32,
         )],
-        vec![grandiose_stage0::GenericArgument::ConstU32(1)],
+        vec![grandiose_stage0::GenericArgument::ConstInteger(1u32.into())],
     )
     .unwrap()
     .fingerprint();
@@ -1915,7 +1915,7 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
         assert_eq!(value.selector_name(), name);
         assert!(inventory.insert(value, (name, tag.parse::<u8>().unwrap())).is_none());
     }
-    assert_eq!(inventory.len(), 180);
+    assert_eq!(inventory.len(), 182);
     let mut metadata = String::new();
     let mut previous = *inventory.first_key_value().unwrap().0;
     let mut checks = Vec::new();
@@ -1943,7 +1943,7 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
     let program = source_program(case, &[("@CASES@", generated), ("@ROLES@", metadata), ("@CONVERSIONS@", literal(&conversions))]);
     let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
     record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
-    assert_eq!(results, [cases.len() as i64, 180, 648, 1, 20]);
+    assert_eq!(results, [cases.len() as i64, 182, 648, 1, 20]);
 }
 
 #[test]

@@ -1,0 +1,160 @@
+// Fused arithmetic and tolerance checks are exact integer/dyadic algorithms.
+// In particular, no intermediate floating overflow can change a tolerance test.
+struct FloatDyadic { magnitude: Vec<u32>, exponent: i128, negative: Bool }
+fn float_big_trim(value: &mut Vec<u32>) {
+    let length = Vec::len(& *value);
+    handle length == 0 { true => (), false => handle *Vec::get_unchecked(& *value, length - 1) == 0 {
+        true => { let _ = Vec::pop(&mut *value); tail float_big_trim(value) }, false => (),
+    } }
+}
+fn float_big_from128(value: u128) -> Vec<u32> {
+    let mut out = Vec::new();
+    Vec::push(&mut out, as<u32>(value));
+    Vec::push(&mut out, as<u32>(bit_shr(value, 32)));
+    Vec::push(&mut out, as<u32>(bit_shr(value, 64)));
+    Vec::push(&mut out, as<u32>(bit_shr(value, 96)));
+    float_big_trim(&mut out);
+    out
+}
+fn float_big_sum_from(left: &mut Vec<u32>, right: &Vec<u32>, index: usize) {
+    handle index == Vec::len(right) {
+        true => (),
+        false => {
+            handle index == Vec::len(& *left) { true => Vec::push(&mut *left, 0), false => () };
+            float_big_add_from(&mut *left, index, as<u64>(*Vec::get_unchecked(right, index)));
+            tail float_big_sum_from(left, right, index + 1)
+        },
+    }
+}
+fn float_big_subtract_from(left: &mut Vec<u32>, right: &Vec<u32>, index: usize, borrow: u64) {
+    handle index == Vec::len(& *left) {
+        true => handle borrow == 0 { true => (), false => __g1_abort() },
+        false => {
+            let a = as<u64>(*Vec::get_unchecked(& *left, index));
+            let b = handle index < Vec::len(right) { true => as<u64>(*Vec::get_unchecked(right, index)), false => 0 } + borrow;
+            let (word, next) = handle a < b {
+                true => (bit_shl(as<u64>(1), 32) + a - b, as<u64>(1)), false => (a - b, as<u64>(0)),
+            };
+            let place = handle Vec::get_mut(&mut *left, index) { Result::Ok(place) => place, _ => __g1_abort() };
+            *place = as<u32>(word);
+            tail float_big_subtract_from(left, right, index + 1, next)
+        },
+    }
+}
+fn float_math_sum(a: &FloatDyadic, b: &FloatDyadic) -> FloatDyadic {
+    let exponent = min(a.exponent, b.exponent);
+    let mut left = float_big_shift(&a.magnitude, as<u128>(a.exponent - exponent));
+    let mut right = float_big_shift(&b.magnitude, as<u128>(b.exponent - exponent));
+    handle a.negative == b.negative {
+        true => {
+            float_big_sum_from(&mut left, &right, 0);
+            FloatDyadic { magnitude: left, exponent: exponent, negative: a.negative }
+        },
+        false => handle float_big_compare(&left, &right) {
+            Ordering::Equal => FloatDyadic { magnitude: Vec::new(), exponent: 0, negative: false },
+            Ordering::Greater => {
+                float_big_subtract_from(&mut left, &right, 0, 0);
+                float_big_trim(&mut left);
+                FloatDyadic { magnitude: left, exponent: exponent, negative: a.negative }
+            },
+            Ordering::Less => {
+                float_big_subtract_from(&mut right, &left, 0, 0);
+                float_big_trim(&mut right);
+                FloatDyadic { magnitude: right, exponent: exponent, negative: b.negative }
+            },
+        },
+    }
+}
+fn float_math_compare(a: &FloatDyadic, b: &FloatDyadic) -> Ordering {
+    let exponent = min(a.exponent, b.exponent);
+    let left = float_big_shift(&a.magnitude, as<u128>(a.exponent - exponent));
+    let right = float_big_shift(&b.magnitude, as<u128>(b.exponent - exponent));
+    float_big_compare(&left, &right)
+}
+fn float_mul_add_bits(value: u64, multiplier: u64, addend: u64, width: u32, mantissa_bits: u32, bias: i32) -> u64 {
+    let sign_mask = bit_shl(as<u64>(1), width - 1);
+    let infinity = bit_shl(bit_shl(as<u64>(1), width - mantissa_bits - 1) - 1, mantissa_bits);
+    let nan = bit_or(infinity, bit_shl(as<u64>(1), mantissa_bits - 1));
+    let a = bit_and(value, sign_mask - 1);
+    let b = bit_and(multiplier, sign_mask - 1);
+    let c = bit_and(addend, sign_mask - 1);
+    handle a > infinity { true => return(nan, @float_mul_add_bits), false => () };
+    handle b > infinity { true => return(nan, @float_mul_add_bits), false => () };
+    handle c > infinity { true => return(nan, @float_mul_add_bits), false => () };
+    let negative = bit_and(bit_xor(value, multiplier), sign_mask) != 0;
+    let addend_negative = bit_and(addend, sign_mask) != 0;
+    let product_infinite = handle a == infinity { true => true, false => b == infinity };
+    handle product_infinite {
+        false => (),
+        true => {
+            handle a == 0 { true => return(nan, @float_mul_add_bits), false => () };
+            handle b == 0 { true => return(nan, @float_mul_add_bits), false => () };
+            handle c == infinity {
+                true => handle negative != addend_negative { true => return(nan, @float_mul_add_bits), false => () }, false => (),
+            };
+            return(bit_or(infinity, handle negative { true => sign_mask, false => 0 }), @float_mul_add_bits)
+        },
+    };
+    handle c == infinity { true => return(addend, @float_mul_add_bits), false => () };
+    let (a_m, a_e) = float_dyadic(a, mantissa_bits, bias);
+    let (b_m, b_e) = float_dyadic(b, mantissa_bits, bias);
+    let (c_m, c_e) = float_dyadic(c, mantissa_bits, bias);
+    let product = FloatDyadic { magnitude: float_big_from128(as<u128>(a_m) * as<u128>(b_m)), exponent: a_e + b_e, negative: negative };
+    let addition = FloatDyadic { magnitude: float_big_from(c_m), exponent: c_e, negative: addend_negative };
+    let sum = float_math_sum(&product, &addition);
+    let sign = handle sum.negative { true => sign_mask, false => 0 };
+    handle Vec::len(&sum.magnitude) == 0 { true => return(sign, @float_mul_add_bits), false => () };
+    let ratio = FloatRatio { numerator: sum.magnitude, denominator: float_big_from(1), exponent: sum.exponent };
+    bit_or(float_round_ratio(&ratio, infinity, mantissa_bits, bias), sign)
+}
+fn float_approximately_equal_bits(left: u64, right: u64, absolute: u64, relative: u64, width: u32, mantissa_bits: u32, bias: i32)
+    -> Result<Bool,ToleranceError> {
+    let sign_mask = bit_shl(as<u64>(1), width - 1);
+    let infinity = bit_shl(bit_shl(as<u64>(1), width - mantissa_bits - 1) - 1, mantissa_bits);
+    let abs = bit_and(absolute, sign_mask - 1);
+    let rel = bit_and(relative, sign_mask - 1);
+    handle abs >= infinity { true => return(Result::Err(ToleranceError::NonFinite), @float_approximately_equal_bits), false => () };
+    handle rel >= infinity { true => return(Result::Err(ToleranceError::NonFinite), @float_approximately_equal_bits), false => () };
+    handle abs != 0 {
+        true => handle bit_and(absolute, sign_mask) != 0 { true => return(Result::Err(ToleranceError::Negative), @float_approximately_equal_bits), false => () }, false => (),
+    };
+    handle rel != 0 {
+        true => handle bit_and(relative, sign_mask) != 0 { true => return(Result::Err(ToleranceError::Negative), @float_approximately_equal_bits), false => () }, false => (),
+    };
+    let a = bit_and(left, sign_mask - 1);
+    let b = bit_and(right, sign_mask - 1);
+    handle a > infinity { true => return(Result::Ok(false), @float_approximately_equal_bits), false => () };
+    handle b > infinity { true => return(Result::Ok(false), @float_approximately_equal_bits), false => () };
+    handle left == right { true => return(Result::Ok(true), @float_approximately_equal_bits), false => () };
+    handle a == 0 { true => handle b == 0 { true => return(Result::Ok(true), @float_approximately_equal_bits), false => () }, false => () };
+    handle a == infinity { true => return(Result::Ok(false), @float_approximately_equal_bits), false => () };
+    handle b == infinity { true => return(Result::Ok(false), @float_approximately_equal_bits), false => () };
+    let (a_m, a_e) = float_dyadic(a, mantissa_bits, bias);
+    let (b_m, b_e) = float_dyadic(b, mantissa_bits, bias);
+    let left_value = FloatDyadic { magnitude: float_big_from(a_m), exponent: a_e, negative: bit_and(left, sign_mask) != 0 };
+    let right_negative = FloatDyadic { magnitude: float_big_from(b_m), exponent: b_e, negative: bit_and(right, sign_mask) == 0 };
+    let difference = float_math_sum(&left_value, &right_negative);
+    let (abs_m, abs_e) = float_dyadic(abs, mantissa_bits, bias);
+    let absolute_value = FloatDyadic { magnitude: float_big_from(abs_m), exponent: abs_e, negative: false };
+    handle float_math_compare(&difference, &absolute_value) { Ordering::Greater => (), _ => return(Result::Ok(true), @float_approximately_equal_bits) };
+    let (rel_m, rel_e) = float_dyadic(rel, mantissa_bits, bias);
+    let (max_m, max_e) = handle a >= b { true => (a_m, a_e), false => (b_m, b_e) };
+    let relative_value = FloatDyadic { magnitude: float_big_from128(as<u128>(rel_m) * as<u128>(max_m)), exponent: rel_e + max_e, negative: false };
+    Result::Ok(handle float_math_compare(&difference, &relative_value) { Ordering::Greater => false, _ => true })
+}
+impl f32 {
+    pub fn mul_add(value: Self, multiplier: Self, addend: Self) -> Self {
+        Self::from_bits(as<u32>(float_mul_add_bits(as<u64>(Self::to_bits(value)), as<u64>(Self::to_bits(multiplier)), as<u64>(Self::to_bits(addend)), 32, 23, 127)))
+    }
+    pub fn approximately_equal(left: Self, right: Self, tolerance: Tolerance<Self>) -> Result<Bool,ToleranceError> {
+        float_approximately_equal_bits(as<u64>(Self::to_bits(left)), as<u64>(Self::to_bits(right)), as<u64>(Self::to_bits(tolerance.absolute)), as<u64>(Self::to_bits(tolerance.relative)), 32, 23, 127)
+    }
+}
+impl f64 {
+    pub fn mul_add(value: Self, multiplier: Self, addend: Self) -> Self {
+        Self::from_bits(float_mul_add_bits(Self::to_bits(value), Self::to_bits(multiplier), Self::to_bits(addend), 64, 52, 1023))
+    }
+    pub fn approximately_equal(left: Self, right: Self, tolerance: Tolerance<Self>) -> Result<Bool,ToleranceError> {
+        float_approximately_equal_bits(Self::to_bits(left), Self::to_bits(right), Self::to_bits(tolerance.absolute), Self::to_bits(tolerance.relative), 64, 52, 1023)
+    }
+}
