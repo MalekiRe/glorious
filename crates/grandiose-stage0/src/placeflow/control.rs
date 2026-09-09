@@ -6,6 +6,7 @@ use super::*;
 pub(super) struct LabelBoundary {
     pub brand: crate::LabelBrand,
     pub incoming: BTreeMap<String, LocalState>,
+    pub retained: BTreeSet<String>,
     pub exits: Vec<ContinuationState>,
 }
 
@@ -14,14 +15,17 @@ impl Analyzer<'_> {
         self.label_continuations.push(LabelBoundary {
             brand,
             incoming: self.states.clone(),
+            // Strict operands are protected owners even when they have no
+            // source local and therefore no ordinary LocalState entry.
+            retained: self.states.keys().chain(self.minimum_bindings.keys()).cloned().collect(),
             exits: vec![],
         });
     }
 
     pub(super) fn record_label_continuation(&mut self, brand: crate::LabelBrand, span: Span) {
         let target = self.label_continuations.iter().rposition(|label| label.brand == brand);
-        let retained = target.map(|index| self.label_continuations[index].incoming.keys()
-            .cloned().collect::<BTreeSet<_>>()).unwrap_or_default();
+        let retained = target.map(|index| self.label_continuations[index].retained.clone())
+            .unwrap_or_default();
         // These owners are abandoned by this edge, not by the later lexical
         // suffix. Check them before ordinary scope teardown removes their
         // binding records, and before any sibling arm can consume a value.

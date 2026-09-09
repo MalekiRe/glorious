@@ -61,6 +61,53 @@ fn rejects(body: &str) {
 }
 
 #[test]
+fn local_labels_rejoin_bottom_typed_completion_arms() {
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn select(value: Token, flag: Flag) -> i64 {{
+            let answer = @done: i64 {{
+                handle flag {{ Flag::Yes => @done(42), Flag::No => @done(42) }}
+            }};
+            consume(value); answer
+        }} pub fn main() -> i64 {{ select(Token {{}}, Flag::{flag}) }}"));
+        accepts(&format!("fn pair(value: Token, answer: i64) -> i64 {{ consume(value); answer }}
+        pub fn main() -> i64 {{
+            pair(Token {{}}, @done: i64 {{
+                handle Flag::{flag} {{ Flag::Yes => @done(42), Flag::No => @done(42) }}
+            }})
+        }}"));
+        accepts(&format!("fn select(value: Token, flag: Flag) -> i64 {{
+            @inner: () {{
+                handle flag {{
+                    Flag::Yes => @select(consume(value)),
+                    Flag::No => @inner(())
+                }}
+            }};
+            consume(value)
+        }} pub fn main() -> i64 {{ select(Token {{}}, Flag::{flag}) }}"));
+    }
+}
+
+#[test]
+fn rejoined_bottom_typed_arms_do_not_hide_later_double_use() {
+    let source = format!("{TOKEN}fn select(value: Token, flag: Flag) -> i64 {{
+        @done: () {{
+            handle flag {{
+                Flag::Yes => {{ consume(value); @done(()) }},
+                Flag::No => @done(())
+            }}
+        }};
+        consume(value)
+    }} pub fn main() -> i64 {{ select(Token {{}}, Flag::Yes) }}");
+    for optimization in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(error) => error,
+            Ok(_) => panic!("a rejoined completion arm must retain its move before the suffix"),
+        };
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5003"), "{error:#?}");
+    }
+}
+
+#[test]
 fn direct_label_continuations_keep_their_own_move_and_minimum_use_states() {
     accepts("effect Ask { ask() -> (); }
         fn select(value:Token) -> Token {

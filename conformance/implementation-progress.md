@@ -5,6 +5,38 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 93: local label rejoins and protected operands
+
+A bottom-typed label body no longer proves that the enclosing label cannot
+continue. Completion arms can transfer to that label; a known transfer to a
+different brand still propagates outward. The shared strict-expression query
+therefore preserves the reachable suffix for ownership, escape and use checks.
+Label entry also retains protected strict operands that have minimum-use
+obligations but no source-local state entry. Rejoining a nested label does not
+abandon an earlier argument of the enclosing call.
+
+Both new regression groups failed before the fix. All 14 minimum-use tests now
+pass (`target/label-completion-rejoin-after-v2.log`), including fresh and decoded
+O0/O2 execution of both branches, nested destinations and protected arguments,
+plus rejection of a double use after rejoining. The all-target compile check
+passes (`target/label-completion-rejoin-all-targets-v1.log`).
+
+The broader integration run passes 1,578 tests, including all 891 service,
+176 library API, 269 Core and 111 destruction tests
+(`target/integration-label-completion-rejoin-v2.log`). The five existing generic
+exit and 16 source-library cases still fail. The expanded tail-call target
+also reproduces an activation-transfer callable ABI mismatch: 16 tail tests
+pass and one fails. One raw-callable execution test remains explicitly ignored.
+A separate current-main runtime-storage baseline reproduces the 10-byte
+nonlinearity in the exact physical-allocation slope assertion
+(`target/label-rejoin-callable-storage-baseline-v1.log`); logical allocation
+slopes are unchanged. These failures are not waived.
+
+The separate unknown-callback ownership prototype remains isolated: its 38
+control-summary, 11 original exit and 12 minimum-use tests pass, but the new
+callback-rejoin ownership regression still fails. This checkpoint does not
+claim complete label control/resource fusion or overall language conformance.
+
 ## Per-invocation control coverage
 
 Sealed control summaries expose invocation outcomes before the caller's suffix

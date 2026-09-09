@@ -262,7 +262,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // from ambient floating-point controls and sticky exception status.
 // Cache 92 retains complete callable capture footprints in logical owners
 // and records implicit resident stores from captured invocation operands.
-pub const STAGE0_CACHE_GENERATION: u32 = 92;
+// Cache 93 preserves the continuation of a label whose bottom-typed body
+// can transfer back to that label, including completion-arm rejoins.
+pub const STAGE0_CACHE_GENERATION: u32 = 93;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

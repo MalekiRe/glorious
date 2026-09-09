@@ -1956,6 +1956,12 @@ impl Analyzer<'_> {
             CoreKind::Transfer { brand, .. } => Some(AbruptExit::Transfer(*brand)),
             CoreKind::Label { brand, body: child } => match Self::abrupt_exit(body, *child) {
                 Some(AbruptExit::Transfer(target)) if target == *brand => None,
+                // Bottom in the body says that it cannot return to its own
+                // continuation. It does not say that it bypasses this label:
+                // completion arms and indirect calls can leave to this very
+                // destination. Only a known different brand propagates here;
+                // otherwise the label's frozen result type decides below.
+                Some(AbruptExit::Never) => None,
                 exit => exit,
             },
             CoreKind::Let { value, .. }
