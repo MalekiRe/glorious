@@ -164,6 +164,34 @@ pub(super) fn executable(key: &InstanceKey) -> DefKey {
     }
 }
 
+/// Discharge addressability at the first boundary with closed generic types.
+/// Frozen ownership loans supply the obligations; do not reconstruct borrows
+/// from source or Core. Independent concrete validation checks the same rule.
+pub(super) fn check_addressability(
+    ownership: &OwnershipMir,
+    instance: &InstanceKey,
+    signatures: &ElaboratedInterface,
+) -> Result<(), SpecializedDiscoveryError> {
+    ownership.validate().map_err(|error| SpecializedError(error.0))?;
+    let arguments = crate::service::materialization_body_arguments(instance, signatures)
+        .map_err(SpecializedError)?;
+    let mut substitution = Substitution { arguments: &arguments, solver: TraitSolver::new(signatures) };
+    fn check(body: &OwnershipMir, substitution: &mut Substitution<'_>) -> Result<(), SpecializedDiscoveryError> {
+        for loan in &body.loans {
+            let Type::Reference { referent, .. } = &body.values[loan.destination.0 as usize].ty else {
+                return Err(SpecializedError("ownership loan lacks its reference type".into()).into());
+            };
+            let ty = substitution.ty(referent)?;
+            if crate::types::label::payload(&ty).is_some() {
+                return Err(SpecializedDiscoveryError::NonAddressableLabel { definition: body.definition, ty });
+            }
+        }
+        for closure in &body.closures { check(&closure.body, substitution)?; }
+        Ok(())
+    }
+    check(ownership, &mut substitution)
+}
+
 pub(super) fn declaration_key(
     definition: DefKey,
     arguments: Vec<GenericArgument>,

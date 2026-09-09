@@ -762,6 +762,7 @@ impl TraitSolver {
         assumptions: &[TraitGoal],
     ) -> Option<crate::Quantity> {
         use crate::Quantity;
+        if crate::types::label::payload(ty).is_some() { return Some(Quantity::UNRESTRICTED); }
         let relation = |quantity| ElaboratedTraitReference {
             definition: crate::resolution::language_use_trait_definition(),
             arguments: vec![GenericArgument::ConstQuantity(quantity)],
@@ -1067,6 +1068,13 @@ impl TraitSolver {
     }
 
     fn supertrait_goals(&self, goal: &TraitGoal) -> Vec<TraitGoal> {
+        if is_intrinsic_label_trait(&goal.relation)
+            && matches!(goal.relation.arguments.as_slice(), [GenericArgument::Type(_)]) {
+            return vec![TraitGoal { subject: goal.subject.clone(), relation: ElaboratedTraitReference {
+                definition: crate::resolution::language_use_trait_definition(),
+                arguments: vec![GenericArgument::ConstQuantity(crate::Quantity::UNRESTRICTED)],
+            } }];
+        }
         let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
             return vec![];
         };
@@ -2782,13 +2790,7 @@ impl TraitSolver {
         let [GenericArgument::Type(payload)] = goal.relation.arguments.as_slice() else {
             return TraitAnswerIndex::NoSolution;
         };
-        let Type::Callable {
-            safety: crate::Safety::Safe, parameters, result, ..
-        } = &goal.subject
-        else {
-            return TraitAnswerIndex::NoSolution;
-        };
-        if parameters.as_slice() != [payload.clone()] || !matches!(result.as_ref(), Type::Never) {
+        if crate::types::label::payload(&goal.subject) != Some(payload) {
             return TraitAnswerIndex::NoSolution;
         }
         let key = goal_key(goal);

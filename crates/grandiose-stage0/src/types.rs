@@ -15,6 +15,7 @@ pub mod integer_const;
 pub(crate) mod regions;
 mod universes;
 mod callable;
+pub(crate) mod label;
 pub use callable::CallableContract;
 pub(crate) use universes::UniversalScope;
 

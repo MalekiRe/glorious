@@ -7891,6 +7891,40 @@ fn frozen_core_rejects_unfused_lexical_label_dependencies_without_source_diagnos
 }
 
 #[test]
+fn frozen_label_values_require_their_exact_nominal_brand() {
+    let source = "pub fn main() -> i64 { let first = @main; @inner: i64 { let second = @inner; 42 } }";
+    let core = core_for("core-generative-label-type@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let labels = core.expressions.iter().enumerate().filter_map(|(index, expression)|
+        matches!(expression.kind, CoreKind::LabelValue { .. }).then_some(index)).collect::<Vec<_>>();
+    assert_eq!(labels.len(), 2);
+    assert_ne!(core.expressions[labels[0]].ty, core.expressions[labels[1]].ty);
+    for ty in [core.expressions[labels[1]].ty.clone(), Type::Unit] {
+        let mut forged = core.clone();
+        forged.expressions[labels[0]].ty = ty;
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"
+            && diagnostic.message.contains("generative nominal brand")));
+    }
+}
+
+#[test]
+fn frozen_core_cannot_borrow_a_generative_label() {
+    let mut core = core_for("core-generative-label-address@0.1.0",
+        "pub fn main() -> i64 { let target = @main; 42 }");
+    assert!(core.validate().is_empty());
+    let (index, label) = core.expressions.iter().enumerate()
+        .find(|(_, expression)| matches!(expression.kind, CoreKind::LabelValue { .. })).unwrap();
+    let mut borrowed = label.clone();
+    borrowed.kind = CoreKind::Borrow { unique: false, value: grandiose_stage0::CoreId(index as u32) };
+    borrowed.ty = Type::Reference { mutability: grandiose_stage0::Mutability::Shared,
+        lifetime: grandiose_stage0::Lifetime::Elided, referent: Box::new(label.ty.clone()) };
+    core.expressions.push(borrowed);
+    assert!(core.validate().iter().any(|diagnostic| diagnostic.code == "G4183"
+        && diagnostic.message.contains("address of a generative label")));
+}
+
+#[test]
 fn nested_labels_can_transfer_to_an_enclosing_brand_through_the_vm_edge() {
     let core = core_for(
         "core-nested-label-transfer@0.1.0",

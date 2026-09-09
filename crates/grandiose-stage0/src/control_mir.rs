@@ -17,6 +17,10 @@ pub use capabilities::*;
 // Regions and invocation quantities are semantic contracts retained in the
 // declarations; they are not additional operands of a value-flow edge.
 pub(crate) fn call_type_matches(expected: &Type, actual: &Type) -> bool {
+    if matches!(expected, Type::Callable { .. })
+        && let Some(callable) = crate::types::label::callable(actual) {
+        return call_type_matches(expected, &callable);
+    }
     match (expected, actual) {
         (Type::Reference { mutability: a, referent: x, .. }, Type::Reference { mutability: b, referent: y, .. }) => a == b && call_type_matches(x, y),
         (Type::Callable { parameters: a, result: x, .. }, Type::Callable { parameters: b, result: y, .. }) =>
@@ -272,6 +276,8 @@ impl ControlMir {
                 } => {
                     let mut callee_ty = self.ty(*callee)?;
                     while let Type::Reference { referent, .. } = callee_ty { callee_ty = referent; }
+                    let label_callable = crate::types::label::callable(callee_ty);
+                    let callee_ty = label_callable.as_ref().unwrap_or(callee_ty);
                     let Type::Callable {
                         parameters,
                         result: result_ty,

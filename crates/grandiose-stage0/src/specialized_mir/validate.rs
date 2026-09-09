@@ -198,6 +198,9 @@ impl SpecializedMir {
                 return Err(invalid("invalid specialized loan identity"));
             }
             let ty = self.checked_place_type(&loan.place)?;
+            if crate::types::label::payload(ty).is_some() {
+                return Err(invalid("specialized loan addresses a proof-only generative label"));
+            }
             if !self.values.get(loan.destination.0 as usize).is_some_and(|value| matches!(&value.ty, Type::Reference { mutability, referent, .. } if referent.as_ref() == ty && (*mutability == crate::Mutability::Unique) == loan.unique)) { return Err(invalid("specialized loan ABI mismatch")); }
         }
         for (index, layout) in self.layouts.iter().enumerate() {
@@ -561,6 +564,17 @@ mod tests {
     }
     fn i64_argument() -> Vec<GenericArgument> {
         vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+    }
+
+    #[test]
+    fn concrete_loans_cannot_address_generative_labels() {
+        let mut body = fixture("pub fn main<T>(value:T) -> T { { let reference = &value; }; value }", i64_argument());
+        let loan = body.loans.first().expect("generic borrower retains its loan").clone();
+        let ty = crate::types::label::new(crate::LabelBrand { owner: body.source_definition, label: 0 }, Type::Unit);
+        body.values[loan.place.root().0 as usize].ty = ty.clone();
+        let Type::Reference { referent, .. } = &mut body.values[loan.destination.0 as usize].ty else { panic!("loan reference") };
+        **referent = ty;
+        assert!(body.validate().unwrap_err().0.contains("addresses a proof-only generative label"));
     }
 
     #[test]

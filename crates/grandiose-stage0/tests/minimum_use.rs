@@ -410,6 +410,64 @@ fn unknown_prefix_cannot_erase_a_later_captured_label_return() {
 }
 
 #[test]
+fn ordinary_bottom_returning_functions_do_not_have_generative_label_authority() {
+    let source = format!("{TOKEN}
+        fn halt(value:i64) -> ! {{ halt(value) }}
+        fn require_label<L>(target:L) -> i64 where L:Label<i64> {{ 42 }}
+        pub fn main() -> i64 {{ require_label(halt) }}");
+    for optimization in ["0", "2"] {
+        let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(failure) => failure,
+            Ok(_) => panic!("a bottom-returning function is not a generative lexical label"),
+        };
+        assert!(failure.diagnostics().iter().any(|diagnostic|
+            diagnostic.code == "G4143"), "{failure:#?}");
+    }
+    accepts("fn require_label<L>(target:L) -> i64 where L:Label<i64> { 42 }
+        pub fn main() -> i64 { require_label(@main) }");
+}
+
+#[test]
+fn distinct_label_brands_cannot_satisfy_one_invariant_generic_type() {
+    let source = format!("{TOKEN}
+        fn same<L>(a:L,b:L) -> i64 where L:Label<i64> {{ 42 }}
+        pub fn main() -> i64 {{ @outer: i64 {{ @inner: i64 {{ same(@outer,@inner) }} }} }}");
+    for optimization in ["0", "2"] {
+        let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(failure) => failure,
+            Ok(_) => panic!("different lexical brands cannot become the same L merely because their payload types agree"),
+        };
+        assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4107"), "{failure:#?}");
+    }
+    accepts("fn keep<T>(value:T) -> T { value }
+        fn same<L>(a:L,b:L) -> i64 where L:Label<i64> { 42 }
+        fn duplicate<L>(target:L) -> i64 where L:Label<i64> { same(target,target) }
+        pub fn main() -> i64 { let target = keep(@main); duplicate(target) }");
+}
+
+#[test]
+fn generative_labels_are_not_addressable_values() {
+    for borrowed in ["&target", "&mut target"] {
+      for program in [
+        format!("pub fn main() -> i64 {{ let mut target = @main; let reference = {borrowed}; 42 }}"),
+        format!("fn borrow<T>(value:T) -> T {{ let mut target = value; {{ let reference = {borrowed}; }}; target }}
+            pub fn main() -> i64 {{ let target = borrow(@main); 42 }}"),
+      ] {
+        let source = format!("{TOKEN} {program}");
+        for optimization in ["0", "2"] {
+            let failure = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+                Err(failure) => failure,
+                Ok(_) => panic!("a proof-only generative label has no addressable resident: {source}"),
+            };
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4179"), "{failure:#?}");
+        }
+      }
+      accepts(&format!("fn borrow<T>(value:T) -> T {{ let mut target = value; {{ let reference = {borrowed}; }}; target }}
+          pub fn main() -> i64 {{ borrow(42) }}"));
+    }
+}
+
+#[test]
 fn helper_label_rejoins_cannot_hide_double_use() {
     let source = format!("{TOKEN}
         fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}

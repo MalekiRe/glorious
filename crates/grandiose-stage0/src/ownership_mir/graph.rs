@@ -80,8 +80,7 @@ impl OwnershipMir {
                         .labels
                         .get(id.0 as usize)
                         .ok_or_else(|| invalid("unknown label value"))?;
-                    matches!(ty, Type::Callable { parameters, result, .. }
-                        if parameters.len() == 1 && parameters[0] == *self.graph_type(label.result)? && **result == Type::Never)
+                    *ty == crate::types::label::new(label.brand, self.graph_type(label.result)?.clone())
                 }
                 OwnershipComputation::Resumption { handler, clause } => {
                     let clause = self
@@ -160,6 +159,8 @@ impl OwnershipMir {
                 while let Type::Reference { referent, .. } = ty {
                     ty = referent;
                 }
+                let label_callable = crate::types::label::callable(ty);
+                let ty = label_callable.as_ref().unwrap_or(ty);
                 self.graph_type(*result)?;
                 if let Type::Callable {
                     parameters,

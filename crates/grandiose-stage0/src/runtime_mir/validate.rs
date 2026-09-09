@@ -1626,19 +1626,12 @@ impl RuntimeMir {
             dst,
             target,
             destination,
+            brand,
             ..
         } = instruction
         {
-            let Type::Callable {
-                parameters, result, ..
-            } = self.local_type(*dst)?
-            else {
-                return Err("MIR label value destination is not callable".into());
-            };
-            if parameters.as_slice() != [self.local_type(*destination)?.clone()]
-                || !matches!(result.as_ref(), Type::Never)
-            {
-                return Err("MIR label value callable shape disagrees with its payload".into());
+            if *self.local_type(*dst)? != crate::types::label::new(*brand, self.local_type(*destination)?.clone()) {
+                return Err("MIR label value nominal brand or payload disagrees with its destination".into());
             }
             let block = self
                 .blocks

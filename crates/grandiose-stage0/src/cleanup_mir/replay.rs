@@ -28,7 +28,9 @@ fn callees(body: &CleanupMir, control: &CleanupControl, bodies: &BTreeMap<DefKey
             callee, target: SpecializedCallTarget::Indirect,
             ..
         } => {
-            let arity = match &body.values[callee.0 as usize].ty {
+            let ty = &body.values[callee.0 as usize].ty;
+            let callable = crate::types::label::callable(ty);
+            let arity = match callable.as_ref().unwrap_or(ty) {
                 Type::Callable { parameters, .. } => Some(parameters.len()),
                 _ => None,
             };
@@ -44,7 +46,9 @@ fn callees(body: &CleanupMir, control: &CleanupControl, bodies: &BTreeMap<DefKey
 
 fn escapes_call(body: &CleanupMir, control: &CleanupControl, operation: &Operation) -> bool {
     let CleanupControl::Invoke { callee, .. } = control else { return false; };
-    match &body.values[callee.0 as usize].ty {
+    let ty = &body.values[callee.0 as usize].ty;
+    let callable = crate::types::label::callable(ty);
+    match callable.as_ref().unwrap_or(ty) {
         Type::Callable { effects, .. } => effects.effects.contains(&operation.0)
             || !effects.tails.is_empty() || !effects.projections.is_empty(),
         _ => true,

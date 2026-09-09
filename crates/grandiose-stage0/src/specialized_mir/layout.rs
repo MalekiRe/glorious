@@ -11,6 +11,9 @@ impl SpecializedMir {
             layouts: &mut Vec<SpecializedLayout>,
             building: &mut BTreeSet<Vec<u8>>,
         ) -> Result<(), SpecializedError> {
+            if let Some(callable) = crate::types::label::callable(ty) {
+                return collect(&callable, signatures, layouts, building);
+            }
             match ty {
                 Type::Tuple(fields) => {
                     for field in fields {

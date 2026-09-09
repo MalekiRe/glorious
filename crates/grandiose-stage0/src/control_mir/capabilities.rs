@@ -168,11 +168,13 @@ impl ControlCapabilityOperation {
         Ok(match self {
             Self::Test { .. } => result == &Type::Scalar(ScalarType::Bool),
             Self::Borrow { place, unique } => matches!(result, Type::Reference { mutability, referent, .. }
-                if (*mutability == Mutability::Unique) == *unique && referent.as_ref() == place.ty(body)?),
+                if (*mutability == Mutability::Unique) == *unique && referent.as_ref() == place.ty(body)?
+                    && crate::types::label::payload(referent).is_none()),
             Self::ReadReference(value) => matches!(body.ty(*value)?, Type::Reference { referent, .. } if referent.as_ref() == result),
             Self::Move(place) | Self::ReadPlace(place) => place.ty(body)? == result,
             Self::Assign { place, value } => result == &Type::Unit && place.ty(body)? == body.ty(*value)?,
-            Self::Label(id) => body.labels.get(id.0 as usize).is_some() && matches!(result, Type::Callable { result, .. } if **result == Type::Never),
+            Self::Label(id) => body.labels.get(id.0 as usize)
+                .is_some_and(|label| crate::types::label::matches_brand(result, label.brand)),
             Self::Resumption { handler, clause } => body.handlers.get(handler.0 as usize)
                 .and_then(|handler| handler.clauses.get(*clause as usize)).is_some()
                 && matches!(result, Type::Callable { .. }),

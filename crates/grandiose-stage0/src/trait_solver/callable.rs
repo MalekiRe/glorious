@@ -255,6 +255,8 @@ impl TraitSolver {
             Type::Reference { mutability, referent, .. } => (referent.as_ref(), Some(*mutability)),
             value => (value, None),
         };
+        let label_callable = crate::types::label::callable(callable);
+        let callable = label_callable.as_ref().unwrap_or(callable);
         let Type::Callable { contract, safety: crate::Safety::Safe, lifetime_binders, parameters, result, effects, .. } = callable else { return None; };
         if receiver.is_some_and(|receiver| match receiver {
             crate::Mutability::Shared => !contract.shared_receiver,

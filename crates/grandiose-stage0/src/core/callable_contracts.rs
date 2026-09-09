@@ -176,6 +176,7 @@ impl Elaborator<'_> {
             Type::Reference { mutability, referent, .. } => (self.inference.resolve_type_structure(*referent), Some(mutability)),
             value => (value, None),
         };
+        let callable = crate::types::label::callable(&callable).unwrap_or(callable);
         let Type::Callable { contract, safety, lifetime_binders, parameters, result, effects, .. } = callable else {
             return Err(("G4105", "intrinsic callable predicate requires exact receiver evidence"));
         };

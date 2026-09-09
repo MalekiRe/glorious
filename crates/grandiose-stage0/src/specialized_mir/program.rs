@@ -18,6 +18,7 @@ pub struct SpecializedProgram {
 pub enum SpecializedDiscoveryError {
     Invalid(SpecializedError),
     Limit(crate::InstanceGraphError),
+    NonAddressableLabel { definition: DefKey, ty: Type },
 }
 impl From<SpecializedError> for SpecializedDiscoveryError {
     fn from(error: SpecializedError) -> Self {
@@ -70,6 +71,7 @@ impl SpecializedProgram {
                     instance.callable
                 ))
             })?;
+            lower::check_addressability(&template.ownership, &instance, signatures)?;
             let body = SpecializedMir::lower(
                 &template.ownership,
                 &template.result,

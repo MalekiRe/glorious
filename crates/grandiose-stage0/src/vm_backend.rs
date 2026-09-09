@@ -3419,6 +3419,10 @@ pub(crate) fn vm_nominal_copy_descriptor(
     })
 }
 pub(crate) fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
+    // The existing VM control-capability carrier shares an invocation shape
+    // with callable registers. Source nominal identity is not reconstructed
+    // from this physical view: MakeLabel retains the exact branded target.
+    if let Some(callable) = crate::types::label::callable(value) { return vm_type(&callable); }
     match value {
         // A pending environment witness is proof-only. Until the control
         // producer supplies a sealed runtime owner and disposal plan, an

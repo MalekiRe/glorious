@@ -1587,6 +1587,7 @@ impl ElaboratedInterface {
     }
 
     fn structural_principal_use(&self, ty: &Type, active: &mut Vec<Type>, solver: Option<&crate::TraitSolver>) -> Option<Quantity> {
+        if crate::types::label::payload(ty).is_some() { return Some(Quantity::UNRESTRICTED); }
         if let Some(fields) = crate::refinement::binding_pack_fields(ty) {
             return fields.iter().try_fold(Quantity::UNRESTRICTED, |quantity, field| {
                 quantity.intersection(self.principal_use(field, active, solver)?).ok()

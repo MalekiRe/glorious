@@ -8,12 +8,37 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/unknown-prefix-captured-return-integration-v1.log`, cache 101). This includes a source
+ignored (`target/generative-label-integration-v3.log`, cache 102). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 102 gives compiler-created labels invariant nominal identities. Ordinary
+bottom-returning functions cannot satisfy `Label<T>`, and generic inference
+cannot unify distinct lexical brands. Invocation consumers share a directional
+`Fn` view without replacing nominal value identity; intrinsic label evidence
+also supplies unrestricted use. Direct and generically specialized loans of
+labels reject, while ordinary generic borrowing remains valid. Frozen ownership
+loans supply the specialization obligations, and independent Core/Control and
+concrete validation retain the restriction. Replay uses the same quantity and
+callable-effect contracts.
+
+The final selected gate has 1,970 passes, the exact same 17 named failures as
+cache 101, and no ignores. All 891 service, 39 array/container and 176 library
+API tests pass, as does the all-target compile check. SourceMap still executes;
+the source matrix is unchanged at 16 passes and 15 failures.
+
+Full label conformance is still open: structural control fusion, active
+destination resolution through opaque/structural callable boundaries and full
+proof-carrier erasure are not supplied by nominal typing. The VM retains its
+existing label control carrier. Guarded resource states, higher-order result
+coverage, captured native/mixed execution, compiler/library completion and
+self-hosting also remain unfinished. See `implementation-progress.md` for the
+unsafe-acceptance regressions and verification results.
+
+The following cache 101 and earlier checkpoints are historical.
 
 Cache 101 retains positively observed invocation result dependencies alongside
 unconditional coverage gaps. An unknown callback prefix no longer erases a

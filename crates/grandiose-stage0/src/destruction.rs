@@ -48,6 +48,9 @@ impl<'a> Planner<'a> {
     /// Open source templates have no executable destruction identity yet.
     /// They are visited again under the caller's concrete substitution.
     pub(crate) fn discover(&mut self, ty: &Type) -> Result<Option<InstanceKey>, String> {
+        // The payload is the destination's type, not a resident owned by the
+        // proof-only label. Ending a label value runs no payload destructor.
+        if crate::types::label::payload(ty).is_some() { return Ok(None); }
         let key = match InstanceKey::new(
             glue_definition(),
             &[GenericKind::Type],

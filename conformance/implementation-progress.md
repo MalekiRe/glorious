@@ -5,6 +5,66 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 102: invariant nominal label authority
+
+A non-invoking generic helper accepted an ordinary bottom-returning function
+as `Label<i64>` (`target/generative-label-authority-before-v1.log`). Label
+evidence had been inferred from a safe one-argument `Fn` returning `!`, which
+cannot establish a fresh generative destination. Compiler-created labels now
+use an opaque brand and payload in the existing nominal type algebra. Ordinary
+function types cannot unify with them, distinct lexical brands are invariant,
+and payload substitution preserves the brand. The previous terminal-function
+argument search for label-only generic inference is removed.
+
+Intrinsic `Label` evidence consumes that nominal identity. A shared directional
+`Fn` view supplies invocation contracts without rewriting the value's type or
+its inferred generic arguments; payload lifetimes shift under its callable
+binder. Core, Control, Ownership, Specialized, Cleanup and runtime label
+construction/invocation checks retain the distinction. Source and MIR use
+queries recognize concrete labels as duplicable, and intrinsic `Label` bounds
+entail unrestricted use for generic helpers. Label payloads are not resident
+owners to destroy. Replay consumes the same use product and callable effect
+view; it does not acquire an independent exemption for labels.
+
+Direct borrowing of label values was also accepted
+(`target/generative-label-addressability-before-v1.log`). Elaboration now
+rejects it. An initial generic probe was rejected for unrelated syntax/use
+reasons; the corrected helper returns its owner after ending the loan and
+demonstrates the actual specialization bypass
+(`target/generative-label-generic-addressability-v3.log`). Demand discovery
+discharges addressability on the frozen ownership loans using the common type
+substitution and reports G4179; independent Core, Control and concrete loan
+validators reject malformed products. Both shared and unique generic probes
+now reject, while the same helpers borrowing integers execute fresh/decoded
+at O0/O2. No new source/Core loan walker is introduced.
+
+The nominal migration initially exposed missed representation consumers:
+label construction validators, MIR duplicability, generic `Label` use evidence,
+and replay's callable-effect view. Existing replay and label-transfer fixtures
+remain unchanged. The final gates below cover the corrected consumers rather
+than treating those intermediate failures as passing results.
+
+This is not full label conformance: the VM still uses its existing physical
+label carrier. Correctness-required fusion, active destination resolution
+through opaque/structural callable boundaries, full proof-carrier erasure and
+captured native/mixed execution remain open. The active outer-label closure
+positive is not relaxed. Compiler/library conformance and self-hosting remain
+unfinished. Source cache generation is 102; native, bytecode and verifier
+generations are unchanged.
+
+The final selected integration run has 1,970 passes, the exact same 17 named
+failures as cache 101, and no ignores
+(`target/generative-label-integration-v3.log`). All 327 unit, 25 borrowed-callable,
+38 callable-control, 273 Core, 111 destruction, 39 array/container,
+22 request/revision, 891 service and 176 library API tests pass. Minimum-use
+has 32 passes and the existing active outer-label fusion failure; all four
+tail-label tests pass. Mandatory-tail retains 16 passes and its existing ABI
+failure. The source matrix remains 16 passes and 15 failures, with SourceMap
+executing. The all-target compile check passes
+(`target/generative-label-check-v3.log`). The unchanged nested generic-label
+replay regression also passes independently
+(`target/generative-label-replay-v3.log`).
+
 ## Cache 101: observed invocation dependencies survive coverage gaps
 
 An unresolved callback before a captured-label getter exposed another unsafe

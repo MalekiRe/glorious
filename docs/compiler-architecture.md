@@ -265,3 +265,38 @@ the observations. This is the distinction between retaining a known possible
 dependency and proving that no other outcomes or dependencies exist. It does
 not supply missing higher-order result projections or complete guarded storage
 states, and adds no independent Core reconstruction.
+
+## Nominal label authority and callable views
+
+`types/label.rs` constructs compiler-owned nominal label types using the
+existing nominal type algebra. An opaque invariant identity represents the
+lexical brand; the payload remains an ordinary mapped type argument. Generic
+substitution and canonical identity therefore retain the brand without adding
+an ABI refinement that could be joined onto an unrelated function value.
+Only this nominal subject supplies intrinsic `Label<T>` evidence. Ordinary
+bottom-returning functions do not, and distinct brands cannot unify merely
+because their payloads agree. The old terminal-function argument heuristic
+for inferring label-only generic payloads has been removed.
+
+The shared intrinsic `Fn` view shifts the payload under the callable binder.
+Call checking and concrete invocation validators consume that directional
+view, but the actual value and inferred generic arguments keep their nominal
+type. Core and the succeeding label-construction validators check the retained
+brand; runtime construction also checks the destination payload. Label use
+queries return the duplicable interval, while payload types do not imply
+resident ownership or destruction. Replay consumes the ordinary owner quantity
+product, not a replay-specific exception for labels.
+
+Direct borrowing rejects nominal labels during elaboration. When a generic
+loan's referent is not concrete until specialization, demand discovery checks
+its frozen ownership-loan obligation using the specialization type mapping and
+reports a source error. Independent Core, Control and concrete loan validation
+reject malformed products as well. This uses the existing loan and place
+products, not another source/Core borrow walker.
+
+This is a nominal authority migration, not complete label conformance. The VM
+still uses its existing label control carrier and a physical callable view at
+emission; that representation is not a source function pointer or proof of
+correctness-required structural fusion. Full proof-carrier erasure, active
+destination resolution across opaque/structural callable boundaries, captured
+outer-label fusion and native/mixed execution remain separate open obligations.

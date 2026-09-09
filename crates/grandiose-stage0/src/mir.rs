@@ -6662,19 +6662,12 @@ impl MirFunction {
             dst,
             target,
             destination,
+            brand,
             ..
         } = instruction
         {
-            let Type::Callable {
-                parameters, result, ..
-            } = self.local_type(*dst)?
-            else {
-                return Err("MIR label value destination is not callable".into());
-            };
-            if parameters.as_slice() != [self.local_type(*destination)?.clone()]
-                || !matches!(result.as_ref(), Type::Never)
-            {
-                return Err("MIR label value callable shape disagrees with its payload".into());
+            if *self.local_type(*dst)? != crate::types::label::new(*brand, self.local_type(*destination)?.clone()) {
+                return Err("MIR label value nominal brand or payload disagrees with its destination".into());
             }
             let block = self
                 .blocks
@@ -7576,6 +7569,7 @@ pub(crate) fn mir_type_is_duplicable(ty: &Type, descriptors: &[MirNominalCopyDes
         descriptors: &[MirNominalCopyDescriptor],
         active: &mut Vec<(DefKey, Vec<GenericArgument>)>,
     ) -> bool {
+        if crate::types::label::payload(ty).is_some() { return true; }
         match ty {
             Type::Reference { mutability, .. } => *mutability != Mutability::Unique,
             Type::Tuple(elements) => elements

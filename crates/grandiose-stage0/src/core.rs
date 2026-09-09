@@ -943,6 +943,17 @@ impl TypedBody {
             }
             needs_unsafe_validation |= matches!(expression.ty, Type::Callable { safety: crate::Safety::Unsafe, .. });
             let owner = CoreId(index as u32);
+            if let CoreKind::LabelValue { brand } = expression.kind
+                && !crate::types::label::matches_brand(&expression.ty, brand) {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core label value does not retain its generative nominal brand".into() });
+            }
+            if let CoreKind::Borrow { value, .. } = expression.kind
+                && self.expressions.get(value.0 as usize)
+                    .is_some_and(|value| crate::types::label::payload(&value.ty).is_some()) {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core cannot form an address of a generative label".into() });
+            }
             if matches!(&expression.kind, CoreKind::Record { definition, .. } if *definition == crate::refinement::bindings_definition())
                 && !authorized_binding_packs.contains(&owner) {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
@@ -4324,19 +4335,11 @@ impl Elaborator<'_> {
                 };
                 self.alloc(
                     CoreKind::LabelValue { brand: label.brand },
-                    Type::Callable { contract: Default::default(),
-                        safety: crate::Safety::Safe,
-                        lifetime_binders: 0,
-                        parameters: vec![label.result],
-                        result: Box::new(Type::Never),
-                        effects: EffectRow::empty(),
-                        invocation: crate::Quantity::ONCE,
-                    },
+                    crate::types::label::new(label.brand, label.result),
                     expression.span,
                 )
             }
             ExprKind::Transfer { name, value } => {
-                let value = self.expression(value);
                 let Some(label) = self
                     .active_labels
                     .iter()
@@ -4350,7 +4353,11 @@ impl Elaborator<'_> {
                         "transfer targets a label outside its lexical scope",
                     );
                 };
-                let value_type = self.expressions[value.0 as usize].ty.clone();
+                let expected = self.inference.resolve_type_structure(label.result.clone());
+                let value = self.expression_expected(value, Some(expected.clone()));
+                let value_type = Self::weaken_nested_callable_invocations(&expected,
+                    self.expressions[value.0 as usize].ty.clone());
+                self.expressions[value.0 as usize].ty = value_type.clone();
                 if self
                     .inference
                     .unify(label.result.clone(), value_type)
@@ -5178,6 +5185,7 @@ impl Elaborator<'_> {
     /// first construct the record with a reusable named function, then later
     /// pass it to a parameter whose instantiated field is one-shot.
     fn weaken_nested_callable_invocations(required: &Type, provided: Type) -> Type {
+        if crate::types::label::payload(&provided).is_some() { return provided; }
         match (required, provided) {
             (
                 Type::Callable {
@@ -5246,6 +5254,9 @@ impl Elaborator<'_> {
             return self.alloc(CoreKind::Error, Type::Error, span);
         }
         let ty = self.expressions[value.0 as usize].ty.clone();
+        if crate::types::label::payload(&ty).is_some() {
+            return self.fail(span, "G4179", "generative labels are proof-only and cannot be addressed");
+        }
         if matches!(&ty, Type::Never) {
             return self.alloc(CoreKind::Borrow { unique, value }, Type::Never, span);
         }
@@ -11238,6 +11249,8 @@ impl Elaborator<'_> {
             self.expressions[callee.0 as usize].ty = callable.clone();
         }
         let (callable, lifetime_mode) = match callable {
+            value if crate::types::label::payload(&value).is_some() =>
+                (crate::types::label::callable(&value).expect("label callable view"), LifetimeMode::InstantiateBound),
             callable @ Type::Callable { .. } => (callable, LifetimeMode::InstantiateBound),
             Type::Reference { mutability, referent, .. }
                 if matches!(referent.as_ref(), Type::Callable { .. }) => {
@@ -11354,6 +11367,13 @@ impl Elaborator<'_> {
                 self.inference.zonk(raw_actual.clone()).unwrap_or(raw_actual),
             );
             self.expressions[argument.0 as usize].ty = actual.clone();
+            // This is a directional Fn argument view, not nominal equality.
+            // Keep the generative type on the value and in inferred generic
+            // arguments; only an explicitly structural callable parameter
+            // can consume the intrinsic supertrait view.
+            let actual = if matches!(parameter, Type::Callable { .. }) {
+                crate::types::label::callable(&actual).unwrap_or(actual)
+            } else { actual };
             // A capture-free named function is duplicable, but it can still
             // be supplied to an ordinary one-shot callable parameter: the
             // parameter promises at most/at least the uses performed by this
@@ -11419,7 +11439,7 @@ impl Elaborator<'_> {
         // evidence is in scope, its associated contracts are the precise
         // source of those substitutions.  Leaving the fresh slots unresolved
         // would reject a well-typed recursive forwarding call at sealing.
-        self.infer_direct_call_contract_from_ambient_bounds(callee, &arguments);
+        self.infer_direct_call_contract_from_ambient_bounds(callee);
         // Arguments may have just fixed a generic return type. Publish that
         // concrete result to the enclosing expression now: otherwise a
         // subsequent scalar operator observes a stale inference variable and
@@ -14220,7 +14240,6 @@ impl Elaborator<'_> {
     fn infer_direct_call_contract_from_ambient_bounds(
         &mut self,
         callee: CoreId,
-        call_arguments: &[CoreId],
     ) {
         let (definition, arguments) = match &self.expressions[callee.0 as usize].kind {
             CoreKind::Function {
@@ -14241,60 +14260,14 @@ impl Elaborator<'_> {
         let ambient_effect_bindings = self.ambient_callable_effect_bindings.clone();
         for (subject, relation) in &signature.where_bounds {
             let subject = self.inference.zonk(subject.clone()).unwrap_or_else(|_| subject.clone());
-            // A concrete label value is represented at the call boundary by
-            // its escaping callable shape.  Unlike an ambient generic label
-            // bound, this direct argument contains the payload type that can
-            // solve a generic used only in `L: Label<B>` (the `S` in
-            // `try<T, E, S, L>` is the canonical case).  Recover that
-            // evidence before generic sealing rather than forcing std to
-            // artificially tie the propagated function's Ok type to `T`.
+            // Only the generative nominal subject supplies intrinsic label
+            // payload evidence. Ordinary bottom-returning operands cannot
+            // solve a label-only generic merely by sharing its Fn shape.
             if crate::is_intrinsic_label_trait(relation)
                 && let [GenericArgument::Type(expected_payload)] = relation.arguments.as_slice()
+                && let Some(actual_payload) = crate::types::label::payload(&subject)
             {
-                // A generic `L` has been unified from its value parameter by
-                // this point, but retain the actual Core operand as the
-                // authoritative direct-evidence source. It also avoids
-                // depending on whether the generic inference table exposes
-                // the callable's structural shape before where-bound
-                // checking starts.
-                let actual_label = signature
-                    .parameters
-                    .iter()
-                    .zip(call_arguments)
-                    .find_map(|(parameter, argument)| {
-                        self.inference
-                            .zonk(parameter.clone())
-                            .is_ok_and(|parameter| parameter == subject)
-                            .then(|| self.expressions[argument.0 as usize].ty.clone())
-                    })
-                    .or_else(|| {
-                        // A direct label function normally has one matching
-                        // value parameter above. During recovery or when an
-                        // alias has delayed that relation, use the unique
-                        // terminal callable argument as the same evidence;
-                        // do not guess when a call contains several labels.
-                        let mut candidates = call_arguments
-                            .iter()
-                            .filter_map(|argument| {
-                                let ty = self.expressions[argument.0 as usize].ty.clone();
-                                matches!(&ty, Type::Callable { result, .. } if matches!(result.as_ref(), Type::Never))
-                                    .then_some(ty)
-                            });
-                        let candidate = candidates.next();
-                        candidates.next().is_none().then_some(candidate).flatten()
-                    });
-                if let Some(Type::Callable {
-                    parameters: actual_parameters,
-                    result: actual_result,
-                    ..
-                }) = actual_label
-                    && let [actual_payload] = actual_parameters.as_slice()
-                    && matches!(actual_result.as_ref(), Type::Never)
-                {
-                    let _ = self
-                        .inference
-                        .unify(expected_payload.clone(), actual_payload.clone());
-                }
+                let _ = self.inference.unify(expected_payload.clone(), actual_payload.clone());
             }
             let matches = ambient_bounds
                 .iter()
@@ -17281,6 +17254,7 @@ fn reference_leaf_paths_active(
     active: &mut std::collections::BTreeMap<DefKey, Type>,
     input: bool,
 ) -> Result<(), ()> {
+    if crate::types::label::payload(ty).is_some() { return Ok(()); }
     let Type::Nominal { definition, arguments } = ty else {
         return structural_reference_leaf_paths(signatures, ty, path, leaves, active, input);
     };
