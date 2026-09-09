@@ -589,7 +589,7 @@ mod tests {
         let contract = CoreHandlerContinuationContract {
             brand: crate::CallableBrand::Continuation { owner: mir.definition, handler: CoreId(0), clause: 0 },
             parameter: Type::Unit, result: Type::Unit, effects: crate::EffectRow::empty(),
-            invocation: crate::Quantity::AFFINE, direct_uses: 0,
+            invocation: crate::Quantity::AFFINE,
         };
         let mut computation = mir.regions[0].clone();
         computation.instructions[0].value = EvaluationValue(1);

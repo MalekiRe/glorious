@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-09 from the current source and cache 107 verification below,
+Updated 2026-09-09 from the current source and cache 108 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,25 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 108 migrates resumption capture admission into the shared source lifetime
+analysis and structural fusion, removing the independent source alias walker
+and immediate-closure rewrite. Body-sealed lifetime products are checked before
+transformation. Explicit resumption quantities now use UseFlow rather than a
+syntactic call counter; nominal label invocation authority comes from the shared
+bound control product. Nested partially consumed capture storage relocates with
+its initialization holes intact during cleanup. All 86 focused checks pass,
+including fresh/decoded O0/O2 capture execution and invalid escape, quantity,
+stale-proof, replay-safety and moved-field cases.
+
+Unknown resumption inputs to generic factories still lack complete capture
+proof/representation. Native owned handlers, ordinary native captured callables,
+borrowed/cross-frame resumption transfer, full helper-family fusion and
+mandatory-tail activation transfer remain open. No broad library/service sweep
+was repeated; the source-library matrix remains cache 105 above. Exact logs
+and limitations are recorded in `implementation-progress.md`.
+
+The following cache 107 and earlier checkpoints are historical.
 
 Cache 107 / verifier 37 fixes the captured-resumption product regression from
 cache 106. The verifier now uses one structural resident-value record for exact

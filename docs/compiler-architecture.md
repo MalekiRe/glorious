@@ -455,12 +455,59 @@ deep-handler reinstatement. A physical handler result change incompatible with
 the already-bound resumption ABI rejects explicitly. Ordinary closure bodies
 cannot resolve an ambient resumption instruction: captures must supply values.
 
-This extends lexical fusion, not general native handler support or complete
-resumption lifetime analysis. Existing source escape admission and its restricted
-immediate-resumption rewrite remain pending migration to the shared lifetime
-consumer. Native owned-handler installation is still explicitly unsupported.
+This extends lexical fusion, not general native handler support. Resumption
+capture admission now uses the shared lifetime boundary described below.
+Native owned-handler installation is still explicitly unsupported.
 Full helper-family fusion and mandatory-tail handler activation transfer remain
 open; VM handler composition does not establish those separate contracts.
+
+## Source control lifetimes and resumption capture admission
+
+EscapeFlow's existing resident-value domain carries both label and resumption
+brands. Capture formation retains these dependencies through the same ordered
+formation actions, aliases, structural fields and storage graph as references.
+An explicit handler arm introduces its actual resumption identity; its outgoing
+result, pre-existing storage and pending outer-label exits must not retain that
+identity when the arm ends. Exit payloads resolve against their own storage
+snapshot. Owning a control-bearing closure does not make it frame-independent.
+The old independent source resumption-capture alias walker and restricted
+immediate-closure rewrite are removed.
+
+The source resource-checking boundary publishes body-sealed capture obligations
+from that lifetime analysis before fusion. Structural fusion binds the exact
+source body before consulting its environment obligations, including helper
+expansion frames. Captured resumptions use the same tagged environment products,
+strict formation order and checked invocation substitution as captured labels.
+An unchanged body batch reuses its original resource products; a transformed
+batch receives independent validation and fresh bound analyses. Missing, invalid
+or stale lifetime input does not authorize a transformation.
+
+For an invocation under incomplete enclosing execution coverage, a compiler-owned
+nominal label type can supply its invariant destination by matching the shared
+lexical binder product. The shared invocation producer emits the strict argument
+payload relation and exact target; escape and lowering consume that relation.
+An ordinary bottom-returning function has no such nominal authority. This proves
+the call conditional on reaching it, not the preceding computation's coverage.
+
+Explicit resumption quantity is checked by UseFlow against shared continuation
+facts. The former elaboration-time syntactic call counter and its Core contract
+field are removed: summing branch call sites or overlooking aggregate aliases
+cannot validate an execution interval. Tail/cancellation declaration admission
+remains explicit. Residual replay-safety admission follows an explicit binder's
+declared multi-shot capability rather than that deleted counter.
+
+Composing an aggregate capture also requires cleanup to relocate partially
+consumed storage. The VM layout checker now distinguishes ordinary value
+validation from storage-layout validation through one recursive layout relation.
+Owned projection extraction and tag-only destruction dispatch preserve typed
+holes at every structural depth. The selected storage root must still exist;
+moving it clears that root, and selecting a hole as a value remains invalid.
+This preserves initialization state, not a source Copy or invocation permission.
+
+This is not complete higher-order lifetime analysis. Generic factories with
+unknown resumption inputs still lack a complete captured-control proof and
+representation. Guard-correlated storage outcomes, full helper-family fusion,
+borrowed/cross-frame resumption transfer and native handlers remain open.
 
 ## Executable resumption value provenance
 

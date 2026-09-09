@@ -97,7 +97,7 @@ impl StagedTypedBody {
         abort_primitive: Option<DefKey>,
         continuations: Arc<crate::core_continuations::CoreContinuations>,
         diagnostics: &mut Vec<CompileDiagnostic>,
-    ) -> (PlaceFlow, bool) {
+    ) -> (PlaceFlow, EscapeFlow, bool) {
         let Self { core, lexical_bounds, lexical_effect_bindings, solver, .. } = self;
         let flow = PlaceFlow::analyze_with_frozen_solver(
             core, signatures, lexical_bounds, lexical_effect_bindings, solver, abort_primitive,
@@ -116,7 +116,7 @@ impl StagedTypedBody {
         )));
         let valid = self.valid && flow.diagnostics.is_empty() && escapes.diagnostics.is_empty()
             && uses.diagnostics.is_empty();
-        (flow, valid)
+        (flow, escapes, valid)
     }
 
     fn analyze(
@@ -126,7 +126,7 @@ impl StagedTypedBody {
         continuations: Arc<crate::core_continuations::CoreContinuations>,
         diagnostics: &mut Vec<CompileDiagnostic>,
     ) -> PublishedBody {
-        let (flow, valid) = self.check_resources(signatures, abort_primitive, continuations, diagnostics);
+        let (flow, _, valid) = self.check_resources(signatures, abort_primitive, continuations, diagnostics);
         let Self { definition, is_constant, core, budget, .. } = self;
         PublishedBody { definition, is_constant, valid, core, flow, budget }
     }
@@ -1955,6 +1955,7 @@ impl StageZeroCompiler {
         // the ownership representation. Source contracts are checked on the
         // original program; no representation rewrite may repair invalid use
         // or escape. The transformed program then receives fresh analyses.
+        let mut original_resources = BTreeMap::new();
         let unchanged_control = {
             let control_bodies = staged_bodies.iter().filter_map(|staged|
                 control_signatures.get(&staged.definition).map(|signature| (staged.definition,
@@ -1966,18 +1967,29 @@ impl StageZeroCompiler {
                     session.checkpoint_in(&budgets[&definition], cost))?;
             let bound = summaries.bind(&control_bodies).map_err(|reason| ServiceError::Failed(vec![
                 CompileDiagnostic::invariant("G4180", format!("staged control batch failed validation: {reason:?}"))]))?;
-            let mut transformed = BTreeMap::new();
+            let mut control_captures = crate::escape::ControlCaptures::default();
             for staged in &staged_bodies {
                 if !staged.valid || !control_bodies.contains_key(&staged.definition) { continue; }
                 session.checkpoint_in(&staged.budget, 0)?;
-                match crate::core::control_fusion::transform(staged.definition, &bound) {
+                let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(
+                    &staged.core, bound.body(staged.definition))
+                    .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant(error.code, error.message)]))?;
+                let (flow, escapes, valid) = staged.check_resources(&signatures, abort_primitive, Arc::new(facts), &mut diagnostics);
+                if valid {
+                    control_captures.include(staged.definition, &staged.core, &escapes).map_err(|error|
+                        ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180", error)]))?;
+                }
+                original_resources.insert(staged.definition, (flow, valid));
+            }
+            let mut transformed = BTreeMap::new();
+            for staged in &staged_bodies {
+                if !staged.valid || !control_bodies.contains_key(&staged.definition) { continue; }
+                if !original_resources.get(&staged.definition).is_some_and(|(_, valid)| *valid) { continue; }
+                session.checkpoint_in(&staged.budget, 0)?;
+                match crate::core::control_fusion::transform(staged.definition, &bound, &control_captures) {
                     Ok(Some(core)) => {
                         session.checkpoint_in(&staged.budget, core.expressions.len() as u64 + 1)?;
-                        let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(
-                            &staged.core, bound.body(staged.definition))
-                            .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant(error.code, error.message)]))?;
-                        let (_, valid) = staged.check_resources(&signatures, abort_primitive, Arc::new(facts), &mut diagnostics);
-                        transformed.insert(staged.definition, (core, valid));
+                        transformed.insert(staged.definition, core);
                     }
                     Ok(_) => {}
                     Err(error) => diagnostics.push(CompileDiagnostic::source(error.code, error.message, Some(error.span))),
@@ -1985,9 +1997,8 @@ impl StageZeroCompiler {
             }
             let unchanged = transformed.is_empty();
             for staged in &mut staged_bodies {
-                if let Some((core, valid)) = transformed.remove(&staged.definition) {
+                if let Some(core) = transformed.remove(&staged.definition) {
                     staged.core = core;
-                    staged.valid &= valid;
                 }
                 // Recovered/invalid staged inputs have already published
                 // their diagnostics and cannot enter ownership publication.
@@ -1998,6 +2009,7 @@ impl StageZeroCompiler {
                 staged.valid &= errors.is_empty();
                 diagnostics.extend(errors.into_iter().map(|error| CompileDiagnostic::source(error.code, error.message, Some(error.span))));
             }
+            if !unchanged { original_resources.clear(); }
             unchanged.then_some(summaries)
         };
         let control_bodies = staged_bodies.iter().filter_map(|staged|
@@ -2020,7 +2032,8 @@ impl StageZeroCompiler {
                 .with_fact("label_target", format!("{:?}", obligation.target))
                 .with_fact("invocation_site", format!("{:?}", obligation.site)));
         }
-        let continuations = staged_bodies.iter().map(|staged| {
+        let continuations = staged_bodies.iter()
+            .filter(|staged| !original_resources.contains_key(&staged.definition)).map(|staged| {
             crate::core_continuations::CoreContinuations::derive_with_invocations(
                 &staged.core, bound_control.body(staged.definition),
             ).map(|facts| (staged.definition, Arc::new(facts)))
@@ -2031,8 +2044,14 @@ impl StageZeroCompiler {
             // Observe cancellation at the new phase boundary without
             // changing the existing semantic work charges or body budget.
             session.checkpoint_in(&staged.budget, 0)?;
-            let facts = continuations[&staged.definition].clone();
-            body_products.push(staged.analyze(&signatures, abort_primitive, facts, &mut diagnostics));
+            if let Some((flow, valid)) = original_resources.remove(&staged.definition) {
+                let valid = valid && staged.valid;
+                let StagedTypedBody { definition, is_constant, core, budget, .. } = staged;
+                body_products.push(PublishedBody { definition, is_constant, valid, core, flow, budget });
+            } else {
+                let facts = continuations[&staged.definition].clone();
+                body_products.push(staged.analyze(&signatures, abort_primitive, facts, &mut diagnostics));
+            }
         }
         for PublishedBody {
             definition,

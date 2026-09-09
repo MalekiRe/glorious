@@ -181,6 +181,10 @@ impl LabelDependencies {
     pub(crate) fn reference(&self, id: CoreId) -> Option<LabelBrand> {
         self.rules.get(id.0 as usize)?.as_ref()?.reference
     }
+
+    pub(crate) fn binders(&self) -> impl Iterator<Item = LabelBrand> + '_ {
+        self.rules.iter().filter_map(|rule| rule.as_ref()?.binder)
+    }
 }
 
 #[cfg(test)]

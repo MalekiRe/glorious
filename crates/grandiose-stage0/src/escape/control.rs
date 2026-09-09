@@ -1,7 +1,19 @@
-//! Label dependencies ride the existing value/storage/capture snapshots.
+//! Generative control dependencies ride the existing value/storage snapshots.
 //! This adapter consumes the shared lexical brand facts and capture-formation
 //! actions; it does not re-evaluate Core or infer labels from callable types.
 use super::*;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) enum ControlBrand {
+    Label(crate::LabelBrand),
+    Resumption(crate::core::ResumptionId),
+}
+
+impl ControlBrand {
+    fn diagnostic(self) -> &'static str {
+        match self { Self::Label(_) => "G4179", Self::Resumption(_) => "G4174" }
+    }
+}
 
 /// Augment ordinary result provenance with positively projected inputs.
 /// Unknown fields retain the existing declared-result proof obligations;
@@ -27,16 +39,16 @@ pub(super) fn known_payload(
     }
 }
 
-pub(super) fn value_labels(value: &Value) -> BTreeSet<crate::LabelBrand> {
+pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
     let mut labels = BTreeSet::new();
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
-            Value::Label(brand) => {
+            Value::Control(brand) => {
                 labels.insert(*brand);
             }
             Value::Closure {
-                labels: captured, ..
+                controls: captured, ..
             } => labels.extend(captured),
             Value::Aggregate(values)
             | Value::Variant(values)
@@ -56,7 +68,7 @@ pub(super) fn value_labels(value: &Value) -> BTreeSet<crate::LabelBrand> {
             } => pending.extend(array_values(*length, element, fields)),
             Value::CallableResident { footprint, .. } => pending.push(footprint),
             Value::Region(_) => {
-                unreachable!("resolve storage snapshots before querying label dependencies")
+                unreachable!("resolve storage snapshots before querying control dependencies")
             }
             Value::None
             | Value::FrameIndependent
@@ -68,24 +80,24 @@ pub(super) fn value_labels(value: &Value) -> BTreeSet<crate::LabelBrand> {
 }
 
 impl Analyzer<'_> {
-    pub(super) fn report_label_value_escape(&mut self, value: &Value, span: Span, boundary: &str) {
-        for brand in value_labels(value) {
+    pub(super) fn report_control_value_escape(&mut self, value: &Value, span: Span, boundary: &str) {
+        for brand in value_controls(value) {
             self.error(
                 span,
-                "G4179",
-                format!("label {brand:?} is retained beyond its lexical destination by {boundary}"),
+                brand.diagnostic(),
+                format!("control capability {brand:?} is retained beyond its active scope by {boundary}"),
             );
         }
     }
 
-    pub(super) fn report_label_scope_escape(
+    pub(super) fn report_control_scope_escape(
         &mut self,
-        brand: crate::LabelBrand,
+        brand: ControlBrand,
         result: &Value,
         incoming: &ValueEnvironment,
         span: Span,
     ) {
-        let retains = |value: &Value| value_labels(&self.resolved_value(value)).contains(&brand);
+        let retains = |value: &Value| value_controls(&self.resolved_value(value)).contains(&brand);
         let retained_by_result = retains(result);
         // These are the exact storage identities that predate this label.
         // Label-local bindings and retired shadowed names are not external
@@ -104,7 +116,7 @@ impl Analyzer<'_> {
                     let retains = |value: &Value| {
                         // Resolve against the exit's storage graph, not whatever
                         // sibling/normal state happens to be current afterward.
-                        value_labels(&Self::resolved_value_in(value, &exit.environment))
+                        value_controls(&Self::resolved_value_in(value, &exit.environment))
                             .contains(&brand)
                     };
                     retains(&exit.value)
@@ -113,8 +125,8 @@ impl Analyzer<'_> {
                         })
                 });
         if retained_by_result || retained_by_outer_storage || retained_by_outer_exit {
-            self.error(span, "G4179", format!(
-                "label {brand:?} remains in an outgoing value or outer storage after its scope ends"));
+            self.error(span, brand.diagnostic(), format!(
+                "control capability {brand:?} remains in an outgoing value or outer storage after its scope ends"));
         }
     }
 }
@@ -123,11 +135,11 @@ impl Analyzer<'_> {
 mod tests {
     use super::*;
 
-    fn brand(label: u32) -> crate::LabelBrand {
-        crate::LabelBrand {
+    fn brand(label: u32) -> ControlBrand {
+        ControlBrand::Label(crate::LabelBrand {
             owner: crate::DefKey(crate::Digest::of_bytes(b"control scope snapshots")),
             label,
-        }
+        })
     }
 
     #[test]
@@ -138,35 +150,35 @@ mod tests {
             ResolvedPayload::Unknown(Type::Unit),
             ResolvedPayload::Inputs {
                 ty: Type::Unit,
-                values: vec![Value::Label(brand(0))],
+                values: vec![Value::Control(brand(0))],
             },
         ]))
         .unwrap();
         assert_eq!(
             returned,
-            Value::Aggregate(vec![Value::None, Value::Label(brand(0))])
+            Value::Aggregate(vec![Value::None, Value::Control(brand(0))])
         );
         assert!(!frame_independent_value(&returned));
-        assert_eq!(value_labels(&returned), BTreeSet::from([brand(0)]));
+        assert_eq!(value_controls(&returned), BTreeSet::from([brand(0)]));
     }
 
     #[test]
     fn control_labels_survive_wrappers_but_not_uninhabited_array_elements() {
         let value = Value::CallableResident {
             footprint: Box::new(Value::Logical {
-                physical: Box::new(Value::Aggregate(vec![Value::Label(brand(0))])),
-                arguments: BTreeMap::from([(0, Value::Alternatives(vec![Value::Label(brand(1))]))]),
+                physical: Box::new(Value::Aggregate(vec![Value::Control(brand(0))])),
+                arguments: BTreeMap::from([(0, Value::Alternatives(vec![Value::Control(brand(1))]))]),
             }),
             resident_captures: vec![],
         };
-        assert_eq!(value_labels(&value), BTreeSet::from([brand(0), brand(1)]));
+        assert_eq!(value_controls(&value), BTreeSet::from([brand(0), brand(1)]));
         assert!(!frame_independent_value(&value));
         let empty = Value::Array {
             length: Some(0),
             element: Box::new(value),
             fields: BTreeMap::new(),
         };
-        assert!(value_labels(&empty).is_empty());
+        assert!(value_controls(&empty).is_empty());
     }
 
     #[test]
@@ -178,23 +190,23 @@ mod tests {
         let mut values = ValueEnvironment::default();
         values
             .regions
-            .insert(region.clone(), Value::Label(brand(0)), merge_region_values);
+            .insert(region.clone(), Value::Control(brand(0)), merge_region_values);
         let value = Value::Closure {
             environment: EnvironmentBrand {
-                owner: brand(0).owner,
+                owner: crate::DefKey(crate::Digest::of_bytes(b"control scope snapshots")),
                 callable: crate::CallableId(0),
             },
             captures: vec![],
             resident_captures: vec![],
             frame_independent: true,
             regions: BTreeSet::from([region]),
-            labels: BTreeSet::new(),
+            controls: BTreeSet::new(),
         };
         let resolved = Analyzer::resolved_value_in(&value, &values);
-        assert_eq!(value_labels(&resolved), BTreeSet::from([brand(0)]));
+        assert_eq!(value_controls(&resolved), BTreeSet::from([brand(0)]));
         assert!(!frame_independent_value(&resolved));
         assert!(
-            value_labels(&Analyzer::resolved_value_in(
+            value_controls(&Analyzer::resolved_value_in(
                 &value,
                 &ValueEnvironment::default()
             ))

@@ -470,7 +470,6 @@ impl CoreFingerprintEncoder<'_> {
                                 effects: continuation.effects.clone(),
                                 invocation: continuation.invocation,
                             });
-                            self.bytes(&continuation.direct_uses.to_le_bytes());
                         }
                         None => self.bytes(b"no-continuation"),
                     }

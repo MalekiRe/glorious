@@ -10476,7 +10476,7 @@ fn take_storage_projection(
         .as_mut().ok_or(VmArtifactError::UseAfterMove { register: base })?;
     if let VmValue::Resident(home) = value {
         let value = home.take(fields, budget)?;
-        if !value_matches_vm_type(&value, expected) {
+        if !value_matches_vm_layout(&value, expected, Initialization::Storage) {
             return Err(VmArtifactError::ResultType { expected: expected.clone(), found: value.ty() });
         }
         return Ok(value);
@@ -10485,7 +10485,10 @@ fn take_storage_projection(
     if matches!(slot, VmValue::Uninitialized(_)) {
         return Err(VmArtifactError::UseAfterMove { register: base });
     }
-    if !value_matches_vm_type(slot, expected) {
+    // Taking storage relocates its initialization mask as well as its
+    // contents. A nested partially consumed product must remain available
+    // to structural cleanup; this does not make its holes readable values.
+    if !value_matches_vm_layout(slot, expected, Initialization::Storage) {
         return Err(VmArtifactError::ResultType { expected: expected.clone(), found: slot.ty() });
     }
     let ty = slot.ty();
@@ -12429,20 +12432,26 @@ fn aggregate_matches_layout(values: &[VmValue], field_types: &[VmType]) -> bool 
         && values
             .iter()
             .zip(field_types)
-            .all(|(value, ty)| match value {
-                // A moved payload preserves its frozen slot type. Tag-only
-                // destruction dispatch must still recognize the remaining
-                // aggregate; selecting this hole as a value remains rejected
-                // by matches_pattern_fields/value_matches_vm_type.
-                VmValue::Uninitialized(actual) => vm_type_matches(actual, ty),
-                _ => value_matches_vm_type(value, ty),
-            })
+            .all(|(value, ty)| value_matches_vm_layout(value, ty, Initialization::Storage))
 }
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Initialization { Value, Storage }
 
 /// A VM generic is a declaration-local wildcard at runtime; every other
 /// structural component must agree exactly with the value's concrete shape.
 fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
-    if matches!(value, VmValue::Uninitialized(_) | VmValue::SuspendedReference(_)) { return false; }
+    value_matches_vm_layout(value, expected, Initialization::Value)
+}
+
+/// Value reads require initialized leaves. Storage relocation and tag-only
+/// destruction dispatch retain typed holes recursively, but never erase a
+/// hole or confer permission to read it. Both modes use the same layout rules.
+fn value_matches_vm_layout(value: &VmValue, expected: &VmType, initialization: Initialization) -> bool {
+    if let VmValue::Uninitialized(actual) = value {
+        return initialization == Initialization::Storage && vm_type_matches(actual, expected);
+    }
+    if matches!(value, VmValue::SuspendedReference(_)) { return false; }
     if let VmValue::Resident(home) = value { return home.is_initialized(&[]) && vm_type_matches(home.ty(), expected); }
     match expected {
         VmType::Generic(_) => true,
@@ -12481,14 +12490,14 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
             ..
         } if element.as_ref() == &VmType::U8 && tag == value_tag && alignment == value_alignment),
         VmType::Tuple(expected) => {
-            matches!(value, VmValue::Tuple(values) if values.len() == expected.len() && values.iter().zip(expected).all(|(value, ty)| value_matches_vm_type(value, ty)))
+            matches!(value, VmValue::Tuple(values) if values.len() == expected.len() && values.iter().zip(expected).all(|(value, ty)| value_matches_vm_layout(value, ty, initialization)))
         }
         VmType::Array(expected) => {
-            matches!(value, VmValue::Array { values, .. } if values.iter().all(|value| value_matches_vm_type(value, expected)))
+            matches!(value, VmValue::Array { values, .. } if values.iter().all(|value| value_matches_vm_layout(value, expected, initialization)))
         }
         VmType::FixedArray { element, length } => {
             matches!(value, VmValue::Array { values, .. } if values.len() as u64 == *length
-                && values.iter().all(|value| value_matches_vm_type(value, element)))
+                && values.iter().all(|value| value_matches_vm_layout(value, element, initialization)))
         }
         VmType::Nominal {
             definition,
@@ -18250,6 +18259,33 @@ mod tests {
             assert!(matches!(replace_referenced_array(&mut registers, &mut [], &reference, vec![], &mut cow_budget()),
                 Err(VmArtifactError::UnsupportedEscapingUniqueReference)));
         }
+    }
+
+    #[test]
+    fn resumption_product_cleanup_relocates_nested_holes_without_reviving_them() {
+        let signature = VmType::Callable { shared_receiver: false, unique_receiver: false,
+            safety: Safety::Safe, parameters: vec![VmType::I64], result: Box::new(VmType::I64),
+            effects: Box::default() };
+        let inner = VmType::Tuple(vec![signature.clone(), VmType::I64]);
+        let mut registers = vec![Some(VmValue::Tuple(vec![VmValue::Tuple(vec![
+            VmValue::Resumption { frame: 3, signature: signature.clone() }, VmValue::I64(42),
+        ].into())].into()))];
+        let mut budget = cow_budget();
+        let token = take_storage_projection(&mut registers, 0, &[0, 0], &signature, &mut budget).unwrap();
+        assert!(matches!(token, VmValue::Resumption { frame: 3, .. }));
+        let partial = take_storage_projection(&mut registers, 0, &[0], &inner, &mut budget).unwrap();
+        assert!(!storage_is_initialized(registers[0].as_ref(), &[0]));
+        assert!(!value_matches_vm_type(&partial, &inner));
+        assert!(aggregate_matches_layout(&[partial.clone()], &[inner.clone()]));
+        assert!(!aggregate_matches_layout(&[partial.clone()], &[VmType::Tuple(vec![VmType::Unit, VmType::I64])]));
+        registers.push(Some(partial));
+        assert!(!storage_is_initialized(registers[1].as_ref(), &[0]));
+        assert!(storage_is_initialized(registers[1].as_ref(), &[1]));
+        assert!(matches!(take_storage_projection(&mut registers, 1, &[0], &signature, &mut budget),
+            Err(VmArtifactError::UseAfterMove { .. })));
+        assert!(matches!(take_storage_projection(&mut registers, 1, &[1], &VmType::I64, &mut budget).unwrap(), VmValue::I64(42)));
+        assert!(matches!(take_storage_projection(&mut registers, 0, &[0], &inner, &mut budget),
+            Err(VmArtifactError::UseAfterMove { .. })));
     }
 
     #[test]

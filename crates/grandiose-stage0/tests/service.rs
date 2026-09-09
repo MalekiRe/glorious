@@ -10980,12 +10980,6 @@ fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract()
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G6005"),
-        "missing direct-resumption quantity diagnostic: {diagnostics:#?}"
-    );
-    assert!(
-        diagnostics
-            .iter()
             .any(|diagnostic| diagnostic.code == "G5012"),
         "missing structured continuation-use diagnostic: {diagnostics:#?}"
     );
@@ -12453,19 +12447,16 @@ fn service_rejects_a_resumption_closure_escaping_through_a_dynamic_label() {
         }
         pub fn main() -> i64 { make()() }
     "#;
-    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-        StageZeroCompiler::new().compile(request(source))
-    else {
-        panic!("a resumption snapshot escaped through a dynamic label");
-    };
-    assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4174"),
-        "missing source-level aliased-resumption escape rejection: {diagnostics:#?}"
-    );
-    assert!(
-        !diagnostics.iter().any(|diagnostic| diagnostic.code == "G7010"),
-        "an escaped resumption must not reach malformed handler lowering: {diagnostics:#?}"
-    );
+    for source in [source.to_owned(), source.replace("let saved = k;", "let saved = (k,);")
+        .replace("saved(41)", "saved.0(41)")] {
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+            StageZeroCompiler::new().compile(request(&source))
+        else { panic!("a resumption snapshot escaped through a dynamic label"); };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4174"),
+            "missing source-level aliased-resumption escape rejection: {diagnostics:#?}");
+        assert!(!diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G7010" | "G7042")),
+            "an escaped resumption must not reach malformed handler lowering: {diagnostics:#?}");
+    }
 }
 
 #[test]
@@ -13356,7 +13347,7 @@ fn service_rejects_direct_resumption_overuse_against_an_exact_quantity() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G6005"),
+            .any(|diagnostic| diagnostic.code == "G5012"),
         "missing direct-resumption quantity diagnostic: {diagnostics:#?}"
     );
 }
@@ -14405,12 +14396,6 @@ fn service_rejects_an_underused_cross_call_replay_contract() {
     else {
         panic!("one resume unexpectedly satisfied an exact two-shot cross-call contract")
     };
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G6005"),
-        "missing cross-call replay quantity diagnostic: {diagnostics:#?}"
-    );
     assert!(
         diagnostics
             .iter()

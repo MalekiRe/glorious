@@ -19,7 +19,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 mod invocations;
 mod control;
-use control::value_labels;
+use control::{ControlBrand, value_controls};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EscapeDiagnostic {
@@ -32,9 +32,45 @@ pub struct EscapeDiagnostic {
 #[derive(Clone, Debug, Default)]
 pub struct EscapeFlow {
     pub diagnostics: Vec<EscapeDiagnostic>,
+    control_input: Option<crate::Digest>,
+    control_captures: BTreeMap<EnvironmentBrand, BTreeSet<ControlBrand>>,
+}
+
+/// Request-local capture obligations from the existing lifetime analysis.
+/// A body seal travels with the entries; consumers cannot supply an unbound
+/// set of constructor names as lifetime authority.
+#[derive(Default)]
+pub(crate) struct ControlCaptures {
+    bodies: BTreeMap<crate::DefKey, (crate::Digest, BTreeSet<EnvironmentBrand>)>,
+}
+
+impl ControlCaptures {
+    pub(crate) fn include(&mut self, owner: crate::DefKey, body: &TypedBody, escapes: &EscapeFlow) -> Result<(), &'static str> {
+        let captures = escapes.resumption_captures(body)?;
+        self.bodies.insert(owner, (body.semantic_fingerprint(), captures));
+        Ok(())
+    }
+
+    pub(crate) fn bind(&self, owner: crate::DefKey, body: &TypedBody) -> Result<bool, &'static str> {
+        let (input, captures) = self.bodies.get(&owner).ok_or("missing source control lifetime product")?;
+        if *input != body.semantic_fingerprint() { return Err("stale source control lifetime product"); }
+        Ok(!captures.is_empty())
+    }
+
+    pub(crate) fn contains(&self, environment: EnvironmentBrand) -> bool {
+        self.bodies.get(&environment.owner).is_some_and(|(_, captures)| captures.contains(&environment))
+    }
 }
 
 impl EscapeFlow {
+    fn resumption_captures(&self, body: &TypedBody) -> Result<BTreeSet<EnvironmentBrand>, &'static str> {
+        if self.control_input != Some(body.semantic_fingerprint()) || !self.diagnostics.is_empty() {
+            return Err("control lifetime product does not match admitted source Core");
+        }
+        Ok(self.control_captures.iter().filter_map(|(environment, controls)|
+            controls.iter().any(|brand| matches!(brand, ControlBrand::Resumption(_))).then_some(*environment)).collect())
+    }
+
     /// Check returned values and suspension payloads. `flow` is intentionally
     /// an input to this phase: its NLL/reborrow facts establish that this is a
     /// post-loan boundary, rather than a second lexical borrow checker.
@@ -51,7 +87,7 @@ impl EscapeFlow {
             Ok(facts) => facts,
             Err(error) => return Self { diagnostics: vec![EscapeDiagnostic {
                 code: error.code, span: error.span, message: error.message,
-            }] },
+            }], ..Self::default() },
         };
         let mut analyzer = Analyzer {
             body,
@@ -65,6 +101,7 @@ impl EscapeFlow {
             loan_roots: frozen_loan_roots(flow),
             values: ValueEnvironment::default(),
             labels: vec![],
+            control_captures: BTreeMap::new(),
             diagnostics: vec![],
         };
         // Parameters may carry references through structural aggregates. They
@@ -86,6 +123,8 @@ impl EscapeFlow {
         });
         Self {
             diagnostics: analyzer.diagnostics,
+            control_input: Some(body.semantic_fingerprint()),
+            control_captures: analyzer.control_captures,
         }
     }
 }
@@ -96,9 +135,9 @@ impl EscapeFlow {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Value {
     None,
-    /// A proof-only label is not an empty scalar footprint. Its generative
+    /// A label or resumption is not an empty scalar footprint. Its generative
     /// destination must remain live through aliases and captured residents.
-    Label(crate::LabelBrand),
+    Control(ControlBrand),
     /// Proven resident without any frame-relative component. Unlike `None`,
     /// this is positive transfer evidence, never absence of a known loan.
     FrameIndependent,
@@ -140,7 +179,7 @@ enum Value {
         resident_captures: Vec<crate::resident_invocations::Operand<Value>>,
         frame_independent: bool,
         regions: BTreeSet<crate::placeflow::regions::Region>,
-        labels: BTreeSet<crate::LabelBrand>,
+        controls: BTreeSet<ControlBrand>,
     },
     /// An opaque factory result carries selected input snapshots without
     /// inventing a physical environment field or a compiler-owned brand.
@@ -238,6 +277,7 @@ struct Analyzer<'a> {
     loan_roots: BTreeSet<String>,
     values: ValueEnvironment,
     labels: Vec<LabelBoundary>,
+    control_captures: BTreeMap<EnvironmentBrand, BTreeSet<ControlBrand>>,
     diagnostics: Vec<EscapeDiagnostic>,
 }
 
@@ -307,16 +347,16 @@ impl Analyzer<'_> {
                     fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
                 Value::Logical { physical, arguments } => Value::Logical { physical: Box::new(resolve(physical, graph, active)),
                     arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
-                Value::Closure { environment, captures, resident_captures, frame_independent, regions, labels } => {
+                Value::Closure { environment, captures, resident_captures, frame_independent, regions, controls } => {
                     let possible = resolve(&Value::Region(regions.clone()), graph, active);
                     let roots = capture_dependency_roots(&possible);
                     let mut captures = captures.clone();
                     captures.extend(roots.iter().cloned().map(|root| Capture::Borrowed { root, environment: *environment }));
-                    let labels = labels.iter().copied().chain(value_labels(&possible)).collect::<BTreeSet<_>>();
+                    let controls = controls.iter().copied().chain(value_controls(&possible)).collect::<BTreeSet<_>>();
                     Value::Closure { environment: *environment, captures,
                         resident_captures: resident_captures.clone(),
-                        frame_independent: *frame_independent && roots.is_empty() && labels.is_empty(),
-                        regions: BTreeSet::new(), labels }
+                        frame_independent: *frame_independent && roots.is_empty() && controls.is_empty(),
+                        regions: BTreeSet::new(), controls }
                 }
                 Value::CallableResident { footprint, resident_captures } => Value::CallableResident {
                     footprint: Box::new(resolve(footprint, graph, active)), resident_captures: resident_captures.clone(),
@@ -332,15 +372,15 @@ impl Analyzer<'_> {
         let value = match expression.kind {
             CoreKind::ConstValue(_) => Value::None,
             CoreKind::Literal(_)
-            | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
             | CoreKind::Error
             | CoreKind::PatternTest { .. }
             | CoreKind::IntrinsicCall { .. } => Value::None,
-            CoreKind::LabelValue { .. } => Value::Label(self.continuations.label_reference(id)
-                .expect("a bound label dependency product retains each label value's brand")),
+            CoreKind::Resumption { id, .. } => Value::Control(ControlBrand::Resumption(id)),
+            CoreKind::LabelValue { .. } => Value::Control(ControlBrand::Label(self.continuations.label_reference(id)
+                .expect("a bound label dependency product retains each label value's brand"))),
             CoreKind::Local(name) => self.values.get(&name).cloned().unwrap_or(Value::None),
             CoreKind::Borrow { value, .. } if self.continuations.is_abrupt(value) => {
                 self.value(value);
@@ -399,7 +439,7 @@ impl Analyzer<'_> {
                     .map(|exit| (exit.value, exit.environment)).unzip();
                 self.values = joined_environments(&incoming, environments);
                 let result = join(values);
-                self.report_label_scope_escape(brand, &result, &incoming, expression.span);
+                self.report_control_scope_escape(ControlBrand::Label(brand), &result, &incoming, expression.span);
                 result
             }
             CoreKind::Transfer { brand, value } => {
@@ -457,17 +497,19 @@ impl Analyzer<'_> {
                 // Captured destinations remain lexical inputs while this
                 // isolated invocation is inspected. Its exits must not run
                 // at formation or masquerade as ordinary function returns.
-                let mut labels = self.continuations.lexical_label_inputs(body)
-                    .expect("bound closure dependencies cover every Core body").clone();
+                let mut controls = self.continuations.lexical_label_inputs(body)
+                    .expect("bound closure dependencies cover every Core body").iter().copied()
+                    .map(ControlBrand::Label).collect::<BTreeSet<_>>();
                 for capture in &environment.captures {
                     for action in CaptureFormation::new(capture).actions() {
                         if matches!(action, CaptureAction::RetainContents)
                             && let Some(value) = self.values.get(&capture.name) {
-                            labels.extend(value_labels(&self.resolved_value(value)));
+                            controls.extend(value_controls(&self.resolved_value(value)));
                         }
                     }
                 }
-                self.labels = outer_labels.iter().filter(|label| labels.contains(&label.brand))
+                self.control_captures.entry(environment.brand).or_default().extend(&controls);
+                self.labels = outer_labels.iter().filter(|label| controls.contains(&ControlBrand::Label(label.brand)))
                     .map(|label| LabelBoundary { brand: label.brand, exits: vec![] }).collect();
                 let Some(flow) = self.closure_flows.get(&environment.brand) else {
                     self.error(expression.span, "G5016", "closure body has no frozen callable loan product");
@@ -548,7 +590,7 @@ impl Analyzer<'_> {
                     resident_captures,
                     frame_independent,
                     regions,
-                    labels,
+                    controls,
                 }
             }
             CoreKind::Call {
@@ -655,12 +697,16 @@ impl Analyzer<'_> {
                             self.values.remove(name);
                         }
                     }
-                    if let crate::core::CoreHandlerResumption::Explicit { name, .. } =
-                        clause.resumption
-                    {
-                        self.values.remove(&name);
+                    let resumption = if let crate::core::CoreHandlerResumption::Explicit { id, name, .. } = &clause.resumption {
+                        self.values.define(name.clone(), Value::Control(ControlBrand::Resumption(*id)));
+                        Some((*id, name.clone()))
+                    } else { None };
+                    let result = self.value(clause.body);
+                    if let Some((id, name)) = resumption {
+                        self.report_control_scope_escape(ControlBrand::Resumption(id), &result, &incoming, clause.span);
+                        restore_bindings(&mut self.values, &incoming, [name]);
                     }
-                    exits.push(self.value(clause.body));
+                    exits.push(result);
                     restore_bindings(&mut self.values, &incoming,
                         clause.bindings.iter().map(|(name, _)| name.clone()));
                     if !self.continuations.is_abrupt(clause.body) {
@@ -1125,7 +1171,7 @@ impl Analyzer<'_> {
     fn report_return_escape(&mut self, value: &Value, span: Span) {
         let resolved = self.resolved_value(value);
         let value = &resolved;
-        self.report_label_value_escape(value, span, "the callable result");
+        self.report_control_value_escape(value, span, "the callable result");
         let mut emitted = BTreeSet::new();
         for root in borrowed_roots(value) {
             if emitted.insert(("reference", root.clone())) {
@@ -1157,7 +1203,7 @@ impl Analyzer<'_> {
     fn report_suspension_escape(&mut self, value: &Value, span: Span) {
         let resolved = self.resolved_value(value);
         let value = &resolved;
-        self.report_label_value_escape(value, span, "a runtime effect payload");
+        self.report_control_value_escape(value, span, "a runtime effect payload");
         for root in borrowed_roots(value) {
             self.error(
                 span,
@@ -1177,7 +1223,7 @@ impl Analyzer<'_> {
     fn report_external_store_escape(&mut self, value: &Value, span: Span) {
         let resolved = self.resolved_value(value);
         let value = &resolved;
-        self.report_label_value_escape(value, span, "caller-owned storage");
+        self.report_control_value_escape(value, span, "caller-owned storage");
         let mut emitted = BTreeSet::new();
         for root in borrowed_roots(value) {
             if emitted.insert(("reference", root.clone())) {
@@ -1603,9 +1649,9 @@ fn frame_independent_value(value: &Value) -> bool {
             array_values(*length, element, fields).all(frame_independent_value),
         Value::Logical { physical, arguments } => frame_independent_value(physical)
             && arguments.values().all(frame_independent_value),
-        Value::Closure { frame_independent, labels, .. } => *frame_independent && labels.is_empty(),
+        Value::Closure { frame_independent, controls, .. } => *frame_independent && controls.is_empty(),
         Value::CallableResident { footprint, .. } => frame_independent_value(footprint),
-        Value::None | Value::Label(_) | Value::Borrowed { .. } => false,
+        Value::None | Value::Control(_) | Value::Borrowed { .. } => false,
     }
 }
 
@@ -1644,7 +1690,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
             for value in arguments.values() { collect_borrowed_roots(value, roots); }
         }
         Value::CallableResident { footprint, .. } => collect_borrowed_roots(footprint, roots),
-        Value::Closure { .. } | Value::None | Value::Label(_) | Value::FrameIndependent | Value::ExternalBorrowed => {}
+        Value::Closure { .. } | Value::None | Value::Control(_) | Value::FrameIndependent | Value::ExternalBorrowed => {}
     }
 }
 
@@ -1757,7 +1803,7 @@ fn value_contains_external_reference(value: &Value) -> bool {
         Value::Logical { physical, arguments } => value_contains_external_reference(physical)
             || arguments.values().any(value_contains_external_reference),
         Value::CallableResident { footprint, .. } => value_contains_external_reference(footprint),
-        Value::None | Value::Label(_) | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
+        Value::None | Value::Control(_) | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
 
@@ -1788,7 +1834,7 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
             collect_closure_captures(physical, captures);
             for value in arguments.values() { collect_closure_captures(value, captures); }
         }
-        Value::None | Value::Label(_) | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
+        Value::None | Value::Control(_) | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
     }
 }
 

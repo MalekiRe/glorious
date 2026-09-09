@@ -64,6 +64,7 @@ enum Selected {
 pub(crate) fn transform(
     owner: DefKey,
     control: &BoundControlSummaries<'_>,
+    control_captures: &crate::escape::ControlCaptures,
 ) -> Result<Option<TypedBody>, CoreDiagnostic> {
     let source = control.staged_body(owner).ok_or_else(|| diagnostic(invalid_typed_core_span(),
         "control fusion requires a sealed source body"))?;
@@ -71,7 +72,10 @@ pub(crate) fn transform(
         .ok_or_else(|| diagnostic(source.expression(source.root).span, "control fusion lacks a sealed lexical dependency product"))?;
     let pending = dependencies.pending_closures(source.root)
         .map_err(|reason| diagnostic(source.expression(source.root).span, format!("invalid lexical control scope: {reason:?}")))?;
-    if pending.is_empty() && !source.expressions.iter().any(|expr|
+    let captured_control = control_captures.bind(owner, source)
+        .map_err(|error| diagnostic(source.expression(source.root).span, error))?;
+    if pending.is_empty() && !captured_control
+        && !source.expressions.iter().any(|expr|
         matches!(expr.kind, CoreKind::Closure { .. }) && contains_label(&expr.ty)) {
         return Ok(None);
     }
@@ -81,7 +85,7 @@ pub(crate) fn transform(
         return Err(diagnostic(source.expression(source.root).span, "control fusion requires validated staged Core"));
     }
     let mut pass = Fusion {
-        owner, control, output: TypedBody { expressions: vec![], unsafe_scopes: BTreeSet::new(),
+        owner, control, control_captures, output: TypedBody { expressions: vec![], unsafe_scopes: BTreeSet::new(),
             ..source.clone() }, next: 0, active: BTreeMap::new(), stack: vec![CallableBrand::Named(owner)],
         values: vec![], environments: vec![], label_results: BTreeMap::new(),
     };
@@ -117,6 +121,7 @@ fn contains_label(ty: &Type) -> bool {
 }
 
 struct Fusion<'a> {
+    control_captures: &'a crate::escape::ControlCaptures,
     owner: DefKey,
     control: &'a BoundControlSummaries<'a>,
     output: TypedBody,
@@ -174,6 +179,8 @@ impl Fusion<'_> {
         // are remapped mechanically; only the existing binders create brands.
         let input = self.control.fusion_body(owner).map_err(|reason| diagnostic(invalid_typed_core_span(),
             format!("control expansion requires a sealed source body: {reason:?}")))?;
+        self.control_captures.bind(owner, input)
+            .map_err(|error| diagnostic(input.expression(input.root).span, error))?;
         for expression in &input.expressions {
             match &expression.kind {
                 CoreKind::Closure { environment, .. } => {
@@ -627,7 +634,7 @@ impl Fusion<'_> {
         let transformed_capture = environment.captures.iter().any(|capture|
             contains_label(&self.semantic_type(frame, capture.ty.clone()))
                 || self.ty(frame, capture.ty.clone()) != self.semantic_type(frame, capture.ty.clone()));
-        if !free.is_empty() || transformed_capture {
+        if !free.is_empty() || transformed_capture || self.control_captures.contains(environment.brand) {
             let tag = self.alloc(CoreKind::Literal(self.environments.len().to_string()), Type::Scalar(ScalarType::I64), span);
             let mut fields = vec![tag];
             let mut captures = vec![];

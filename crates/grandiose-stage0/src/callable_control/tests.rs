@@ -102,7 +102,12 @@ fn pending_control_is_sealed_and_discharged_before_ordinary_core() {
     let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
         &mut |_, _| Ok::<_, ()>(())).unwrap();
     let bound = summaries.bind(&inputs).unwrap();
-    let fused = crate::core::control_fusion::transform(owner, &bound).unwrap().unwrap();
+    let body = &fixture.bodies[&owner];
+    let flow = crate::PlaceFlow::analyze_with_interface(body, &fixture.interface);
+    let escapes = crate::EscapeFlow::analyze_with_interface(body, &flow, &fixture.interface);
+    let mut captures = crate::escape::ControlCaptures::default();
+    captures.include(owner, body, &escapes).unwrap();
+    let fused = crate::core::control_fusion::transform(owner, &bound, &captures).unwrap().unwrap();
     assert!(fused.validate().is_empty());
     assert!(crate::core::label_dependencies::LabelDependencies::derive(&fused.expressions)
         .unwrap().pending_closures(fused.root).unwrap().is_empty());
@@ -115,6 +120,73 @@ fn pending_control_is_sealed_and_discharged_before_ordinary_core() {
     contract.environment = Some(Box::new(Type::Unit));
     assert!(!body.validate_for_control_fusion().is_empty(), "pending labels must not excuse a forged environment");
     assert!(summaries.bind(&fixture.inputs()).is_err());
+}
+
+#[test]
+fn resumption_capture_lifetime_authority_rejects_missing_invalid_and_stale_inputs() {
+    let fixture = Fixture::control_input("#![no_std]
+        effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => {
+            let task = (value:i64) -> i64 { k(value) }; task(42)
+        } } }", true);
+    let owner = fixture.names["main"];
+    let inputs = fixture.inputs();
+    let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    let bound = summaries.bind(&inputs).unwrap();
+    let body = &fixture.bodies[&owner];
+    let flow = crate::PlaceFlow::analyze_with_interface(body, &fixture.interface);
+    let escapes = crate::EscapeFlow::analyze_with_interface(body, &flow, &fixture.interface);
+    let mut captures = crate::escape::ControlCaptures::default();
+    assert!(crate::core::control_fusion::transform(owner, &bound, &captures).is_err());
+    assert!(captures.include(owner, body, &crate::EscapeFlow::default()).is_err());
+    captures.include(owner, body, &escapes).unwrap();
+    assert_eq!(captures.bind(owner, body), Ok(true));
+    assert!(crate::core::control_fusion::transform(owner, &bound, &captures).unwrap().is_some());
+    let mut invalid = escapes.clone();
+    invalid.diagnostics.push(crate::escape::EscapeDiagnostic {
+        code: "G4174", span: body.expression(body.root).span, message: "invalid lifetime".into(),
+    });
+    assert!(captures.include(owner, body, &invalid).is_err());
+    let mut stale = body.clone();
+    stale.expressions[body.root.0 as usize].ty = Type::Never;
+    assert!(captures.bind(owner, &stale).is_err());
+    assert!(captures.include(owner, &stale, &escapes).is_err());
+}
+
+#[test]
+fn resumption_handler_label_invocations_use_only_nominal_binder_authority() {
+    let fixture = Fixture::new("#![no_std]
+        effect Ask { [0,1] ask() -> i64; }
+        pub fn main() -> i64 { @done: i64 {
+            let alias = @done;
+            handle Ask::ask() { Ask::ask() with k => alias(42) }
+        } }");
+    let owner = fixture.names["main"];
+    let inputs = fixture.inputs();
+    let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    let bound = summaries.bind(&inputs).unwrap();
+    let body = &fixture.bodies[&owner];
+    let call = body.expressions.iter().find(|expression| matches!(&expression.kind,
+        CoreKind::Call { callee, .. } if matches!(&body.expression(*callee).kind,
+            CoreKind::Local(name) if name == "alias"))).unwrap();
+    let labels = crate::core::label_dependencies::LabelDependencies::derive(&body.expressions).unwrap();
+    let control = bound.declared_call_control(body, call, &labels).unwrap();
+    assert!(!control.unknown);
+    assert_eq!(control.direct_labels.len(), 1);
+    assert!(matches!(control.transfers[0].payload.source,
+        payloads::PayloadSource::Argument { index: 0, ref path } if path.is_empty()));
+    let CoreKind::Call { callee, .. } = call.kind else { unreachable!() };
+    let mut unbranded = body.clone();
+    unbranded.expressions[callee.0 as usize].ty = crate::types::label::callable(
+        &body.expression(callee).ty).unwrap();
+    assert!(bound.declared_call_control(&unbranded, call, &labels).is_none(),
+        "an ordinary bottom callable cannot acquire the nominal destination");
+    unbranded.expressions[callee.0 as usize].ty = crate::types::label::new(
+        crate::LabelBrand { owner, label: u32::MAX }, Type::Scalar(crate::ScalarType::I64));
+    assert!(bound.declared_call_control(&unbranded, call, &labels).is_none(),
+        "a different nominal identity cannot acquire this binder's destination");
 }
 
 #[test]

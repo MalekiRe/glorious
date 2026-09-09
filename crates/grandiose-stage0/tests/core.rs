@@ -4690,7 +4690,6 @@ fn nested_partial_handlers_compose_to_discharge_a_callable_effect_contract() {
         .continuation
         .as_ref()
         .expect("nonterminal handler continuation contract");
-    assert_eq!(contract.direct_uses, 1, "tail resume is one use");
     assert!(
         contract.effects.effects.is_empty(),
         "nested partial coverage failed to subtract Choice from the continuation row: {contract:#?}"
@@ -4739,15 +4738,15 @@ fn handler_contract_rejects_implicit_or_explicit_resume_when_zero_uses_are_requi
         tail.diagnostics
     );
 
-    let explicit = core_for(
+    let (explicit, signatures) = core_and_signatures_for(
         "core-handler-zero-explicit@0.1.0",
         "effect Stop { [0,0] stop() -> i64; } pub fn main() -> i64 { handle Stop::stop() { Stop::stop() with k => k(0) } }",
     );
     assert!(
-        explicit
-            .diagnostics
+        grandiose_stage0::UseFlow::analyze_with_interface(&explicit,
+            &PlaceFlow::analyze_with_interface(&explicit, &signatures), &signatures).diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G6005"),
+            .any(|diagnostic| diagnostic.code == "G5012"),
         "explicit resume ignored a zero-use contract: {:#?}",
         explicit.diagnostics
     );
@@ -4755,14 +4754,15 @@ fn handler_contract_rejects_implicit_or_explicit_resume_when_zero_uses_are_requi
 
 #[test]
 fn handler_contract_rejects_dropping_a_required_explicit_resumption() {
-    let core = core_for(
+    let (core, signatures) = core_and_signatures_for(
         "core-handler-required-explicit@0.1.0",
         "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => 0 } }",
     );
     assert!(
-        core.diagnostics
+        grandiose_stage0::UseFlow::analyze_with_interface(&core,
+            &PlaceFlow::analyze_with_interface(&core, &signatures), &signatures).diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G4178"),
+            .any(|diagnostic| diagnostic.code == "G5012"),
         "required explicit resumption was silently discarded: {:#?}",
         core.diagnostics
     );
@@ -4806,7 +4806,7 @@ fn handler_payload_binders_capture_only_when_a_nested_closure_needs_them() {
 }
 
 #[test]
-fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
+fn an_uninvoked_resumption_capture_cannot_discharge_exact_use() {
     let package = PackageKey("core-handler-resumption-escape@0.1.0".into());
     let source = "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let delayed = (ignored: i64) -> i64 { let saved = k; 0 }; 0 } } }";
     let file = FileKey::new(&package, "src/main.glorious");
@@ -4827,13 +4827,12 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
         &DefinitionIndex::from_interface(&interface),
         &signatures,
     );
-    assert!(
-        core.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G4174"),
-        "nested closure captured a handler continuation: {:#?}",
-        core.diagnostics
-    );
+    // The original source does not export its closure. Its actual violation
+    // is leaving an exact-once resumption uninvoked, not capture formation.
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    let uses = grandiose_stage0::UseFlow::analyze_with_interface(&core, &flow, &signatures);
+    assert!(uses.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5012"),
+        "the unused captured continuation must retain its exact-use obligation: {:#?}", uses.diagnostics);
     let captures = core
         .expressions
         .iter()
@@ -5371,7 +5370,6 @@ fn normalized_quantity_bounds_drive_finite_resumption_core_and_mir_contracts() {
         })
         .expect("handler continuation contract");
     assert_eq!(continuation.invocation, Quantity::new(2, Some(2)).unwrap());
-    assert_eq!(continuation.direct_uses, 2);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
     let mir = MirLowering::lower(definition.key, &core, &flow)
@@ -5385,35 +5383,28 @@ fn normalized_quantity_bounds_drive_finite_resumption_core_and_mir_contracts() {
 }
 
 #[test]
-fn nested_handler_arms_preserve_outer_resumption_use_tracking() {
-    let core = core_for(
+fn nested_handler_arms_preserve_outer_resumption_quantities() {
+    let (core, signatures) = core_and_signatures_for(
         "core-nested-resumption-use-tracking@0.1.0",
         "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let mut uses = core
-        .expressions
-        .iter()
-        .filter_map(|expression| match &expression.kind {
-            CoreKind::Handle { clauses, .. } => clauses.first()?.continuation.as_ref(),
-            _ => None,
-        })
-        .map(|continuation| continuation.direct_uses)
-        .collect::<Vec<_>>();
-    uses.sort_unstable();
-    assert_eq!(uses, vec![1, 1]);
+    let uses = grandiose_stage0::UseFlow::analyze_with_interface(&core,
+        &PlaceFlow::analyze_with_interface(&core, &signatures), &signatures);
+    assert!(uses.diagnostics.is_empty(), "{:#?}", uses.diagnostics);
 }
 
 #[test]
 fn nested_handler_arms_reject_excess_outer_resumption_uses() {
-    let core = core_for(
+    let (core, signatures) = core_and_signatures_for(
         "core-nested-resumption-use-rejection@0.1.0",
         "use std::*; effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) + outer(value) } } } }",
     );
     assert!(
-        core.diagnostics
+        grandiose_stage0::UseFlow::analyze_with_interface(&core,
+            &PlaceFlow::analyze_with_interface(&core, &signatures), &signatures).diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G6005"),
+            .any(|diagnostic| diagnostic.code == "G5012"),
         "the outer [1, 1] continuation must observe both nested calls: {:#?}",
         core.diagnostics
     );

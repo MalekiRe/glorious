@@ -5,6 +5,63 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 108: source control lifetimes and shared resumption quantity checking
+
+Resumption capture admission now comes from EscapeFlow's existing resident-value
+and storage domain. Labels and resumptions retain their distinct generative
+identities through aliases, aggregates, capture formation and pending exits.
+An explicit handler arm checks its outgoing result, outer storage and pending
+outer-label payload snapshots for its own resumption identity. The independent
+source capture-alias walker and restricted immediate-closure rewrite are removed.
+
+Source resource checking publishes body-sealed capture obligations before
+structural fusion. The transform validates those seals for original and expanded
+helper frames, and uses the same tagged environment representation for captured
+resumptions as captured labels. Unchanged batches reuse their original resource
+products; transformed batches receive independent validation and fresh analyses.
+Missing, invalid or stale lifetime evidence rejects transformation. The shared
+invocation producer also recognizes a nominal label's invariant destination
+under incomplete enclosing execution coverage, using the lexical binder product.
+An ordinary bottom callable or a different nominal brand cannot acquire it.
+
+The obsolete syntactic resumption counter and its Core contract field are removed.
+UseFlow checks explicit quantities against shared continuation facts, so branch
+alternatives are not summed as sequential uses and aggregate aliases do not
+disappear. Tail/cancellation declaration admission remains separate, and residual
+replay-safety admission follows an explicit binder's declared multi-shot contract.
+Existing negative source programs are preserved; their quantity assertions now
+target the authoritative G5012 diagnostic rather than the deleted early counter.
+
+The aggregate-capture positive then exposed cleanup applying fully-initialized
+value validation to a nested partially consumed product. The VM's shared layout
+relation now distinguishes value checks from storage relocation/tag-only checks.
+Owned extraction carries typed holes recursively, clears the moved storage root,
+and leaves attempts to read or extract those holes rejected. No resumption
+authentication or source Copy permission is supplied by layout matching.
+
+Final focused verification passes **86 tests**, none failed or ignored:
+`target/control-lifetimes-focused-v3.log` has 81 passes (12 library units, two
+fusion groups, 19 Core tests, two semantic safety cases and 46 service tests);
+`target/control-lifetimes-supplemental-v3.log` adds five existing boundary checks.
+Fresh/decoded O0/O2 execution covers direct and aggregate resumption captures,
+generic invocation forwarding and mutually exclusive branch calls. Negative
+checks cover escaped snapshots, quantity violations, multi-shot unique/label
+capture, stale/missing proof and moved-field reuse. The earlier v1 and v2 logs
+exposed source-counter/control gaps and then the runtime partial-storage failure;
+they are not counted as passing acceptance gates.
+
+No broad library/service sweep was repeated. The latest source-library matrix
+remains cache 105's 16 passes and 15 failures. Generic factories with unknown
+resumption inputs still lack a complete captured-control proof/representation;
+full helper-family fusion, mandatory-tail activation transfer, guarded storage
+outcomes and native owned handlers remain unfinished. Ordinary native captured
+callables and borrowed/cross-frame resumption transfer are separate open ABIs.
+This does not complete compiler/library conformance or self-hosting.
+
+Source cache generation is 108. Verifier generation remains 37, bytecode remains
+72, and the native ABI is unchanged. The refreshed source closure audit passes
+with 100 locked source files and all 11,455 public contracts still open.
+
 ## Cache 107 / verifier 37: resumption identity through resident products
 
 The captured-resumption source preserved in cache 106 now executes fresh and

@@ -344,10 +344,6 @@ pub struct CoreHandlerContinuationContract {
     pub result: Type,
     pub effects: EffectRow,
     pub invocation: crate::quantity::Quantity,
-    /// Direct syntactic invocation sites observed while elaborating this arm.
-    /// This is deliberately a lower-bound check only: later control-flow and
-    /// ownership passes refine path-sensitive use counts.
-    pub direct_uses: u64,
 }
 impl CoreHandlerContinuationContract {
     pub(crate) fn callable_type(&self) -> Type {
@@ -535,11 +531,6 @@ struct ActiveResumption {
     id: ResumptionId,
     name: String,
     binding_generation: u64,
-}
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ResumptionUseTracker {
-    identity: ActiveResumption,
-    direct_uses: u64,
 }
 #[derive(Clone)]
 struct ActiveLabel {
@@ -3290,7 +3281,6 @@ impl TypedBody {
             binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             callable_value_joins: vec![],
             pending_callable_bounds: vec![],
@@ -3544,7 +3534,6 @@ impl TypedBody {
             binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             callable_value_joins: vec![],
             pending_callable_bounds: vec![],
@@ -3677,7 +3666,6 @@ impl TypedBody {
             binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             callable_value_joins: vec![],
             pending_callable_bounds: vec![],
@@ -3808,7 +3796,6 @@ impl TypedBody {
             binding_mutability: std::collections::BTreeMap::new(),
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
             callable_value_joins: vec![],
             pending_callable_bounds: vec![],
@@ -4201,7 +4188,6 @@ struct Elaborator<'a> {
     /// arms keep enclosing trackers live: an outer continuation may be
     /// resumed from a nested handler body, while an identically spelled inner
     /// continuation remains a distinct branded value.
-    resumption_use_trackers: Vec<ResumptionUseTracker>,
     /// Opaque nominal identities minted for this body's sealed callable
     /// environments and their normal post-states.  They are intentionally
     /// tracked separately from source nominal definitions: a source path can
@@ -4556,7 +4542,6 @@ impl Elaborator<'_> {
                     && let [resumption, value] = arguments.as_slice()
                 {
                     let callee = self.expression(*resumption);
-                    self.record_resumption_call(callee);
                     let expected = match self.expressions[callee.0 as usize].ty.clone() {
                         Type::Callable { parameters, .. } => parameters.first().cloned(),
                         _ => None,
@@ -4669,7 +4654,6 @@ impl Elaborator<'_> {
                     return value;
                 }
                 let callee = self.expression(callee);
-                self.record_resumption_call(callee);
                 let parameters = match self.expressions[callee.0 as usize].ty.clone() {
                     Type::Callable { parameters, .. } => parameters,
                     _ => vec![],
@@ -7938,166 +7922,6 @@ impl Elaborator<'_> {
             .map(|(name, (mode, ty))| ClosureCapture { name, mode, ty })
             .collect()
     }
-    /// A continuation snapshot is valid only while its handler frame is
-    /// active.  A closure may capture it when the complete enclosing clause
-    /// proves that the closure is immediately invoked; returning, storing, or
-    /// passing that closure would let the snapshot outlive the frame and is
-    /// therefore rejected.  This mirrors refinement-capture checking but
-    /// retains the stronger handler-frame diagnostic and provenance.
-    fn check_resumption_capture_escapes(
-        &mut self,
-        branch: CoreId,
-        resumptions: &std::collections::BTreeSet<String>,
-    ) {
-        if resumptions.is_empty() {
-            return;
-        }
-        // Capture names are not continuation identities: a nested operation
-        // payload may deliberately shadow an outer `with k`.  Freeze the
-        // currently visible resumption type while the arm remains active so
-        // the later structural scan only diagnoses the actual snapshot, not
-        // an ordinary same-spelled payload local.
-        let resumption_types = resumptions
-            .iter()
-            .filter_map(|name| {
-                self.active_resumption(name)
-                    .and_then(|_| self.locals.lookup(name).cloned())
-                    .map(|ty| (name.clone(), ty))
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let mut aliases = resumption_types.keys().map(|name| (name.clone(), name.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        let mut closures = Vec::new();
-        self.collect_resumption_capturing_closures(branch, &mut aliases, &mut closures);
-        for (closure, resumption) in closures {
-            if self.refinement_closure_is_immediately_invoked(branch, closure) {
-                self.fuse_immediate_resumption_closure(branch, closure);
-                continue;
-            }
-            self.error(
-                self.expressions[closure.0 as usize].span,
-                "G4174",
-                &format!(
-                    "nested closure cannot let handler resumption `{resumption}` escape its active frame",
-                ),
-            );
-            self.recovered = true;
-        }
-    }
-    /// Fuse a proven single local invocation while the continuation's lexical
-    /// frame is still active. Only continuation-only environments qualify:
-    /// ordinary residents retain their capture/move/borrow representation.
-    /// Argument temporaries precede parameter bindings, preserving evaluation
-    /// order even when parameter names shadow the caller's argument locals.
-    fn fuse_immediate_resumption_closure(&mut self, branch: CoreId, closure: CoreId) -> bool {
-        let CoreKind::Closure { parameters, environment, body, .. } =
-            self.expressions[closure.0 as usize].kind.clone() else { return false; };
-        if environment.captures.is_empty() || environment.captures.iter().any(|capture| {
-            self.active_resumption(&capture.name).is_none()
-        }) { return false; }
-        let kind = self.expressions[branch.0 as usize].kind.clone();
-        let call = match &kind {
-            CoreKind::Call { callee, .. } if *callee == closure => Some((branch, None)),
-            CoreKind::Block(values) => values.windows(2).find_map(|pair| {
-                let CoreKind::Let { name, value } = &self.expressions[pair[0].0 as usize].kind else { return None; };
-                let CoreKind::Call { callee, .. } = &self.expressions[pair[1].0 as usize].kind else { return None; };
-                (*value == closure && matches!(&self.expressions[callee.0 as usize].kind,
-                    CoreKind::Local(actual) if actual == name)).then_some((pair[1], Some(pair[0])))
-            }),
-            CoreKind::Closure { .. } => return false,
-            _ => None,
-        };
-        if let Some((call, binding)) = call {
-            let CoreKind::Call { arguments, .. } = self.expressions[call.0 as usize].kind.clone() else { unreachable!() };
-            if parameters.len() != arguments.len() { return false; }
-            let span = self.expressions[call.0 as usize].span;
-            let mut sequence = Vec::new();
-            let mut temporaries = Vec::new();
-            for (index, argument) in arguments.into_iter().enumerate() {
-                let name = format!("$fused_{}_argument_{index}", closure.0);
-                let ty = self.expressions[argument.0 as usize].ty.clone();
-                sequence.push(self.alloc(CoreKind::Let { name: name.clone(), value: argument }, Type::Unit, span));
-                temporaries.push(self.alloc(CoreKind::Local(name), ty, span));
-            }
-            for ((name, _), value) in parameters.into_iter().zip(temporaries) {
-                sequence.push(self.alloc(CoreKind::Let { name, value }, Type::Unit, span));
-            }
-            sequence.push(body);
-            self.expressions[call.0 as usize].kind = CoreKind::Block(sequence);
-            // Remove the unused environment constructor from the frozen arena
-            // as well as the reachable graph; no backend may lift it later.
-            self.expressions[closure.0 as usize].kind = CoreKind::Tuple(vec![]);
-            self.expressions[closure.0 as usize].ty = Type::Unit;
-            if let Some(binding) = binding {
-                self.expressions[binding.0 as usize].kind = CoreKind::Tuple(vec![]);
-            }
-            return true;
-        }
-        core_children(&kind).into_iter().any(|child| self.fuse_immediate_resumption_closure(child, closure))
-    }
-    /// Follow direct lexical aliases before examining captures. A new binding
-    /// shadows its predecessor only after its initializer has been visited.
-    /// Clause payloads and closure parameters similarly establish fresh names.
-    fn collect_resumption_capturing_closures(
-        &self,
-        expression: CoreId,
-        aliases: &mut std::collections::BTreeMap<String, String>,
-        closures: &mut Vec<(CoreId, String)>,
-    ) -> Option<String> {
-        match &self.expressions[expression.0 as usize].kind {
-            CoreKind::Local(name) | CoreKind::Resumption { name, .. } => aliases.get(name).cloned(),
-            CoreKind::Move(value) => self.collect_resumption_capturing_closures(*value, aliases, closures),
-            CoreKind::Let { name, value } => {
-                let origin = self.collect_resumption_capturing_closures(*value, aliases, closures);
-                aliases.remove(name);
-                if let Some(origin) = origin { aliases.insert(name.clone(), origin); }
-                None
-            }
-            CoreKind::Block(values) => {
-                let mut nested = aliases.clone();
-                let mut result = None;
-                for value in values {
-                    result = self.collect_resumption_capturing_closures(*value, &mut nested, closures);
-                }
-                result
-            }
-            CoreKind::Closure { environment, parameters, body, .. } => {
-                let mut captured = environment.captures.iter().filter_map(|capture|
-                    aliases.get(&capture.name).map(|origin| (capture.name.clone(), origin.clone())))
-                    .collect::<std::collections::BTreeMap<_, _>>();
-                let origin = captured.values().next().cloned();
-                if let Some(origin) = &origin { closures.push((expression, origin.clone())); }
-                for (name, _) in parameters { captured.remove(name); }
-                self.collect_resumption_capturing_closures(*body, &mut captured, closures);
-                origin
-            }
-            CoreKind::Handle { computation, clauses } => {
-                self.collect_resumption_capturing_closures(*computation, &mut aliases.clone(), closures);
-                for clause in clauses {
-                    let mut nested = aliases.clone();
-                    for (name, _) in &clause.bindings { nested.remove(name); }
-                    if let CoreHandlerResumption::Explicit { name, .. } = &clause.resumption { nested.remove(name); }
-                    self.collect_resumption_capturing_closures(clause.body, &mut nested, closures);
-                }
-                None
-            }
-            CoreKind::Completion { computation, clauses, .. } => {
-                self.collect_resumption_capturing_closures(*computation, &mut aliases.clone(), closures);
-                for clause in clauses {
-                    let mut nested = aliases.clone();
-                    for (name, _) in &clause.bindings { nested.remove(name); }
-                    self.collect_resumption_capturing_closures(clause.body, &mut nested, closures);
-                }
-                None
-            }
-            kind => {
-                for child in core_children(kind) {
-                    self.collect_resumption_capturing_closures(child, &mut aliases.clone(), closures);
-                }
-                None
-            }
-        }
-    }
     /// A refinement binder is a branch-local proof-backed projection.  A
     /// closure may use such a projection only while the branch proves the
     /// refinement.  Direct invocation is therefore sound, including the
@@ -9893,16 +9717,6 @@ impl Elaborator<'_> {
                 .cloned(),
             CoreKind::Local(name) => self.active_resumption(name),
             _ => None,
-        }
-    }
-    fn record_resumption_call(&mut self, id: CoreId) {
-        let Some(identity) = self.resumption_identity(id) else {
-            return;
-        };
-        for tracker in &mut self.resumption_use_trackers {
-            if tracker.identity.id == identity.id {
-                tracker.direct_uses = tracker.direct_uses.saturating_add(1);
-            }
         }
     }
     /// Find a unique-reference use in the residual source region of the
@@ -12974,12 +12788,6 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            if let Some(identity) = active_identity.as_ref() {
-                self.resumption_use_trackers.push(ResumptionUseTracker {
-                    identity: identity.clone(),
-                    direct_uses: 0,
-                });
-            }
             // A deep handler is reinstated only around a resumed protected
             // continuation.  While its clause itself runs the selected frame
             // is suspended, so a fresh operation of this protocol must flow
@@ -12999,32 +12807,21 @@ impl Elaborator<'_> {
             let previous_unsafe = std::mem::replace(&mut self.unsafe_context, false);
             let body = self.expression_expected(clause.source.body, body_expected);
             self.unsafe_context = previous_unsafe;
-            if let Some((_, name)) = active_resumption.as_ref() {
-                self.check_resumption_capture_escapes(
-                    body,
-                    &std::collections::BTreeSet::from([name.clone()]),
-                );
-            }
             self.handled_effects = clause_effects;
             self.handled_operations = clause_operations;
-            let direct_uses = if active_identity.is_some() {
-                self.resumption_use_trackers
-                    .pop()
-                    .expect("active handler resumption must retain its use tracker")
-                    .direct_uses
-            } else {
-                0
-            };
             if active_identity.is_some() {
                 self.active_resumptions
                     .pop()
                     .expect("active handler resumption must outlive its clause body");
             }
             // A replayed continuation reinstates its protected residual once
-            // per direct invocation. That residual must not carry a unique
+            // per invocation. That residual must not carry a unique
             // loan or a live lexical leave target: either capability would be
             // duplicated by the second activation.
-            if direct_uses >= 2 {
+            // Admission follows the declared replay contract, not a count
+            // of syntactic calls that loses aliases and branch alternatives.
+            if matches!(resumption, CoreHandlerResumption::Explicit { .. })
+                && clause.operation.resumption.upper.is_none_or(|upper| upper >= 2) {
                 if self.replay_residual_captures_label_transfer(
                     computation,
                     &clause.effect,
@@ -13077,13 +12874,6 @@ impl Elaborator<'_> {
                     result: result.clone(),
                     effects: continuation_effects.clone(),
                     invocation: clause.operation.resumption,
-                    direct_uses: match &resumption {
-                        CoreHandlerResumption::Tail { .. } => 1,
-                        CoreHandlerResumption::Explicit { .. } => direct_uses,
-                        CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
-                            0
-                        }
-                    },
                 });
             self.validate_handler_continuation_contract(
                 &resumption,
@@ -13665,29 +13455,9 @@ impl Elaborator<'_> {
                     self.recovered = true;
                 }
             }
-            CoreHandlerResumption::Explicit { quantity, .. } => {
-                let actual = crate::quantity::Quantity::new(
-                    continuation.direct_uses,
-                    Some(continuation.direct_uses),
-                )
-                .expect("a direct resumption use count always forms an interval");
-                if continuation.direct_uses > 0 && !quantity.contains(actual) {
-                    self.error(
-                        span,
-                        "G6005",
-                        "direct handler resumptions do not satisfy the operation's quantity",
-                    );
-                    self.recovered = true;
-                }
-                if continuation.direct_uses == 0 && quantity.requires_positive_use() {
-                    self.error(
-                        span,
-                        "G4178",
-                        "handler continuation requires a resume but this arm never invokes it",
-                    );
-                    self.recovered = true;
-                }
-            }
+            // Explicit invocation counts are validated by UseFlow against
+            // shared continuation facts, including aliases and choices.
+            CoreHandlerResumption::Explicit { .. } => {}
             CoreHandlerResumption::Discard { quantity } => {
                 if quantity.requires_positive_use() {
                     self.error(

@@ -669,13 +669,13 @@ impl BoundControlSummaries<'_> {
         }
         // A gap in an enclosing execution does not invalidate a callee's
         // independently checked abstract contract. Compose that contract only
-        // at statically selected calls and only with positively known label
-        // operands. This is conditional on *reaching the invocation*, not a
+        // at statically selected calls or nominally branded label operands.
+        // This is conditional on *reaching the invocation*, not a
         // fabricated observation of the preceding computation or its guards.
         for (index, expression) in body.expressions.iter().enumerate() {
             let id = CoreId(index as u32);
             if calls.get(&id).is_some_and(|control| !control.unknown) { continue; }
-            if let Some(mut control) = self.declared_call_control(&body, expression) {
+            if let Some(mut control) = self.declared_call_control(&body, expression, seal.labels.as_ref()?) {
                 // A complete abstract callee contract can settle coverage,
                 // but cannot erase a more precise observed input dependency.
                 if let Some(observed) = calls.get(&id) {
@@ -689,8 +689,24 @@ impl BoundControlSummaries<'_> {
         Some(BodyInvocationControl { body, calls })
     }
 
-    fn declared_call_control(&self, body: &TypedBody, expression: &crate::CoreExpr) -> Option<InvocationControl> {
+    fn declared_call_control(&self, body: &TypedBody, expression: &crate::CoreExpr,
+        labels: &crate::core::label_dependencies::LabelDependencies) -> Option<InvocationControl> {
         let CoreKind::Call { callee, arguments, .. } = &expression.kind else { return None; };
+        // A nominal label's invariant identity is declaration authority,
+        // even when an enclosing handler leaves execution coverage unknown.
+        // Match it against the shared lexical binder product; an arbitrary
+        // bottom-returning callable supplies no such identity.
+        if let Some(payload) = crate::types::label::payload(&body.expression(*callee).ty)
+            && arguments.len() == 1
+            && let Some(target) = labels.binders().find(|brand|
+                crate::types::label::matches_brand(&body.expression(*callee).ty, *brand)) {
+            return Some(InvocationControl {
+                labels: [target].into(), direct_labels: [target].into(),
+                transfers: vec![InvocationTransfer { target: Some(target), payload: InvocationPayload {
+                    ty: payload.clone(), source: payloads::PayloadSource::Argument { index: 0, path: vec![] },
+                } }], ..InvocationControl::default()
+            });
+        }
         let definition = match &body.expression(*callee).kind {
             CoreKind::Function { definition, host_import: None, .. } => *definition,
             CoreKind::TraitMethod { method, deferred: None, .. } => *method,

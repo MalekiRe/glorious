@@ -24,7 +24,7 @@ fn executes(body: &str) {
         assert!(!emitted.functions.values().flat_map(|function| &function.instructions)
             .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::MakeLabel { .. })),
             "fused lexical destinations must not survive as runtime label carriers: {source}");
-        assert_eq!(artifact.run_i64().unwrap(), 42, "{source}");
+        assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("O{optimization}: {source}\n{error:#?}")), 42, "{source}");
         assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "{source}");
     }
 }
@@ -160,6 +160,14 @@ fn handler_fusion_preserves_nested_resume_and_completion_contracts() {
 
 #[test]
 fn handler_fusion_preserves_captured_resumption_values() {
+    for flag in ["Yes", "No"] {
+        executes(&format!("enum Flag {{ Yes, No }} effect Ask {{ [1,1] ask() -> i64; }}
+            pub fn main() -> i64 {{ handle Ask::ask() {{ Ask::ask() with k => {{
+                let task = (value:i64) -> i64 {{ handle Flag::{flag} {{
+                    Flag::Yes => k(value), Flag::No => k(value)
+                }} }}; task(42)
+            }} }} }}"));
+    }
     executes("effect Ask { [1,1] ask() -> i64; }
         pub fn main() -> i64 { @done: i64 {
             handle Ask::ask() { Ask::ask() with k => {
@@ -168,6 +176,23 @@ fn handler_fusion_preserves_captured_resumption_values() {
                 task(40)
             } }
         } }");
+    executes("effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 {
+            handle Ask::ask() { Ask::ask() with k => {
+                let offset = 2;
+                let task = (value:i64) -> i64 { k(value + offset) };
+                let alias = (task,); alias.0(40)
+            } }
+        }");
+    executes("effect Ask { [1,1] ask() -> i64; }
+        fn apply<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64> { task(value) }
+        pub fn main() -> i64 {
+            handle Ask::ask() { Ask::ask() with k => {
+                let saved = (k,); let offset = 2;
+                let task = (value:i64) -> i64 { saved.0(value + offset) };
+                apply(task,40)
+            } }
+        }");
 }
 
 #[test]

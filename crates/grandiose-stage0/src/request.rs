@@ -291,7 +291,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // fusion and shares per-callable source loan products with escape/lowering.
 // Cache 106 preserves exact handler/resumption binders through structural
 // control fusion and independently validates the receiving lexical scopes.
-pub const STAGE0_CACHE_GENERATION: u32 = 107;
+// Cache 108 derives resumption capture/lifetime obligations from shared escape
+// snapshots before fusion, replacing the source-only immediate-call rewrite.
+pub const STAGE0_CACHE_GENERATION: u32 = 108;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
