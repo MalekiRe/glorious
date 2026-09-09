@@ -74,6 +74,61 @@ fn later_callable_argument_preserves_an_earlier_nominal_generic_identity() {
 }
 
 #[test]
+fn captured_quantified_callback_receivers_resolve_native_storage_before_borrowing() {
+    run(r#"
+        type Callback = for<'a> (&'a i64) -> &'a i64;
+        fn identity<'a>(value: &'a i64) -> &'a i64 { value }
+        fn apply(callback: Callback, value: &i64) -> i64 {
+            let task = () -> i64 { *callback(value) };
+            task()
+        }
+        pub fn main() -> i64 { let value = 42; apply(identity, &value) }
+    "#, 42);
+    run(r#"
+        type Callback = for<'a> (&'a i64) -> &'a i64;
+        fn identity<'a>(value: &'a i64) -> &'a i64 { value }
+        fn make<'a>(callback: Callback, value: &'a i64) -> () -> i64 {
+            move (callback, value) { *callback(value) }
+        }
+        pub fn main() -> i64 { let value = 42; make(identity, &value)() }
+    "#, 42);
+    run(r#"
+        fn answer() -> i64 { 42 }
+        fn apply<F>(callback: &F) -> i64
+        where for<'a> &'a F: Fn<(), Output=i64, Effects={}> {
+            let task = () -> i64 { callback() };
+            task()
+        }
+        pub fn main() -> i64 { let stored = answer; apply(&stored) }
+    "#, 42);
+}
+
+#[test]
+fn returned_callback_cannot_borrow_its_factory_local_capture_slots() {
+    let source = r#"
+        type Callback = for<'a> (&'a i64) -> &'a i64;
+        fn identity<'a>(value: &'a i64) -> &'a i64 { value }
+        fn make<'a>(callback: Callback, shared: &'a i64, seed: i64) -> () -> i64 {
+            let mut seed = seed;
+            () -> i64 { seed = *callback(shared) + 1; seed }
+        }
+        pub fn main() -> i64 {
+            let value = 41;
+            let task = make(identity, &value, 0);
+            task()
+        }
+    "#;
+    for level in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(request(source, level)) {
+            Err(error) => error,
+            Ok(_) => panic!("a returned callback cannot retain borrows of its factory's local slots"),
+        };
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"),
+            "O{level}: {:#?}", error.diagnostics());
+    }
+}
+
+#[test]
 fn shared_named_callable_is_invoked_through_its_original_borrowed_receiver() {
     run(r#"
         fn answer() -> i64 { 21 }

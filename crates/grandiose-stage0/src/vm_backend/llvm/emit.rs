@@ -81,31 +81,16 @@ impl<'a> Plan<'a> {
             let mut frame_bytes = 0u64;
             let mut path_count = 0usize;
             for (register, ty) in function.registers.iter().enumerate() {
-                let layout = if matches!(ty, VmType::Callable { .. }) {
-                    if register < function.parameters as usize {
-                        return Err(unsupported(
-                            0,
-                            "native callable parameter/control ABI is not implemented",
-                        ));
-                    }
-                    Arc::new(NativeLayout {
-                        ty: ty.clone(),
-                        memory: MemoryLayout::of::<u64>(),
-                        shape: NativeShape::Scalar,
-                    })
-                } else {
-                    layout::concrete_layout(ty, &descriptors).map_err(|_| {
+                if matches!(ty, VmType::Callable { .. }) && register < function.parameters as usize {
+                    return Err(unsupported(0, "native callable parameter/control ABI is not implemented"));
+                }
+                let layout = layout::concrete_layout(ty, &descriptors).map_err(|_| {
                         unsupported(
                             0,
                             &format!("no shared native layout for register {register}: {ty:?}"),
                         )
-                    })?
-                };
-                if !matches!(ty, VmType::Callable { .. }) {
-                    result
-                        .layouts
-                        .insert(layout::type_key(ty), NativeTypeLayout::from_native(&layout));
-                }
+                    })?;
+                result.layouts.insert(layout::type_key(ty), NativeTypeLayout::from_native(&layout));
                 let mut resident_paths = BTreeSet::new();
                 collect_paths(&layout, &mut vec![], &mut resident_paths)?;
                 path_count = path_count
@@ -742,7 +727,7 @@ impl<'a, 'p> Body<'a, 'p> {
                 captures,
                 environment,
             } if captures.is_empty() && environment.is_none() => {
-                let index = self
+                let _index = self
                     .plan
                     .functions
                     .iter()
@@ -750,7 +735,15 @@ impl<'a, 'p> Body<'a, 'p> {
                     .ok_or_else(|| {
                         self.unsupported("native callable target is outside the verified graph")
                     })?;
-                self.line(format!("store i64 {index}, ptr %r{dst}, align 8"));
+                for (word, bytes) in callee.0.as_bytes().chunks_exact(8).enumerate() {
+                    let pointer = self.value(format!("getelementptr i8, ptr %r{dst}, i64 {}", word * 8));
+                    self.line(format!("store i64 {}, ptr {pointer}, align 8", u64::from_ne_bytes(bytes.try_into().unwrap())));
+                }
+                // Zero is not a VM environment token. Until sealed native
+                // callable registration is installed, crossing these bytes
+                // into a VM callable load fails closed at the domain check.
+                let environment = self.value(format!("getelementptr i8, ptr %r{dst}, i64 32"));
+                self.line(format!("store i64 0, ptr {environment}, align 8"));
                 self.mark(*dst, &[], true);
             }
             I::DestroyCallable { dst, value } => {

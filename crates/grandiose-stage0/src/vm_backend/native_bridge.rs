@@ -66,6 +66,8 @@ pub struct VmNativeLayoutField {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmNativeLayoutShape {
     Scalar,
+    /// Callee digest at zero; execution-domain environment identity at 32.
+    Callable,
     Reference,
     /// Immutable byte pointer at offset zero, followed by a usize extent.
     /// Backing remains pinned for the complete execution data domain.
@@ -104,6 +106,7 @@ impl From<&NativeLayout> for VmNativeLayout {
             alignment: layout.memory.alignment(),
             shape: match &layout.shape {
                 NativeShape::Scalar => VmNativeLayoutShape::Scalar,
+                NativeShape::Callable => VmNativeLayoutShape::Callable,
                 NativeShape::Reference { .. } => VmNativeLayoutShape::Reference,
                 NativeShape::StaticData => VmNativeLayoutShape::StaticData,
                 NativeShape::Product(super::native_memory::NativeFields::Repeated { element, count, stride }) =>
@@ -767,7 +770,7 @@ impl VmNativeCall<'_> {
     /// `destination` must name writable storage for the linked parameter's
     /// exact native layout, without overlapping active arguments or loans.
     pub unsafe fn write_argument(
-        &self,
+        &mut self,
         index: usize,
         destination: *mut u8,
     ) -> Result<(), VmArtifactError> {
@@ -780,7 +783,7 @@ impl VmNativeCall<'_> {
         let value = self.registers[self.arguments[index] as usize]
             .as_ref()
             .ok_or_else(|| error("native argument is not initialized"))?;
-        unsafe { layout.write(destination, value.clone()) }
+        unsafe { layout.write(destination, value.clone(), self.budget) }
     }
 
     /// # Safety
@@ -817,15 +820,14 @@ impl VmNativeCall<'_> {
             return Err(error("native argument is not a callback"));
         };
         let plan = plan.clone();
-        let Some(VmValue::Callable {
-            callee, captures, ..
-        }) = self.registers[self.arguments[index] as usize].as_ref()
-        else {
+        let value = self.registers[self.arguments[index] as usize].as_ref()
+            .ok_or_else(|| error("native callback argument is not initialized"))?;
+        let value = match value { VmValue::Resident(home) => home.load(&[], self.budget)?, value => value.clone() };
+        let VmValue::Callable { callee, captures, .. } = value else {
             return Err(error(
                 "native callbacks cannot be labels or resumption tokens",
             ));
         };
-        let (callee, captures) = (*callee, captures.clone());
         self.with_callback_plan(callee, captures, plan, native)
     }
 
@@ -993,7 +995,7 @@ impl CallbackContext<'_, '_> {
                 "owned callback result lacks its native producer storage",
             ));
         }
-        unsafe { self.plan.result.write(result, value)?; }
+        unsafe { self.plan.result.write(result, value, self.call.budget)?; }
         Ok(false)
     }
 }
@@ -1085,6 +1087,8 @@ pub(super) fn execute(
                 }
             }
             (ArgumentPlan::Callback(_), VmValue::Callable { .. }) => {}
+            (ArgumentPlan::Callback(_), VmValue::Resident(home))
+                if matches!(home.ty(), VmType::Callable { .. }) && home.is_fully_initialized(&[]) => {}
             (ArgumentPlan::Callback(_), _) => {
                 return Err(error(
                     "native callbacks cannot be labels or resumption tokens",

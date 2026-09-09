@@ -296,6 +296,68 @@ fn library_request(source: &str, optimization: &str) -> CompilationRequest {
 }
 
 #[test]
+fn callable_raw_storage_preserves_borrowed_capture_identity() {
+    let source = r#"use std::*;
+        pub fn main() -> i64 {
+            let a: i64 = 42;
+            let reference = &a;
+            let task = () -> i64 { *reference };
+            let mut items = Vec::new();
+            Vec::push(&mut items, task);
+            Vec::reserve(&mut items, 64);
+            let mut moved = items;
+            let result = handle Vec::pop(&mut moved) {
+                Result::Ok(task) => task(), Result::Err(_) => 0
+            };
+            handle Vec::finish_empty(moved) {
+                Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items)
+            }
+        }
+    "#;
+    run_callable_storage(source, 42);
+}
+
+fn run_callable_storage(source: &str, expected: i64) {
+    for optimization in ["0", "2"] {
+        let mut request = library_request(source, optimization);
+        let library = request.sources.last_mut().unwrap();
+        let source = format!("{}\npub fn capture_test_abort<T>(value:T) -> ! {{ __g1_abort() }}", std::str::from_utf8(&library.bytes).unwrap());
+        *library = SourceInput::new(library.package.clone(), library.logical_path.clone(), source.as_bytes());
+        let compilation = StageZeroCompiler::new().compile(request).unwrap();
+        assert!(compilation.diagnostics.is_empty(), "{:?}", compilation.diagnostics);
+        let artifact = compilation.artifact.unwrap();
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), expected);
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), expected);
+    }
+}
+
+#[test]
+fn callable_raw_storage_preserves_mutable_capture_between_popped_invocations() {
+    run_callable_storage(r#"use std::*;
+        pub fn main() -> i64 {
+            let mut counter = 40;
+            let task = () -> i64 { counter = counter + 1; counter };
+            let mut items = Vec::new();
+            Vec::push(&mut items, task);
+            Vec::reserve(&mut items, 64);
+            let result = handle Vec::pop(&mut items) {
+                Result::Ok(task) => {
+                    let mut stored = move task;
+                    let first = (&mut stored)();
+                    let second = stored();
+                    first + second
+                },
+                Result::Err(_) => 0
+            };
+            handle Vec::finish_empty(items) {
+                Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items)
+            }
+        }
+    "#, 83);
+}
+
+#[test]
 fn library_array_storage_and_conversion_preserve_owners() {
     let source = r#"use std::*;
         pub fn main() -> i64 {
@@ -636,7 +698,6 @@ fn logical_capture_probe_live_residents_and_expired_owners_validate() {
 }
 
 #[test]
-#[ignore = "native raw storage does not yet support Callable layout; ownership and decode are covered above"]
 fn native_callable_owner_storage_executes() {
     let source = "use std::*; pub fn main() -> i64 { let a:i64=42; let reference = &a; let task = () -> i64 { *reference }; let mut items = Vec::new(); Vec::push(&mut items,task); let result = handle Vec::pop(&mut items) { Result::Ok(task) => task(), Result::Err(_) => 0 }; handle Vec::finish_empty(items) { Result::Ok(_) => result, Result::Err(items) => capture_test_abort(items) } }";
     for optimization in ["0", "2"] {

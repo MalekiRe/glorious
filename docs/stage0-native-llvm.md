@@ -95,6 +95,27 @@ compiler, linker, and native runtime libraries must be trusted. Merely naming an
 arbitrary executable `clang` does not authenticate it. Source unsafe contracts
 still require the unsafe runner; native execution does not sandbox unsafe code.
 
+### Raw callable residents
+
+Shared native storage represents a source callable with a 32-byte verified
+callee digest followed by one aligned 64-bit execution-domain environment token
+(40 bytes, alignment 8). The payload contains neither Rust object bytes nor a
+naked function pointer. An address-specific resident lease retains the original
+capture environment. Raw moves, byte relocation, and allocation growth preserve
+that identity; source Copy instead duplicates owned captures. Overwrite, typed
+move-out, storage retirement, and allocation release remove the corresponding
+leases without inventing source Drop policy. Weak identity entries do not retain
+popped environments, and the registry/home graph has no retention cycle.
+
+Reads reject unknown, cross-execution, unleased, retired, wrong-target, and
+wrong-signature tokens. Copying arbitrary token bytes without a supported raw
+move/copy does not create a resident lease. Source-level tests run shared and
+mutable captured callables through Vec storage, reserve, move, pop, and invocation
+at O0/O2, both fresh and decoded. Native format generation 8 also gives generated
+capture-free local placeholders this full layout; their zero environment token
+is not VM authority. Generated captured/indirect callable execution remains a
+separate, explicitly rejected boundary at this checkpoint.
+
 ## Generated LLVM and bytecode sharing
 
 `compile_llvm_partitioned(request, target, use_vm)` selects the bytecode bodies

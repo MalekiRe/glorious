@@ -8,12 +8,26 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/integration-callable-residents-v1.log`, cache 92). This includes a source
+ignored (`target/integration-callable-raw-storage-source-v1.log`, cache 94). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 94 enables callable raw storage with execution-domain environment leases;
+the previously ignored execution test and all 33 fixed-array/container tests now
+pass. The broader runtime batch has 756 passes and the existing tail-transfer
+callable ABI failure, with no ignores. A captured-reference receiver regression
+also passes fresh/decoded O0/O2 execution after native carrier normalization.
+The original returned-closure service fixture borrowed dead factory-local slots:
+the lawful positive now explicitly owns its captures, and the original source
+is preserved as an active failing escape-checking regression. Captured
+native/mixed invocation, higher-order capture/store propagation, guarded
+control/resource integration and physical cost conformance remain open. See
+`implementation-progress.md` for evidence and the checkpoint's limits.
+
+The following cache 92 and earlier checkpoints are historical.
 
 Cache 92 retains callable capture footprints in logical owners and records
 captured owner stores. The combined run passes 1,860 tests, with the same five

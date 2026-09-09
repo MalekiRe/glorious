@@ -20,7 +20,7 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 7;
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 8;
 pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:mixed-tail-v5";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.

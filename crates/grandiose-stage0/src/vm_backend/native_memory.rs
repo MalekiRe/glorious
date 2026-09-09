@@ -18,6 +18,7 @@ pub(super) struct NativeMemory {
     pub(super) home_bytes: Rc<Cell<usize>>,
     pub(super) measurements: Option<Rc<NativeMemoryMeasurements>>,
     pub(super) homes: super::native_storage::HomeRegistry,
+    pub(super) callables: Rc<super::native_callable::CallableResidents>,
     program_descriptors: Option<Arc<[VmNominalCopyDescriptor]>>,
     storage_plans: BTreeMap<super::DefKey, Arc<super::native_storage::NativeFramePlan>>,
     native_return_plans: BTreeMap<super::DefKey, Arc<super::native_storage::NativeFramePlan>>,
@@ -141,6 +142,7 @@ impl NativeMemory {
             return Err(error("raw release layout does not match allocation"));
         }
         self.live_bytes -= layout.size();
+        self.callables.clear(pointer.addr(), layout.size());
         self.allocations.remove(&pointer.addr());
         Ok(())
     }
@@ -183,6 +185,7 @@ impl NativeMemory {
         }
         match result {
             Ok(()) => {
+                self.callables.relocate(pointer.addr(), old.size(), output.addr(), size);
                 self.live_bytes = self.live_bytes - old.size() + size;
                 Ok(output)
             }
@@ -287,6 +290,9 @@ impl<'a> IntoIterator for &'a NativeFields {
 #[derive(Clone, Debug)]
 pub(super) enum NativeShape {
     Scalar,
+    /// Verified callee key (32 bytes) and execution-domain environment token
+    /// (u64). Ownership leases are metadata, never Rust objects in the payload.
+    Callable,
     /// Two words: a genuine immutable byte pointer, then its usize extent.
     /// The static tag and element alignment are frozen in `NativeLayout::ty`.
     StaticData,
@@ -313,6 +319,15 @@ pub(super) struct NativeLayout {
 }
 
 impl NativeLayout {
+    pub(super) fn owns_callable(&self) -> bool {
+        match &self.shape {
+            NativeShape::Callable => true,
+            NativeShape::Product(fields) => fields.distinct().any(|field| field.layout.owns_callable()),
+            NativeShape::Enum { variants, .. } => variants.iter().flat_map(NativeFields::distinct).any(|field| field.layout.owns_callable()),
+            _ => false,
+        }
+    }
+
     /// A native reference needs a representable referent, recursively through
     /// aggregate fields. Keep linking and ordinary storage planning in agreement.
     pub(super) fn supports_resident(&self, descriptors: &Arc<[VmNominalCopyDescriptor]>) -> bool {
@@ -322,7 +337,7 @@ impl NativeLayout {
             if !seen.insert(key) { return true; }
             if depth >= 96 { return false; }
             match &layout.shape {
-                NativeShape::Scalar | NativeShape::StaticData => true,
+                NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable => true,
                 NativeShape::Reference { referent, .. } => native_layout(referent, descriptors, &mut vec![])
                     .is_ok_and(|layout| visit(&layout, descriptors, seen, depth + 1)),
                 NativeShape::Product(fields) => fields.distinct().all(|field| visit(&field.layout, descriptors, seen, depth + 1)),
@@ -458,6 +473,7 @@ impl NativeReference {
             return Err(error("native reference resident was moved out"));
         }
         let value = field.read(&[], budget)?;
+        budget.native_memory.callables.clear(field.pointer.addr(), field.layout.memory.size());
         let mut holes = self.holes.borrow_mut();
         holes.retain(|hole| !hole.starts_with(&field.path));
         holes.insert(field.path);
@@ -487,7 +503,7 @@ impl NativeReference {
                 (NativeShape::Product(fields), VmValue::Tuple(values) | VmValue::Array { values } | VmValue::Record { fields: values, .. }) => (0, fields, values, None),
                 (NativeShape::Enum { payload_offset, variants }, VmValue::Enum { variant, fields: values, .. }) =>
                     (*payload_offset, variants.get(*variant as usize).ok_or_else(|| error("invalid native enum discriminant"))?, values, Some(*variant)),
-                _ => return unsafe { layout.write(pointer, value) },
+                _ => return unsafe { layout.write(pointer, value, budget) },
             };
             if fields.len() != values.len() { return Err(error("native product field count mismatch")); }
             for (index, (field, value)) in fields.iter().zip(values.iter()).enumerate() {
@@ -499,6 +515,8 @@ impl NativeReference {
             Ok(())
         }
         let mut replacement_holes = BTreeSet::new();
+        let value = match value { VmValue::Resident(home) => home.load(&[], budget)?, value => value };
+        budget.native_memory.callables.clear(field.pointer.addr(), field.layout.memory.size());
         // SAFETY: only checked unique references reach this operation; source
         // drops/moves the old resident before replacing it.
         write_partial(&field.layout, field.pointer, value, &mut field.path.clone(), &mut replacement_holes, budget)?;
@@ -550,6 +568,10 @@ pub(super) fn native_layout(
         }
         VmType::U128 | VmType::I128 => MemoryLayout::of::<u128>(),
         VmType::RawPointer { .. } => MemoryLayout::of::<*mut u8>(),
+        VmType::Callable { .. } => {
+            return Ok(NativeLayout { ty: ty.clone(),
+                memory: MemoryLayout::of::<[u64; 5]>(), shape: NativeShape::Callable });
+        }
         VmType::StaticData { element, tag, alignment: 1 }
             if element.as_ref() == &VmType::U8
                 && matches!(*tag, crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG) => {
@@ -629,9 +651,8 @@ pub(super) fn native_layout(
                 shape: shape_and_memory.1,
             });
         }
-        // Callable/legacy collection values need the full stable
-        // address/call ABI. Never serialize their Rust/VM handles into memory
-        // and misrepresent that as a host-compatible Glorious payload.
+        // Legacy collection and control-capability values do not have a raw
+        // resident ABI. Never serialize their interpreter representations.
         _ => return Err(VmArtifactError::UnsupportedNativeLayout { ty: ty.clone() }),
     };
     Ok(NativeLayout {
@@ -657,6 +678,9 @@ impl NativeLayout {
             };
         }
         match &self.shape {
+            NativeShape::Callable => unsafe {
+                budget.native_memory.callables.read(source, &self.ty)
+            },
             NativeShape::StaticData => {
                 let pointer = unsafe { source.cast::<*const u8>().read() };
                 let length = unsafe { source.add(std::mem::size_of::<usize>()).cast::<usize>().read() };
@@ -765,12 +789,19 @@ impl NativeLayout {
     /// `destination` has the layout's alignment, extent, and writable provenance;
     /// its previous resident obligations have already been discharged. No
     /// overlapping live loan may be invalidated by this typed move.
-    pub(super) unsafe fn write(&self, destination: *mut u8, value: VmValue) -> Result<(), VmArtifactError> {
+    pub(super) unsafe fn write(&self, destination: *mut u8, value: VmValue, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
         if !value_matches_vm_type(&value, &self.ty) {
             return Err(error("native write value does not match concrete type"));
         }
+        if !matches!(&value, VmValue::Resident(_)) {
+            budget.native_memory.callables.clear(destination.addr(), self.memory.size());
+        }
         match (&self.shape, value) {
             (_, VmValue::Resident(home)) => unsafe { home.write_bytes(destination)?; },
+            (NativeShape::Callable, value) => {
+                budget.reserve_value("native callable resident lease", 1)?;
+                unsafe { budget.native_memory.callables.write(destination, value)?; }
+            }
             (NativeShape::StaticData, VmValue::StaticData { bytes, offset, length, .. }) => {
                 let end = offset.checked_add(length).ok_or_else(|| error("static byte window overflow"))?;
                 if bytes.get(offset..end).is_none() { return Err(error("static byte window exceeds its backing storage")); }
@@ -815,7 +846,7 @@ impl NativeLayout {
                     unsafe {
                         field
                             .layout
-                            .write(destination.add(field.offset), value.clone())?;
+                            .write(destination.add(field.offset), value.clone(), budget)?;
                     }
                 }
             }
@@ -841,6 +872,7 @@ impl NativeLayout {
                         field.layout.write(
                             destination.add(payload_offset + field.offset),
                             value.clone(),
+                            budget,
                         )?;
                     }
                 }
@@ -1048,7 +1080,9 @@ pub(super) fn execute_memory_intrinsic(
             let (layout, source) = (layout(0)?, ptr_arg(0)?);
             // SAFETY: unsafe source promises an initialized, valid resident and
             // transfers its ownership obligations according to the raw-read contract.
-            unsafe { layout.read(source, budget)? }
+            let value = unsafe { layout.read(source, budget)? };
+            budget.native_memory.callables.clear(source.addr(), layout.memory.size());
+            value
         }
         Write => {
             let (layout, destination) = (layout(0)?, ptr_arg(0)?);
@@ -1060,7 +1094,7 @@ pub(super) fn execute_memory_intrinsic(
             // SAFETY: source promises writable storage and discharges its previous resident.
             let consumed_home = match &value { VmValue::Resident(home) => Some(home.clone()), _ => None };
             unsafe {
-                layout.write(destination, value)?;
+                layout.write(destination, value, budget)?;
             }
             if let Some(home) = consumed_home { home.clear(&[]); }
             VmValue::Unit
@@ -1073,6 +1107,7 @@ pub(super) fn execute_memory_intrinsic(
                 .size();
             let (source, destination) = (ptr_arg(0)?, ptr_arg(1)?);
             if bytes != 0 {
+                budget.native_memory.callables.copy(source.addr(), destination.addr(), bytes);
                 // SAFETY: source owns the source/destination extent, provenance,
                 // and overlap obligations. Bytes may include uninitialized padding.
                 unsafe {
@@ -1113,7 +1148,7 @@ mod tests {
         let pointer = bytes.as_ptr();
         let value = VmValue::StaticData { tag: crate::STATIC_RAW_U8_DATA_TAG, alignment: 1, bytes, offset: 1, length: 1 };
         let mut slot = Slot { pointer: ptr::null(), length: 0 };
-        unsafe { layout.write((&mut slot as *mut Slot).cast(), value) }.unwrap();
+        unsafe { layout.write((&mut slot as *mut Slot).cast(), value, &mut budget) }.unwrap();
         assert_eq!(slot.pointer, unsafe { pointer.add(1) });
         assert_eq!(slot.length, 1);
         assert_eq!(unsafe { slot.pointer.read() }, 22);
@@ -1330,7 +1365,7 @@ mod tests {
         let reference = VmValue::Reference { target: super::super::ReferenceTarget::Native(destination.clone()),
             fields: Arc::from([]), unique: true, referent: layout.ty.clone() };
         // A partially moved resident cannot be exported as a complete native reference.
-        assert!(unsafe { reference_layout.write(pointer_slot.as_mut_ptr().cast(), reference) }.is_err());
+        assert!(unsafe { reference_layout.write(pointer_slot.as_mut_ptr().cast(), reference, &mut budget) }.is_err());
         destination.write(&[0, 1], VmValue::I64(42), &mut budget).unwrap();
         assert!(destination.is_fully_initialized());
         native.write(&[], destination.take(&[], &mut budget).unwrap(), &mut budget).unwrap();
@@ -1357,7 +1392,7 @@ mod tests {
         // SAFETY: one correctly aligned writable reference slot; its referent
         // is the live local above, exclusively accessed through this pointer.
         unsafe {
-            layout.write(resident.as_mut_ptr().cast(), reference).unwrap();
+            layout.write(resident.as_mut_ptr().cast(), reference, &mut budget()).unwrap();
             let stored = resident.assume_init();
             assert_eq!(stored, pointer);
             *stored += 2;

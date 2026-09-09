@@ -5,6 +5,47 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 94: raw callable residents and stored receivers
+
+Native raw storage now carries callable definition keys and execution-domain
+environment tokens, with address-specific leases retaining the original capture
+environment. Raw moves, relocation and allocation growth preserve identity;
+source Copy duplicates owned captures. Reads reject forged, cross-domain,
+retired and wrong-signature residents, including attempts to upgrade receiver
+permissions. Native format generation 8 uses the complete 40-byte layout.
+Generated captured/indirect callable execution remains an explicitly rejected
+boundary, not a completed native execution feature.
+
+The previously ignored raw callable execution test is active and passing.
+All 33 fixed-array/container tests pass in the integration batch, which reports
+756 passes and the existing tail-transfer callable ABI failure, with no ignores
+(`target/integration-callable-raw-storage-v1.log`). The captured-reference
+receiver fix has a separate before-failure/after-pass regression with three legal
+sources, executed fresh and decoded at O0/O2
+(`target/callable-raw-storage-nested-receiver-v3.log` and `-v4.log`).
+
+Raw storage also exposed an invalid positive service fixture: a returned closure
+borrowed its factory's local callback, reference-handle and seed slots. The
+positive now explicitly owns those captures, while preserving the shared caller
+borrow and the facade/cache assertions. Its original source is retained as an
+active negative regression,
+`returned_callback_cannot_borrow_its_factory_local_capture_slots`, which still
+fails because the compiler accepts it. This is an unresolved escape-checking
+hole; the runtime does not extend dead local storage to mask it.
+
+The final checkpoint recheck passes all 290 unit, 33 fixed-array/container,
+22 request/revision and 891 service tests, plus 22 borrowed-callable tests.
+The sole failure in this 1,258-pass run is the active factory-local escape
+negative above (`target/callable-storage-checkpoint-tests-v1.log`). The all-target
+compile check passes (`target/callable-storage-checkpoint-check-v1.log`).
+
+Full higher-order capture/store propagation, unknown-callback guarded ownership,
+captured native/mixed invocation and allocation-cost conformance remain open.
+In particular, callable registry scans still need scaling and work-accounting
+validation. The source-library matrix remains 15 passing/16 failing, and its
+176-test API suite passes (`target/integration-callable-raw-storage-source-v1.log`).
+This checkpoint is not full compiler or standard-library conformance.
+
 ## Cache 93: local label rejoins and protected operands
 
 A bottom-typed label body no longer proves that the enclosing label cannot

@@ -822,6 +822,7 @@ pub(super) struct NativeHome {
     live_bytes: Rc<Cell<usize>>,
     measurements: Option<Rc<NativeMemoryMeasurements>>,
     registry: HomeRegistry,
+    callables: std::rc::Weak<super::native_callable::CallableResidents>,
 }
 
 impl Drop for NativeHome {
@@ -869,6 +870,7 @@ impl NativeHome {
             live_bytes,
             measurements: budget.native_memory.measurements.clone(),
             registry: budget.native_memory.homes.clone(),
+            callables: Rc::downgrade(&budget.native_memory.callables),
         });
         if bytes != 0 {
             home.registry
@@ -918,6 +920,7 @@ impl NativeHome {
             live_bytes: budget.native_memory.home_bytes.clone(),
             measurements: budget.native_memory.measurements.clone(),
             registry: budget.native_memory.homes.clone(),
+            callables: Rc::downgrade(&budget.native_memory.callables),
         });
         unsafe {
             home.initialize_native_with_holes(budget, holes)?;
@@ -970,7 +973,7 @@ impl NativeHome {
                     home.state.borrow_mut().variants.insert(path.clone(), tag);
                     (*payload_offset, fields)
                 }
-                NativeShape::Scalar | NativeShape::StaticData | NativeShape::Reference { .. } => {
+                NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable | NativeShape::Reference { .. } => {
                     let value = unsafe { layout.read(pointer, budget)? };
                     if let VmValue::Reference {
                         target,
@@ -1019,7 +1022,9 @@ impl NativeHome {
         if !self.live.get() {
             return Err(error("native storage lifetime has ended"));
         }
-        self.clear(&[]);
+        // Adoption validates existing resident bytes; it must not revoke
+        // callable leases supplied by the producer before reading them.
+        *self.state.borrow_mut() = Initialization::default();
         if let Err(failure) = visit(self, &self.layout, self.pointer(), &mut vec![], budget, holes) {
             self.clear(&[]);
             return Err(failure);
@@ -1080,6 +1085,9 @@ impl NativeHome {
         unsafe {
             std::ptr::copy(self.pointer(), destination, self.layout.memory.size());
         }
+        if let Some(callables) = self.callables.upgrade() {
+            callables.copy(self.pointer().addr(), destination.addr(), self.layout.memory.size());
+        }
         if let Some(measurements) = &self.measurements {
             measurements.copied(AllocationKind::Home, self.layout.memory.size());
         }
@@ -1107,7 +1115,7 @@ impl NativeHome {
         ) -> Result<bool, VmArtifactError> {
             budget.tick()?;
             match &layout.shape {
-                NativeShape::Reference { .. } => Ok(true),
+                NativeShape::Reference { .. } | NativeShape::Callable => Ok(true),
                 NativeShape::Product(fields) => {
                     for field in fields.distinct() {
                         if inspect(&field.layout, budget)? {
@@ -1189,6 +1197,13 @@ impl NativeHome {
     }
 
     pub(super) fn clear(&self, path: &[u32]) {
+        if let Some(callables) = self.callables.upgrade() {
+            if path.is_empty() {
+                callables.clear(self.pointer.addr(), self.layout.memory.size());
+            } else if let Ok((pointer, layout)) = self.project(path) {
+                callables.clear(pointer.addr(), layout.memory.size());
+            }
+        }
         let mut state = self.state.borrow_mut();
         if path.is_empty() {
             *state = Initialization::default();
@@ -1356,7 +1371,7 @@ impl NativeHome {
         }
         if matches!(
             layout.shape,
-            NativeShape::Scalar | NativeShape::StaticData | NativeShape::Reference { .. }
+            NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable | NativeShape::Reference { .. }
         ) {
             return self.load_leaf(&layout, pointer, path, budget);
         }
@@ -1472,6 +1487,7 @@ impl NativeHome {
                     unsafe {
                         std::ptr::copy(source.pointer(), pointer, layout.memory.size());
                     }
+                    budget.native_memory.callables.copy(source.pointer().addr(), pointer.addr(), layout.memory.size());
                     if let Some(measurements) = &self.measurements {
                         measurements.copied(AllocationKind::Home, layout.memory.size());
                     }
@@ -1486,6 +1502,7 @@ impl NativeHome {
             state.references.retain(|field, _| !field.starts_with(path));
             state.variants.retain(|field, _| !field.starts_with(path));
         }
+        budget.native_memory.callables.clear(pointer.addr(), layout.memory.size());
         self.store_at(&layout, pointer, &mut path.to_vec(), value, budget)?;
         self.state.borrow_mut().root = true;
         Ok(())
@@ -1500,6 +1517,7 @@ impl NativeHome {
         budget: &mut ExecutionBudget,
     ) -> Result<(), VmArtifactError> {
         if matches!(value, VmValue::Uninitialized(_)) {
+            budget.native_memory.callables.clear(pointer.addr(), layout.memory.size());
             self.state.borrow_mut().holes.insert(path.clone());
             return Ok(());
         }
@@ -1512,6 +1530,7 @@ impl NativeHome {
             unsafe {
                 std::ptr::copy(source_pointer, pointer, layout.memory.size());
             }
+            budget.native_memory.callables.copy(source_pointer.addr(), pointer.addr(), layout.memory.size());
             if let Some(measurements) = &self.measurements {
                 measurements.copied(AllocationKind::Home, layout.memory.size());
             }
@@ -1579,7 +1598,7 @@ impl NativeHome {
                     }
                 } else {
                     unsafe {
-                        layout.write(pointer, value.clone())?;
+                        layout.write(pointer, value.clone(), budget)?;
                     }
                 }
                 if let VmValue::Reference {

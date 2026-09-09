@@ -12206,11 +12206,11 @@ fn service_rolls_back_private_reference_closure_facade_revisions() {
 #[test]
 fn service_preserves_hrtb_returned_closure_environments_through_nested_facade_revisions() {
     // The nested public facades expose one constructor whose returned closure
-    // captures an HRTB callback, a shared caller borrow, and a unique local
-    // capture.  Its eventual indirect call must retain the exact environment
+    // owns an HRTB callback, a shared caller borrow, and a mutable seed.
+    // Its eventual indirect call must retain the exact environment
     // capabilities from source through Core, MIR, VM emission, and decode.
     let root = "use top_facade::{make, Callback}; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { let source = 41; let closure = make(identity, &source, 0); closure() }";
-    let provider = "pub type Callback = for<'a> (&'a i64) -> &'a i64; pub fn make<'a>(callback: Callback, shared: &'a i64, seed: i64) -> () -> i64 { let mut seed = seed; () -> i64 { seed = *callback(shared) + 1; seed } } pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }";
+    let provider = "pub type Callback = for<'a> (&'a i64) -> &'a i64; pub fn make<'a>(callback: Callback, shared: &'a i64, seed: i64) -> () -> i64 { let mut seed = seed; move (callback, shared, seed) { seed = *callback(shared) + 1; seed } } pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }";
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
         for (package, source) in [

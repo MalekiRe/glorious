@@ -658,7 +658,7 @@ impl super::super::RuntimeTailBoundary for GeneratedTailBoundary<'_> {
                 // rejects any unmaterialized frame-relative reference rather
                 // than serializing a register coordinate as native authority.
                 unsafe {
-                    layout.write(data, value.clone())?;
+                    layout.write(data, value.clone(), budget)?;
                 }
                 for offset in 0..paths[index].len() {
                     budget.tick()?;

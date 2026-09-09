@@ -378,7 +378,7 @@ fn native_float_conversion_matrix_matches_vm_bits_and_checked_errors() {
                         )
                         .unwrap();
                         let mut bytes = Slot([0; 16]);
-                        unsafe { layout.write(bytes.0.as_mut_ptr(), expected.clone()) }.unwrap();
+                        unsafe { layout.write(bytes.0.as_mut_ptr(), expected.clone(), &mut budget()) }.unwrap();
                         assert_eq!(
                             &actual.0[..layout.memory.size()],
                             &bytes.0[..layout.memory.size()],

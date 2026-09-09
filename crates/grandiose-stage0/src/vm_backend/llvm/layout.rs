@@ -58,6 +58,7 @@ pub struct NativeTypeLayout {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeTypeShape {
     Scalar,
+    Callable,
     Reference,
     StaticData,
     Product(Vec<(u64, NativeTypeLayout)>),
@@ -87,6 +88,7 @@ impl NativeTypeLayout {
             alignment: layout.memory.alignment() as u32,
             shape: match &layout.shape {
                 NativeShape::Scalar => NativeTypeShape::Scalar,
+                NativeShape::Callable => NativeTypeShape::Callable,
                 NativeShape::Reference { .. } => NativeTypeShape::Reference,
                 NativeShape::StaticData => NativeTypeShape::StaticData,
                 NativeShape::Product(NativeFields::Repeated {
@@ -124,6 +126,7 @@ impl NativeTypeLayout {
         };
         match &self.shape {
             NativeTypeShape::Scalar => bytes.push(0),
+            NativeTypeShape::Callable => bytes.push(6),
             NativeTypeShape::Reference => bytes.push(1),
             NativeTypeShape::StaticData => bytes.push(5),
             NativeTypeShape::Product(items) => {
@@ -197,7 +200,7 @@ fn validate_selected_layout(layout: &NativeLayout) -> Result<(), LlvmError> {
         ));
     }
     match &layout.shape {
-        NativeShape::Scalar | NativeShape::StaticData | NativeShape::Reference { .. } => {}
+        NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable | NativeShape::Reference { .. } => {}
         NativeShape::Product(fields) => {
             for field in fields.distinct() {
                 validate_selected_layout(&field.layout)?;

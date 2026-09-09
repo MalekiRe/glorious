@@ -44,6 +44,7 @@ use codec::{
 };
 pub(crate) use codec::vm_nominal_copy_descriptor_key;
 mod native_memory;
+mod native_callable;
 mod native_profile;
 mod native_bridge;
 mod native_storage;
@@ -9994,6 +9995,7 @@ enum VmValue {
 struct RuntimeCaptureEnvironment {
     values: RefCell<Vec<VmValue>>,
     owned: Vec<bool>,
+    live: std::cell::Cell<bool>,
 }
 
 impl RuntimeCaptureEnvironment {
@@ -10004,10 +10006,13 @@ impl RuntimeCaptureEnvironment {
 
     fn with_ownership(values: Vec<VmValue>, owned: Vec<bool>) -> Arc<Self> {
         debug_assert_eq!(values.len(), owned.len());
-        Arc::new(Self { values: RefCell::new(values), owned })
+        Arc::new(Self { values: RefCell::new(values), owned, live: std::cell::Cell::new(true) })
     }
 
     fn duplicate(&self, budget: &mut ExecutionBudget) -> Result<Arc<Self>, VmArtifactError> {
+        if !self.live.get() {
+            return Err(VmArtifactError::NativeMemory { message: "cannot copy a destroyed callable environment" });
+        }
         let captured = self.values.borrow();
         budget.reserve_value("copied callable captures", captured.len())?;
         budget.reserve_allocation(self.owned.len())?;
@@ -10044,7 +10049,11 @@ fn copy_owned_value(value: &VmValue, budget: &mut ExecutionBudget) -> Result<VmV
         },
         VmValue::Resident(home) => {
             let copied = native_storage::NativeHome::new(home.layout.clone(), budget)?;
-            copied.store(&[], value, budget)?;
+            if home.layout.owns_callable() {
+                let loaded = home.load(&[], budget)?;
+                let value = copy_owned_value(&loaded, budget)?;
+                copied.store(&[], &value, budget)?;
+            } else { copied.store(&[], value, budget)?; }
             VmValue::Resident(copied)
         }
         VmValue::Tuple(values) => VmValue::Tuple(fields(values, budget)?),
@@ -10230,7 +10239,11 @@ impl RuntimeRegisters {
 
     fn copy_into(&mut self, dst: u32, src: u32, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
         let native = self.native_plan.as_ref().is_some_and(|plan| plan.layouts[dst as usize].is_some());
-        self.values[dst as usize] = Some(if native {
+        let environments = self.native_plan.as_ref().is_some_and(|plan| plan.copy_environments[dst as usize]);
+        self.values[dst as usize] = Some(if environments {
+            let value = self.copy_value(src, budget)?;
+            copy_owned_value(&value, budget)?
+        } else if native {
             self.values[src as usize].as_ref().ok_or(VmArtifactError::UseAfterMove { register: src })?.clone()
         } else {
             let value = self.copy_value(src, budget)?;
@@ -17514,6 +17527,9 @@ fn execute_program_in_float_profile(
             VmInstruction::DestroyCallable { dst, value } => {
                 let callable = registers.values[*value as usize].take()
                     .ok_or(VmArtifactError::UseAfterMove { register: *value })?;
+                let callable = match callable {
+                    VmValue::Resident(home) => home.take(&[], budget)?, value => value,
+                };
                 let (callee, captures) = match callable {
                     VmValue::Callable { callee, captures, .. } => (callee, captures),
                     // Labels and resumptions expose a callable source ABI,
@@ -17529,7 +17545,9 @@ fn execute_program_in_float_profile(
                 };
                 let destructor = program.callable_environments.get(&callee)
                     .and_then(|environment| environment.destructor);
+                captures.live.set(false);
                 let Some(callee) = destructor else {
+                    captures.take();
                     registers[*dst as usize] = Some(VmValue::Unit);
                     pc += 1;
                     continue;
@@ -17622,9 +17640,19 @@ fn execute_program_in_float_profile(
                 // This is a receiver loan, not a source-level Copy. Loading
                 // it must preserve the exact Arc-backed capture environment
                 // so unique invocations observe prior capture mutations.
+                // A captured reference can itself occupy a native home.
+                // Resolve that carrier before following its receiver loan.
+                let callee_value = match callee_value {
+                    VmValue::Resident(home) => home.load(&[], budget)?,
+                    value => value,
+                };
                 let callee_value = match callee_value {
                     VmValue::Reference { target, fields, .. } => {
                         let value = load_reference_target(&registers, &callers, &target, &fields, budget)?;
+                        let value = match value {
+                            VmValue::Resident(home) => home.load(&[], budget)?,
+                            value => value,
+                        };
                         if !matches!(value, VmValue::Callable { .. }) {
                             return Err(VmArtifactError::NotCallable { register: *callee });
                         }
