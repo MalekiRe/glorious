@@ -15,6 +15,13 @@ pub(super) struct MinimumDisposition {
     opened: BTreeMap<Projection, Option<u32>>,
 }
 
+impl MinimumDisposition {
+    pub(super) fn retain_owners(&mut self, owners: &BTreeSet<String>) {
+        self.transferred.retain(|place| owners.contains(&place.root));
+        self.opened.retain(|place, _| owners.contains(&place.root));
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct MinimumBinding {
     ty: Type,

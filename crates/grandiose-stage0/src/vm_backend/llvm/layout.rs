@@ -36,6 +36,7 @@ impl LlvmTarget {
             || !cfg!(all(
                 target_arch = "x86_64",
                 target_os = "linux",
+                target_env = "gnu",
                 target_endian = "little",
                 target_pointer_width = "64"
             ))

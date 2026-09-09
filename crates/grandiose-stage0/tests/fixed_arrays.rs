@@ -392,6 +392,199 @@ fn library_fixed_array_reference_slots_reborrow_native_residents_without_copying
 }
 
 #[test]
+fn library_fixed_array_reference_elements_preserve_provenance_through_vec_roundtrip() {
+    let source = "use std::*; pub fn main() -> i64 { let a = 20; let b = 22; let items: [&i64;2] = [&a,&b]; let items = array_into_vec(items); let items: [&i64;2] = handle array_try_from_vec(items) { Result::Ok(items) => items, Result::Err(_) => [&a,&b] }; let [a,b] = items; *a + *b }";
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(library_request(source, optimization))
+            .unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the library moves initialized reference residents while
+        // their caller storage remains alive throughout the roundtrip.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
+fn library_fixed_array_reference_vec_does_not_erase_the_source_loan() {
+    let source = "use std::*; pub fn main() -> i64 { let mut a: i64 = 41; let items = { let original: [&i64;1] = [&a]; array_into_vec(original) }; a = 42; handle Vec::get(&items,0) { Result::Ok(value) => *(*value), Result::Err(_) => 0 } }";
+    for optimization in ["0", "2"] {
+        let outcome = StageZeroCompiler::new().compile(library_request(source, optimization));
+        assert!(outcome.is_err(), "native owner erased its source loan");
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { unreachable!() };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5007"), "{diagnostics:?}");
+    }
+}
+
+#[test]
+fn owning_container_later_insertions_preserve_logical_reference_regions() {
+    for source in [
+        "use std::*; pub fn main() -> i64 { let a:i64=20; let b:i64=22; let mut items:Vec<&i64> = Vec::new(); { Vec::push(&mut items,&a); Vec::push(&mut items,&b); }; *(*Vec::get_unchecked(&items,0)) + *(*Vec::get_unchecked(&items,1)) }",
+        "use std::*; fn insert<'a>(items:&mut Vec<&'a i64>, item:&'a i64) { Vec::push(items,item); } pub fn main() -> i64 { let a:i64=42; let mut items:Vec<&i64> = Vec::new(); insert(&mut items,&a); *(*Vec::get_unchecked(&items,0)) }",
+        "use std::*; pub fn main() -> i64 { let mut a:i64=42; let mut items:Vec<&i64> = Vec::new(); handle true { true => Vec::push(&mut items,&a), false => { a=41; } }; *(*Vec::get_unchecked(&items,0)) }",
+        "use std::*; pub fn main() -> i64 { let mut a:i64=41; { let mut items:Vec<&mut i64> = Vec::new(); Vec::push(&mut items,&mut a); handle Vec::pop(&mut items) { Result::Ok(value) => { *value = *value + 1; }, Result::Err(_) => () }; }; a }",
+        "use std::*; pub fn main() -> i64 { let a:i64=20; let b:i64=22; let mut items:Vec<(&i64,&i64)> = Vec::new(); Vec::push(&mut items,(&a,&b)); let pair = Vec::get_unchecked(&items,0); *pair.0 + *pair.1 }",
+        "use std::*; pub fn main() -> i64 { let a:i64=42; let mut inner:Vec<&i64> = Vec::new(); Vec::push(&mut inner,&a); let mut outer:Vec<Vec<&i64>> = Vec::new(); Vec::push(&mut outer,inner); let inner = Vec::get_unchecked(&outer,0); *(*Vec::get_unchecked(inner,0)) }",
+    ] {
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(library_request(source, optimization))
+                .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+            let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+            // SAFETY: every source referent remains alive through owner use.
+            assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+            assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+    for source in [
+        "use std::*; pub fn main() -> i64 { let mut a:i64=41; let mut items:Vec<&i64> = Vec::new(); { Vec::push(&mut items,&a); }; a=42; *(*Vec::get_unchecked(&items,0)) }",
+        "use std::*; pub fn main() -> i64 { let mut items:Vec<&i64> = Vec::new(); { let a:i64=42; Vec::push(&mut items,&a); }; *(*Vec::get_unchecked(&items,0)) }",
+        "use std::*; fn bad<'a>(items:&mut Vec<&'a i64>) { let a:i64=42; Vec::push(items,&a); } pub fn main() -> i64 { 42 }",
+        "use std::*; pub fn main() -> i64 { let mut a:i64=41; let mut items:Vec<&i64> = Vec::new(); handle true { true => Vec::push(&mut items,&a), false => () }; a=42; *(*Vec::get_unchecked(&items,0)) }",
+        "use std::*; pub fn main() -> i64 { let mut a:i64=41; let mut items:Vec<&mut i64> = Vec::new(); Vec::push(&mut items,&mut a); a=42; handle Vec::pop(&mut items) { Result::Ok(value) => *value, Result::Err(_) => 0 } }",
+        "use std::*; pub fn main() -> i64 { let a:i64=20; let mut b:i64=21; let mut items:Vec<(&i64,&i64)> = Vec::new(); { Vec::push(&mut items,(&a,&b)); }; b=22; let pair = Vec::get_unchecked(&items,0); *pair.0 + *pair.1 }",
+    ] {
+        for optimization in ["0", "2"] {
+            let outcome = StageZeroCompiler::new().compile(library_request(source, optimization));
+            let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("owner lost an inserted reference: {source}"); };
+            assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5007" | "G5013" | "G5017" | "G5022")), "{source}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn generic_owner_conversions_preserve_regions_shared_across_type_arguments() {
+    let declarations = "use std::*; trait Convert<T> { fn convert(value:Self) -> T; } impl<'a> Convert<Vec<&'a i64>> for &'a i64 { fn convert(value:Self) -> Vec<&'a i64> { let mut items:Vec<&'a i64> = Vec::new(); Vec::push(&mut items,value); items } } fn convert<T,U>(value:U) -> T where U:Convert<T> { Convert<T>::convert(value) } ";
+    let source = format!("{declarations} pub fn main() -> i64 {{ let a:i64=42; let items:Vec<&i64> = convert(&a); *(*Vec::get_unchecked(&items,0)) }}");
+    let rejected = format!("{declarations} pub fn main() -> i64 {{ let mut a:i64=41; let items:Vec<&i64> = {{ let value = &a; convert(value) }}; a=42; *(*Vec::get_unchecked(&items,0)) }}");
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(library_request(&source, optimization))
+            .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the shared resident keeps its caller storage alive.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        let outcome = StageZeroCompiler::new().compile(library_request(&rejected, optimization));
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("generic conversion erased a resident region"); };
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5007"), "{diagnostics:?}");
+    }
+}
+
+fn shared_slot_request(source: &str, optimization: &str) -> CompilationRequest {
+    let mut request = library_request(source, optimization);
+    // This ordinary source-defined, Copy-only interior-mutable slot is a
+    // different owner representation from Vec, with no compiler-recognized
+    // spelling. Its allocation intentionally lives until the program ends.
+    let support = r#"
+        pub struct SharedSlot<T> { private pointer:*mut Option<T>, private marker:PhantomData<T> }
+        impl<T> SharedSlot<T> where T:Use<[0,*]> {
+            pub fn new() -> Self {
+                let raw = unsafe { __g1_memory_allocate(size_of<Option<T>>(),align_of<Option<T>>()) };
+                handle unsafe { __g1_memory_is_null(raw) } != 0 { true => __g1_abort(), false => () };
+                let pointer = unsafe { __g1_memory_cast<u8,Option<T>>(raw) };
+                unsafe { __g1_memory_write(pointer,None); };
+                SharedSlot { pointer:pointer, marker:PhantomData {} }
+            }
+            pub fn copy(value:&Self) -> Self { SharedSlot { pointer:value.pointer, marker:PhantomData {} } }
+            pub fn set(value:&Self, item:T) {
+                let previous = unsafe { __g1_memory_read(__g1_memory_as_const(value.pointer)) };
+                discard(previous);
+                unsafe { __g1_memory_write(value.pointer,Some(item)); }
+            }
+            pub fn get(value:&Self) -> Option<T> {
+                let item = unsafe { __g1_memory_read(__g1_memory_as_const(value.pointer)) };
+                unsafe { __g1_memory_write(value.pointer,item); };
+                item
+            }
+        }
+        pub struct AnchoredSlot<'a,T> { private anchor:&'a i64, private pointer:*mut Option<T> }
+        impl<'a,T> AnchoredSlot<'a,T> where T:Use<[0,*]> {
+            pub fn new(anchor:&'a i64) -> Self {
+                let raw = unsafe { __g1_memory_allocate(size_of<Option<T>>(),align_of<Option<T>>()) };
+                handle unsafe { __g1_memory_is_null(raw) } != 0 { true => __g1_abort(), false => () };
+                let pointer = unsafe { __g1_memory_cast<u8,Option<T>>(raw) };
+                unsafe { __g1_memory_write(pointer,None); };
+                AnchoredSlot { anchor:anchor, pointer:pointer }
+            }
+            pub fn set(value:&Self, item:T) {
+                let previous = unsafe { __g1_memory_read(__g1_memory_as_const(value.pointer)) };
+                discard(previous);
+                unsafe { __g1_memory_write(value.pointer,Some(item)); }
+            }
+            pub fn get(value:&Self) -> Option<T> {
+                let item = unsafe { __g1_memory_read(__g1_memory_as_const(value.pointer)) };
+                unsafe { __g1_memory_write(value.pointer,item); };
+                item
+            }
+        }
+        pub struct RegionSlot<'a> { private anchor:&'a i64, private pointer:*mut Option<&'a i64> }
+        impl<'a> RegionSlot<'a> {
+            pub fn new(anchor:&'a i64) -> Self {
+                let slot:SharedSlot<&'a i64> = SharedSlot::new();
+                RegionSlot { anchor:anchor, pointer:slot.pointer }
+            }
+            pub fn set(value:&Self, item:&'a i64) {
+                let slot = SharedSlot { pointer:value.pointer, marker:PhantomData {} };
+                SharedSlot::set(&slot,item);
+            }
+            pub fn get(value:&Self) -> Option<&'a i64> {
+                let slot = SharedSlot { pointer:value.pointer, marker:PhantomData {} };
+                SharedSlot::get(&slot)
+            }
+        }
+    "#;
+    let index = request.sources.iter().position(|source| source.package == PackageKey("std@0.1.0".into())).unwrap();
+    let mut bytes = request.sources[index].bytes.to_vec();
+    bytes.extend_from_slice(support.as_bytes());
+    request.sources[index] = SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), bytes);
+    request
+}
+
+#[test]
+fn physical_owner_fields_do_not_hide_distinct_logical_residents_with_the_same_lifetime() {
+    for (name, ty) in [("AnchoredSlot", "AnchoredSlot<'_,&i64>"), ("RegionSlot", "RegionSlot<'_>")] {
+        let source = format!("use std::*; pub fn main() -> i64 {{ let a:i64=20; let b:i64=42; let slot:{ty} = {name}::new(&a); {name}::set(&slot,&b); handle {name}::get(&slot) {{ Result::Ok(value) => *value, Result::Err(_) => 0 }} }}");
+        let rejected = format!("use std::*; pub fn main() -> i64 {{ let a:i64=20; let mut b:i64=41; let slot:{ty} = {name}::new(&a); {{ {name}::set(&slot,&b); }}; b=42; handle {name}::get(&slot) {{ Result::Ok(value) => *value, Result::Err(_) => 0 }} }}");
+        for optimization in ["0", "2"] {
+            let artifact = StageZeroCompiler::new().compile(shared_slot_request(&source, optimization))
+                .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+            let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+            // SAFETY: both the physical anchor and the raw-backed shared resident
+            // remain alive while the source-defined owner is used.
+            assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+            assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+            let outcome = StageZeroCompiler::new().compile(shared_slot_request(&rejected, optimization));
+            let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("physical field hid the later logical resident"); };
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5007"), "{diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn empty_cloned_interior_mutable_owners_keep_later_region_updates() {
+    let source = "use std::*; pub fn main() -> i64 { let a:i64=42; let slot:SharedSlot<&i64> = { let original:SharedSlot<&i64> = SharedSlot::new(); SharedSlot::copy(&original) }; { let alias = SharedSlot::copy(&slot); SharedSlot::set(&alias,&a); }; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => 0 } }";
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(shared_slot_request(source, optimization))
+            .unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the source-defined owner only copies shared-reference
+        // residents, and the referent outlives both aliases of its allocation.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+    for source in [
+        "use std::*; pub fn main() -> i64 { let mut a:i64=41; let slot:SharedSlot<&i64> = SharedSlot::new(); { let alias = SharedSlot::copy(&slot); SharedSlot::set(&alias,&a); }; a=42; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => 0 } }",
+        "use std::*; pub fn main() -> i64 { let slot:SharedSlot<&i64> = SharedSlot::new(); { let a:i64=42; let alias = SharedSlot::copy(&slot); SharedSlot::set(&alias,&a); }; handle SharedSlot::get(&slot) { Result::Ok(value) => *value, Result::Err(_) => 0 } }",
+        "use std::*; fn bad<'a>(slot:&SharedSlot<&'a i64>) { let a:i64=42; SharedSlot::set(slot,&a); } pub fn main() -> i64 { 42 }",
+    ] {
+        for optimization in ["0", "2"] {
+            let outcome = StageZeroCompiler::new().compile(shared_slot_request(source, optimization));
+            let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = outcome else { panic!("shared owner lost a later store: {source}"); };
+            assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5007" | "G5013" | "G5017" | "G5022")), "{source}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
 fn library_array_conversion_steps() {
     for (name, source) in [
         (

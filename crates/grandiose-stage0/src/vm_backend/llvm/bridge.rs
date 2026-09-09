@@ -242,6 +242,13 @@ pub(in crate::vm_backend) unsafe fn run(
 }
 
 unsafe fn run_local(module: LlvmNativeModule, limits: VmExecutionLimits) -> Result<i64, LlvmError> {
+    let environment = crate::vm_backend::llvm::float_env::NativeFloatEnvironment::enter()?;
+    let result = unsafe { run_local_with_float_environment(module, limits) };
+    environment.restore()?;
+    result
+}
+
+unsafe fn run_local_with_float_environment(module: LlvmNativeModule, limits: VmExecutionLimits) -> Result<i64, LlvmError> {
     let program = vm_wrappers(module.plan())?;
     let plans = Arc::new(GeneratedPlans::new(&module)?);
     let contracts = imports_from_roots(&program, program.functions.keys().copied().collect())?;

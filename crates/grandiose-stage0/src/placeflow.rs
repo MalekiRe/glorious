@@ -117,6 +117,7 @@ struct PatternBindingTransfer {
     moved: Option<Projection>,
     borrowed_move: bool,
     aliases: Vec<(Vec<u32>, BTreeSet<ProjectionLoan>)>,
+    regions: Vec<(Vec<u32>, BTreeSet<regions::Region>)>,
 }
 
 /// A frozen ownership fact for a loan that is still live at the body exit.
@@ -584,11 +585,14 @@ impl PlaceFlow {
             projection_loans: vec![],
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
+            logical: LogicalFlow::default(),
             open_referent_holes: BTreeMap::new(),
             moved_places: BTreeSet::new(),
             minimum_bindings: BTreeMap::new(),
             minimum_states: vec![MinimumDisposition::default()],
             minimum_handlers: vec![],
+            normal_continuation: true,
+            label_continuations: vec![],
             move_paths: MovePathArena::default(),
             bindings: PlaceBindingArena::default(),
             scopes: vec![BTreeMap::new()],
@@ -690,7 +694,18 @@ impl PlaceFlow {
         }
     }
 }
+pub(crate) mod regions;
+mod control;
+
+#[derive(Clone, Default)]
+struct LogicalFlow {
+    origins: BTreeMap<String, BTreeSet<regions::Region>>,
+    regions: regions::RegionGraph<BTreeSet<ProjectionLoan>>,
+}
+
 struct Analyzer<'a> {
+    normal_continuation: bool,
+    label_continuations: Vec<control::LabelBoundary>,
     body: &'a TypedBody,
     signatures: Option<&'a ElaboratedInterface>,
     lexical_bounds: &'a [(Type, crate::ElaboratedTraitReference)],
@@ -715,6 +730,7 @@ struct Analyzer<'a> {
     /// Provenance outlives one compact active-loan entry.  It is consulted
     /// only when a live descendant proves the parent region remains open.
     reference_origins: BTreeMap<String, BTreeSet<ProjectionLoan>>,
+    logical: LogicalFlow,
     /// A direct `move *reference` leaves its unique referent uninitialized
     /// while retaining the reference handle.  The key is the exact lexical
     /// reference binding, never the referent root: a parameter reference may
@@ -767,17 +783,47 @@ struct Analyzer<'a> {
     diagnostics: Vec<FlowDiagnostic>,
 }
 
-/// State observed at one dynamically selected handler/completion exit.
-type HandlerExit = (
-    BTreeMap<String, LocalState>,
-    Vec<ProjectionLoan>,
-    BTreeSet<Projection>,
-    BTreeMap<String, BTreeSet<String>>,
-    BTreeMap<String, BTreeSet<ProjectionLoan>>,
-    BTreeMap<String, Span>,
-);
+/// Ownership state attached to one control continuation. May-move facts and
+/// minimum-use alternatives travel together: neither is a substitute for the
+/// other when a branch leaves a scope or rejoins a labelled destination.
+#[derive(Clone)]
+struct ContinuationState {
+    states: BTreeMap<String, LocalState>,
+    loans: Vec<ProjectionLoan>,
+    moves: BTreeSet<Projection>,
+    parents: BTreeMap<String, BTreeSet<String>>,
+    origins: BTreeMap<String, BTreeSet<ProjectionLoan>>,
+    holes: BTreeMap<String, Span>,
+    logical: LogicalFlow,
+    minimum: Vec<MinimumDisposition>,
+}
 
 impl Analyzer<'_> {
+    fn capture_continuation(&self) -> ContinuationState {
+        ContinuationState {
+            states: self.states.clone(),
+            loans: self.projection_loans.clone(),
+            moves: self.moved_places.clone(),
+            parents: self.reborrow_parents.clone(),
+            origins: self.reference_origins.clone(),
+            holes: self.open_referent_holes.clone(),
+            logical: self.logical.clone(),
+            minimum: self.minimum_states.clone(),
+        }
+    }
+
+    fn restore_continuation(&mut self, state: &ContinuationState) {
+        self.normal_continuation = true;
+        self.states = state.states.clone();
+        self.projection_loans = state.loans.clone();
+        self.moved_places = state.moves.clone();
+        self.reborrow_parents = state.parents.clone();
+        self.reference_origins = state.origins.clone();
+        self.open_referent_holes = state.holes.clone();
+        self.logical = state.logical.clone();
+        self.minimum_states = state.minimum.clone();
+    }
+
     fn record_destructor_paths(&mut self, owner: &str, ty: &Type) {
         let paths = self.drop_observation_paths(ty, &mut BTreeSet::new());
         self.destructor_paths.extend(paths.into_iter().map(|fields| Projection {
@@ -956,7 +1002,7 @@ impl Analyzer<'_> {
         let signatures = self.signatures.unwrap_or(&empty);
         for (name, ty) in abi {
             let mut leaves = vec![];
-            if crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() {
+            if crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() && leaves.is_empty() {
                 continue;
             }
             for (fields, ty) in leaves {
@@ -964,14 +1010,19 @@ impl Analyzer<'_> {
                     unreachable!("reference layout traversal only yields references");
                 };
                 let key = projection_key(name, &fields);
-                self.reference_origins.entry(key).or_insert_with(|| BTreeSet::from([ProjectionLoan {
-                    place: Projection { root: name.clone(), fields },
+                let loans = self.reference_origins.entry(key.clone()).or_insert_with(|| BTreeSet::from([ProjectionLoan {
+                    place: Projection { root: name.clone(), fields: fields.clone() },
                     unique: matches!(mutability, crate::types::Mutability::Unique),
                     owner: None,
                     partitions: BTreeMap::new(),
                     indirect: true,
                     external: false,
-                }]));
+                }])).clone();
+                if crate::core::reference_path_is_logical(&fields) {
+                    let region = regions::Region { site: name.clone(), path: fields };
+                    self.logical.origins.insert(key, BTreeSet::from([region.clone()]));
+                    self.logical.regions.insert(region, loans, |loans, incoming| loans.extend(incoming));
+                }
             }
         }
         let parameters = abi
@@ -1153,6 +1204,7 @@ impl Analyzer<'_> {
                     .is_some_and(|owner| belongs_to_scope(&locals, owner)));
             !belongs_to_scope(&locals, name) && !loans.is_empty()
         });
+        self.logical.origins.retain(|name, _| !belongs_to_scope(&locals, name));
     }
 
     fn activate_branch_bindings<'b>(
@@ -1198,7 +1250,8 @@ impl Analyzer<'_> {
     fn preserve_expression_result(&mut self, id: CoreId, source: CoreId) {
         let owner = Self::result_owner(id);
         self.record_aggregate_reference_origins(&owner, source);
-        if self.reference_origins.keys().any(|key| key == &owner || key.starts_with(&(owner.clone() + "."))) {
+        if self.reference_origins.keys().chain(self.logical.origins.keys())
+            .any(|key| key == &owner || key.starts_with(&(owner.clone() + "."))) {
             self.pending_results.insert(id);
         }
     }
@@ -1218,6 +1271,7 @@ impl Analyzer<'_> {
             .filter(|owner| **owner == root || owner.starts_with(&(root.clone() + ".")))
             .cloned().collect::<BTreeSet<_>>();
         for owner in owners { self.release_owner_loans(&owner, span); }
+        self.logical.origins.retain(|owner, _| *owner != root && !owner.starts_with(&(root.clone() + ".")));
     }
 
     fn release_unobserved_result_loans(&mut self, id: CoreId, observed: &[Vec<u32>], span: Span) {
@@ -1282,6 +1336,7 @@ impl Analyzer<'_> {
                 }
             }
             CoreKind::Label { brand, body } => {
+                self.enter_label_continuation(brand);
                 // Labels are control boundaries, but their body is also a
                 // lexical storage region. Capture that region at analysis
                 // time while Core still tells us exactly which branded label
@@ -1309,8 +1364,12 @@ impl Analyzer<'_> {
                     .then_some(next_scope)
                     .unwrap_or(target);
                 self.label_storage_exits.insert(brand, (source, target));
+                self.finish_label_continuation(brand, e.span);
             }
-            CoreKind::Transfer { value: body, .. } => self.visit_with_live_after(body, live_after),
+            CoreKind::Transfer { brand, value } => {
+                self.visit_with_live_after(value, live_after);
+                if self.normal_continuation { self.record_label_continuation(brand, e.span); }
+            }
             CoreKind::Let { name, value } => {
                 // A strict initializer which transfers out or evaluates to
                 // `Never` never creates the lexical owner. In particular,
@@ -1488,6 +1547,7 @@ impl Analyzer<'_> {
                 reference_shape,
                 ..
             } => {
+                let logical_arguments = arguments.clone();
                 let operands_complete = Self::abrupt_exit(self.body, callee).is_none()
                     && arguments.iter().all(|argument| Self::abrupt_exit(self.body, *argument).is_none());
                 self.reject_opaque_reference_result(reference_shape, &e.ty, e.span, "call");
@@ -1529,6 +1589,7 @@ impl Analyzer<'_> {
                     }
                 }
                 if operands_complete {
+                    self.record_logical_call_stores(callee, &logical_arguments, id);
                     if self.minimum_definitely_aborts(id) { self.minimum_states.clear(); }
                     else { self.check_minimum_call_suspensions(callee, e.span); }
                 }
@@ -1575,25 +1636,16 @@ impl Analyzer<'_> {
                 self.enter_minimum_handler(&clauses);
                 self.visit_pattern_subject(computation, &inside_handler, e.span);
                 let minimum_handler = self.minimum_handlers.pop().expect("active minimum-use handler");
-                let incoming = self.states.clone();
-                let incoming_loans = self.projection_loans.clone();
-                let incoming_moves = self.moved_places.clone();
-                let incoming_parents = self.reborrow_parents.clone();
-                let incoming_origins = self.reference_origins.clone();
-                let incoming_holes = self.open_referent_holes.clone();
+                if !self.normal_continuation { return; }
+                let incoming_state = self.capture_continuation();
+                let incoming = incoming_state.states.clone();
                 let incoming_refinements = self.refinements.clone();
                 let incoming_minimum = self.minimum_states.clone();
-                let mut minimum_exits = if self.minimum_handler_completes_normally(computation, &clauses) {
-                    vec![incoming_minimum.clone()]
+                let mut exits = if self.minimum_handler_completes_normally(computation, &clauses) {
+                    vec![incoming_state.clone()]
                 } else { vec![] };
-                let mut exits = Vec::with_capacity(clauses.len());
-                for clause in clauses {
-                    self.states = incoming.clone();
-                    self.projection_loans = incoming_loans.clone();
-                    self.moved_places = incoming_moves.clone();
-                    self.reborrow_parents = incoming_parents.clone();
-                    self.reference_origins = incoming_origins.clone();
-                    self.open_referent_holes = incoming_holes.clone();
+                for (clause_index, clause) in clauses.into_iter().enumerate() {
+                    self.restore_continuation(&incoming_state);
                     self.refinements = incoming_refinements.clone();
                     self.minimum_states = self.minimum_clause_inputs(&minimum_handler, &clause, &incoming_minimum);
                     let transfers = self.handler_payload_transfers(computation, &clause);
@@ -1604,7 +1656,7 @@ impl Analyzer<'_> {
                         }
                         _ => None,
                     };
-                    let clause_index = u32::try_from(exits.len())
+                    let clause_index = u32::try_from(clause_index)
                         .expect("handler clause index exceeded PlaceFlow identity space");
                     self.activate_branch_bindings(
                         &clause.bindings,
@@ -1630,28 +1682,11 @@ impl Analyzer<'_> {
                     // but neither its payload nor continuation identity may
                     // become an outer post-state fact.
                     self.end_scope(clause.span);
-                    minimum_exits.push(self.minimum_states.clone());
-                    exits.push((
-                        self.states.clone(),
-                        self.projection_loans.clone(),
-                        self.moved_places.clone(),
-                        self.reborrow_parents.clone(),
-                        self.reference_origins.clone(),
-                        self.open_referent_holes.clone(),
-                    ));
+                    if self.normal_continuation { exits.push(self.capture_continuation()); }
                 }
-                if !exits.is_empty() {
-                    self.states = join_handler_exits(
-                        &exits
-                            .iter()
-                            .map(|(states, _, _, _, _, _)| states.clone())
-                            .collect::<Vec<_>>(),
-                    );
-                    self.projection_loans = join_handler_projection_loans(&exits, &incoming);
-                    self.moved_places = join_handler_moves(&exits, &incoming);
-                    self.join_reborrow_facts(&exits, &incoming);
-                    self.open_referent_holes = join_handler_referent_holes(&exits, &incoming);
-                    self.join_minimum_exits(minimum_exits, e.span);
+                self.normal_continuation = !exits.is_empty();
+                if self.normal_continuation {
+                    self.join_continuation_states(&exits, &incoming, e.span);
                     self.refinements = incoming_refinements;
                 }
             }
@@ -1678,23 +1713,14 @@ impl Analyzer<'_> {
                 let previous_ephemeral = self.ephemeral_borrow_owner.replace(subject_owner.clone());
                 self.visit_pattern_subject(computation, &inside_completion, e.span);
                 self.ephemeral_borrow_owner = previous_ephemeral;
-                let incoming = self.states.clone();
-                let incoming_loans = self.projection_loans.clone();
-                let incoming_moves = self.moved_places.clone();
-                let incoming_parents = self.reborrow_parents.clone();
-                let incoming_origins = self.reference_origins.clone();
-                let incoming_holes = self.open_referent_holes.clone();
+                if !self.normal_continuation { return; }
+                let incoming_state = self.capture_continuation();
+                let incoming = incoming_state.states.clone();
                 let incoming_refinements = self.refinements.clone();
                 let incoming_minimum = self.minimum_states.clone();
-                let mut minimum_exits = vec![];
                 let mut exits = Vec::with_capacity(clauses.len());
-                for clause in clauses {
-                    self.states = incoming.clone();
-                    self.projection_loans = incoming_loans.clone();
-                    self.moved_places = incoming_moves.clone();
-                    self.reborrow_parents = incoming_parents.clone();
-                    self.reference_origins = incoming_origins.clone();
-                    self.open_referent_holes = incoming_holes.clone();
+                for (clause_index, clause) in clauses.into_iter().enumerate() {
+                    self.restore_continuation(&incoming_state);
                     self.refinements = incoming_refinements.clone();
                     self.minimum_states = incoming_minimum.clone();
                     let transfers = self.pattern_binding_transfers(
@@ -1707,7 +1733,7 @@ impl Analyzer<'_> {
                     // those names the same generative treatment as ordinary
                     // completion-pattern binders: forged Core cannot use a
                     // matching spelling to retarget an outer loan.
-                    let clause_index = u32::try_from(exits.len())
+                    let clause_index = u32::try_from(clause_index)
                         .expect("completion clause index exceeded PlaceFlow identity space");
                     self.activate_branch_bindings(
                         &clause.bindings,
@@ -1752,28 +1778,11 @@ impl Analyzer<'_> {
                     self.release_expression_results(&arm_results, Some(id), clause.span);
                     self.end_scope(clause.span);
                     self.release_owner_loans(&subject_owner, clause.span);
-                    minimum_exits.push(self.minimum_states.clone());
-                    exits.push((
-                        self.states.clone(),
-                        self.projection_loans.clone(),
-                        self.moved_places.clone(),
-                        self.reborrow_parents.clone(),
-                        self.reference_origins.clone(),
-                        self.open_referent_holes.clone(),
-                    ));
+                    if self.normal_continuation { exits.push(self.capture_continuation()); }
                 }
-                if !exits.is_empty() {
-                    self.states = join_handler_exits(
-                        &exits
-                            .iter()
-                            .map(|(states, _, _, _, _, _)| states.clone())
-                            .collect::<Vec<_>>(),
-                    );
-                    self.projection_loans = join_handler_projection_loans(&exits, &incoming);
-                    self.moved_places = join_handler_moves(&exits, &incoming);
-                    self.join_reborrow_facts(&exits, &incoming);
-                    self.open_referent_holes = join_handler_referent_holes(&exits, &incoming);
-                    self.join_minimum_exits(minimum_exits, e.span);
+                self.normal_continuation = !exits.is_empty();
+                if self.normal_continuation {
+                    self.join_continuation_states(&exits, &incoming, e.span);
                     self.refinements = incoming_refinements;
                 }
             }
@@ -1872,6 +1881,7 @@ impl Analyzer<'_> {
         }
         let mut operand_owners = BTreeSet::new();
         for (index, (value, mut future)) in reachable.iter().zip(suffixes).enumerate() {
+            if !self.normal_continuation { break; }
             // Strict operands remain owned by their parent operation. Only
             // a non-tail block expression discards its result at this point;
             // give that temporary an exact statement-long loan owner. Unit
@@ -2325,6 +2335,13 @@ impl Analyzer<'_> {
     /// widening `&pair.left` to an imprecise whole-record loan.
     fn capture_reference_loan(&mut self, name: &str, span: Span, owner: Option<&str>) {
         let name = self.resolve_name(name);
+        let regions = self.logical.origins.iter()
+            .filter(|(key, _)| **key == name || key.starts_with(&(name.clone() + ".")))
+            .flat_map(|(_, regions)| regions.iter().cloned()).collect::<BTreeSet<_>>();
+        if !regions.is_empty() {
+            let owner = owner.map(str::to_owned).unwrap_or_else(|| format!("<anonymous-logical-capture-{}>", span.start));
+            self.logical.origins.entry(owner).or_default().extend(regions);
+        }
         if self.open_referent_holes.contains_key(&name) {
             self.error(
                 span,
@@ -2338,7 +2355,7 @@ impl Analyzer<'_> {
         let reborrows = self
             .projection_loans
             .iter()
-            .filter(|loan| loan.owner.as_deref() == Some(name.as_str()))
+            .filter(|loan| loan.owner.as_ref().is_some_and(|owner| *owner == name || owner.starts_with(&(name.clone() + "."))))
             .cloned()
             .map(|mut loan| {
                 loan.owner = owner.map(str::to_owned);
@@ -2898,7 +2915,137 @@ impl Analyzer<'_> {
         }
     }
 
+    fn logical_origin_regions(&self, owner: &str) -> BTreeSet<regions::Region> {
+        let selected = owner.split('.').collect::<Vec<_>>();
+        let root = selected[0];
+        self.logical.origins.range(root.to_owned()..)
+            .take_while(|(key, _)| *key == root || key.starts_with(&(root.to_owned() + ".")))
+            .filter(|(key, _)| {
+                let candidate = key.split('.').collect::<Vec<_>>();
+                candidate.len() == selected.len() && candidate.iter().zip(&selected).all(|(left, right)|
+                    left == right || left.parse::<u32>().ok().zip(right.parse::<u32>().ok())
+                        .is_some_and(|(left, right)| crate::core::reference_path_matches(&[left], &[right])))
+            }).flat_map(|(_, regions)| regions.iter().cloned()).collect()
+    }
+
+    fn logical_regions_from_value_path(&self, id: CoreId, fields: &[u32]) -> BTreeSet<regions::Region> {
+        let logical = crate::core::reference_path_is_logical(fields);
+        if let Some(deref) = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) {
+            let parents = self.reference_loans_from_value_path(id, &fields[..deref]);
+            return parents.into_iter().flat_map(|parent| {
+                let mut path = parent.place.fields;
+                path.extend_from_slice(&fields[deref + 1..]);
+                let known = self.logical_origin_regions(&projection_key(&parent.place.root, &path));
+                if known.is_empty() && logical {
+                    BTreeSet::from([regions::Region { site: parent.place.root, path }])
+                } else { known }
+            }).collect();
+        }
+        if self.pending_results.contains(&id) {
+            return self.logical_origin_regions(&projection_key(&Self::result_owner(id), fields));
+        }
+        if let Some(key) = self.reference_origin_key(id) {
+            let known = self.logical_origin_regions(&projection_key(&key, fields));
+            if !known.is_empty() || !logical { return known; }
+            return BTreeSet::from([regions::Region { site: key, path: fields.to_vec() }]);
+        }
+        match &self.body.expression(id).kind {
+            CoreKind::Move(value) | CoreKind::Label { body: value, .. } | CoreKind::Transfer { value, .. } =>
+                return self.logical_regions_from_value_path(*value, fields),
+            CoreKind::Block(values) => return values.last().map(|value|
+                self.logical_regions_from_value_path(*value, fields)).unwrap_or_default(),
+            CoreKind::Deref(reference) => {
+                return self.reference_loans_from_value(*reference).into_iter().flat_map(|parent| {
+                    let mut path = parent.place.fields;
+                    path.extend_from_slice(fields);
+                    let known = self.logical_origin_regions(&projection_key(&parent.place.root, &path));
+                    if known.is_empty() && logical { BTreeSet::from([regions::Region { site: parent.place.root, path }]) }
+                    else { known }
+                }).collect();
+            }
+            CoreKind::Call { arguments, reference_origin: CallReferenceOrigin::Paths(paths), .. }
+            | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(paths), .. } => {
+                let mut known = BTreeSet::new();
+                for path in paths {
+                    if !crate::core::reference_path_is_prefix(&path.result_fields, fields) { continue; }
+                    let Some(argument) = arguments.get(path.argument as usize) else { continue; };
+                    let mut source = path.argument_fields.clone();
+                    source.extend_from_slice(&fields[path.result_fields.len()..]);
+                    known.extend(self.logical_regions_from_value_path(*argument, &source));
+                }
+                if !known.is_empty() || !logical { return known; }
+            }
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Record { fields: values, .. }
+            | CoreKind::Enum { fields: values, .. } => {
+                if let Some((field, tail)) = fields.split_first() {
+                    if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+                        return values.iter().flat_map(|value| self.logical_regions_from_value_path(*value, tail)).collect();
+                    }
+                    if let Some(value) = values.get(*field as usize) { return self.logical_regions_from_value_path(*value, tail); }
+                }
+            }
+            _ => {}
+        }
+        if logical { BTreeSet::from([regions::Region { site: Self::result_owner(id), path: fields.to_vec() }]) }
+        else { BTreeSet::new() }
+    }
+
+    fn record_logical_value_origins(&mut self, name: &str, id: CoreId) {
+        let mut changed = false;
+        let source = if self.pending_results.contains(&id) { Some(Self::result_owner(id)) }
+            else { self.reference_origin_key(id) };
+        if let Some(source) = source {
+            let aliases = self.logical.origins.iter()
+                .filter(|(key, _)| **key == source || key.starts_with(&(source.clone() + ".")))
+                .map(|(key, regions)| (format!("{name}{}", &key[source.len()..]), regions.clone())).collect::<Vec<_>>();
+            for (key, regions) in aliases { self.logical.origins.entry(key).or_default().extend(regions); changed = true; }
+        }
+        let empty = ElaboratedInterface::default();
+        let mut leaves = vec![];
+        let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty, &mut vec![], &mut leaves);
+        for (path, _) in leaves {
+            let regions = self.logical_regions_from_value_path(id, &path);
+            let Some(first) = regions.first().cloned() else { continue; };
+            let parents = self.reference_loans_from_value_path(id, &path).into_iter()
+                .map(|loan| ProjectionLoan { owner: None, ..loan }).collect::<BTreeSet<_>>();
+            self.logical.regions.connect(&regions);
+            self.logical.regions.insert(first, parents, |loans, incoming| loans.extend(incoming));
+            self.logical.origins.entry(projection_key(name, &path)).or_default().extend(regions);
+            changed = true;
+        }
+        if changed { self.refresh_logical_loans(id); }
+    }
+
+    fn record_logical_call_stores(&mut self, callee: CoreId, arguments: &[CoreId], call: CoreId) {
+        let Some(signatures) = self.signatures else { return; };
+        let mut changed = false;
+        for transfer in regions::call_transfers(signatures, self.body, callee) {
+            let (Some(destination), Some(source)) = (arguments.get(transfer.destination), arguments.get(transfer.source)) else { continue; };
+            let mut region_ids = self.logical_regions_from_value_path(*destination, &transfer.destination_path);
+            let Some(first) = region_ids.first().cloned() else { continue; };
+            region_ids.extend(self.logical_regions_from_value_path(*source, &transfer.source_path));
+            let loans = self.reference_loans_from_value_path(*source, &transfer.source_path).into_iter()
+                .map(|loan| ProjectionLoan { owner: None, ..loan }).collect::<BTreeSet<_>>();
+            self.logical.regions.connect(&region_ids);
+            self.logical.regions.insert(first, loans, |loans, incoming| loans.extend(incoming));
+            changed = true;
+        }
+        if changed { self.refresh_logical_loans(call); }
+    }
+
+    fn refresh_logical_loans(&mut self, source: CoreId) {
+        let aliases = self.logical.origins.iter().filter(|(owner, _)| !self.origin_has_been_moved(owner))
+            .flat_map(|(owner, regions)| self.logical.regions.contents(regions).into_iter().flatten()
+                .map(|loan| (owner.clone(), loan))).collect::<Vec<_>>();
+        for (owner, loan) in aliases {
+            if !self.projection_loans.contains(&ProjectionLoan { owner: Some(owner.clone()), ..loan.clone() }) {
+                self.install_reference_alias(&owner, loan, source);
+            }
+        }
+    }
+
     fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
+        self.record_logical_value_origins(name, id);
         if self.pending_results.contains(&id) {
             let source = Self::result_owner(id);
             let aliases = self.reference_origins.keys()
@@ -3030,6 +3177,10 @@ impl Analyzer<'_> {
             };
             let parents = self.reference_loans_from_value_path(argument, &path.argument_fields);
             if parents.is_empty() {
+                // A logical generic resident may be empty. Forwarding that
+                // empty set creates no checked reference authority; unlike
+                // a missing physical reference it is not a malformed call.
+                if crate::core::reference_path_is_logical(&path.argument_fields) { continue; }
                 // A call classified as `External` has proved that all of its
                 // reference leaves are static/external.  Forwarding one of
                 // those leaves needs no caller loan to keep alive; in
@@ -3398,6 +3549,14 @@ impl Analyzer<'_> {
                 if crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() {
                     continue;
                 }
+                let regions = leaves.iter().map(|(leaf, _)| {
+                    let mut source = fields.clone();
+                    source.extend_from_slice(leaf);
+                    let regions = paths.iter().filter(|path| crate::core::reference_path_matches(&path.result_fields, &source))
+                        .flat_map(|path| arguments.get(path.argument as usize).into_iter().flat_map(|argument|
+                            self.logical_regions_from_value_path(*argument, &path.argument_fields))).collect();
+                    (leaf.clone(), regions)
+                }).collect();
                 let aliases = leaves.into_iter().map(|(leaf, ty)| {
                     let mut source = fields.clone();
                     source.extend_from_slice(&leaf);
@@ -3411,7 +3570,7 @@ impl Analyzer<'_> {
                     (leaf, loans)
                 }).collect();
                 transfers.push(PatternBindingTransfer {
-                    name, value: computation, moved: None, borrowed_move: false, aliases,
+                    name, value: computation, moved: None, borrowed_move: false, aliases, regions,
                 });
             }
         }
@@ -3438,13 +3597,18 @@ impl Analyzer<'_> {
             let borrowed_move = moving && matches!(self.body.expression(root).kind, CoreKind::Deref(_));
             let mut leaves = vec![];
             let _ = crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves);
+            let regions = leaves.iter().map(|(leaf, _)| {
+                let mut source = fields.clone();
+                source.extend_from_slice(leaf);
+                (leaf.clone(), self.logical_regions_from_value_path(value, &source))
+            }).collect();
             let aliases = leaves.into_iter().map(|(leaf, _)| {
                 let mut source = fields.clone();
                 source.extend_from_slice(&leaf);
                 let loans = self.reference_loans_from_value_path(value, &source);
                 (leaf, loans)
             }).collect();
-            Some(PatternBindingTransfer { name, value, moved, borrowed_move, aliases })
+            Some(PatternBindingTransfer { name, value, moved, borrowed_move, aliases, regions })
         }).collect()
     }
 
@@ -3501,6 +3665,9 @@ impl Analyzer<'_> {
         }
         for transfer in transfers {
             let name = self.resolve_name(&transfer.name);
+            for (leaf, regions) in transfer.regions {
+                if !regions.is_empty() { self.logical.origins.entry(projection_key(&name, &leaf)).or_default().extend(regions); }
+            }
             for (leaf, parents) in transfer.aliases {
                 let destination = projection_key(&name, &leaf);
                 for parent in parents {
@@ -3570,11 +3737,17 @@ impl Analyzer<'_> {
                 self.origin_loans(origin),
                 self.reborrow_parents.get(origin).cloned().unwrap_or_default(),
             )).collect::<Vec<_>>();
+        let logical_replacement = self.logical.origins.iter()
+            .filter(|(origin, _)| under(origin, &temporary))
+            .map(|(origin, regions)| (format!("{key}{}", &origin[temporary.len()..]), regions.clone()))
+            .collect::<Vec<_>>();
         let old_owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
             .filter(|owner| under(owner, &key)).cloned().collect::<BTreeSet<_>>();
         for owner in old_owners { self.release_owner_loans(&owner, self.body.expression(value).span); }
         self.reference_origins.retain(|origin, _| !under(origin, &key));
         self.reborrow_parents.retain(|origin, _| !under(origin, &key));
+        self.logical.origins.retain(|origin, _| !under(origin, &key));
+        for (destination, regions) in logical_replacement { self.logical.origins.insert(destination, regions); }
         for (destination, loans, parents) in replacement {
             for mut loan in loans {
                 loan.owner = Some(destination.clone());
@@ -3590,6 +3763,7 @@ impl Analyzer<'_> {
         for owner in temporary_owners { self.release_owner_loans(&owner, self.body.expression(value).span); }
         self.reference_origins.retain(|origin, _| !under(origin, &temporary));
         self.reborrow_parents.retain(|origin, _| !under(origin, &temporary));
+        self.logical.origins.retain(|origin, _| !under(origin, &temporary));
     }
 
     fn place_origin_key(&self, place: &CorePlace) -> Option<String> {
@@ -3961,12 +4135,18 @@ impl Analyzer<'_> {
 
     fn join_reborrow_facts(
         &mut self,
-        exits: &[HandlerExit],
+        exits: &[ContinuationState],
         incoming: &BTreeMap<String, LocalState>,
     ) {
         self.reborrow_parents.clear();
         self.reference_origins.clear();
-        for (_, _, _, parents, origins, _) in exits {
+        self.logical = LogicalFlow::default();
+        for exit in exits {
+            let ContinuationState { parents, origins, logical, .. } = exit;
+            self.logical.regions.merge_from(&logical.regions, |loans, incoming| loans.extend(incoming));
+            for (owner, regions) in &logical.origins {
+                self.logical.origins.entry(owner.clone()).or_default().extend(regions.iter().cloned());
+            }
             for (child, parents) in parents {
                 if incoming.contains_key(child) || self.pending_results.iter().any(|id| {
                     let root = Self::result_owner(*id);
@@ -4178,12 +4358,12 @@ fn join_handler_exits(exits: &[BTreeMap<String, LocalState>]) -> BTreeMap<String
 /// references cannot escape their lexical arm merely because another arm uses
 /// the same spelling.
 fn join_handler_projection_loans(
-    exits: &[HandlerExit],
+    exits: &[ContinuationState],
     incoming: &BTreeMap<String, LocalState>,
 ) -> Vec<ProjectionLoan> {
     let mut loans = exits
         .iter()
-        .flat_map(|(_, loans, _, _, _, _)| loans)
+        .flat_map(|exit| &exit.loans)
         .filter(|loan| incoming.contains_key(&loan.place.root))
         .cloned()
         .collect::<Vec<_>>();
@@ -4198,12 +4378,12 @@ fn join_handler_projection_loans(
 /// local `Moved` join above. Clause-local roots are excluded because they
 /// cannot escape their arm.
 fn join_handler_moves(
-    exits: &[HandlerExit],
+    exits: &[ContinuationState],
     incoming: &BTreeMap<String, LocalState>,
 ) -> BTreeSet<Projection> {
     let mut moves = exits
         .iter()
-        .flat_map(|(_, _, moves, _, _, _)| moves)
+        .flat_map(|exit| &exit.moves)
         .filter(|place| incoming.contains_key(&place.root))
         .cloned()
         .collect::<Vec<_>>();
@@ -4227,12 +4407,12 @@ fn join_handler_moves(
 /// any reachable arm leaves an incoming reference open; a sibling restoration
 /// is not proof that the next ordinary expression may use the handle.
 fn join_handler_referent_holes(
-    exits: &[HandlerExit],
+    exits: &[ContinuationState],
     incoming: &BTreeMap<String, LocalState>,
 ) -> BTreeMap<String, Span> {
     exits
         .iter()
-        .flat_map(|(_, _, _, _, _, holes)| holes)
+        .flat_map(|exit| &exit.holes)
         .filter(|(reference, _)| incoming.contains_key(*reference))
         .map(|(reference, span)| (reference.clone(), *span))
         .collect()

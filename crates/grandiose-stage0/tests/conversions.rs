@@ -92,8 +92,8 @@ fn as_function_dispatches_to_an_ordinary_user_implementation() {
         pub struct Count { value: i64 }
         pub impl Use<[1, 1]> for Count {}
         pub struct Reading { value: f32 }
-        pub impl As<i64> for Count { cast(value: Count) -> i64 { value.value } }
-        pub impl As<Reading> for Count { cast(value: Count) -> Reading { Reading { value: as(value.value) } } }
+        pub impl As<i64> for Count { cast(value: Count) -> i64 { let Count { value } = value; value } }
+        pub impl As<Reading> for Count { cast(value: Count) -> Reading { let Count { value } = value; Reading { value: as(value) } } }
         fn forward<T, S>(value: S) -> T where S: As<T> { as(value) }
         fn extract(value: Count) -> i64 { as(value) }
         pub fn main() -> i64 {
@@ -139,7 +139,7 @@ fn as_is_an_ordinary_renameable_library_function() {
     assert_eq!(
         run(r#"
         use std::as as convert;
-        fn as<T, S>(value: S, answer: T) -> T { answer }
+        fn as<T, S>(value: S, answer: T) -> T where S: Use<[0, 1]> { answer }
         pub fn main() -> i64 { as<i64>(0, 40) + convert<i64>(convert<u8>(2)) }
     "#),
         42

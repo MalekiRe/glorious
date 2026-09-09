@@ -5,6 +5,7 @@
 //! control must never become an ordinary native call by accident.
 
 mod emit;
+pub(super) mod float_env;
 mod layout;
 mod load;
 pub(super) mod memory;
@@ -20,7 +21,7 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 6;
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 7;
 pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:mixed-tail-v5";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
@@ -359,6 +360,10 @@ impl NativeContext {
             14 => VmArtifactError::NativeMemory {
                 message: "native enum projection does not match the active variant layout",
             },
+            15 => VmArtifactError::Trap,
+            16 => VmArtifactError::NativeAbi {
+                message: "cannot establish or restore the native floating-point environment",
+            },
             6 => VmArtifactError::NativeAbi {
                 message: "native execution reached a verified terminal trap",
             },
@@ -430,3 +435,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "llvm/float_tests.rs"]
+mod float_tests;

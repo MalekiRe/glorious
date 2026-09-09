@@ -246,7 +246,10 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 19;
 // and introduces the private mixed LLVM/VM mandatory-tail dispatcher (ABI 5).
 // Cache 84 pins static literal sites and admits exact shared byte-view slots
 // (native ABI 4 / LLVM ABI 6), with checked heterogeneous enum projections.
-pub const STAGE0_CACHE_GENERATION: u32 = 84;
+// Cache 85 retains logical resident regions in generic source-managed owners.
+// Cache 86 separates branded ownership continuations; cache 87 adds exact
+// native floating conversions with an explicitly guarded machine profile.
+pub const STAGE0_CACHE_GENERATION: u32 = 87;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 71;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

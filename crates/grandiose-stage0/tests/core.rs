@@ -3107,11 +3107,52 @@ fn enum_reference_results_preserve_variant_invariant_caller_paths() {
         let grandiose_stage0::CallReferenceOrigin::Paths(paths) = origin else {
             panic!("reference result must not become opaque: {origin:#?}");
         };
-        assert_eq!(paths.len(), 1, "{paths:#?}");
+        assert_eq!(paths.len(), 3, "{paths:#?}");
         assert_eq!(paths[0].result_fields, vec![0]);
+        // The shared physical payload position and each generic resident
+        // retain the same frozen source; logical residents are not fields.
+        assert_eq!(paths[1].result_fields, vec![u32::MAX - 2, 0]);
+        assert_eq!(paths[2].result_fields, vec![u32::MAX - 2, 1]);
+        for path in paths {
+            assert_eq!(path.argument, 0);
+            assert!(path.argument_fields.is_empty());
+        }
+    }
+}
+
+#[test]
+fn open_identity_arguments_do_not_erase_an_independent_physical_reference_input() {
+    let core = core_for(
+        "core-open-identity-reference-input@0.1.0",
+        "struct Id<Tag> { index:u32 } impl<Tag> Use<[0,*]> for Id<Tag> {} fn select<'a,Tag>(value:&'a i64, id:Id<Tag>) -> &'a i64 { value } pub fn main<'a,Tag>(value:&'a i64, id:Id<Tag>) -> &'a i64 { select(value,id) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let (contract, origin) = core.expressions.iter().find_map(|expression| match &expression.kind {
+        CoreKind::Call { reference_contract, reference_origin, .. } => Some((reference_contract, reference_origin)),
+        _ => None,
+    }).expect("generic identity argument call");
+    for origin in [contract, origin] {
+        let grandiose_stage0::CallReferenceOrigin::Paths(paths) = origin else { panic!("{origin:#?}"); };
+        assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].argument, 0);
         assert!(paths[0].argument_fields.is_empty());
+        assert!(paths[0].result_fields.is_empty());
     }
+    assert!(PlaceFlow::analyze(&core).diagnostics.is_empty());
+
+    // An unknown raw-backed resident is not an identity-only argument. It
+    // must retain declaration opacity until its concrete reference shape is
+    // available, even in the presence of another physical reference input.
+    let opaque = core_for(
+        "core-open-resident-reference-input@0.1.0",
+        "struct Owner<T> { pointer:*const T } fn select<'a,T>(value:&'a i64, owner:Owner<T>) -> &'a i64 { value } pub fn main<'a,T>(value:&'a i64, owner:Owner<T>) -> &'a i64 { select(value,owner) }",
+    );
+    assert!(opaque.diagnostics.is_empty(), "{:#?}", opaque.diagnostics);
+    assert!(opaque.expressions.iter().any(|expression| matches!(expression.kind, CoreKind::Call {
+        reference_origin: grandiose_stage0::CallReferenceOrigin::Opaque,
+        reference_shape: grandiose_stage0::CallReferenceShape::OpaquePotentiallyReference, ..
+    })));
+    assert!(PlaceFlow::analyze(&opaque).diagnostics.iter().any(|diagnostic| diagnostic.code == "G5023"));
 }
 
 #[test]
@@ -5696,10 +5737,14 @@ fn opaque_generic_result_shapes_distinguish_concrete_scalars_from_enum_reference
     let grandiose_stage0::CallReferenceOrigin::Paths(paths) = origin else {
         panic!("variant-invariant enum payload lost frozen provenance: {origin:#?}");
     };
-    assert_eq!(paths.len(), 1);
-    assert_eq!(paths[0].result_fields, [0]);
-    assert_eq!(paths[0].argument, 0);
-    assert_eq!(paths[0].argument_fields, [0]);
+    assert_eq!(paths.len(), 4);
+    let expected = [vec![0], vec![u32::MAX - 2, 0]];
+    for result in &expected {
+        for argument in &expected {
+            assert!(paths.iter().any(|path| path.result_fields == *result
+                && path.argument == 0 && path.argument_fields == *argument), "{paths:#?}");
+        }
+    }
     assert_eq!(*shape, grandiose_stage0::CallReferenceShape::CallerPaths);
     let flow = PlaceFlow::analyze(&opaque);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");

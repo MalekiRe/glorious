@@ -242,15 +242,106 @@ impl Body<'_, '_> {
                     let value = self.value(format!("fneg {ty} {value}"));
                     self.canonical_float(*dst, &value)?;
                 }
-                _ => {
-                    return Err(
-                        self.unsupported("native float conversion contract is not implemented")
-                    );
+                FloatPrimitive::Convert { checked, .. } => {
+                    self.float_convert(*dst, arguments[0], *checked)?
                 }
             },
             _ => return Ok(false),
         }
         Ok(true)
+    }
+
+    fn float_conversion_value(
+        &mut self,
+        operation: &str,
+        from: &VmType,
+        to: &VmType,
+        value: &str,
+        rounds: bool,
+    ) -> Result<String, LlvmError> {
+        let source = layout::scalar_ir(from)
+            .ok_or_else(|| self.unsupported("native float conversion has a non-scalar input"))?;
+        let target = layout::scalar_ir(to)
+            .ok_or_else(|| self.unsupported("native float conversion has a non-scalar output"))?;
+        let suffix = |ty: &str| {
+            match ty {
+                "float" => "f32",
+                "double" => "f64",
+                ty => ty,
+            }
+            .to_owned()
+        };
+        let name = format!(
+            "llvm.experimental.constrained.{operation}.{}.{}",
+            suffix(target),
+            suffix(source)
+        );
+        let rounding_parameter = if rounds { ", metadata" } else { "" };
+        self.declarations.insert(format!(
+            "declare {target} @{name}({source}{rounding_parameter}, metadata)"
+        ));
+        let rounding = if rounds {
+            ", metadata !\"round.tonearest\""
+        } else {
+            ""
+        };
+        Ok(self.value(format!(
+            "call {target} @{name}({source} {value}{rounding}, metadata !\"fpexcept.ignore\")"
+        )))
+    }
+
+    fn float_convert(&mut self, dst: u32, source: u32, checked: bool) -> Result<(), LlvmError> {
+        let from = self.function.registers[source as usize].clone();
+        let to = self.function.registers[dst as usize].clone();
+        let value = self.load(source)?;
+        if matches!(to, VmType::F32 | VmType::F64) {
+            if checked {
+                return Err(self.unsupported(
+                    "floating result cannot use an integer checked-conversion contract",
+                ));
+            }
+            let (operation, rounds) = match (&from, &to) {
+                (VmType::F32, VmType::F64) => ("fpext", false),
+                (VmType::F64, VmType::F32) => ("fptrunc", true),
+                (_, _) if width(&from).is_some() => {
+                    (if signed(&from) { "sitofp" } else { "uitofp" }, true)
+                }
+                _ => {
+                    return Err(self.unsupported("native floating conversion source is not numeric"));
+                }
+            };
+            // Convert a wide integer directly to the selected precision. An
+            // intermediate f64 can double-round a value destined for f32.
+            let converted = self.float_conversion_value(operation, &from, &to, &value, rounds)?;
+            return self.canonical_float(dst, &converted);
+        }
+        if !checked || !matches!(from, VmType::F32 | VmType::F64) {
+            return Err(
+                self.unsupported("float-to-integer conversion must carry a checked contract")
+            );
+        }
+        let bits = width(&to)
+            .ok_or_else(|| self.unsupported("checked float conversion result is not an integer"))?;
+        let exponent = bits - u32::from(signed(&to));
+        let upper = (u64::from(exponent) + 1023) << 52;
+        let lower = if signed(&to) { upper | (1 << 63) } else { 0 };
+        // Widen f32 exactly for the same half-open power-of-two bounds used
+        // by the VM, including the u128 upper bound beyond finite f32.
+        let wide = if from == VmType::F32 {
+            self.float_conversion_value("fpext", &from, &VmType::F64, &value, false)?
+        } else {
+            value.clone()
+        };
+        let minimum = self.value(format!("fcmp oge double {wide}, 0x{lower:016X}"));
+        let maximum = self.value(format!("fcmp olt double {wide}, 0x{upper:016X}"));
+        let valid = self.value(format!("and i1 {minimum}, {maximum}"));
+        // Ordered bounds reject NaN/infinity before an LLVM conversion could
+        // produce poison. This is the checked leaf's Trap, not saturation;
+        // any public saturating/fallible policy remains ordinary source code.
+        self.guard(&valid, 15);
+        let operation = if signed(&to) { "fptosi" } else { "fptoui" };
+        let converted = self.float_conversion_value(operation, &from, &to, &value, false)?;
+        self.store_scalar(dst, &converted)
     }
 
     fn binary(

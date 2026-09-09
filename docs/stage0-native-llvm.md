@@ -13,7 +13,7 @@ remain distinct from the generated-code tests in `tests/llvm_native.rs`.
 
 ## Admitted execution
 
-The initial selected profile is little-endian, 64-bit x86-64 Linux. Its explicit
+The initial selected profile is little-endian, 64-bit x86-64 GNU/Linux. Its explicit
 LLVM data layout is checked against the shared native storage layouts. Other
 profiles fail closed. Scalar integer widths include i128/u128; records, tuples,
 fixed arrays, enums, references, raw pointers, sealed static byte views, and zero-sized
@@ -21,7 +21,8 @@ residents use the same concrete offsets, alignment, stride, and enum tag rules
 as shared VM storage. Initialization metadata is separate from resident bytes.
 
 The emitter supports checked/wrapping integer arithmetic and conversions,
-comparisons and shifts, basic f32/f64 operations with canonical NaNs,
+comparisons and shifts, basic f32/f64 operations with canonical NaNs, and
+integer/float and float-width conversions,
 constructors/projections, basic ownership/storage instructions, real reference
 loads and stores, direct calls, branches, final lexical transfers, source
 destructor glue expressed by admitted operations, and direct mandatory tails.
@@ -32,6 +33,17 @@ wrong active types or field counts fail before a field is read. Different
 variant offsets are not silently treated as one common struct layout.
 The exact admissible boundary is whole-graph instruction/layout admission, not
 a promise that every operation on the listed type families is supported.
+
+Integer-to-float and narrowing conversions round directly to the destination
+precision using nearest-even; wide integers do not pass through an intermediate
+f64 when the destination is f32. Checked float-to-integer leaves validate ordered,
+half-open power-of-two bounds before truncation, rejecting NaN, infinities, and
+out-of-range inputs with the VM's checked-leaf error. Public `as<T>` saturation,
+NaN-to-zero, and other conversion policy remain ordinary standard-library source.
+Generated entries and the mixed worker establish the selected floating-point
+environment, with gradual underflow and masked exceptions, and restore the
+caller's complete x87/SSE control and status state on return. Embedding rounding
+modes and flush-to-zero/denormals-are-zero settings do not change source results.
 
 Ordinary direct calls use a uniform native slot ABI. Mandatory tail transfers
 return to a native dispatcher that recycles two aligned argument packets. They
@@ -119,6 +131,7 @@ generated capability name. Ordinary native result slots require complete values.
 Source tests run actual LLVM↔VM chains at O0 and O2, including unique-reference
 mutation and return, raw observation of unchanged reference backing addresses,
 static byte/UTF-8 slots, empty literals, stable literal-site addresses and derived views,
+all integer widths crossing f32/f64 conversion slots and source saturation policy,
 owned records/results, fixed-array results and VM patterns, linear zero-sized
 owners, and once-only source Drop on both sides. Tests also cover partially
 moved records and nested array/enum owners. They run the
@@ -147,8 +160,8 @@ owners release bytes on execution teardown, never implicitly execute source Drop
 ## Explicit remaining frontier
 
 The generated backend does not yet execute first-class/captured/borrowed callable parameters,
-outward effects, resumptions, or captured lexical control. Float conversions,
-private dynamic-array/text layouts, and some pattern/projection forms are also
+outward effects, resumptions, or captured lexical control. Private dynamic-array/text
+layouts and some pattern/projection forms are also
 rejected. Ordinary closed-graph VM calls from native bodies are supported;
 they are not yet a public callable-value ABI. Pointer address/cast/comparison and
 size/alignment and static-data machine leaves are supported.

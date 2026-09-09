@@ -377,6 +377,11 @@ fn call_reference_shape(
     let mut leaves = vec![];
     match reference_leaf_paths(signatures, result, &mut vec![], &mut leaves) {
         Ok(()) if leaves.is_empty() => CallReferenceShape::None,
+        // A logical resident may be absent (for example an empty owning
+        // collection). No input relation means no borrowed resident, not an
+        // invented external reference behind its representation.
+        Ok(()) if matches!(origin, CallReferenceOrigin::None)
+            && leaves.iter().all(|(path, _)| reference_path_is_logical(path)) => CallReferenceShape::None,
         // A frozen generic contract still forwards its argument path when
         // that particular argument is static. Preserve the path contract
         // rather than pairing Paths provenance with an External-only shape.
@@ -417,11 +422,19 @@ pub(crate) const REFERENCE_PATH_DEREF: u32 = u32::MAX;
 /// Keeping this component symbolic bounds reference metadata by type shape,
 /// independently of the array's length (including zero-sized residents).
 pub(crate) const REFERENCE_PATH_ARRAY_ELEMENT: u32 = u32::MAX - 1;
+/// A nominal application's logical generic resident. The following component
+/// identifies its type/lifetime argument; subsequent components describe the
+/// resident's reference shape, independently of the physical raw storage.
+pub(crate) const REFERENCE_PATH_LOGICAL_ARGUMENT: u32 = u32::MAX - 2;
+
+pub(crate) fn reference_path_is_logical(path: &[u32]) -> bool {
+    path.contains(&REFERENCE_PATH_LOGICAL_ARGUMENT)
+}
 
 pub(crate) fn reference_path_is_prefix(prefix: &[u32], path: &[u32]) -> bool {
     prefix.len() <= path.len() && prefix.iter().zip(path).all(|(left, right)| {
-        left == right || (*left == REFERENCE_PATH_ARRAY_ELEMENT && *right != REFERENCE_PATH_DEREF)
-            || (*right == REFERENCE_PATH_ARRAY_ELEMENT && *left != REFERENCE_PATH_DEREF)
+        left == right || (*left == REFERENCE_PATH_ARRAY_ELEMENT && *right < REFERENCE_PATH_LOGICAL_ARGUMENT)
+            || (*right == REFERENCE_PATH_ARRAY_ELEMENT && *left < REFERENCE_PATH_LOGICAL_ARGUMENT)
     })
 }
 
@@ -8547,6 +8560,7 @@ impl Elaborator<'_> {
                 *reference_shape = call_reference_shape(self.signatures, result, reference_origin);
             }
             CoreKind::Call {
+                callee,
                 arguments,
                 reference_origin,
                 reference_shape,
@@ -8557,12 +8571,13 @@ impl Elaborator<'_> {
                 // that contract names a unique source argument, keep it
                 // frozen instead of recomputing an ambiguous `Elided` match.
                 if matches!(reference_origin, CallReferenceOrigin::Opaque) {
-                    *reference_origin = call_reference_origin(
+                    *reference_origin = crate::placeflow::regions::call_origin(self.signatures,
+                        &self.expressions[callee.0 as usize]).unwrap_or_else(|| call_reference_origin(
                         self.signatures,
                         &self.expressions,
                         arguments,
                         result,
-                    );
+                    ));
                 }
                 *reference_shape = call_reference_shape(self.signatures, result, reference_origin);
             }
@@ -17282,6 +17297,9 @@ fn call_reference_origin(
                 matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
+        if candidates.is_empty() && reference_path_is_logical(&result_fields) {
+            continue;
+        }
         if candidates.is_empty() {
             return CallReferenceOrigin::Opaque;
         }
@@ -17293,7 +17311,7 @@ fn call_reference_origin(
             });
         }
     }
-    CallReferenceOrigin::Paths(paths)
+    if paths.is_empty() { CallReferenceOrigin::None } else { CallReferenceOrigin::Paths(paths) }
 }
 
 
@@ -17365,6 +17383,9 @@ pub(crate) fn callable_reference_origin_from_contract(
                 matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
+        if candidates.is_empty() && reference_path_is_logical(&result_fields) {
+            continue;
+        }
         if candidates.is_empty() {
             return CallReferenceOrigin::Opaque;
         }
@@ -17376,7 +17397,7 @@ pub(crate) fn callable_reference_origin_from_contract(
             });
         }
     }
-    CallReferenceOrigin::Paths(paths)
+    if paths.is_empty() { CallReferenceOrigin::None } else { CallReferenceOrigin::Paths(paths) }
 }
 
 /// Input provenance can follow a stored reference through a shorter borrow of
@@ -17394,7 +17415,8 @@ pub(crate) fn input_reference_leaf_paths(
         if active.contains(ty) { return Ok(()); }
         active.push(ty.clone());
         let mut direct = vec![];
-        if reference_leaf_paths(signatures, ty, &mut vec![], &mut direct).is_err() {
+        if reference_leaf_paths_active(signatures, ty, &mut vec![], &mut direct,
+            &mut std::collections::BTreeMap::new(), true).is_err() && direct.is_empty() {
             active.pop();
             return Err(());
         }
@@ -17424,10 +17446,159 @@ pub(crate) fn reference_leaf_paths(
     path: &mut Vec<u32>,
     leaves: &mut Vec<(Vec<u32>, Type)>,
 ) -> Result<(), ()> {
+    reference_leaf_paths_active(signatures, ty, path, leaves, &mut std::collections::BTreeMap::new(), false)
+}
+
+fn reference_leaf_paths_active(
+    signatures: &ElaboratedInterface,
+    ty: &Type,
+    path: &mut Vec<u32>,
+    leaves: &mut Vec<(Vec<u32>, Type)>,
+    active: &mut std::collections::BTreeMap<DefKey, Type>,
+    input: bool,
+) -> Result<(), ()> {
+    let Type::Nominal { definition, arguments } = ty else {
+        return structural_reference_leaf_paths(signatures, ty, path, leaves, active, input);
+    };
+    if !type_may_contain_reference(signatures, ty) { return Ok(()); }
+    // Repeated declarations are valid when consuming an already present
+    // nested type argument (Vec<Vec<&T>>). A same-sized or growing recursive
+    // layout is not a finite reference projection. Decreasing type shape provides
+    // a structural termination measure without a guessed nesting limit.
+    if active.get(definition).is_some_and(|previous| reference_layout_weight(ty) >= reference_layout_weight(previous)) { return Err(()); }
+    let previous = active.insert(*definition, ty.clone());
+    let first = leaves.len();
+    let result = structural_reference_leaf_paths(signatures, ty, path, leaves, active, input)
+        .and_then(|()| {
+            // A generic resident can live in source-managed raw storage even
+            // when the nominal's physical fields contain only pointer bits.
+            // This is an application/type relation, never a privileged
+            // collection or marker spelling. Equal lifetimes do not imply
+            // equal referents: a physical field and a raw-backed resident
+            // can hold different loans, including after a later insertion.
+            if !matches!(signatures.definitions.get(definition), Some(ElaboratedHeader::Nominal { .. })) {
+                return Ok(());
+            }
+            for (index, argument) in arguments.iter().enumerate() {
+                let GenericArgument::Type(argument) = argument else { continue; };
+                let mut logical = vec![];
+                let prefix = path.len();
+                path.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
+                let traversed = reference_leaf_paths_active(signatures, argument, path, &mut logical, active, input);
+                path.truncate(prefix);
+                // Open residents make a result contract deferred until its
+                // realized call shape is available. Input traversal retains
+                // any physical leaves already found before this unknown
+                // region, so an open T cannot hide a Slice's outer borrow.
+                if traversed.is_err() && (!input || type_has_reference_storage(signatures, ty,
+                    &mut std::collections::BTreeSet::new(), true)) {
+                    return Err(());
+                }
+                // An open identity-only argument of a sealed physical input
+                // (Id<Tag> with only an integer field, for example) cannot
+                // invalidate another argument's known caller-region path.
+                // Raw storage and unresolved physical/referent residents
+                // remain deferred. Results always use strict traversal.
+                leaves.extend(logical);
+            }
+            let represented = leaves[first..].iter().filter_map(|(_, leaf)| match leaf {
+                Type::Reference { lifetime, .. } => Some(*lifetime),
+                _ => None,
+            }).collect::<std::collections::BTreeSet<_>>();
+            let raw_storage = arguments.iter().any(|argument| matches!(argument,
+                GenericArgument::Lifetime(lifetime) if represented.contains(lifetime)))
+                && type_has_raw_storage(signatures, ty, &mut std::collections::BTreeSet::new());
+            for (index, argument) in arguments.iter().enumerate() {
+                let GenericArgument::Lifetime(lifetime) = argument else { continue; };
+                // An ordinary borrowed view has no additional storage beyond
+                // its physical reference. A raw-backed owner can have both:
+                // retain that independent obligation even at one lifetime.
+                if represented.contains(lifetime) && !raw_storage { continue; }
+                let mut logical = path.clone();
+                logical.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
+                leaves.push((logical, Type::Reference {
+                    lifetime: *lifetime, mutability: Mutability::Shared, referent: Box::new(Type::Unit),
+                }));
+            }
+            Ok(())
+        });
+    if let Some(previous) = previous { active.insert(*definition, previous); }
+    else { active.remove(definition); }
+    result
+}
+
+fn reference_layout_weight(ty: &Type) -> usize {
+    fn arguments(arguments: &[GenericArgument]) -> usize {
+        arguments.iter().fold(0usize, |weight, argument| weight.saturating_add(match argument {
+            GenericArgument::Type(ty) => reference_layout_weight(ty),
+            _ => 1,
+        }))
+    }
+    let nested = match ty {
+        Type::Tuple(fields) => fields.iter().fold(0usize, |weight, field| weight.saturating_add(reference_layout_weight(field))),
+        Type::Reference { referent, .. } => reference_layout_weight(referent),
+        Type::RawPointer { pointee, .. } => reference_layout_weight(pointee),
+        Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => reference_layout_weight(element),
+        Type::Nominal { arguments: values, .. } => arguments(values),
+        Type::Projection { subject, trait_arguments, item_arguments, .. } => reference_layout_weight(subject)
+            .saturating_add(arguments(trait_arguments)).saturating_add(arguments(item_arguments)),
+        Type::Callable { parameters, result, .. } => parameters.iter().fold(reference_layout_weight(result),
+            |weight, parameter| weight.saturating_add(reference_layout_weight(parameter))),
+        _ => 0,
+    };
+    nested.saturating_add(1)
+}
+
+fn type_has_raw_storage(signatures: &ElaboratedInterface, ty: &Type, active: &mut std::collections::BTreeSet<DefKey>) -> bool {
+    type_has_reference_storage(signatures, ty, active, false)
+}
+
+fn type_has_reference_storage(signatures: &ElaboratedInterface, ty: &Type,
+    active: &mut std::collections::BTreeSet<DefKey>, include_borrowed: bool) -> bool {
+    match ty {
+        Type::RawPointer { .. } => true,
+        Type::Reference { referent, .. } if include_borrowed => type_has_reference_storage(signatures, referent, active, true),
+        Type::Callable { .. } if include_borrowed => true,
+        Type::Tuple(fields) => fields.iter().any(|field| type_has_reference_storage(signatures, field, active, include_borrowed)),
+        Type::Array(element) | Type::FixedArray { element, .. } => type_has_reference_storage(signatures, element, active, include_borrowed),
+        Type::Nominal { definition, arguments } if active.insert(*definition) => {
+            let has = match signatures.definitions.get(definition) {
+                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Struct(fields)
+                    | ElaboratedNominalLayout::TupleStruct(fields), .. }) => fields.iter().any(|field|
+                        instantiate_nominal_field_type(&field.ty, arguments)
+                            .map_or(true, |field| type_has_reference_storage(signatures, &field, active, include_borrowed))),
+                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(variants), .. }) => variants.iter().any(|variant| {
+                    let fields = match &variant.payload {
+                        crate::signature::ElaboratedEnumVariantPayload::Unit => vec![],
+                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields.iter().collect(),
+                        crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => fields.iter().map(|field| &field.ty).collect(),
+                    };
+                    fields.iter().any(|field| instantiate_nominal_field_type(field, arguments)
+                        .map_or(true, |field| type_has_reference_storage(signatures, &field, active, include_borrowed)))
+                }),
+                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Opaque, .. }) | None => true,
+                _ => false,
+            };
+            active.remove(definition);
+            has
+        }
+        Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => true,
+        _ => false,
+    }
+}
+
+fn structural_reference_leaf_paths(
+    signatures: &ElaboratedInterface,
+    ty: &Type,
+    path: &mut Vec<u32>,
+    leaves: &mut Vec<(Vec<u32>, Type)>,
+    active: &mut std::collections::BTreeMap<DefKey, Type>,
+    input: bool,
+) -> Result<(), ()> {
     if let Some(fields) = crate::refinement::binding_pack_fields(ty) {
         for (index, field) in fields.iter().enumerate() {
             path.push(index as u32);
-            reference_leaf_paths(signatures, field, path, leaves)?;
+            reference_leaf_paths_active(signatures, field, path, leaves, active, input)?;
             path.pop();
         }
         return Ok(());
@@ -17437,7 +17608,7 @@ pub(crate) fn reference_leaf_paths(
         Type::Tuple(fields) => {
             for (index, field) in fields.iter().enumerate() {
                 path.push(index as u32);
-                reference_leaf_paths(signatures, field, path, leaves)?;
+                reference_leaf_paths_active(signatures, field, path, leaves, active, input)?;
                 path.pop();
             }
         }
@@ -17452,7 +17623,7 @@ pub(crate) fn reference_leaf_paths(
                 for (index, field) in fields.iter().enumerate() {
                     path.push(index as u32);
                     let field = instantiate_nominal_field_type(&field.ty, arguments)?;
-                    reference_leaf_paths(signatures, &field, path, leaves)?;
+                    reference_leaf_paths_active(signatures, &field, path, leaves, active, input)?;
                     path.pop();
                 }
             }
@@ -17485,7 +17656,7 @@ pub(crate) fn reference_leaf_paths(
                         path.push(index as u32);
                         let mut field_leaves = vec![];
                         let traversed =
-                            reference_leaf_paths(signatures, &field, path, &mut field_leaves);
+                            reference_leaf_paths_active(signatures, &field, path, &mut field_leaves, active, input);
                         path.pop();
                         traversed?;
                         for (field_path, leaf) in field_leaves {
@@ -17523,7 +17694,7 @@ pub(crate) fn reference_leaf_paths(
             // element path rather than N leaves and N² caller relations.
             let _ = ty.fixed_array_length().ok_or(())?;
             path.push(REFERENCE_PATH_ARRAY_ELEMENT);
-            let result = reference_leaf_paths(signatures, element, path, leaves);
+            let result = reference_leaf_paths_active(signatures, element, path, leaves, active, input);
             path.pop();
             result?;
         }
@@ -17572,6 +17743,11 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
                 definition,
                 arguments,
             } => {
+                if arguments.iter().any(|argument| match argument {
+                    GenericArgument::Type(ty) => visit(signatures, ty, active),
+                    GenericArgument::Lifetime(_) => true,
+                    _ => false,
+                }) { return true; }
                 // A repeated nominal lies behind at least one array on this
                 // walk. Do not expand it again: every direct field of this
                 // application is visited during its first occurrence, while
@@ -17845,6 +18021,7 @@ mod invariant_call_lifetime_tests {
         }
         assert!(reference_path_matches(&[0, REFERENCE_PATH_ARRAY_ELEMENT, 1], &[0, 42, 1]));
         assert!(!reference_path_matches(&[REFERENCE_PATH_ARRAY_ELEMENT], &[REFERENCE_PATH_DEREF]));
+        assert!(!reference_path_matches(&[REFERENCE_PATH_ARRAY_ELEMENT], &[REFERENCE_PATH_LOGICAL_ARGUMENT]));
         assert!(!reference_path_is_prefix(&[0, REFERENCE_PATH_ARRAY_ELEMENT], &[1, 0]));
     }
 

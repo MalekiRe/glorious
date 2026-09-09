@@ -269,9 +269,18 @@ impl LlvmNativeModule {
         arguments: *const *const u8,
         result: *mut u8,
     ) -> u32 {
+        let Ok(environment) = super::float_env::NativeFloatEnvironment::enter() else {
+            context.fault = 16;
+            return 1;
+        };
         // SAFETY: only the closed generated-code bridge calls this with the
         // exact compiler-owned slot plans and owning library kept alive.
-        unsafe { (self.entries[index])(context, arguments, result) }
+        let status = unsafe { (self.entries[index])(context, arguments, result) };
+        if environment.restore().is_err() {
+            context.fault = 16;
+            return 1;
+        }
+        status
     }
     pub fn abi(&self) -> &super::LlvmAbiDescriptor {
         self.plan.abi()
@@ -371,7 +380,7 @@ impl LlvmNativeModule {
         // SAFETY: the module owns its entry, no arguments are expected, and
         // the result points at correctly aligned uninitialized i64 storage.
         let status = unsafe {
-            (self.entries[index])(&mut context, std::ptr::null(), result.as_mut_ptr().cast())
+            self.invoke_native(index, &mut context, std::ptr::null(), result.as_mut_ptr().cast())
         };
         if let Some(error) = allocation.failure {
             return Err(LlvmError::Runtime(error));

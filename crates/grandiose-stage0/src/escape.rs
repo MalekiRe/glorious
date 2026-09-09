@@ -70,7 +70,8 @@ impl EscapeFlow {
         // replaces that exact projection rather than disappearing from the
         // boundary provenance model.
         for (name, ty) in &body.parameters {
-            analyzer.values.insert(name.clone(), parameter_value(ty));
+            let value = analyzer.seed_logical_value(format!("<parameter-{name}>"), ty, parameter_value(ty));
+            analyzer.values.insert(name.clone(), value);
         }
         let root = analyzer.value(body.root);
         analyzer.report_return_escape(&root, body.expression(body.root).span);
@@ -99,12 +100,20 @@ enum Value {
     /// across suspension, but can be overwritten by a body-local borrow in
     /// an aggregate projection.
     ExternalBorrowed,
+    Region(BTreeSet<crate::placeflow::regions::Region>),
     Borrowed {
         root: String,
         storage: Option<u64>,
         fields: Vec<u32>,
     },
     Aggregate(Vec<Value>),
+    /// Type/lifetime-argument residents are not physical fields. Keep their
+    /// provenance beside the physical shape without fabricating an address
+    /// or allocating a vector indexed by a reserved path component.
+    Logical {
+        physical: Box<Value>,
+        arguments: BTreeMap<u32, Value>,
+    },
     /// A call's homogeneous array result keeps one reference relation per
     /// element shape, plus only the concretely overwritten resident slots.
     Array {
@@ -115,10 +124,15 @@ enum Value {
     /// A known constructor may lack a resident path present in another
     /// variant. That absence is not unknown reference provenance.
     Variant(Vec<Value>),
+    /// A closed enum can expose incompatible layouts at the same payload
+    /// position, for example Result<[&T; N], Vec<&T>>. Keep both provenance
+    /// shapes without claiming that either is a field of the other.
+    Alternatives(Vec<Value>),
     Closure {
         environment: EnvironmentBrand,
         captures: Vec<Capture>,
         frame_independent: bool,
+        regions: BTreeSet<crate::placeflow::regions::Region>,
     },
     Joined(Vec<Value>),
 }
@@ -132,6 +146,7 @@ struct ValueEnvironment {
     bindings: BTreeMap<String, u64>,
     residents: BTreeMap<u64, Value>,
     next: u64,
+    regions: crate::placeflow::regions::RegionGraph<Value>,
 }
 
 impl ValueEnvironment {
@@ -199,6 +214,87 @@ struct Analyzer<'a> {
 }
 
 impl Analyzer<'_> {
+    fn seed_logical_value(&mut self, site: String, ty: &Type, mut value: Value) -> Value {
+        let mut leaves = vec![];
+        let _ = crate::core::reference_leaf_paths(self.signatures, ty, &mut vec![], &mut leaves);
+        if !leaves.iter().any(|(path, _)| crate::core::reference_path_is_logical(path)) { return value; }
+        let external = matches!(value, Value::ExternalBorrowed);
+        if external { value = Value::None; }
+        for (path, _) in leaves {
+            if !crate::core::reference_path_is_logical(&path) {
+                if external { put_value_at_path(&mut value, &path, Value::ExternalBorrowed); }
+                continue;
+            }
+            let resident = if external { Value::ExternalBorrowed }
+                else { value_at_path(&value, &path).unwrap_or(Value::None) };
+            let mut regions = logical_regions(&resident);
+            if regions.is_empty() {
+                regions.insert(crate::placeflow::regions::Region { site: site.clone(), path: path.clone() });
+            } else if matches!(resident, Value::Region(_)) { continue; }
+            self.values.regions.connect(&regions);
+            self.values.regions.insert(regions.first().expect("one logical origin").clone(), resident, merge_region_values);
+            let replacement = Value::Region(regions);
+            if !replace_resident_path(&mut value, &path, replacement.clone())
+                && !put_value_at_path(&mut value, &path, replacement.clone()) {
+                let mut alternative = Value::None;
+                if put_value_at_path(&mut alternative, &path, replacement) {
+                    value = Value::Alternatives(vec![value, alternative]);
+                }
+            }
+        }
+        seal_array_extents(self.signatures, ty, &mut value);
+        value
+    }
+
+    fn resolved_value(&self, value: &Value) -> Value {
+        fn resolve(value: &Value, graph: &crate::placeflow::regions::RegionGraph<Value>, active: &mut BTreeSet<crate::placeflow::regions::Region>) -> Value {
+            match value {
+                Value::Region(regions) => {
+                    let fresh = graph.reachable(regions).difference(active).cloned().collect::<BTreeSet<_>>();
+                    active.extend(fresh.iter().cloned());
+                    let value = join(graph.contents(&fresh).iter().map(|value| resolve(value, graph, active)).collect());
+                    for region in fresh { active.remove(&region); }
+                    value
+                }
+                Value::Aggregate(values) => Value::Aggregate(values.iter().map(|value| resolve(value, graph, active)).collect()),
+                Value::Variant(values) => Value::Variant(values.iter().map(|value| resolve(value, graph, active)).collect()),
+                Value::Alternatives(values) => Value::Alternatives(values.iter().map(|value| resolve(value, graph, active)).collect()),
+                Value::Joined(values) => join(values.iter().map(|value| resolve(value, graph, active)).collect()),
+                Value::Array { length, element, fields } => Value::Array { length: *length,
+                    element: Box::new(resolve(element, graph, active)),
+                    fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
+                Value::Logical { physical, arguments } => Value::Logical { physical: Box::new(resolve(physical, graph, active)),
+                    arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
+                Value::Closure { environment, captures, frame_independent, regions } => {
+                    let possible = resolve(&Value::Region(regions.clone()), graph, active);
+                    let roots = borrowed_roots(&possible);
+                    let mut captures = captures.clone();
+                    captures.extend(roots.iter().cloned().map(|root| Capture::Borrowed { root, environment: *environment }));
+                    Value::Closure { environment: *environment, captures,
+                        frame_independent: *frame_independent && roots.is_empty(), regions: BTreeSet::new() }
+                }
+                value => value.clone(),
+            }
+        }
+        resolve(value, &self.values.regions, &mut BTreeSet::new())
+    }
+
+    fn record_logical_call_stores(&mut self, callee: CoreId, values: &[Value], span: Span) {
+        for transfer in crate::placeflow::regions::call_transfers(self.signatures, self.body, callee) {
+            let (Some(destination), Some(source)) = (values.get(transfer.destination), values.get(transfer.source)) else { continue; };
+            let Some(destination) = self.reference_path_value(destination, &transfer.destination_path) else { continue; };
+            let Some(source) = self.reference_path_value(source, &transfer.source_path) else { continue; };
+            if value_contains_external_reference(&self.resolved_value(&destination)) {
+                self.report_external_store_escape(&source, span);
+            }
+            let mut regions = logical_regions(&destination);
+            let Some(first) = regions.first().cloned() else { continue; };
+            regions.extend(logical_regions(&source));
+            self.values.regions.connect(&regions);
+            self.values.regions.insert(first, source, merge_region_values);
+        }
+    }
+
     fn value(&mut self, id: CoreId) -> Value {
         let expression = self.body.expression(id).clone();
         let value = match expression.kind {
@@ -326,14 +422,19 @@ impl Analyzer<'_> {
                     self.values.define(name.clone(), parameter_value(ty));
                 }
                 let returned = self.value(body);
+                let possible_regions = self.values.regions.clone();
                 self.values = outer_values;
+                self.values.regions.merge_from(&possible_regions, merge_region_values);
 
-                let frame_independent = borrowed_roots(&returned).is_empty()
+                let frame_independent = borrowed_roots(&self.resolved_value(&returned)).is_empty()
                     && !crate::core::tail::has_outer_label_dependency(self.body, body)
                     && environment.captures.iter().all(|capture| {
                         matches!(capture.mode, crate::core::CaptureMode::Copy | crate::core::CaptureMode::Move)
-                            && self.values.get(&capture.name).is_some_and(frame_independent_value)
+                            && self.values.get(&capture.name).is_some_and(|value| frame_independent_value(&self.resolved_value(value)))
                     });
+                let regions = environment.captures.iter().flat_map(|capture|
+                    self.values.get(&capture.name).into_iter().flat_map(logical_regions))
+                    .chain(logical_regions(&returned)).collect();
                 let mut captures = environment
                     .captures
                     .into_iter()
@@ -351,7 +452,7 @@ impl Analyzer<'_> {
                         // must still carry every backing root.  PlaceFlow
                         // separately records the move/reborrow and keeps the
                         // loan live for the callable environment.
-                        borrowed_roots(&value)
+                        borrowed_roots(&self.resolved_value(&value))
                             .into_iter()
                             .map(|root| Capture::Borrowed {
                                 root,
@@ -360,7 +461,7 @@ impl Analyzer<'_> {
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>();
-                captures.extend(borrowed_roots(&returned).into_iter().map(|root| {
+                captures.extend(borrowed_roots(&self.resolved_value(&returned)).into_iter().map(|root| {
                     Capture::Borrowed {
                         root,
                         environment: environment.brand,
@@ -372,6 +473,7 @@ impl Analyzer<'_> {
                     environment: environment.brand,
                     captures,
                     frame_independent,
+                    regions,
                 }
             }
             CoreKind::Call {
@@ -391,9 +493,10 @@ impl Analyzer<'_> {
                     return Value::None;
                 }
                 let values = self.strict_values(arguments.clone());
+                self.record_logical_call_stores(callee, &values, expression.span);
                 if mandatory_tail {
                     for (argument, value) in arguments.iter().zip(&values) {
-                        if !frame_independent_value(value)
+                        if !frame_independent_value(&self.resolved_value(value))
                             && !crate::core::tail::tail_owned_type(self.signatures,
                                 &self.body.expression(*argument).ty, &mut vec![]) {
                             self.error(self.body.expression(*argument).span, "G4403",
@@ -531,6 +634,7 @@ impl Analyzer<'_> {
                 join(exits)
             }
         };
+        let value = self.seed_logical_value(format!("<expression-{}>", id.0), &expression.ty, value);
         if matches!(value, Value::None)
             && crate::core::tail::tail_owned_type(self.signatures, &expression.ty, &mut vec![]) {
             Value::FrameIndependent
@@ -577,14 +681,21 @@ impl Analyzer<'_> {
                         );
                         continue;
                     };
-                    if !put_value_at_path(&mut result, &path.result_fields, value) {
-                        self.error(
-                            span,
-                            "G5023",
-                            format!(
-                                "reference-valued {boundary} has contradictory frozen result paths"
-                            ),
-                        );
+                    let mut updated = result.clone();
+                    if put_value_at_path(&mut updated, &path.result_fields, value.clone()) {
+                        result = updated;
+                    } else if type_has_variant_layout(self.signatures, result_ty, &mut BTreeSet::new()) {
+                        let mut alternative = Value::None;
+                        if put_value_at_path(&mut alternative, &path.result_fields, value) {
+                            match &mut result {
+                                Value::Alternatives(values) => values.push(alternative),
+                                _ => result = Value::Alternatives(vec![result, alternative]),
+                            }
+                        } else {
+                            self.error(span, "G5023", format!("reference-valued {boundary} has contradictory frozen result paths"));
+                        }
+                    } else {
+                        self.error(span, "G5023", format!("reference-valued {boundary} has contradictory frozen result paths"));
                     }
                 }
                 seal_array_extents(self.signatures, result_ty, &mut result);
@@ -611,7 +722,7 @@ impl Analyzer<'_> {
         let Some(deref) = path.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) else {
             return value_at_path(value, path);
         };
-        let reference = value_at_path(value, &path[..deref])?;
+        let reference = self.resolved_value(&value_at_path(value, &path[..deref])?);
         let resident = match reference {
             Value::ExternalBorrowed => Value::ExternalBorrowed,
             Value::Borrowed { storage, fields, .. } => value_at_path(self.values.residents.get(&storage?)?, &fields)?,
@@ -706,7 +817,7 @@ impl Analyzer<'_> {
 
     fn borrowed_value(&mut self, id: CoreId) -> Value {
         if let Some(value) = self.reborrowed_value(id) {
-            for root in borrowed_roots(&value) {
+            for root in borrowed_roots(&self.resolved_value(&value)) {
                 if !self.has_frozen_loan_root(&root) {
                     self.error(self.body.expression(id).span, "G5016",
                         format!("reference to `{root}` has no frozen NLL loan fact"));
@@ -777,7 +888,10 @@ impl Analyzer<'_> {
     fn reborrowed_from_external(&mut self, id: CoreId) -> bool {
         match self.body.expression(id).kind.clone() {
             CoreKind::Field { base, .. } => self.reborrowed_from_external(base),
-            CoreKind::Deref(reference) => matches!(self.value(reference), Value::ExternalBorrowed),
+            CoreKind::Deref(reference) => {
+                let value = self.value(reference);
+                matches!(self.resolved_value(&value), Value::ExternalBorrowed)
+            }
             _ => false,
         }
     }
@@ -811,7 +925,7 @@ impl Analyzer<'_> {
             CoreKind::Deref(reference) => match &self.body.expression(*reference).kind {
                 CoreKind::Local(_) | CoreKind::Field { .. } => {
                     let value = self.value(*reference);
-                    let mut roots = borrowed_roots(&value).into_iter();
+                    let mut roots = borrowed_roots(&self.resolved_value(&value)).into_iter();
                     let root = roots.next()?;
                     roots.next().is_none().then_some(root)
                 }
@@ -880,7 +994,7 @@ impl Analyzer<'_> {
             }
         }
         let mut destinations = BTreeSet::new();
-        targets(reference, projected, &mut destinations);
+        targets(self.resolved_value(&reference), projected, &mut destinations);
         let exact = destinations.len() == 1;
         for (storage, fields) in destinations {
             let Some(resident) = self.values.residents.get_mut(&storage) else { continue; };
@@ -900,12 +1014,15 @@ impl Analyzer<'_> {
             CorePlace::Local { .. } | CorePlace::Error => false,
             CorePlace::Field { base, .. } => self.place_targets_external_storage(base),
             CorePlace::Deref { reference, .. } => {
-                value_contains_external_reference(&self.value(*reference))
+                let value = self.value(*reference);
+                value_contains_external_reference(&self.resolved_value(&value))
             }
         }
     }
 
     fn report_return_escape(&mut self, value: &Value, span: Span) {
+        let resolved = self.resolved_value(value);
+        let value = &resolved;
         let mut emitted = BTreeSet::new();
         for root in borrowed_roots(value) {
             if emitted.insert(("reference", root.clone())) {
@@ -935,6 +1052,8 @@ impl Analyzer<'_> {
     }
 
     fn report_suspension_escape(&mut self, value: &Value, span: Span) {
+        let resolved = self.resolved_value(value);
+        let value = &resolved;
         for root in borrowed_roots(value) {
             self.error(
                 span,
@@ -952,6 +1071,8 @@ impl Analyzer<'_> {
     }
 
     fn report_external_store_escape(&mut self, value: &Value, span: Span) {
+        let resolved = self.resolved_value(value);
+        let value = &resolved;
         let mut emitted = BTreeSet::new();
         for root in borrowed_roots(value) {
             if emitted.insert(("reference", root.clone())) {
@@ -1002,6 +1123,14 @@ fn collect_field_path(place: &CorePlace, path: &mut Vec<(u32, u32)>) {
 /// terminal projection. Any contradiction with an existing aggregate shape
 /// is rejected instead of erasing a body-local borrow from escape analysis.
 fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value) -> bool {
+    if let Value::Alternatives(values) = value {
+        let mut assigned = false;
+        for value in values {
+            let mut updated = value.clone();
+            if assign_field_path(&mut updated, path, replacement.clone()) { *value = updated; assigned = true; }
+        }
+        return assigned;
+    }
     if let Value::Joined(values) = value {
         for value in values.iter_mut() {
             if !assign_field_path(value, path, replacement.clone()) { return false; }
@@ -1014,6 +1143,7 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         if *index >= *field_count {
             return false;
         }
+        while let Value::Logical { physical, .. } = current { current = physical; }
         if matches!(current, Value::None) {
             *current = Value::Aggregate(vec![Value::None; *field_count as usize]);
         }
@@ -1059,9 +1189,29 @@ fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
 }
 
 fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
+    if let Value::Alternatives(values) = target {
+        let mut assigned = false;
+        for value in values {
+            let mut updated = value.clone();
+            if replace_resident_path(&mut updated, path, replacement.clone()) { *value = updated; assigned = true; }
+        }
+        return assigned;
+    }
     let Some((field, tail)) = path.split_first() else { *target = replacement; return true; };
     if let Value::Joined(values) = target {
         return values.iter_mut().all(|value| replace_resident_path(value, path, replacement.clone()));
+    }
+    if *field == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT {
+        let Some((argument, tail)) = tail.split_first() else { return false; };
+        if !matches!(target, Value::Logical { .. }) {
+            let physical = Box::new(std::mem::replace(target, Value::None));
+            *target = Value::Logical { physical, arguments: BTreeMap::new() };
+        }
+        let Value::Logical { arguments, .. } = target else { unreachable!() };
+        return replace_resident_path(arguments.entry(*argument).or_insert(Value::None), tail, replacement);
+    }
+    if let Value::Logical { physical, .. } = target {
+        return replace_resident_path(physical, path, replacement);
     }
     if let Value::Array { length, element, fields } = target {
         if length.is_some_and(|length| u64::from(*field) >= length) { return false; }
@@ -1074,6 +1224,9 @@ fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -
 }
 
 fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Option<Value> {
+    if let Value::Alternatives(values) = value {
+        return Some(join(values.iter().filter_map(|value| value_at_variant_path(value, path, true)).collect()));
+    }
     if let Value::Joined(values) = value {
         return values.iter().map(|value| value_at_variant_path(value, path, known_variant))
             .collect::<Option<Vec<_>>>().map(join);
@@ -1089,6 +1242,21 @@ fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Op
         return Some(Value::ExternalBorrowed);
     }
     let Some((field, tail)) = path.split_first() else { return Some(value.clone()); };
+    if let Value::Logical { physical, arguments } = value {
+        if *field == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT {
+            let (argument, tail) = tail.split_first()?;
+            return value_at_variant_path(arguments.get(argument).unwrap_or(&Value::None), tail, known_variant);
+        }
+        return value_at_variant_path(physical, path, known_variant);
+    }
+    // A constructor with no initialized logical resident contributes an
+    // empty provenance set, not external authority. This also covers a
+    // successful call such as an empty generic owner constructor.
+    if crate::core::reference_path_is_logical(path)
+        && (matches!(value, Value::None | Value::FrameIndependent)
+            || *field == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT) {
+        return Some(Value::None);
+    }
     if let Value::Array { length, element, fields } = value {
         if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
             return array_values(*length, element, fields)
@@ -1123,6 +1291,16 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
         }
         return true;
     }
+    if path[0] == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT {
+        let Some((argument, tail)) = path[1..].split_first() else { return false; };
+        if !matches!(target, Value::Logical { .. }) {
+            let physical = Box::new(std::mem::replace(target, Value::None));
+            *target = Value::Logical { physical, arguments: BTreeMap::new() };
+        }
+        let Value::Logical { arguments, .. } = target else { unreachable!() };
+        return put_value_at_path(arguments.entry(*argument).or_insert(Value::None), tail, replacement);
+    }
+    if let Value::Logical { physical, .. } = target { return put_value_at_path(physical, path, replacement); }
     if path[0] == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
         if matches!(target, Value::None) {
             *target = Value::Array { length: None, element: Box::new(Value::None), fields: BTreeMap::new() };
@@ -1152,6 +1330,21 @@ fn array_values<'a>(length: Option<u64>, element: &'a Value, fields: &'a BTreeMa
 }
 
 fn seal_array_extents(signatures: &crate::ElaboratedInterface, ty: &Type, value: &mut Value) {
+    if let Value::Alternatives(values) = value {
+        for value in values { seal_array_extents(signatures, ty, value); }
+        return;
+    }
+    if let Value::Logical { physical, arguments: residents } = value {
+        if let Type::Nominal { arguments, .. } = ty {
+            for (index, resident) in residents {
+                if let Some(GenericArgument::Type(ty)) = arguments.get(*index as usize) {
+                    seal_array_extents(signatures, ty, resident);
+                }
+            }
+        }
+        seal_array_extents(signatures, ty, physical);
+        return;
+    }
     match (ty, value) {
         (Type::FixedArray { element: ty, length }, Value::Array { length: extent, element, .. }) => {
             *extent = Type::FixedArray { element: ty.clone(), length: length.clone() }.fixed_array_length();
@@ -1204,11 +1397,30 @@ fn joined_environments(
 ) -> ValueEnvironment {
     if exits.is_empty() { return incoming.clone(); }
     let identities = exits.iter().flat_map(|exit| exit.residents.keys().copied()).collect::<BTreeSet<_>>();
+    let mut regions = incoming.regions.clone();
+    for exit in &exits { regions.merge_from(&exit.regions, merge_region_values); }
     ValueEnvironment {
         bindings: incoming.bindings.clone(),
         next: exits.iter().map(|exit| exit.next).max().unwrap_or(incoming.next),
         residents: identities.into_iter().map(|identity| (identity, join(exits.iter()
             .filter_map(|exit| exit.residents.get(&identity).cloned()).collect()))).collect(),
+        regions,
+    }
+}
+
+fn merge_region_values(target: &mut Value, incoming: Value) {
+    if *target != incoming { *target = join(vec![std::mem::replace(target, Value::None), incoming]); }
+}
+
+fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
+    match value {
+        Value::Region(regions) | Value::Closure { regions, .. } => regions.clone(),
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
+            values.iter().flat_map(logical_regions).collect(),
+        Value::Logical { physical, arguments } => logical_regions(physical).into_iter()
+            .chain(arguments.values().flat_map(logical_regions)).collect(),
+        Value::Array { length, element, fields } => array_values(*length, element, fields).flat_map(logical_regions).collect(),
+        _ => BTreeSet::new(),
     }
 }
 
@@ -1239,14 +1451,37 @@ fn join(incoming: Vec<Value>) -> Value {
     }
 }
 
+fn type_has_variant_layout(signatures: &crate::ElaboratedInterface, ty: &Type, active: &mut BTreeSet<crate::DefKey>) -> bool {
+    match ty {
+        Type::Tuple(fields) => fields.iter().any(|field| type_has_variant_layout(signatures, field, active)),
+        Type::FixedArray { element, .. } => type_has_variant_layout(signatures, element, active),
+        Type::Nominal { definition, arguments } if active.insert(*definition) => {
+            let has = match signatures.definitions.get(definition) {
+                Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Enum(_), .. }) => true,
+                Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(fields)
+                    | crate::ElaboratedNominalLayout::TupleStruct(fields), .. }) => fields.iter().any(|field|
+                        crate::core::instantiate_nominal_field_type(&field.ty, arguments).ok()
+                            .is_some_and(|field| type_has_variant_layout(signatures, &field, active))),
+                _ => false,
+            };
+            active.remove(definition);
+            has
+        }
+        _ => false,
+    }
+}
+
 fn frame_independent_value(value: &Value) -> bool {
     match value {
+        Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::FrameIndependent | Value::ExternalBorrowed => true,
-        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
             values.iter().all(frame_independent_value)
         }
         Value::Array { length, element, fields } =>
             array_values(*length, element, fields).all(frame_independent_value),
+        Value::Logical { physical, arguments } => frame_independent_value(physical)
+            && arguments.values().all(frame_independent_value),
         Value::Closure { frame_independent, .. } => *frame_independent,
         Value::None | Value::Borrowed { .. } => false,
     }
@@ -1260,16 +1495,21 @@ fn borrowed_roots(value: &Value) -> BTreeSet<String> {
 
 fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
     match value {
+        Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::Borrowed { root, .. } => {
             roots.insert(root.clone());
         }
-        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
             for value in values {
                 collect_borrowed_roots(value, roots);
             }
         }
         Value::Array { length, element, fields } => {
             for value in array_values(*length, element, fields) { collect_borrowed_roots(value, roots); }
+        }
+        Value::Logical { physical, arguments } => {
+            collect_borrowed_roots(physical, roots);
+            for value in arguments.values() { collect_borrowed_roots(value, roots); }
         }
         Value::Closure { .. } | Value::None | Value::FrameIndependent | Value::ExternalBorrowed => {}
     }
@@ -1374,12 +1614,15 @@ fn effect_row_contains_open_type_parameter(row: &EffectRow) -> bool {
 /// body-local borrow cannot safely be written through the merged receiver.
 fn value_contains_external_reference(value: &Value) -> bool {
     match value {
+        Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::ExternalBorrowed => true,
-        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
             values.iter().any(value_contains_external_reference)
         }
         Value::Array { length, element, fields } =>
             array_values(*length, element, fields).any(value_contains_external_reference),
+        Value::Logical { physical, arguments } => value_contains_external_reference(physical)
+            || arguments.values().any(value_contains_external_reference),
         Value::None | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
@@ -1394,16 +1637,21 @@ fn closure_captures(value: &Value) -> Vec<Capture> {
 
 fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
     match value {
+        Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::Closure {
             captures: values, ..
         } => captures.extend(values.clone()),
-        Value::Aggregate(values) | Value::Variant(values) | Value::Joined(values) => {
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
             for value in values {
                 collect_closure_captures(value, captures);
             }
         }
         Value::Array { length, element, fields } => {
             for value in array_values(*length, element, fields) { collect_closure_captures(value, captures); }
+        }
+        Value::Logical { physical, arguments } => {
+            collect_closure_captures(physical, captures);
+            for value in arguments.values() { collect_closure_captures(value, captures); }
         }
         Value::None | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
     }

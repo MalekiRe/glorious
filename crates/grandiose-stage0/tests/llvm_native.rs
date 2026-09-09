@@ -34,6 +34,44 @@ fn compile(source: &str) -> LlvmIrProgram {
         .unwrap_or_else(|error| panic!("{source}: {error:?}"))
 }
 
+fn with_hostile_float_mode<T>(body: impl FnOnce() -> T) -> T {
+    #[cfg(target_arch = "x86_64")]
+    {
+        struct Restore { mxcsr: u32, x87: u16 }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: these control words were captured on this thread.
+                unsafe {
+                    std::arch::asm!("ldmxcsr [{p}]", p = in(reg) &self.mxcsr, options(nostack));
+                    std::arch::asm!("fldcw [{p}]", p = in(reg) &self.x87, options(nostack));
+                }
+            }
+        }
+        let mut saved = Restore { mxcsr: 0, x87: 0 };
+        let hostile_mxcsr = 0xffd5_u32; // toward zero, FTZ/DAZ, masked exceptions, status flags
+        let hostile_x87 = 0x0f7f_u16;
+        // SAFETY: x86_64 supports SSE; all operands are aligned and all
+        // exception masks stay set. The guard also restores on unwinding.
+        unsafe {
+            std::arch::asm!("stmxcsr [{p}]", p = in(reg) &mut saved.mxcsr, options(nostack));
+            std::arch::asm!("fnstcw [{p}]", p = in(reg) &mut saved.x87, options(nostack));
+            std::arch::asm!("ldmxcsr [{p}]", p = in(reg) &hostile_mxcsr, options(nostack));
+            std::arch::asm!("fldcw [{p}]", p = in(reg) &hostile_x87, options(nostack));
+        }
+        let result = body();
+        let mut after_mxcsr = 0_u32;
+        let mut after_x87 = 0_u16;
+        unsafe {
+            std::arch::asm!("stmxcsr [{p}]", p = in(reg) &mut after_mxcsr, options(nostack));
+            std::arch::asm!("fnstcw [{p}]", p = in(reg) &mut after_x87, options(nostack));
+        }
+        assert_eq!((after_mxcsr, after_x87), (hostile_mxcsr, hostile_x87));
+        result
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    body()
+}
+
 #[test]
 fn actual_llvm_native_scalar_control_matches_vm_at_o0_and_o2() {
     for source in [
@@ -60,6 +98,79 @@ fn actual_llvm_native_scalar_control_matches_vm_at_o0_and_o2() {
             }
             .unwrap_or_else(|error| panic!("{source}: {error:?}"));
             assert_eq!(module.run_i64_with_limits(Default::default()).unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn native_float_conversions_preserve_public_source_policy_across_engines() {
+    let mut source = String::from("use std::*; fn yes(value: Bool) -> i64 { handle value { true => 1, false => 0 } }\n");
+    let mut groups = Vec::new();
+    for (ty, maximum, signed) in [
+        ("u8", "255", false), ("i8", "127", true),
+        ("u16", "65535", false), ("i16", "32767", true),
+        ("u32", "4294967295", false), ("i32", "2147483647", true),
+        ("u64", "18446744073709551615", false), ("i64", "9223372036854775807", true),
+        ("u128", "340282366920938463463374607431768211455", false),
+        ("i128", "170141183460469231731687303715884105727", true),
+        ("usize", "18446744073709551615", false), ("isize", "9223372036854775807", true),
+    ] {
+        let minimum = if signed { format!("wrapping_add({maximum}, 1)") } else { "0".into() };
+        source.push_str(&format!("fn min_{ty}() -> {ty} {{ {minimum} }} fn max_{ty}() -> {ty} {{ {maximum} }}\n"));
+        let mut checks = vec![
+            "yes(f32_eq(as<f32>(value), 42.0))".to_owned(),
+            "yes(f64_eq(as<f64>(value), 42.0))".to_owned(),
+        ];
+        for float in ["f32", "f64"] {
+            checks.extend([
+                format!("yes(as<{ty}>({float}_div(0.0, 0.0)) == 0)"),
+                format!("yes(as<{ty}>({float}_div(1.0, 0.0)) == max_{ty}())"),
+                format!("yes(as<{ty}>({float}_div(-1.0, 0.0)) == min_{ty}())"),
+                format!("yes(as<{ty}>({float}_add(42.9, 0.0)) == value)"),
+                format!("yes(as<{ty}>({float}_add(-0.9, 0.0)) == 0)"),
+            ]);
+        }
+        source.push_str(&format!("fn check_{ty}(value: {ty}) -> i64 {{ {} }}\n", checks.join(" + ")));
+        groups.push(format!("check_{ty}(42)"));
+    }
+    source.push_str("fn wide() -> u64 { 9223372586610589697 }
+        fn widest() -> u128 { 340282366920938463463374607431768211455 }
+        fn odd() -> u64 { 9007199254740993 }
+        fn precision() -> i64 {
+            let zero = as<f32>(-0.0);
+            yes(f32_eq(as<f32>(wide()), 9223373136366403584.0)) +
+            yes(f32_eq(as<f32>(widest()), f32_div(1.0, 0.0))) +
+            yes(f64_eq(as<f64>(odd()), 9007199254740992.0)) +
+            yes(f32_eq(as<f32>(16777217), 16777216.0)) +
+            yes(f32_eq(as<f32>(16777219), 16777220.0)) +
+            yes(f32_eq(as<f32>(1.000000059604644775390625), 1.0)) +
+            yes(f32_eq(f32_div(1.0, zero), f32_div(-1.0, 0.0))) +
+            yes(f64_eq(f64_div(1.0, as<f64>(zero)), f64_div(-1.0, 0.0)))
+        }\n");
+    groups.push("precision()".into());
+    let expected = 12 * 12 + 8;
+    for (index, group) in groups.chunks(4).enumerate() {
+        source.push_str(&format!("fn group_{index}() -> i64 {{ {} }}\n", group.join(" + ")));
+    }
+    source.push_str("pub fn main() -> i64 { group_0() + group_1() + group_2() + group_3() }");
+    let mut input = request(&source);
+    input.sources.push(SourceInput::new(
+        PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(),
+        include_bytes!("../../../stdlib/src/lib.glorious").as_slice(),
+    ));
+    let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap())
+        .unwrap_or_else(|error| panic!("{source}: {error:?}"));
+    assert_eq!(ir.vm_program().run_i64().unwrap(), expected);
+    let conversions = ir.function_keys().iter().copied().filter(|key| {
+        ir.function(*key).unwrap().instructions.iter().any(|instruction| matches!(instruction,
+            grandiose_stage0::VmInstruction::FloatIntrinsic { primitive: grandiose_stage0::runtime_manifest::FloatPrimitive::Convert { .. }, .. }))
+    }).collect::<Vec<_>>();
+    assert!(!conversions.is_empty() && conversions.len() < ir.function_keys().len());
+    for plan in [ir.clone(), ir.with_vm_functions(conversions).unwrap(), ir.with_vm_functions([ir.entry_key()]).unwrap()] {
+        for optimization in [0, 2] {
+            let native = unsafe { plan.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), expected);
+            assert_eq!(with_hostile_float_mode(|| native.run_i64_with_limits(Default::default())).unwrap(), expected);
         }
     }
 }

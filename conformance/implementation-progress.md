@@ -5,6 +5,74 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 87: exact native float conversions
+
+Integrated `e840442e` and its separate conversion-fixture correction `dffdf6d9`.
+LLVM native ABI 7 converts integers directly to the requested floating precision
+and guards checked float-to-integer leaves with ordered half-open bounds before
+conversion. Public saturation and NaN policy remain source library definitions.
+Generated entries and the mixed worker establish and restore the selected
+GNU/x86-64 floating environment. The 481-case bit/error matrix exercises 7,696
+native invocations across O0/O2 and eight ambient-mode configurations. Public
+source tests cover 152 conversion checks across native and both mixed partitions.
+Pure-VM and foreign-callback profile restoration remain a separate open follow-up.
+
+The combined main-tree run passes 2,054 tests, including 891 service tests;
+only the actual source-library target fails, with 15 passing and 16 failing
+cases (`target/integration-control-float-v1.log`). All 176 library API tests
+pass. This is not complete library or compiler conformance.
+
+## Cache 86: direct branded ownership continuations
+
+Continuation snapshots keep moves, loans, reborrow/reference origins, logical
+container regions, referent holes and minimum-use alternatives together. A direct
+transfer records its state at the exact generative label, checks abandoned
+owners before teardown and does not enter an unrelated normal branch join.
+The destination rejoins only its own transfers and normal body completion.
+Original clause indices remain stable when terminal arms are excluded.
+
+The focused run preserves all 891 service, 111 destruction, 4 lexical-tail and
+11 then-existing minimum-use tests (`target/label-continuations-v1.log`). New
+direct cases execute fresh and decoded artifacts at O0/O2; negatives retain
+exact G5024/G5003 expectations for abandoned linear parameters/locals/strict
+operands and nested-label moves. All 12 minimum-use tests pass after the handler
+and strict-operand follow-up (`target/label-continuations-v2.log`).
+Five generic-helper exit regressions remain open. Passing label arguments is
+not proof that they are invoked, and a normally returning helper can also exit
+on another path. Derived invocation/exit summaries and required control fusion
+are still needed; this direct-edge implementation does not claim to supply them.
+
+## Cache 85: logical residents in source-managed owners
+
+Integrated the exact `e60d6fb6` delta. Generic type/lifetime residents have
+logical provenance paths distinct from physical fields. Persistent region
+identities preserve later insertions through initially empty owners, aliases,
+interior mutation and branch joins. Physical references cannot mask different
+raw-backed residents merely because their lifetimes are equal. Nested finite
+owner layouts use decreasing type shape as their traversal termination measure.
+
+The main-tree batch passes 1,189 tests: 281 unit, 7 borrowed-temporary,
+6 conditional-Drop, 268 Core, 111 destruction, 15 expected-reborrow,
+27 fixed-array/container, 17 lifetime, 17 mandatory-tail, 11 minimum-use,
+13 mutable-binding, 22 request, 38 semantic, 176 library API and 180 VM tests
+(`target/integration-logical-regions-v2.log`). The native follow-up also passes
+21 generated-native, 29 bridge and 891 service tests
+(`target/integration-logical-regions-v3.log`). The source-library run is
+initially 14 passing / 17 failing: `StringInterner::get` lost provenance around
+an open generic tag. The exact `c5ab6b27` follow-up repairs input-only traversal
+of sealed identity-only arguments while raw-backed unresolved owners stay
+opaque and result traversal stays strict. The combined cache-87 run restores
+`storage` and the original 15 passing / 16 failing source-library matrix.
+
+This does not finish closure-bearing container provenance. Compile-only probes
+still expose escapes through stored borrowed closures and captured-owner
+insertions. The independent completion-exit regressions also remain open:
+terminal arms contaminate continuing move state, and later consumption can hide
+an earlier exit's positive-use debt. A normally returning helper can also exit
+through a label on one branch; a noninvoking helper must not invent such an exit.
+Result bottomness or scanning passed label values is therefore not a complete
+substitute for the specified derived invocation/exit contracts.
+
 ## Cache 84: pinned static-data windows across LLVM and VM
 
 Integrated the exact `ce0e4bc3` delta. Shared VM/native ABI 4 and LLVM native

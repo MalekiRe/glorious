@@ -61,6 +61,52 @@ fn rejects(body: &str) {
 }
 
 #[test]
+fn direct_label_continuations_keep_their_own_move_and_minimum_use_states() {
+    accepts("effect Ask { ask() -> (); }
+        fn select(value:Token) -> Token {
+            handle Ask::ask() { Ask::ask() => @select(value) }; value
+        } pub fn main() -> i64 { consume(select(Token {})) }");
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn select(value:Token, flag:Flag) -> Token {{
+            handle flag {{ Flag::Yes => @select(value), Flag::No => () }}; value
+        }} pub fn main() -> i64 {{ consume(select(Token {{}}, Flag::{flag})) }}"));
+        accepts(&format!("pub fn main() -> i64 {{ let value = Token {{}};
+            consume(@done: Token {{
+                handle Flag::{flag} {{ Flag::Yes => @done(value), Flag::No => () }}; value
+            }})
+        }}"));
+    }
+    for (body, code) in [
+        ("fn select(value:Token, flag:Flag) -> i64 {
+            handle flag { Flag::Yes => @select(42), Flag::No => () }; consume(value)
+        } pub fn main() -> i64 { select(Token {},Flag::Yes) }", "G5024"),
+        ("fn select(value:Token, flag:Flag) -> i64 {
+            @done: () { handle flag {
+                Flag::Yes => { consume(value); @done(()) }, Flag::No => ()
+            }; }; consume(value)
+        } pub fn main() -> i64 { select(Token {},Flag::Yes) }", "G5003"),
+        ("pub fn main() -> i64 { @done: i64 {
+            let abandoned = Token {}; @done(42)
+        }}", "G5024"),
+        ("effect Ask { ask() -> (); }
+        fn select(value:Token) -> i64 {
+            handle Ask::ask() { Ask::ask() => @select(42) }; consume(value)
+        } pub fn main() -> i64 { select(Token {}) }", "G5024"),
+        ("fn pair(value:Token, number:i64) -> i64 { consume(value) + number }
+        pub fn main() -> i64 { pair(Token {}, @main(42)) }", "G5024"),
+    ] {
+        let source = format!("{TOKEN}{body}");
+        for optimization in ["0", "2"] {
+            let error = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+                Err(error) => error,
+                Ok(_) => panic!("label exit lost its ownership state: {source}"),
+            };
+            assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{source}\n{error:#?}");
+        }
+    }
+}
+
+#[test]
 fn named_linear_owners_transfer_or_deconstruct_without_byte_residents() {
     accepts("pub fn main() -> i64 { let value = Token {}; consume(value) }");
     accepts(
