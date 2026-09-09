@@ -5,6 +5,30 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 83: mandatory tail transfers across LLVM and VM
+
+Integrated the exact `af6f2b29` and `e470225c` changes. Identical unique-reference
+results transfer through final joins without borrowing a retired tail-result
+temporary. LLVM native ABI 5 and a private synchronous VM handoff share the
+dispatcher-owned argument packets; the ending VM activation returns before the
+next native body begins. Ordinary surviving VM callers keep their frames and
+result destinations. Public bytecode cannot import the original source graph's
+tail proofs through a native-looking host symbol or capability name.
+
+The main-tree integration passes 276 unit, 268 Core, 15 expected-reborrow,
+19 generated-native, 17 mandatory-tail, 4 lexical-label-tail and 22 request tests
+(`target/integration-mixed-tail-v2.log`). Its two native-bridge resource failures
+were comparison-home overhead exposed by the IEEE migration: the one-Pair-home
+fixture now uses a scalar pattern, and empty Vec cleanup no longer constructs
+comparison operands. Both byte limits remain unchanged. The follow-up passes
+all 29 native-bridge and 176 library API tests
+(`target/integration-mixed-tail-cost-v3.log`).
+
+Mixed-engine tests execute 10,000 transfers with argument permutation, 1,000
+unique-reference/owned/linear-zero-sized transfers, exactly-once source Drop,
+and surviving ordinary callers at native O0/O2. These bounded regressions do
+not complete the native callable, static-data or outward-control interfaces.
+
 ## Cache 82: IEEE floating comparisons and partial traits
 
 The floating policy now follows the requested IEEE semantics. `PartialEq` and

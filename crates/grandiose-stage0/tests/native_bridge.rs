@@ -909,7 +909,9 @@ fn ordinary_source_local_has_one_native_home_before_the_call() {
             let mut pair = Pair { first: 19, second: 20 };
             let returned = update(&mut pair);
             let observed = returned.first + returned.second;
-            handle observed == 42 { true => pair.first + pair.second, false => 0 }
+            // The budget isolates the Pair's home. A scalar pattern does not
+            // introduce the independent borrowed operands of PartialEq::eq.
+            handle observed { 42 => pair.first + pair.second, _ => 0 }
         }
     "#,
     );

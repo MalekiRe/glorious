@@ -2,12 +2,71 @@
 use super::*;
 
 impl Elaborator<'_> {
+    /// Context is already propagated to every result arm of these structural
+    /// joins. Do not add a second result loan after an existing child loan or
+    /// an ownership transfer. In particular, no join loan may resurrect the
+    /// discarded result temporary of a mandatory tail call.
+    pub(super) fn reference_result_already_reborrowed(&self, value: CoreId, unique: bool) -> bool {
+        let mut pending = vec![value];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(value) = pending.pop() {
+            if !seen.insert(value) {
+                continue;
+            }
+            match &self.expressions[value.0 as usize].kind {
+                CoreKind::Move(_)
+                | CoreKind::Call {
+                    mandatory_tail: true,
+                    ..
+                } => {}
+                CoreKind::Borrow { unique: actual, .. } if *actual == unique => {}
+                CoreKind::Block(values) => {
+                    let Some(last) = values.last() else {
+                        return false;
+                    };
+                    pending.push(*last);
+                }
+                CoreKind::Label { body, .. } => pending.push(*body),
+                CoreKind::Completion { clauses, .. } if !clauses.is_empty() => {
+                    pending.extend(clauses.iter().map(|clause| clause.body));
+                }
+                _ => return false,
+            }
+        }
+        true
+    }
+
     pub(super) fn tail_call(&mut self, call: ExprId, expected: Option<Type>, span: Span) -> CoreId {
-        let call = self.expression_expected(call, expected);
-        let CoreKind::Call {
-            callee, ..
-        } = self.expressions[call.0 as usize].kind.clone()
-        else {
+        let source_call = matches!(
+            self.body.expressions[call.0 as usize].kind,
+            ExprKind::Call { .. }
+        );
+        let mut call = self.expression_expected(call, expected);
+        // Expected unique-reference contexts ordinarily form a child loan.
+        // A direct tail call has no surviving result temporary to borrow: an
+        // identical unique result transfers to the inherited destination.
+        // Peel only this contextual identity, never an explicit source borrow,
+        // shared downgrade, referent change, or lifetime/result transformation.
+        if source_call
+            && let CoreKind::Borrow {
+                unique: true,
+                value,
+            } = self.expressions[call.0 as usize].kind
+            && let CoreKind::Deref(inner) = self.expressions[value.0 as usize].kind
+            && matches!(
+                self.expressions[inner.0 as usize].kind,
+                CoreKind::Call { .. }
+            )
+            && self
+                .inference
+                .resolve_type_structure(self.expressions[call.0 as usize].ty.clone())
+                == self
+                    .inference
+                    .resolve_type_structure(self.expressions[inner.0 as usize].ty.clone())
+        {
+            call = inner;
+        }
+        let CoreKind::Call { callee, .. } = self.expressions[call.0 as usize].kind.clone() else {
             return self.fail(span, "G4400", "mandatory `tail` requires a callable invocation, not a constructor or machine operation");
         };
         if !matches!(
@@ -42,9 +101,9 @@ pub(crate) fn tail_owned_type(
         Type::Tuple(fields) => fields
             .iter()
             .all(|field| tail_owned_type(signatures, field, active)),
-        Type::Array(element) | Type::FixedArray { element, .. } | Type::StaticData { element, .. } => {
-            tail_owned_type(signatures, element, active)
-        }
+        Type::Array(element)
+        | Type::FixedArray { element, .. }
+        | Type::StaticData { element, .. } => tail_owned_type(signatures, element, active),
         Type::Nominal {
             definition,
             arguments,
@@ -89,11 +148,19 @@ pub(crate) fn has_outer_label_dependency(body: &TypedBody, root: CoreId) -> bool
     let mut seen = std::collections::BTreeSet::new();
     let mut pending = vec![root];
     while let Some(id) = pending.pop() {
-        if !seen.insert(id) { continue; }
-        let Some(expression) = body.expressions.get(id.0 as usize) else { return true; };
+        if !seen.insert(id) {
+            continue;
+        }
+        let Some(expression) = body.expressions.get(id.0 as usize) else {
+            return true;
+        };
         match expression.kind {
-            CoreKind::Label { brand, .. } => { declared.insert(brand); }
-            CoreKind::LabelValue { brand } | CoreKind::Transfer { brand, .. } => { referenced.insert(brand); }
+            CoreKind::Label { brand, .. } => {
+                declared.insert(brand);
+            }
+            CoreKind::LabelValue { brand } | CoreKind::Transfer { brand, .. } => {
+                referenced.insert(brand);
+            }
             _ => {}
         }
         pending.extend(core_children(&expression.kind));
@@ -192,8 +259,12 @@ impl TypedBody {
                 CoreKind::Closure {
                     body, environment, ..
                 } => {
-                    pending.push((*body, true, !environment.captures.is_empty()
-                        || has_outer_label_dependency(self, *body), *body));
+                    pending.push((
+                        *body,
+                        true,
+                        !environment.captures.is_empty() || has_outer_label_dependency(self, *body),
+                        *body,
+                    ));
                 }
                 CoreKind::Completion {
                     computation,

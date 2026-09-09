@@ -3725,6 +3725,14 @@ fn vm_effect_argument(
     })
 }
 pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, VmArtifactError> {
+    validate_program(&program, None)?;
+    Ok(VerifiedVmProgram { program })
+}
+
+// Public/decoded bytecode always reconstructs semantics from its own bodies.
+// The optional source is used only by the private compiler-generated native
+// execution adapter, never to produce a portable VerifiedVmProgram.
+fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&VerifiedVmProgram>) -> Result<(), VmArtifactError> {
     if program.schema != STAGE0_VM_SCHEMA {
         return Err(VmArtifactError::UnsupportedSchema {
             found: program.schema,
@@ -3878,7 +3886,8 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             }
         }
     }
-    let transfer_proofs = tail_provenance::summaries(&program.functions)?;
+    let transfer_proofs = tail_provenance::summaries(
+        &native_semantics.map_or(program, |source| &source.program).functions)?;
     for function in program.functions.values() {
         verify_function_control(function, true, false, &transfer_proofs)?;
         for action in declared_frame_cleanup(function)? {
@@ -4119,7 +4128,7 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             }
         }
     }
-    Ok(VerifiedVmProgram { program })
+    Ok(())
 }
 
 /// Direct calls and lifted callable construction infer a target-local generic
@@ -15137,11 +15146,44 @@ fn execute_program_profiled(
     depth: u32,
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
+    profile: Option<&mut VmAuthoringProfile>,
+    native_return: bool,
+    capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
+    borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
+) -> Result<VmValue, VmArtifactError> {
+    match execute_program_with_tail_boundary(program, definition, arguments, depth, budget, host,
+        profile, native_return, capture_environment, borrowed_callers, None)? {
+        RuntimeExecutionOutcome::Returned(value) => Ok(value),
+        RuntimeExecutionOutcome::TailTransferred => Err(VmArtifactError::HandlerStateMismatch),
+    }
+}
+
+/// Private, synchronous engine handoff. The recipient must move the verified
+/// arguments into storage that survives this activation before accepting it.
+/// No public import, serialized instruction, or ordinary call can install this.
+trait RuntimeTailBoundary {
+    fn transfer(&mut self, callee: DefKey, registers: &mut RuntimeRegisters,
+        arguments: &[u32], budget: &mut ExecutionBudget) -> Result<bool, VmArtifactError>;
+}
+
+enum RuntimeExecutionOutcome {
+    Returned(VmValue),
+    TailTransferred,
+}
+
+fn execute_program_with_tail_boundary(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    arguments: &[VmValue],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
     mut profile: Option<&mut VmAuthoringProfile>,
     native_return: bool,
     capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
     mut borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
-) -> Result<VmValue, VmArtifactError> {
+    mut tail_boundary: Option<&mut dyn RuntimeTailBoundary>,
+) -> Result<RuntimeExecutionOutcome, VmArtifactError> {
     let return_floor = borrowed_callers.as_ref().map_or(0, |callers| callers.len());
     if depth.saturating_add(return_floor as u32) >= budget.limits.max_call_depth {
         return Err(VmArtifactError::CallDepthLimit {
@@ -17214,6 +17256,15 @@ fn execute_program_profiled(
                 let target = program.functions.get(callee)
                     .ok_or(VmArtifactError::MissingFunction { definition: *callee })?;
                 require_execution_contract(target, budget)?;
+                // Only the boundary activation can be handed back. Surviving
+                // ordinary VM callers keep their frames and result destinations.
+                // The normal verified tail checks above remain authoritative.
+                if callers.is_empty() && return_floor == 0
+                    && let Some(boundary) = tail_boundary.as_deref_mut()
+                    && boundary.transfer(*callee, &mut registers, arguments, budget)? {
+                    registers.retire_call_arguments(arguments);
+                    return Ok(RuntimeExecutionOutcome::TailTransferred);
+                }
                 budget.reserve_value("mandatory tail arguments", arguments.len())?;
                 let values = arguments.iter().map(|argument| registers.copy_value(*argument, budget))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -17681,7 +17732,7 @@ fn execute_program_profiled(
                 if let Some(borrowed) = borrowed_callers.as_deref_mut() {
                     *borrowed = callers;
                 }
-                return Ok(value);
+                return Ok(RuntimeExecutionOutcome::Returned(value));
             }
             VmInstruction::Trap => return Err(VmArtifactError::Trap),
         }

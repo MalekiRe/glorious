@@ -1053,9 +1053,22 @@ impl NativeHome {
     /// pointers. This is a semantic raw move/copy, never a boundary adapter.
     /// The caller supplies writable, aligned storage of this exact layout.
     pub(super) unsafe fn write_bytes(&self, destination: *mut u8) -> Result<(), VmArtifactError> {
-        let state = self.state.borrow();
-        if !state.root || !state.holes.is_empty() {
+        if !self.is_fully_initialized(&[]) {
             return Err(error("native write requires a fully initialized resident"));
+        }
+        unsafe { self.write_bytes_with_sidecar(destination) }
+    }
+
+    /// Move resident bytes including holes only together with a separately
+    /// checked initialization sidecar. The generated tail packet uses this
+    /// private extension; ordinary native results still require complete owners.
+    pub(super) unsafe fn write_bytes_with_sidecar(&self, destination: *mut u8) -> Result<(), VmArtifactError> {
+        if !self.live.get() {
+            return Err(error("native storage lifetime has ended"));
+        }
+        let state = self.state.borrow();
+        if !state.root {
+            return Err(error("native sidecar write requires a live resident root"));
         }
         for reference in state.references.values() {
             if let StoredTarget::Home(home) = &reference.target {
@@ -1859,6 +1872,9 @@ mod tests {
         home.retire();
         let retired = measurements.snapshot();
         assert_eq!((retired.home_allocations, retired.home_deallocations), (2, 2));
+        let mut exported = 0i64;
+        assert!(unsafe { stale.write_bytes_with_sidecar((&raw mut exported).cast()) }.is_err());
+        assert!(unsafe { stale.write_bytes((&raw mut exported).cast()) }.is_err());
         home.retire();
         drop(home);
         drop(stale);

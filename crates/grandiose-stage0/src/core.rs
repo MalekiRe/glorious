@@ -4718,9 +4718,7 @@ impl Elaborator<'_> {
         let Type::Reference { mutability, .. } = self.inference.resolve_type_structure(expected.clone()) else {
             return value;
         };
-        if matches!(self.expressions[value.0 as usize].kind, CoreKind::Move(_))
-            || matches!(self.expressions[value.0 as usize].kind, CoreKind::Borrow { unique, .. }
-                if unique == matches!(mutability, Mutability::Unique)) {
+        if self.reference_result_already_reborrowed(value, matches!(mutability, Mutability::Unique)) {
             return value;
         }
         let actual = self.inference.resolve_type_structure(self.expressions[value.0 as usize].ty.clone());

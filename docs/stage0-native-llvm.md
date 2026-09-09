@@ -34,8 +34,13 @@ Ordinary direct calls use a uniform native slot ABI. Mandatory tail transfers
 return to a native dispatcher that recycles two aligned argument packets. They
 do not depend on LLVM tail-call optimization: alternating packets preserve
 parallel argument permutation and the old body activation returns before the
-next body starts. The tests execute 10,000 mutual tail transfers at native O0
-and O2 under a finite call-depth limit.
+next body starts. VM thunks use a private typed execution outcome to return a
+verified mandatory tail packet to this same dispatcher. The VM activation and
+callback return before the next native body starts; no recursive cross-engine
+call substitutes for a tail transfer. Surviving ordinary VM callers retain
+their result destinations and are not silently discarded. The tests execute
+10,000 alternating VM/native tail transfers at native O0 and O2 under a finite
+call-depth limit.
 
 Every execution has shared instruction, activation-depth, and logical native
 resident-byte budgets. The initial stack-backed implementation also limits an
@@ -78,6 +83,15 @@ referent backing address is preserved. Source Drop glue remains the exact checke
 source implementation bound by the full code identity; no same-shaped foreign
 destructor is selected by a symbol name.
 
+The mixed VM execution adapter remains private; it is not published or serialized
+as portable verified bytecode. Its native bodies are the LLVM implementations of
+the original immutable verified body graph, so tail preservation is reconstructed
+from those source bodies while every adapter graph/ABI/control check remains in
+place. Ordinary bytecode verification still treats a `HostCall` as an unknown
+external boundary; source-like capability or symbol names cannot import these
+semantic proofs. Tests require that the private adapted graph fails ordinary
+portable verification, and that a forged adapter result ABI still rejects.
+
 Generated argument slots contain two pointers: existing resident bytes and a
 canonical initialization sidecar. Native calls and recycled tail packets preserve
 the sidecar independently of the bytes, so moving one field does not reinitialize
@@ -117,8 +131,7 @@ owners release bytes on execution teardown, never implicitly execute source Drop
 
 ## Explicit remaining frontier
 
-The generated backend does not yet execute cross-engine mandatory tails,
-first-class/captured/borrowed callable parameters,
+The generated backend does not yet execute first-class/captured/borrowed callable parameters,
 outward effects, resumptions, or captured lexical control. Float conversions,
 private dynamic-array/text layouts, and some pattern/projection forms are also
 rejected. Ordinary closed-graph VM calls from native bodies are supported;
@@ -128,7 +141,7 @@ unavailable until the shared static-data slot layout is implemented.
 
 The public runner currently exposes only a zero-argument i64 entry. Expanding the boundary
 requires source-level differential tests and actual generated LLVM↔VM calls for
-callable values, static data, mandatory mixed tails, and
+callable values, static data, and
 supported outward control contracts.
 
 Run the targeted regression with:

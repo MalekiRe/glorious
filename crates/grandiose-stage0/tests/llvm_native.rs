@@ -613,12 +613,117 @@ fn generated_native_preserves_actual_reference_backing_addresses() {
 }
 
 #[test]
-fn cross_engine_mandatory_tail_rejects_before_loading() {
-    let ir = compile("fn answer() -> i64 { 42 } pub fn main() -> i64 { tail answer() }");
-    assert!(matches!(
-        ir.with_vm_functions([ir.entry_key()]),
-        Err(LlvmError::Unsupported { .. })
-    ));
+fn cross_engine_mandatory_tails_release_frames_and_permute_arguments() {
+    let source = "fn vm_even(n: i64, a: i64, b: i64) -> i64 {
+            let marker = 41001;
+            handle n == 0 { true => a * 10 + b, false => tail native_odd(b, a, n - 1) }
+        }
+        fn native_odd(a: i64, b: i64, n: i64) -> i64 {
+            handle n == 0 { true => a * 10 + b, false => tail vm_even(n - 1, b, a) }
+        }
+        pub fn main() -> i64 { let marker = 41002; tail vm_even(10000, 4, 2) }";
+    let mixed = compile_mixed(source);
+    let limits = VmExecutionLimits {
+        max_call_depth: 16,
+        ..Default::default()
+    };
+    assert_eq!(mixed.vm_program().run_i64_with_limits(limits).unwrap(), 42);
+    for optimization in [0, 2] {
+        let native = unsafe {
+            mixed.compile(&LlvmCompileOptions {
+                optimization,
+                ..Default::default()
+            })
+        }
+        .unwrap();
+        assert_eq!(native.run_i64_with_limits(limits).unwrap(), 42);
+    }
+}
+
+#[test]
+fn mixed_tail_packets_preserve_reference_returns_owned_drop_and_zero_sized_values() {
+    let cases = [
+        "fn vm_bounce<'a>(n: i64, value: &'a mut i64) -> &'a mut i64 {
+            let marker = 41001;
+            handle n == 0 { true => value, false => tail native_bounce(value, n - 1) }
+        }
+        fn native_bounce<'a>(value: &'a mut i64, n: i64) -> &'a mut i64 {
+            handle n == 0 { true => value, false => tail vm_bounce(n - 1, value) }
+        }
+        pub fn main() -> i64 {
+            let marker = 41002; let mut count = 40;
+            let view = vm_bounce(1000, &mut count); *view = *view + 2; count
+        }",
+        "struct Probe<'a> { count: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 2; } }
+        fn vm_bounce<'a>(n: i64, value: Probe<'a>) -> Probe<'a> {
+            let marker = 41001;
+            handle n == 0 { true => value, false => tail native_bounce(value, n - 1) }
+        }
+        fn native_bounce<'a>(value: Probe<'a>, n: i64) -> Probe<'a> {
+            handle n == 0 { true => value, false => tail vm_bounce(n - 1, value) }
+        }
+        pub fn main() -> i64 {
+            let marker = 41002; let mut count = 40;
+            { let probe = vm_bounce(1000, Probe { count: &mut count }); () }; count
+        }",
+        "struct Token {} impl Use<[1,1]> for Token {}
+        fn vm_bounce(n: i64, value: Token) -> Token {
+            let marker = 41001;
+            handle n == 0 { true => value, false => tail native_bounce(value, n - 1) }
+        }
+        fn native_bounce(value: Token, n: i64) -> Token {
+            handle n == 0 { true => value, false => tail vm_bounce(n - 1, value) }
+        }
+        pub fn main() -> i64 {
+            let marker = 41002; let Token {} = vm_bounce(1000, Token {}); 42
+        }",
+    ];
+    for source in cases {
+        let ir = compile_mixed(source);
+        let limits = VmExecutionLimits {
+            max_call_depth: 16,
+            max_native_bytes: 128 * 1024,
+            ..Default::default()
+        };
+        assert_eq!(ir.vm_program().run_i64_with_limits(limits).unwrap(), 42);
+        for optimization in [0, 2] {
+            let native = unsafe {
+                ir.compile(&LlvmCompileOptions {
+                    optimization,
+                    ..Default::default()
+                })
+            }
+            .unwrap();
+            assert_eq!(
+                native
+                    .run_i64_with_limits(limits)
+                    .unwrap_or_else(|error| panic!("{source}: {error:?}")),
+                42
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_tail_handoff_keeps_surviving_ordinary_vm_callers() {
+    let source = "fn native_answer() -> i64 { 40 }
+        fn vm_inner() -> i64 { let marker = 41001; tail native_answer() }
+        fn vm_outer() -> i64 { let marker = 41001; vm_inner() + 2 }
+        fn native_entry() -> i64 { tail vm_outer() }
+        pub fn main() -> i64 { let marker = 41002; native_entry() }";
+    let ir = compile_mixed(source);
+    for optimization in [0, 2] {
+        let native = unsafe {
+            ir.compile(&LlvmCompileOptions {
+                optimization,
+                ..Default::default()
+            })
+        }
+        .unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
 }
 
 fn compile_mixed(source: &str) -> LlvmIrProgram {

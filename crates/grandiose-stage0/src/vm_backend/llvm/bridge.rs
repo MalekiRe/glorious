@@ -90,8 +90,12 @@ fn resident_types(
     Ok(residents.into_values().collect())
 }
 
-fn vm_wrappers(module: &LlvmNativeModule) -> Result<VerifiedVmProgram, VmArtifactError> {
-    let plan = module.plan();
+/// Private execution representation, not portable verified bytecode. Replaced
+/// bodies execute LLVM compiled from these exact original verified bodies;
+/// unknown user host imports cannot supply their semantic transfer summaries.
+fn vm_wrappers(
+    plan: &crate::vm_backend::llvm::LlvmIrProgram,
+) -> Result<CandidateVmProgram, VmArtifactError> {
     let mut program = plan.program.program.clone();
     // A generated wrapper is an explicit native authority boundary, even
     // when the original source signature was safe. Public safe admission is
@@ -112,7 +116,7 @@ fn vm_wrappers(module: &LlvmNativeModule) -> Result<VerifiedVmProgram, VmArtifac
         };
         let parameters = function.registers[..function.parameters as usize].to_vec();
         let mut contract = b"grandiose-compiler-owned-native-binding-v1".to_vec();
-        contract.extend_from_slice(&module.abi().fingerprint().as_bytes());
+        contract.extend_from_slice(&plan.abi().fingerprint().as_bytes());
         contract.extend_from_slice(&definition.0.as_bytes());
         let source_contract = Digest::of_bytes(&contract);
         let mut resident_operations =
@@ -163,18 +167,26 @@ fn vm_wrappers(module: &LlvmNativeModule) -> Result<VerifiedVmProgram, VmArtifac
     program.host_capabilities =
         super::super::reachable_host_capabilities(program.entry, &program.functions);
     program.fingerprint = program.computed_fingerprint();
-    super::super::verify_program(program)
+    // Check every ordinary graph/ABI/control invariant of the adapter. Only
+    // the semantic body summaries come from the unchanged source graph: a
+    // generated HostCall is this same checked source function, not an unknown
+    // external implementation. Keep the original VerifiedVmProgram intact;
+    // the adapted bytecode is never exposed or serialized as verified code.
+    super::super::validate_program(&program, Some(&plan.program))?;
+    Ok(program)
 }
 
 struct GeneratedPlans {
     callbacks: BTreeMap<DefKey, Arc<CallbackPlan>>,
     initialization: BTreeMap<DefKey, Vec<Vec<Vec<u32>>>>,
+    parameters: BTreeMap<DefKey, Vec<Arc<NativeLayout>>>,
 }
 
 impl GeneratedPlans {
     fn new(module: &LlvmNativeModule) -> Result<Self, VmArtifactError> {
         let mut callbacks = BTreeMap::new();
         let mut initialization = BTreeMap::new();
+        let mut parameter_plans = BTreeMap::new();
         for definition in &module.plan().functions {
             let function = &module.plan().program.program.functions[definition];
             let descriptors = function.nominal_copy_descriptors.clone().into();
@@ -191,6 +203,7 @@ impl GeneratedPlans {
                     })
                     .collect::<Result<Vec<_>, _>>()?,
             );
+            parameter_plans.insert(*definition, parameters.clone());
             if !module.plan().vm_functions.contains(definition) {
                 continue;
             }
@@ -206,6 +219,7 @@ impl GeneratedPlans {
         Ok(Self {
             callbacks,
             initialization,
+            parameters: parameter_plans,
         })
     }
 }
@@ -228,12 +242,9 @@ pub(in crate::vm_backend) unsafe fn run(
 }
 
 unsafe fn run_local(module: LlvmNativeModule, limits: VmExecutionLimits) -> Result<i64, LlvmError> {
-    let program = vm_wrappers(&module)?;
+    let program = vm_wrappers(module.plan())?;
     let plans = Arc::new(GeneratedPlans::new(&module)?);
-    let contracts = imports_from_roots(
-        &program.program,
-        program.program.functions.keys().copied().collect(),
-    )?;
+    let contracts = imports_from_roots(&program, program.functions.keys().copied().collect())?;
     let mut imports = VmNativeImports::default();
     for contract in &contracts {
         if contract.capability != GENERATED_CAPABILITY {
@@ -277,9 +288,8 @@ unsafe fn run_local(module: LlvmNativeModule, limits: VmExecutionLimits) -> Resu
         instructions: 0,
         allocated_elements: 0,
     };
-    let result =
-        execute_with_arguments(&program.program, program.program.entry, &[], 0, &mut budget)
-            .map_err(LlvmError::Runtime)?;
+    let result = execute_with_arguments(&program, program.entry, &[], 0, &mut budget)
+        .map_err(LlvmError::Runtime)?;
     expect_i64(result).map_err(LlvmError::Runtime)
 }
 
@@ -452,6 +462,9 @@ unsafe extern "C" fn invoke_vm(
     index: u32,
     slots: *const *const u8,
     result: *mut u8,
+    tail_slots: *mut *const u8,
+    tail_storage: *mut u8,
+    tail_next: *mut u32,
 ) -> u32 {
     // SAFETY: generated code calls only with its current synchronous context.
     let context = unsafe { &mut *context };
@@ -461,12 +474,27 @@ unsafe extern "C" fn invoke_vm(
     }
     invocation.call.budget.instructions = context.instructions;
     let outcome = catch_unwind(AssertUnwindSafe(|| unsafe {
-        invoke_vm_checked(invocation, context, index, slots, result)
+        invoke_vm_checked(
+            invocation,
+            context,
+            index,
+            slots,
+            result,
+            tail_slots,
+            tail_storage,
+            tail_next,
+        )
     }))
     .unwrap_or_else(|_| Err(super::error("generated native VM callback panicked")));
     context.instructions = invocation.call.budget.instructions;
     match outcome {
-        Ok(()) => 0,
+        Ok(tail) => {
+            if tail {
+                2
+            } else {
+                0
+            }
+        }
         Err(error) => {
             invocation.failure = Some(error);
             1
@@ -480,7 +508,10 @@ unsafe fn invoke_vm_checked(
     index: u32,
     slots: *const *const u8,
     result: *mut u8,
-) -> Result<(), VmArtifactError> {
+    tail_slots: *mut *const u8,
+    tail_storage: *mut u8,
+    tail_next: *mut u32,
+) -> Result<bool, VmArtifactError> {
     let definition = invocation
         .module
         .plan()
@@ -523,19 +554,120 @@ unsafe fn invoke_vm_checked(
         additional_depth: context.depth,
         argument_holes: Some(&holes),
     };
-    let outcome = unsafe { callback.invoke(arguments.as_ptr(), plan.parameters.len(), result) };
+    let mut boundary = GeneratedTailBoundary {
+        module: invocation.module,
+        plans: invocation.plans,
+        slots: tail_slots,
+        storage: tail_storage,
+        next: tail_next,
+    };
+    let outcome = unsafe {
+        callback.invoke_with_tail_boundary(
+            arguments.as_ptr(),
+            plan.parameters.len(),
+            result,
+            Some(&mut boundary),
+        )
+    };
     invocation.call.budget.limits.max_native_bytes = native_limit;
     context.instructions = invocation.call.budget.instructions;
     context.byte_limit = native_limit
         .saturating_sub(invocation.call.budget.native_memory.live_native_bytes() as u64)
         .min(LLVM_NATIVE_STACK_BYTES);
-    outcome?;
+    let tail = outcome?;
     if context.live_bytes > context.byte_limit {
         return Err(super::error(
             "generated callback exceeded its shared memory budget",
         ));
     }
-    Ok(())
+    Ok(tail)
+}
+
+/// Only generated thunks construct this boundary, using dispatcher-owned
+/// packets sized by the same immutable plan that emitted the machine code.
+/// It never invokes the next engine while the ending VM activation is live.
+struct GeneratedTailBoundary<'a> {
+    module: &'a LlvmNativeModule,
+    plans: &'a GeneratedPlans,
+    slots: *mut *const u8,
+    storage: *mut u8,
+    next: *mut u32,
+}
+
+impl super::super::RuntimeTailBoundary for GeneratedTailBoundary<'_> {
+    fn transfer(
+        &mut self,
+        callee: DefKey,
+        registers: &mut RuntimeRegisters,
+        arguments: &[u32],
+        budget: &mut ExecutionBudget,
+    ) -> Result<bool, VmArtifactError> {
+        let plan = self.module.plan();
+        if plan.vm_functions.contains(&callee) {
+            return Ok(false);
+        }
+        let index = plan
+            .functions
+            .iter()
+            .position(|key| *key == callee)
+            .ok_or_else(|| super::error("generated tail target is absent from its code witness"))?;
+        let function = &plan.program.program.functions[&callee];
+        if arguments.len() != function.parameters as usize {
+            return Err(super::error("generated tail argument arity mismatch"));
+        }
+        let packet = &plan.tail_packets[index];
+        let paths = &self.plans.initialization[&callee];
+        for (index, argument) in arguments.iter().enumerate() {
+            budget.tick()?;
+            let layout = &self.plans.parameters[&callee][index];
+            let value =
+                registers[*argument as usize]
+                    .as_ref()
+                    .ok_or(VmArtifactError::ReadBeforeWrite {
+                        register: *argument,
+                    })?;
+            let data = unsafe { self.storage.add(packet.data_offsets[index]) };
+            let flags = unsafe { self.storage.add(packet.initialization_offsets[index]) };
+            check_slot(&layout, data)?;
+            if let VmValue::Resident(home) = value {
+                if home.ty() != &layout.ty || !home.is_initialized(&[]) {
+                    return Err(super::error(
+                        "generated tail resident has an invalid layout or root",
+                    ));
+                }
+                for (offset, path) in paths[index].iter().enumerate() {
+                    budget.tick()?;
+                    unsafe {
+                        flags.add(offset).write(u8::from(home.is_initialized(path)));
+                    }
+                }
+                unsafe {
+                    home.write_bytes_with_sidecar(data)?;
+                }
+            } else {
+                // Scalar/reference slots retain real pointer values. This
+                // rejects any unmaterialized frame-relative reference rather
+                // than serializing a register coordinate as native authority.
+                unsafe {
+                    layout.write(data, value.clone())?;
+                }
+                for offset in 0..paths[index].len() {
+                    budget.tick()?;
+                    unsafe {
+                        flags.add(offset).write(1);
+                    }
+                }
+            }
+            unsafe {
+                self.slots.add(2 * index).write(data.cast_const());
+                self.slots.add(2 * index + 1).write(flags.cast_const());
+            }
+        }
+        unsafe {
+            self.next.write(index as u32);
+        }
+        Ok(true)
+    }
 }
 
 unsafe fn read_initialization(
@@ -569,6 +701,78 @@ unsafe fn read_initialization(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_adapter_uses_exact_source_semantics_without_certifying_portable_host_code() {
+        use crate::{
+            CompilationMode, CompilationRequest, CompilerBuildIdentity, LogicalPath, PackageKey,
+            SourceInput, StageZeroCompiler,
+        };
+        let package = PackageKey("native-tail-proof@0.1.0".into());
+        let source = "fn pure(value: i64) -> i64 { value - 1 }
+            fn native_end(value: &mut i64) -> i64 { *value }
+            fn vm_relay(value: &mut i64) -> i64 {
+                let marker = 41001; let ignored = pure(1); tail native_end(value)
+            }
+            pub fn main() -> i64 { let mut value = 42; vm_relay(&mut value) }";
+        let input = CompilationRequest {
+            build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"native-tail-proof")),
+            mode: CompilationMode::Build,
+            root_package: package.clone(),
+            sources: vec![SourceInput::new(
+                package,
+                LogicalPath::parse("src/main.glorious").unwrap(),
+                source.as_bytes(),
+            )],
+            target: "stage0-vm".into(),
+            semantic_options: Default::default(),
+            codegen_options: Default::default(),
+            capability_manifest: vec![],
+            runtime_manifest: None,
+        };
+        let ir = StageZeroCompiler::new()
+            .compile_llvm_partitioned(
+                input,
+                crate::vm_backend::llvm::LlvmTarget::host().unwrap(),
+                |function| {
+                    function.instructions.iter().any(|instruction| {
+                        matches!(instruction, VmInstruction::ConstI64 { value: 41001, .. })
+                    })
+                },
+            )
+            .unwrap();
+        let original = ir.vm_program().canonical_bytes();
+        let mut adapter = vm_wrappers(&ir).unwrap();
+        assert!(matches!(
+            super::super::super::verify_program(adapter.clone()),
+            Err(VmArtifactError::UnprovenTailCarrier { .. })
+        ));
+        assert_eq!(ir.vm_program().canonical_bytes(), original);
+        assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+
+        // Source-derived semantics do not waive a single adapter ABI check.
+        let function = adapter
+            .functions
+            .values_mut()
+            .find(|function| {
+                function
+                    .instructions
+                    .iter()
+                    .any(|instruction| matches!(instruction, VmInstruction::HostCallOwned { .. }))
+            })
+            .unwrap();
+        let instruction = function
+            .instructions
+            .iter_mut()
+            .find(|instruction| matches!(instruction, VmInstruction::HostCallOwned { .. }))
+            .unwrap();
+        let VmInstruction::HostCallOwned { result, .. } = instruction else {
+            unreachable!()
+        };
+        *result = VmType::Tuple(vec![VmType::Bool, VmType::Bool]);
+        adapter.fingerprint = adapter.computed_fingerprint();
+        assert!(super::super::super::validate_program(&adapter, Some(&ir.program)).is_err());
+    }
 
     fn budget() -> ExecutionBudget {
         ExecutionBudget {

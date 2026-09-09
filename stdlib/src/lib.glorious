@@ -1614,7 +1614,10 @@ impl<T> Vec<T> {
 
     pub fn clear(value: &mut Self) -> ()
         where T: Use<[0, 1]> {
-        Vec::truncate(&mut *value, 0)
+        // Empty cleanup has no residents to compare, borrow or destroy.
+        // In particular it must not construct comparison operand homes while
+        // an already-cleared Vec is being retired after a native callback.
+        handle value.length { 0 => (), _ => Vec::truncate(&mut *value, 0) }
     }
 
     pub fn reverse(value: &mut Self) -> () {

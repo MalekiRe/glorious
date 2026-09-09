@@ -200,17 +200,6 @@ impl<'a> Plan<'a> {
         for (index, key) in result.functions.iter().enumerate() {
             let mut body = Body::new(&result, index);
             for (pc, instruction) in program.functions[key].instructions.iter().enumerate() {
-                if let I::TailCallOwned { callee, .. } = instruction
-                    && vm_functions.contains(key) != vm_functions.contains(callee)
-                {
-                    return Err(LlvmError::Unsupported {
-                        function: *key,
-                        instruction: pc,
-                        reason:
-                            "mandatory tails across engines require the shared mixed dispatcher"
-                                .into(),
-                    });
-                }
                 if vm_functions.contains(key) {
                     // The user explicitly chose this bytecode body. Do not
                     // require a second native implementation of its local
@@ -260,6 +249,17 @@ impl<'a> Plan<'a> {
         Digest::of_bytes(&bytes)
     }
 
+    pub(super) fn tail_packets(&self) -> Vec<super::TailPacketLayout> {
+        self.packet_offsets
+            .iter()
+            .zip(&self.packet_init_offsets)
+            .map(|(data, flags)| super::TailPacketLayout {
+                data_offsets: data.iter().map(|offset| *offset as usize).collect(),
+                initialization_offsets: flags.iter().map(|offset| *offset as usize).collect(),
+            })
+            .collect()
+    }
+
     pub(super) fn emit(&self, descriptor: &LlvmAbiDescriptor) -> Result<String, LlvmError> {
         let mut ir = format!(
             "; LLVM-generated Glorious: verified scalar/control graph, no interpreter fallback.\nsource_filename = \"grandiose-native\"\ntarget triple = \"{}\"\ntarget datalayout = \"{}\"\n",
@@ -280,7 +280,7 @@ impl<'a> Plan<'a> {
         let mut declarations = BTreeSet::new();
         for index in 0..self.functions.len() {
             if self.vm_functions.contains(&self.functions[index]) {
-                writeln!(ir, "define internal i32 @g1_body_{index}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:\n  %callback_at = getelementptr %G1Context, ptr %ctx, i32 0, i32 10\n  %callback = load ptr, ptr %callback_at, align 8\n  %present = icmp ne ptr %callback, null\n  br i1 %present, label %invoke, label %reject\ninvoke:\n  %status = call i32 %callback(ptr %ctx, i32 {index}, ptr %args, ptr %result)\n  ret i32 %status\nreject:\n  %failed = call i32 @g1_fault(ptr %ctx, i32 7)\n  ret i32 %failed\n}}").unwrap();
+                writeln!(ir, "define internal i32 @g1_body_{index}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:\n  %callback_at = getelementptr %G1Context, ptr %ctx, i32 0, i32 10\n  %callback = load ptr, ptr %callback_at, align 8\n  %present = icmp ne ptr %callback, null\n  br i1 %present, label %invoke, label %reject\ninvoke:\n  %status = call i32 %callback(ptr %ctx, i32 {index}, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next)\n  ret i32 %status\nreject:\n  %failed = call i32 @g1_fault(ptr %ctx, i32 7)\n  ret i32 %failed\n}}").unwrap();
                 continue;
             }
             let mut body = Body::new(self, index);

@@ -13,7 +13,7 @@ use super::{
     CandidateVmProgram, DefKey, Digest, ExecutionBudget, NativeMemory, ReferenceTarget,
     RuntimeCaptureEnvironment, RuntimeRegisters, VerifiedVmProgram, VmArtifactError, VmExecutionLimits, VmInstruction,
     VmNativeResident, VmNominalCopyDescriptor, VmType, VmValue,
-    execute_program_profiled, execute_with_arguments, expect_i64,
+    execute_with_arguments, expect_i64,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -892,6 +892,21 @@ impl CallbackContext<'_, '_> {
         count: usize,
         result: *mut u8,
     ) -> Result<(), VmArtifactError> {
+        if unsafe { self.invoke_with_tail_boundary(slots, count, result, None)? } {
+            return Err(error("ordinary native callback unexpectedly transferred a tail"));
+        }
+        Ok(())
+    }
+
+    /// A true result means a private generated boundary accepted a mandatory
+    /// tail packet. No result resident has been initialized in that case.
+    unsafe fn invoke_with_tail_boundary(
+        &mut self,
+        slots: *const *const u8,
+        count: usize,
+        result: *mut u8,
+        tail_boundary: Option<&mut dyn super::RuntimeTailBoundary>,
+    ) -> Result<bool, VmArtifactError> {
         if let Some(failure) = &self.call.callback_failure {
             return Err(failure.clone());
         }
@@ -951,7 +966,7 @@ impl CallbackContext<'_, '_> {
             });
         }
         self.call.budget.native_memory.callback_depth += 1;
-        let value = execute_program_profiled(
+        let value = super::execute_program_with_tail_boundary(
             self.call.program,
             self.callee,
             &arguments,
@@ -962,15 +977,20 @@ impl CallbackContext<'_, '_> {
             owned_resident(&self.plan.result.ty),
             (self.captures.len() != 0).then(|| self.captures.clone()),
             None,
+            tail_boundary,
         );
         self.call.budget.native_memory.callback_depth -= 1;
-        let value = value?;
+        let value = match value? {
+            super::RuntimeExecutionOutcome::Returned(value) => value,
+            super::RuntimeExecutionOutcome::TailTransferred => return Ok(true),
+        };
         if owned_resident(&self.plan.result.ty) && !matches!(&value, VmValue::Resident(_)) {
             return Err(error(
                 "owned callback result lacks its native producer storage",
             ));
         }
-        unsafe { self.plan.result.write(result, value) }
+        unsafe { self.plan.result.write(result, value)?; }
+        Ok(false)
     }
 }
 

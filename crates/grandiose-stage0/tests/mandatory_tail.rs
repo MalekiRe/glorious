@@ -82,6 +82,10 @@ fn mandatory_tail_transfers_incoming_borrows_and_nested_carriers() {
          }
          fn relay(value: &i64) -> i64 { tail read(forward(value, 10000)) }
          pub fn main() -> i64 { let answer = 42; relay(&answer) }",
+        "fn forward<'a>(value: &'a mut i64, remaining: i64) -> &'a mut i64 {
+             handle remaining { 0 => value, _ => tail forward(value, remaining - 1) }
+         }
+         pub fn main() -> i64 { let mut answer = 40; let view = forward(&mut answer, 10000); *view = 42; answer }",
         "fn read(value: &i64) -> i64 { *value }
          fn choose<'a>(first: &'a i64, second: &'a i64, flag: Bool) -> i64 {
              let mut selected = first;
@@ -166,6 +170,18 @@ fn mandatory_tail_rejects_following_work_and_frame_dependencies() {
         (
             "fn done() -> i64 { 42 } pub fn main() -> i64 { let answer = tail done(); answer }",
             "G4401",
+        ),
+        (
+            "fn unique<'a>(value: &'a mut i64) -> &'a mut i64 { value }
+             fn shared<'a>(value: &'a mut i64) -> &'a i64 { tail unique(value) }
+             pub fn main() -> i64 { let mut value = 42; *shared(&mut value) }",
+            "G4400",
+        ),
+        (
+            "fn unique<'a>(value: &'a mut i64) -> &'a mut i64 { value }
+             fn explicit<'a>(value: &'a mut i64) -> &'a mut i64 { tail (&mut (*unique(value))) }
+             pub fn main() -> i64 { let mut value = 42; *explicit(&mut value) }",
+            "G4400",
         ),
         (
             "fn read(value: &i64) -> i64 { *value } pub fn main() -> i64 { let value = 42; tail read(&value) }",

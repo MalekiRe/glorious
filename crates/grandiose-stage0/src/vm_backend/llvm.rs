@@ -20,8 +20,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 4;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:sync-v4";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 5;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:mixed-tail-v5";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
@@ -125,6 +125,13 @@ pub struct LlvmIrProgram {
     layouts: BTreeMap<Vec<u8>, NativeTypeLayout>,
     pub(super) functions: Vec<DefKey>,
     pub(super) vm_functions: BTreeSet<DefKey>,
+    pub(super) tail_packets: Vec<TailPacketLayout>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TailPacketLayout {
+    pub(super) data_offsets: Vec<usize>,
+    pub(super) initialization_offsets: Vec<usize>,
 }
 
 impl LlvmIrProgram {
@@ -216,6 +223,7 @@ impl LlvmIrProgram {
             ir,
             layouts: plan.layouts.clone(),
             functions: plan.functions.clone(),
+            tail_packets: plan.tail_packets(),
             program,
             vm_functions,
         })
@@ -280,8 +288,17 @@ pub(super) struct NativeContext {
     pub(super) fault: u32,
     pub(super) tail_calls: u64,
     pub(super) mixed_context: *mut std::ffi::c_void,
-    pub(super) invoke_vm:
-        Option<unsafe extern "C" fn(*mut NativeContext, u32, *const *const u8, *mut u8) -> u32>,
+    pub(super) invoke_vm: Option<
+        unsafe extern "C" fn(
+            *mut NativeContext,
+            u32,
+            *const *const u8,
+            *mut u8,
+            *mut *const u8,
+            *mut u8,
+            *mut u32,
+        ) -> u32,
+    >,
     pub(super) allocation_limit: u64,
     pub(super) allocation_context: *mut std::ffi::c_void,
     pub(super) allocate: Option<
