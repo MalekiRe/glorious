@@ -64,6 +64,61 @@ struct PublishedBody {
     budget: Arc<Budget>,
 }
 
+/// Frozen typing product, before any inter-body ownership/control analysis.
+/// Keeping this phase separate makes the complete demanded Core arena
+/// available regardless of declaration or package traversal order. It is
+/// request-local staging, never an externally published executable product.
+struct StagedTypedBody {
+    definition: DefKey,
+    is_constant: bool,
+    valid: bool,
+    core: TypedBody,
+    lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+    lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+    solver: TraitSolver,
+    budget: Arc<Budget>,
+}
+
+impl std::fmt::Debug for StagedTypedBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("StagedTypedBody")
+            .field("definition", &self.definition)
+            .field("is_constant", &self.is_constant)
+            .field("valid", &self.valid)
+            .field("core", &self.core)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StagedTypedBody {
+    fn analyze(
+        self,
+        signatures: &ElaboratedInterface,
+        abort_primitive: Option<DefKey>,
+        diagnostics: &mut Vec<CompileDiagnostic>,
+    ) -> PublishedBody {
+        let Self { definition, is_constant, valid, core, lexical_bounds,
+            lexical_effect_bindings, solver, budget } = self;
+        let flow = PlaceFlow::analyze_with_frozen_solver(
+            &core, signatures, &lexical_bounds, &lexical_effect_bindings, &solver, abort_primitive,
+        );
+        diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
+            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
+        )));
+        let escapes = EscapeFlow::analyze_with_interface(&core, &flow, signatures);
+        diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
+            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
+        )));
+        let uses = UseFlow::analyze_with_interface(&core, &flow, signatures);
+        diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
+            diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
+        )));
+        let valid = valid && flow.diagnostics.is_empty() && escapes.diagnostics.is_empty()
+            && uses.diagnostics.is_empty();
+        PublishedBody { definition, is_constant, valid, core, flow, budget }
+    }
+}
+
 /// Request-local owner for one package's demanded body work.
 ///
 /// A package session borrows the request's immutable snapshot and controls,
@@ -78,7 +133,7 @@ struct PackageSession<'request> {
     budget: Arc<Budget>,
     package: PackageKey,
     demanded_bodies: BTreeSet<DefKey>,
-    staged_bodies: Vec<PublishedBody>,
+    staged_bodies: Vec<StagedTypedBody>,
 }
 
 impl<'request> PackageSession<'request> {
@@ -129,7 +184,7 @@ impl<'request> PackageSession<'request> {
         self.request.checkpoint_in(&self.budget, cost)
     }
 
-    fn finish(mut self) -> Result<Vec<PublishedBody>, PackageSessionError> {
+    fn finish(mut self) -> Result<Vec<StagedTypedBody>, PackageSessionError> {
         // The worklist is a deterministic set.  Sort the staged result too,
         // so later instance discovery never acquires source traversal order
         // as an accidental semantic input.
@@ -144,11 +199,11 @@ impl<'request> PackageSession<'request> {
 
 /// Affine mutable owner for one body elaboration.
 ///
-/// It owns transient syntax and receives the Typed Core/PlaceFlow scratch at
-/// publication.  Consuming `self` in [`Self::publish`] is the only path that
-/// transfers a body product to its package session; normal Rust destruction
+/// It owns transient syntax and freezes Typed Core at staging. Consuming
+/// `self` in [`Self::stage_typed`] is the only path that transfers this typing
+/// product to its package session; normal Rust destruction
 /// rolls back an incomplete body by dropping its scratch instead.
-#[must_use = "a body session must publish its completed body or be dropped to roll back scratch"]
+#[must_use = "a body session must stage its typed body or be dropped to roll back scratch"]
 struct BodySession<'package, 'request> {
     package: &'package mut PackageSession<'request>,
     definition: DefKey,
@@ -167,11 +222,15 @@ impl BodySession<'_, '_> {
         self.package.request.checkpoint_in(&self.budget, cost)
     }
 
-    /// Stage a complete immutable body product.  The checkpoint happens
+    /// Stage a complete immutable typing product. The checkpoint happens
     /// before mutation of package staging, so cancellation/resource failure
     /// cannot publish this body even to request-local staging.  The enclosing
     /// request transaction remains the sole external publication boundary.
-    fn publish(self, valid: bool, core: TypedBody, flow: PlaceFlow) -> Result<(), ServiceError> {
+    fn stage_typed(self, valid: bool, core: TypedBody,
+        lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+        lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
+        solver: TraitSolver,
+    ) -> Result<(), ServiceError> {
         let Self {
             package,
             definition,
@@ -181,12 +240,14 @@ impl BodySession<'_, '_> {
             ..
         } = self;
         scratch.publish()?;
-        package.staged_bodies.push(PublishedBody {
+        package.staged_bodies.push(StagedTypedBody {
             definition,
             is_constant,
             valid,
             core,
-            flow,
+            lexical_bounds,
+            lexical_effect_bindings,
+            solver,
             budget,
         });
         Ok(())
@@ -1649,37 +1710,7 @@ impl StageZeroCompiler {
                         ElaboratedHeader::Callable(signature) => Some(signature.where_associated_effect_bindings.as_slice()),
                         _ => None,
                     }).unwrap_or_default();
-                let flow = PlaceFlow::analyze_with_frozen_solver(
-                    &core, &signatures, &ambient_projection_bounds, ambient_effect_bindings, &validation_solver,
-                    runtime_manifest.as_ref().and_then(|manifest| manifest.primitives.get(&PrimitiveRole::Abort)).copied(),
-                );
-                diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
-                    CompileDiagnostic::source(
-                        diagnostic.code,
-                        diagnostic.message.clone(),
-                        Some(diagnostic.span),
-                    )
-                }));
-                let escapes = EscapeFlow::analyze_with_interface(&core, &flow, &signatures);
-                diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| {
-                    CompileDiagnostic::source(
-                        diagnostic.code,
-                        diagnostic.message.clone(),
-                        Some(diagnostic.span),
-                    )
-                }));
-                let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
-                diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| {
-                    CompileDiagnostic::source(
-                        diagnostic.code,
-                        diagnostic.message.clone(),
-                        Some(diagnostic.span),
-                    )
-                }));
-                let valid = flow.diagnostics.is_empty()
-                    && escapes.diagnostics.is_empty()
-                    && uses.diagnostics.is_empty()
-                    && core_validation.is_empty()
+                let valid = core_validation.is_empty()
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
                 let mut core_dependencies = graphs
@@ -1694,7 +1725,8 @@ impl StageZeroCompiler {
                     core.semantic_fingerprint(),
                     core_dependencies,
                 );
-                body_session.publish(valid, core, flow)?;
+                body_session.stage_typed(valid, core, ambient_projection_bounds,
+                    ambient_effect_bindings.to_vec(), validation_solver)?;
             }
             for implementation in node
                 .interface
@@ -1837,37 +1869,7 @@ impl StageZeroCompiler {
                     }));
                     let mut ambient_effect_bindings = implementation_signature.where_associated_effect_bindings.clone();
                     ambient_effect_bindings.extend(method_signature.where_associated_effect_bindings.clone());
-                    let flow = PlaceFlow::analyze_with_frozen_solver(
-                        &core, &signatures, &ambient_projection_bounds, &ambient_effect_bindings, &validation_solver,
-                        runtime_manifest.as_ref().and_then(|manifest| manifest.primitives.get(&PrimitiveRole::Abort)).copied(),
-                    );
-                    diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
-                        CompileDiagnostic::source(
-                            diagnostic.code,
-                            diagnostic.message.clone(),
-                            Some(diagnostic.span),
-                        )
-                    }));
-                    let escapes = EscapeFlow::analyze_with_interface(&core, &flow, &signatures);
-                    diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| {
-                        CompileDiagnostic::source(
-                            diagnostic.code,
-                            diagnostic.message.clone(),
-                            Some(diagnostic.span),
-                        )
-                    }));
-                    let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
-                    diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| {
-                        CompileDiagnostic::source(
-                            diagnostic.code,
-                            diagnostic.message.clone(),
-                            Some(diagnostic.span),
-                        )
-                    }));
-                    let valid = flow.diagnostics.is_empty()
-                        && escapes.diagnostics.is_empty()
-                        && uses.diagnostics.is_empty()
-                        && core_validation.is_empty()
+                    let valid = core_validation.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();
                     let mut core_dependencies = graphs
@@ -1882,17 +1884,30 @@ impl StageZeroCompiler {
                         core.semantic_fingerprint(),
                         core_dependencies,
                     );
-                    body_session.publish(valid, core, flow)?;
+                    body_session.stage_typed(valid, core, ambient_projection_bounds,
+                        ambient_effect_bindings, validation_solver)?;
                 }
             }
         }
-        let body_products = package_sessions
+        let staged_bodies = package_sessions
             .into_values()
             .map(PackageSession::finish)
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        // Every demanded body has crossed typing before any ownership check
+        // or MIR lowering begins. Inter-body contracts can now be derived
+        // from this complete immutable batch without source-order guessing.
+        let abort_primitive = runtime_manifest.as_ref()
+            .and_then(|manifest| manifest.primitives.get(&PrimitiveRole::Abort)).copied();
+        let mut body_products = Vec::with_capacity(staged_bodies.len());
+        for staged in staged_bodies {
+            // Observe cancellation at the new phase boundary without
+            // changing the existing semantic work charges or body budget.
+            session.checkpoint_in(&staged.budget, 0)?;
+            body_products.push(staged.analyze(&signatures, abort_primitive, &mut diagnostics));
+        }
         for PublishedBody {
             definition,
             is_constant,

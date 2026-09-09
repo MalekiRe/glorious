@@ -5,6 +5,24 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Typed-body staging for cross-function control analysis
+
+All demanded ordinary and implementation-method bodies now finish typing before
+ownership analysis begins. Request-local staging retains each body's lexical
+solver, predicates, effect bindings and resource budget. Ownership, escape and
+minimum-use checks still run before MIR lowering and external publication. The
+new phase boundary observes cancellation without changing semantic work charges.
+This prepares a complete immutable body batch for derived control contracts;
+it does not yet consume those contracts or fix generic-helper label exits.
+
+The isolated staging run passes all 891 service, 176 library API, 19 borrowed
+callable and 12 minimum-use tests; the source matrix remains 15 passing and
+16 failing (`/var/tmp/grandiose-control-stage-tests-v1.log`). The combined
+main-tree run also preserves those suites and passes 2,085 tests, with only the
+same 16 source-library failures (`target/integration-staging-callable-identity-v1.log`).
+That combined run includes a separately evolving callable inference fix;
+generic callback-join coverage is being strengthened before that fix is committed.
+
 ## Cache 89: shared VM/native floating environment
 
 VM and native execution now share a scoped floating-environment guard using
