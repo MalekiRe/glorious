@@ -291,7 +291,7 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // fusion and shares per-callable source loan products with escape/lowering.
 // Cache 106 preserves exact handler/resumption binders through structural
 // control fusion and independently validates the receiving lexical scopes.
-pub const STAGE0_CACHE_GENERATION: u32 = 106;
+pub const STAGE0_CACHE_GENERATION: u32 = 107;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -300,7 +300,9 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 29 checks the exact safe signatures of address-only pointer leaves.
 // Verifier 31 distinguishes independent reference contents from the local
 // address of their carrier; overwrites invalidate retained referent proofs.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 36;
+// Verifier 37 retains resumption identity in structural resident values,
+// including field extraction, joins and exact handler expiry.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 37;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

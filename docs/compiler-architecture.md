@@ -461,3 +461,29 @@ immediate-resumption rewrite remain pending migration to the shared lifetime
 consumer. Native owned-handler installation is still explicitly unsupported.
 Full helper-family fusion and mandatory-tail handler activation transfer remain
 open; VM handler composition does not establish those separate contracts.
+
+## Executable resumption value provenance
+
+The bytecode verifier's scalar snapshot-brand vector and separate aggregate
+resumption taint are replaced by one structural resident-value domain.
+`vm_backend/resumption_values.rs` distinguishes no capability, possible unknown
+contents, an exact handler token, and structural product fields. Constructors,
+storage moves, constant field projections, owned extraction, record replacement,
+effect payload transfer and saved continuations carry this same value record.
+Both invocation authentication and frame-escape restrictions consume it.
+
+Joins retain an exact field identity only when all incoming values agree. A
+removed field no longer contributes authority to its former owner. Expiring a
+handler invalidates its tokens recursively without erasing their possible
+control contents; revisiting an installation cannot revive an old token.
+Runtime layout matching recognizes a resumption's retained callable signature,
+including inside structural values. This type match is distinct from the
+live-handler check performed by resumption dispatch.
+
+Product nodes are shared immutable values. Structural growth is bounded; losing
+coverage yields unknown, never an empty capability footprint. Opaque memory
+access and dynamic-index extraction do not acquire an exact snapshot identity.
+Borrowing exposes mutable storage and discards its exact snapshot proof while
+retaining possible control contents. General resumption transfer through borrowed
+storage or ordinary call frames remains unsupported, as does the native handler
+ABI. This repairs resident product composition, not those separate boundaries.

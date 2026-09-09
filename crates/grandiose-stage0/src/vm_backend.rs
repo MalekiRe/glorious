@@ -52,6 +52,8 @@ mod replay;
 mod coverage;
 mod tail_provenance;
 mod label_dispatch;
+mod resumption_values;
+use resumption_values::ResumptionValue;
 mod callable_access;
 pub mod llvm;
 mod reference_origins;
@@ -6114,12 +6116,9 @@ struct VerifierContinuation {
     local_labels: Vec<Option<label_dispatch::LocalLabel>>,
     destruction_preserves_frames: Vec<bool>,
     invocation_preserves_frames: Vec<bool>,
-    snapshots: Vec<Option<u32>>,
     labels: Vec<bool>,
-    /// Whether a value contains a frame-branded resumption token.  This is
-    /// separate from `snapshots`: a token nested in an aggregate cannot be
-    /// invoked directly, but it still cannot cross a retained-frame boundary.
-    resumptions: Vec<bool>,
+    /// The same resident-value provenance is restored with the continuation.
+    resumptions: Vec<ResumptionValue>,
     performed: VerifierPerformed,
     /// Frames crossed while looking for the selected outer handler. They are
     /// absent while its clause runs and are restored when the continuation
@@ -6169,20 +6168,15 @@ struct VerifierState {
     local_labels: Vec<Option<label_dispatch::LocalLabel>>,
     destruction_preserves_frames: Vec<bool>,
     invocation_preserves_frames: Vec<bool>,
-    /// Provenance for first-class continuation values. `Some(frame)` means
-    /// this register was produced by `CaptureResumption` for that exact live
-    /// frame. The type system still sees a callable; this parallel proof fact
-    /// is what prevents capability forgery through an equally typed callable.
-    snapshots: Vec<Option<u32>>,
     /// A first-class lexical label shares the callable ABI but can only be
     /// invoked in the frame that minted it. This taint is propagated through
     /// aggregates because a label cannot be frozen into another callable
     /// environment even when nested inside an otherwise ordinary value.
     labels: Vec<bool>,
-    /// Aggregate-aware counterpart to `snapshots`.  The exact brand remains
-    /// in `snapshots` for `ResumeSnapshot`; this bit prevents a brand from
-    /// being smuggled through a tuple, array, record, or shared snapshot.
-    resumptions: Vec<bool>,
+    /// One structural value domain retains both possible resumption contents
+    /// and exact callable leaves. Only a leaf naming a live frame can resume;
+    /// unknown/expired contents still forbid an escaping frame transfer.
+    resumptions: Vec<ResumptionValue>,
     handlers: Vec<VerifierHandlerFrame>,
     pending_leave: Option<PendingLeave>,
     /// Whether `Return` belongs to a callable resumption rather than to the
@@ -6460,9 +6454,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 .map(|index| assume_parameter_destructors && index < function.parameters as usize).collect(),
             invocation_preserves_frames: (0..function.registers.len())
                 .map(|index| assume_parameter_invocations && index < function.parameters as usize).collect(),
-            snapshots: vec![None; function.registers.len()],
             labels: vec![false; function.registers.len()],
-            resumptions: vec![false; function.registers.len()],
+            resumptions: vec![ResumptionValue::None; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,
             resuming: false,
@@ -6521,10 +6514,10 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
         let captured_call = match instruction {
             VmInstruction::CallIndirect { dst, callee, arguments }
             | VmInstruction::CallIndirectOwned { dst, callee, arguments }
-                if states.resumptions.get(*callee as usize) == Some(&true) => {
+                if states.resumptions.get(*callee as usize).is_some_and(ResumptionValue::contains) => {
                 read(&states, *callee)?;
                 let [value] = arguments.as_slice() else { return Err(VmArtifactError::CallArity { expected: 1, found: arguments.len() as u32 }); };
-                let frame = states.snapshots[*callee as usize].ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let frame = states.resumptions[*callee as usize].frame().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let index = states.handlers.iter().rposition(|handler| handler.id == frame)
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let VmType::Callable { safety: Safety::Safe, parameters, result, .. } = register_type(function, *callee)? else {
@@ -6830,7 +6823,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 write(&mut states, *dst)?;
                 if matches!(instruction, VmInstruction::TakeArrayElement { .. }) {
                     states.labels[*dst as usize] = states.labels[*value as usize];
-                    states.resumptions[*dst as usize] = states.resumptions[*value as usize];
+                    states.resumptions[*dst as usize] = states.resumptions[*value as usize].opaque();
+                    states.resumptions[*value as usize] = states.resumptions[*value as usize].opaque();
                     states.reference_origins[*dst as usize] = states.reference_origins[*value as usize].clone();
                 }
             }
@@ -7148,9 +7142,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 states.labels[*dst as usize] = fields
                     .iter()
                     .any(|field| states.labels[*field as usize]);
-                states.resumptions[*dst as usize] = fields
-                    .iter()
-                    .any(|field| states.resumptions[*field as usize]);
+                states.resumptions[*dst as usize] = ResumptionValue::product(fields.iter().map(|field| states.resumptions[*field as usize].clone()));
             }
             VmInstruction::MakeArrayOwned { dst, fields, element_type } | VmInstruction::MakeArray {
                 dst,
@@ -7181,9 +7173,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 states.labels[*dst as usize] = fields
                     .iter()
                     .any(|field| states.labels[*field as usize]);
-                states.resumptions[*dst as usize] = fields
-                    .iter()
-                    .any(|field| states.resumptions[*field as usize]);
+                states.resumptions[*dst as usize] = ResumptionValue::product(fields.iter().map(|field| states.resumptions[*field as usize].clone()));
             }
             VmInstruction::MakeRecordOwned { dst, definition, fields, field_types } | VmInstruction::MakeRecord {
                 dst,
@@ -7235,9 +7225,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 states.labels[*dst as usize] = fields
                     .iter()
                     .any(|field| states.labels[*field as usize]);
-                states.resumptions[*dst as usize] = fields
-                    .iter()
-                    .any(|field| states.resumptions[*field as usize]);
+                states.resumptions[*dst as usize] = ResumptionValue::product(fields.iter().map(|field| states.resumptions[*field as usize].clone()));
             }
             VmInstruction::MakeEnumOwned { dst, definition, variant, fields, field_types } | VmInstruction::MakeEnum {
                 dst,
@@ -7290,9 +7278,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 states.labels[*dst as usize] = fields
                     .iter()
                     .any(|field| states.labels[*field as usize]);
-                states.resumptions[*dst as usize] = fields
-                    .iter()
-                    .any(|field| states.resumptions[*field as usize]);
+                states.resumptions[*dst as usize] = ResumptionValue::product(fields.iter().map(|field| states.resumptions[*field as usize].clone()));
             }
             VmInstruction::IsInitialized { dst, base, fields } => {
                 if dst == base {
@@ -7329,7 +7315,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*base as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize].take(fields);
             }
             VmInstruction::ProjectRecord {
                 dst,
@@ -7374,7 +7360,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*base as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize].project(&[*index]);
             }
             VmInstruction::ProjectTuple {
                 dst,
@@ -7406,7 +7392,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*base as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize].project(&[*index]);
             }
             VmInstruction::ProjectArray {
                 dst,
@@ -7438,7 +7424,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*base as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize].project(&[*index]);
             }
             VmInstruction::UpdateRecord {
                 dst,
@@ -7486,7 +7472,11 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         found: register_type(function, *value)?,
                     });
                 }
-                write(&mut states, *dst)?
+                let mut resumptions = states.resumptions[*base as usize].clone();
+                resumptions.replace(&[*index], states.resumptions[*value as usize].clone());
+                write(&mut states, *dst)?;
+                states.resumptions[*dst as usize] = resumptions;
+                states.labels[*dst as usize] = states.labels[*base as usize] || states.labels[*value as usize];
             }
             VmInstruction::PatternTest {
                 dst,
@@ -7532,7 +7522,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 let payload_metadata = arguments.iter().map(|argument| {
                     let index = *argument as usize;
-                    (states.reference_origins[index].clone(), states.snapshots[index], states.labels[index], states.resumptions[index])
+                    (states.reference_origins[index].clone(), states.labels[index], states.resumptions[index].clone())
                 }).collect::<Vec<_>>();
                 if let Some(index) = states.handlers.iter().rposition(|frame| {
                     frame.continuations.is_empty()
@@ -7565,9 +7555,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                             let index = *destination as usize;
                             states.registers[index] = Some(false);
                             states.reference_origins[index] = metadata.0.clone();
-                            states.snapshots[index] = metadata.1;
-                            states.labels[index] = metadata.2;
-                            states.resumptions[index] = metadata.3;
+                            states.labels[index] = metadata.1;
+                            states.resumptions[index] = metadata.2.clone();
                         }
                     }
                     states.handlers[index].payload_claim = owned_payloads.then_some(false);
@@ -7585,7 +7574,6 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: states.local_labels.clone(),
                         destruction_preserves_frames: states.destruction_preserves_frames.clone(),
                         invocation_preserves_frames: states.invocation_preserves_frames.clone(),
-                        snapshots: states.snapshots.clone(),
                         labels: states.labels.clone(),
                         resumptions: states.resumptions.clone(),
                         performed: VerifierPerformed {
@@ -7720,7 +7708,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 read(&states, *value)?;
                 let frame = states.handlers.last()
                     .ok_or(VmArtifactError::HandlerStackUnderflow)?;
-                if !frame.continuations.is_empty() || states.resumptions[*value as usize] {
+                if !frame.continuations.is_empty() || states.resumptions[*value as usize].contains() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if !states.resumption_return_result.is_empty() {
@@ -7739,7 +7727,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 if !frame.continuations.is_empty() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                expire_snapshot_brand(&mut states.snapshots, frame.id);
+                expire_snapshot_brand(&mut states.resumptions, frame.id);
             }
             VmInstruction::Resume { value } => {
                 read(&states, *value)?;
@@ -7799,7 +7787,6 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
@@ -7875,7 +7862,6 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         handlers,
@@ -7932,14 +7918,13 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     });
                 }
                 write(&mut states, *dst)?;
-                states.snapshots[*dst as usize] = Some(frame_id);
                 states.labels[*dst as usize] = false;
-                states.resumptions[*dst as usize] = true;
+                states.resumptions[*dst as usize] = ResumptionValue::Token(frame_id);
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
                 read(&states, *snapshot)?;
                 read(&states, *value)?;
-                let Some(frame_id) = states.snapshots[*snapshot as usize] else {
+                let Some(frame_id) = states.resumptions[*snapshot as usize].frame() else {
                     // The callable type is necessary but not sufficient: the
                     // value must originate in this live handler stack.
                     return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -8007,7 +7992,6 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
@@ -8064,7 +8048,6 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     forwarded.local_labels = continuation.local_labels.clone();
                     forwarded.destruction_preserves_frames = continuation.destruction_preserves_frames.clone();
                     forwarded.invocation_preserves_frames = continuation.invocation_preserves_frames.clone();
-                    forwarded.snapshots = continuation.snapshots.clone();
                     forwarded.labels = continuation.labels.clone();
                     forwarded.resumptions = continuation.resumptions.clone();
                     for (destination, argument) in outer
@@ -8079,9 +8062,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                             let source = *argument as usize;
                             forwarded.registers[index] = Some(false);
                             forwarded.reference_origins[index] = continuation.reference_origins[source].clone();
-                            forwarded.snapshots[index] = continuation.snapshots[source];
                             forwarded.labels[index] = continuation.labels[source];
-                            forwarded.resumptions[index] = continuation.resumptions[source];
+                            forwarded.resumptions[index] = continuation.resumptions[source].clone();
                         }
                     }
                     forwarded.handlers[index].payload_claim = outer.owned_payloads.then_some(false);
@@ -8102,7 +8084,6 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         performed: continuation.performed,
@@ -8122,7 +8103,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                expire_snapshot_brand(&mut states.snapshots, frame.id);
+                expire_snapshot_brand(&mut states.resumptions, frame.id);
                 // A terminal handler result is a non-local completion of the
                 // protected computation. In particular, it must not return
                 // through a pending `ResumeReturn` clause after a resumed
@@ -8143,9 +8124,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 same_type(function, *dst, *src)?;
                 write(&mut states, *dst)?;
-                states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.labels[*dst as usize] = states.labels[*src as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize].clone();
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
                     states.reference_origins[*dst as usize] =
                         states.reference_origins[*src as usize].clone();
@@ -8162,9 +8142,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 *slot = Some(false);
                 states.storage_live[index] = true;
-                states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
-                states.resumptions[*local as usize] = false;
+                states.resumptions[*local as usize] = ResumptionValue::None;
                 states.reference_origins[*local as usize].clear();
             }
             VmInstruction::StorageDead { local, .. } => {
@@ -8184,9 +8163,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 *slot = None;
                 states.storage_live[index] = false;
-                states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
-                states.resumptions[*local as usize] = false;
+                states.resumptions[*local as usize] = ResumptionValue::None;
                 states.reference_origins[*local as usize].clear();
             }
             VmInstruction::SetDropFlag { flag, .. } => {
@@ -8199,9 +8177,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 // transitions are the sole allowed overwrite operation and
                 // may occur repeatedly as initialization changes.
                 *slot = Some(true);
-                states.snapshots[*flag as usize] = None;
                 states.labels[*flag as usize] = false;
-                states.resumptions[*flag as usize] = false;
+                states.resumptions[*flag as usize] = ResumptionValue::None;
             }
             VmInstruction::DestroyIf { local, flag } => {
                 read(&states, *flag)?;
@@ -8215,9 +8192,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
                 *slot = Some(false);
-                states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
-                states.resumptions[*local as usize] = false;
+                states.resumptions[*local as usize] = ResumptionValue::None;
             }
             VmInstruction::Store { dst, src } | VmInstruction::StoreOwned { dst, src } => {
                 // Store deliberately permits overwrites and does not use
@@ -8241,9 +8217,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     .get_mut(index)
                     .ok_or(VmArtifactError::InvalidRegister { register: *dst })?;
                 *state = Some(true);
-                states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.labels[*dst as usize] = states.labels[*src as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize].clone();
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
                     states.reference_origins[*dst as usize] = states.reference_origins[*src as usize].clone();
                 } else {
@@ -8254,13 +8229,12 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
                 states[*src as usize] = Some(false);
-                states.snapshots[*dst as usize] = states.snapshots[*src as usize];
-                states.snapshots[*src as usize] = None;
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.labels[*src as usize] = false;
-                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
-                states.resumptions[*src as usize] = false;
+                let resumptions = states.resumptions[*src as usize].clone();
+                states.resumptions[*src as usize] = ResumptionValue::None;
                 write(&mut states, *dst)?;
+                states.resumptions[*dst as usize] = resumptions;
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
                     states.reference_origins[*dst as usize] = states.reference_origins[*src as usize].clone();
                 }
@@ -8357,7 +8331,11 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*src as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                // A borrowed view may subsequently observe replacement of
+                // this storage. It retains possible control contents, but
+                // cannot certify a particular snapshot identity.
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize].opaque();
+                states.resumptions[*src as usize] = states.resumptions[*src as usize].opaque();
                 states.reference_origins[*dst as usize] = if *reborrow {
                     states.reference_origins[*src as usize].clone()
                 } else {
@@ -8380,7 +8358,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 expect_type(function, *dst, *referent)?;
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*reference as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*reference as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*reference as usize].opaque();
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
                     states.reference_origins[*dst as usize] = states.reference_origins[*reference as usize].clone();
                 }
@@ -8404,7 +8382,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 expect_type(function, *dst, *referent)?;
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*reference as usize];
-                states.resumptions[*dst as usize] = states.resumptions[*reference as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*reference as usize].opaque();
                 // Hold the unique loan itself while its referent is absent.
                 // Every normal read of the reference now fails until the
                 // accompanying DerefStore reinitializes it.
@@ -8422,7 +8400,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 // through which that authority can be recovered.  Reject the
                 // write instead of allowing a later DerefCopy to erase the
                 // marker and present the resumption as an ordinary callable.
-                if states.resumptions[*src as usize] {
+                if states.resumptions[*src as usize].contains() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let VmType::Reference {
@@ -8717,15 +8695,12 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     ) {
                         return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
                     }
-                    if states.snapshots[capture as usize].is_some() {
-                        return Err(VmArtifactError::HandlerResumeUnavailable);
-                    }
                     if states.labels[capture as usize] {
                         return Err(VmArtifactError::InvalidLabelContract {
                             message: "callable capture cannot retain a lexical label",
                         });
                     }
-                    if states.resumptions[capture as usize] {
+                    if states.resumptions[capture as usize].contains() {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
                 }
@@ -8741,7 +8716,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = false;
-                states.resumptions[*dst as usize] = false;
+                states.resumptions[*dst as usize] = ResumptionValue::None;
             }
             VmInstruction::MakeLabel {
                 dst,
@@ -8766,7 +8741,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = true;
-                states.resumptions[*dst as usize] = false;
+                states.resumptions[*dst as usize] = ResumptionValue::None;
             }
             VmInstruction::CallIndirectOwned { dst, callee, arguments }
             | VmInstruction::CallIndirect {
@@ -8779,7 +8754,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 // ordinary function value. It may be invoked only through
                 // `ResumeSnapshot`, which proves the originating handler
                 // frame remains active.
-                if states.resumptions[*callee as usize] {
+                if states.resumptions[*callee as usize].contains() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let receiver = register_type(function, *callee)?;
@@ -8866,7 +8841,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 states.handlers.truncate(handler_depth);
-                states.snapshots.fill(None);
+                for value in &mut states.resumptions { *value = value.opaque(); }
                 let transferred_proofs = arguments.iter().map(|argument| (
                     tail_provenance::independent(function, &states, *argument),
                     tail_provenance::referent_independent(function, &states, *argument),
@@ -8924,7 +8899,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 // Return leaves this activation (or exposes the value to the
                 // embedding host). A captured resumption is instead valid
                 // only while its branded handler frame remains live.
-                if states.resumptions[*value as usize] {
+                if states.resumptions[*value as usize].contains() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if states.resuming {
@@ -9004,9 +8979,8 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 states.local_labels[argument as usize] = None;
                 states.destruction_preserves_frames[argument as usize] = false;
                 states.invocation_preserves_frames[argument as usize] = false;
-                states.snapshots[argument as usize] = None;
                 states.labels[argument as usize] = false;
-                states.resumptions[argument as usize] = false;
+                states.resumptions[argument as usize] = ResumptionValue::None;
             }
         }
         if advances {
@@ -9031,7 +9005,7 @@ fn verify_call_frame_resumption_transfer(
     states: &VerifierState,
     register: u32,
 ) -> Result<(), VmArtifactError> {
-    if states.resumptions[register as usize] {
+    if states.resumptions[register as usize].contains() {
         return Err(VmArtifactError::HandlerResumeUnavailable);
     }
     Ok(())
@@ -9400,11 +9374,13 @@ fn propagate_state(
             changed |= join_verifier_facts(&mut existing.local_labels, &state.local_labels, |left, right| if left == right { left } else { None });
             changed |= join_verifier_facts(&mut existing.destruction_preserves_frames, &state.destruction_preserves_frames, |left, right| left && right);
             changed |= join_verifier_facts(&mut existing.invocation_preserves_frames, &state.invocation_preserves_frames, |left, right| left && right);
-            changed |= join_verifier_facts(&mut existing.snapshots, &state.snapshots, |left, right| if left == right { left } else { None });
             // Labels/resumptions are capability may-taints, not readability.
             // An arm cannot erase authority carried on another predecessor.
             changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
-            changed |= join_verifier_facts(&mut existing.resumptions, &state.resumptions, |left, right| left || right);
+            for (left, right) in existing.resumptions.iter_mut().zip(&state.resumptions) {
+                let joined = left.join(right);
+                if *left != joined { *left = joined; changed = true; }
+            }
             if existing.pending_leave != state.pending_leave && existing.pending_leave.take().is_some() {
                 changed = true;
             }
@@ -9433,9 +9409,8 @@ fn seed_terminal_call_handlers(
                 let slot = *argument as usize;
                 terminal.registers[slot] = Some(false);
                 terminal.reference_origins[slot].clear();
-                terminal.snapshots[slot] = None;
                 terminal.labels[slot] = false;
-                terminal.resumptions[slot] = false;
+                terminal.resumptions[slot] = ResumptionValue::None;
             }
         }
         let above = terminal.handlers.split_off(index + 1);
@@ -9455,7 +9430,7 @@ fn seed_terminal_call_handlers(
             local_labels: terminal.local_labels.clone(),
             destruction_preserves_frames: terminal.destruction_preserves_frames.clone(),
             invocation_preserves_frames: terminal.invocation_preserves_frames.clone(),
-            snapshots: terminal.snapshots.clone(), labels: terminal.labels.clone(), resumptions: terminal.resumptions.clone(),
+            labels: terminal.labels.clone(), resumptions: terminal.resumptions.clone(),
             performed: VerifierPerformed { effect: frame.effect, effect_arguments: frame.effect_arguments.clone(),
                 operation: frame.operation, arguments: frame.payload_destinations.clone() },
             above, pending_leave: terminal.pending_leave.clone(),
@@ -9508,15 +9483,11 @@ fn merge_handler_states(
 }
 
 /// A continuation token is capability-bearing only while its branded handler
-/// activation remains live.  Clearing all aliases at the structural exit
-/// prevents a stale register from becoming valid if bytecode later revisits
-/// the same lexical `InstallHandler` instruction.
-fn expire_snapshot_brand(snapshots: &mut [Option<u32>], frame: u32) {
-    for snapshot in snapshots {
-        if *snapshot == Some(frame) {
-            *snapshot = None;
-        }
-    }
+/// activation remains live. Invalidating exact identity throughout stored
+/// products prevents a stale token from becoming valid if bytecode revisits
+/// the same lexical `InstallHandler`. Possible control contents remain tainted.
+fn expire_snapshot_brand(values: &mut [ResumptionValue], frame: u32) {
+    for value in values { value.expire(frame); }
 }
 fn register_type(function: &VmFunction, register: u32) -> Result<VmType, VmArtifactError> {
     function
@@ -9883,6 +9854,7 @@ fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactErro
     states.local_labels[index] = None;
     states.destruction_preserves_frames[index] = false;
     states.invocation_preserves_frames[index] = false;
+    states.resumptions[index] = ResumptionValue::None;
     match *state {
         None if !source_storage || storage_live => {
             *state = Some(true);
@@ -12524,7 +12496,12 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         } => {
             matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_generic_argument_matches(actual, expected)))
         }
-        VmType::Callable { .. } => matches!(value, VmValue::Callable { signature, .. } if vm_type_matches(signature, expected)),
+        // Control tokens expose the same checked source callable signature.
+        // Matching that value layout does not supply invocation authority:
+        // label/resumption dispatch still authenticates the live destination.
+        VmType::Callable { .. } => matches!(value,
+            VmValue::Callable { signature, .. } | VmValue::Label { signature, .. }
+                | VmValue::Resumption { signature, .. } if vm_type_matches(signature, expected)),
         VmType::RawPointer { .. } => matches!(value, VmValue::RawPointer { signature, .. } if vm_type_matches(signature, expected)),
         VmType::Reference { unique, referent } => {
             matches!(value, VmValue::Reference { unique: actual_unique, referent: actual_referent, .. } if actual_unique == unique && vm_type_matches(actual_referent, referent))
@@ -18273,6 +18250,22 @@ mod tests {
             assert!(matches!(replace_referenced_array(&mut registers, &mut [], &reference, vec![], &mut cow_budget()),
                 Err(VmArtifactError::UnsupportedEscapingUniqueReference)));
         }
+    }
+
+    #[test]
+    fn resumption_value_layout_checks_the_retained_callable_contract() {
+        let signature = VmType::Callable { shared_receiver: false, unique_receiver: false,
+            safety: Safety::Safe, parameters: vec![VmType::I64], result: Box::new(VmType::I64),
+            effects: Box::default() };
+        let value = VmValue::Resumption { frame: 3, signature: signature.clone() };
+        assert!(value_matches_vm_type(&value, &signature));
+        let mut wrong = signature.clone();
+        let VmType::Callable { parameters, .. } = &mut wrong else { unreachable!() };
+        *parameters = vec![VmType::Unit];
+        assert!(!value_matches_vm_type(&value, &wrong));
+        let tuple = VmValue::Tuple(Arc::from([value]));
+        assert!(value_matches_vm_type(&tuple, &VmType::Tuple(vec![signature])));
+        assert!(!value_matches_vm_type(&tuple, &VmType::Tuple(vec![wrong])));
     }
 
     #[test]

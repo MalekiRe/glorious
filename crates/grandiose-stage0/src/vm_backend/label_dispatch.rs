@@ -135,7 +135,7 @@ pub(super) fn transfer(
     let index = payload as usize;
     let metadata = (states.reference_origins[index].clone(), states.frame_independent[index],
         states.referent_independent[index], states.destruction_preserves_frames[index],
-        states.labels[index], states.resumptions[index], states.snapshots[index], states.invocation_preserves_frames[index]);
+        states.labels[index], states.resumptions[index].clone(), states.invocation_preserves_frames[index]);
     let mut next = states.clone();
     for argument in arguments {
         let index = *argument as usize;
@@ -147,8 +147,7 @@ pub(super) fn transfer(
         next.invocation_preserves_frames[index] = false;
         next.local_labels[index] = None;
         next.labels[index] = false;
-        next.resumptions[index] = false;
-        next.snapshots[index] = None;
+        next.resumptions[index] = ResumptionValue::None;
     }
     write(&mut next, label.destination)?;
     let destination = label.destination as usize;
@@ -158,8 +157,7 @@ pub(super) fn transfer(
     next.destruction_preserves_frames[destination] = metadata.3;
     next.labels[destination] = metadata.4;
     next.resumptions[destination] = metadata.5;
-    next.snapshots[destination] = metadata.6;
-    next.invocation_preserves_frames[destination] = metadata.7;
+    next.invocation_preserves_frames[destination] = metadata.6;
     Ok(Some((label.target, next)))
 }
 

@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-09 from the current source and cache 106 verification below,
+Updated 2026-09-09 from the current source and cache 107 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,22 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 107 / verifier 37 fixes the captured-resumption product regression from
+cache 106. The verifier now uses one structural resident-value record for exact
+handler identity and possible control contents. Field extraction, moves, joins
+and handler expiry preserve that distinction; runtime extraction checks a control
+token's retained callable signature. All 25 focused resumption checks pass,
+including fresh/decoded source execution at O0/O2 and invalid escape/forgery cases.
+
+Native/mixed `InstallHandlerOwned` remains unsupported, as do ordinary native
+captured-callable storage, general resumption transfer across borrowed storage or
+ordinary call frames, full helper-family fusion and mandatory-tail activation
+transfer. The latest broad source-library matrix remains cache 105 above; no
+broad suite was repeated for this slice. See `implementation-progress.md` for
+the exact final gate and remaining source lifetime-admission migration.
+
+The following cache 106 and earlier checkpoints are historical.
 
 Cache 106 extends lexical fusion through handler and resumption binders. Distinct
 delimiters retain exact clause/continuation identities through Core, Evaluation

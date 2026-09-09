@@ -6621,6 +6621,56 @@ fn handler_completion_is_delimited_and_checks_the_resumption_result_abi() {
 }
 
 #[test]
+fn resumption_identity_survives_owned_nested_product_extraction() {
+    let effect = DefKey(Digest::of_bytes(b"resumption-product-effect"));
+    let token = VmType::Callable { shared_receiver: false, unique_receiver: false,
+        safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64), effects: Box::default() };
+    let array = VmType::Array(Box::new(token.clone()));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], definition: DefKey(Digest::of_bytes(b"resumption-product")),
+            captures: 0, parameters: 0,
+            registers: vec![VmType::I64, token.clone(), VmType::I64, array.clone(),
+                VmType::Tuple(vec![array]), token],
+            instructions: vec![
+                VmInstruction::InstallHandler { effect, effect_arguments: vec![], operation: 0,
+                    payload_destinations: vec![], resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume, target: 4 },
+                VmInstruction::Perform { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 0 },
+                VmInstruction::CaptureResumption { dst: 1 },
+                VmInstruction::MakeArrayOwned { dst: 3, fields: vec![1],
+                    element_type: VmType::Callable { shared_receiver: false, unique_receiver: false,
+                        safety: grandiose_stage0::Safety::Safe, parameters: vec![VmType::I64],
+                        result: Box::new(VmType::I64), effects: Box::default() } },
+                VmInstruction::MakeTupleOwned { dst: 4, fields: vec![3] },
+                VmInstruction::TakeProjection { dst: 5, base: 4, fields: vec![0, 0] },
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::ResumeSnapshot { snapshot: 5, value: 2 },
+            ],
+        }, fingerprint: Digest::of_bytes(b"resumption-product-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert_eq!(verify_vm(candidate.clone()).unwrap().run_i64().unwrap(), 42);
+    assert_eq!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64().unwrap(), 42);
+    let mut program = CandidateVmProgram { schema: candidate.schema, runtime_manifest: None,
+        entry: candidate.function.definition,
+        functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
+        host_capabilities: vec![], callable_environments: BTreeMap::new(), fingerprint: candidate.fingerprint };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(decode_and_verify_program(&encode_program(&program)).unwrap().run_i64().unwrap(), 42);
+
+    // Structural storage must not keep a token alive after its delimiter ends.
+    candidate.function.instructions.insert(9, VmInstruction::UninstallHandler);
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(decode_and_verify_artifact(&encode_artifact(&candidate)).is_err());
+}
+
+#[test]
 fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-ask"));
     let residual_effect = DefKey(Digest::of_bytes(b"snapshot-residual-log"));

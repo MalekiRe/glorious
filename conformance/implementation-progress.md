@@ -5,6 +5,55 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 107 / verifier 37: resumption identity through resident products
+
+The captured-resumption source preserved in cache 106 now executes fresh and
+decoded at O0/O2, with no emitted label carriers. The fix migrates the bytecode
+verifier's two partially overlapping records (one scalar snapshot identity and
+one aggregate may-taint) into one structural resident-value domain. Exact tokens,
+possible unknown contents, known absence and product fields remain distinct.
+Invocation authentication and frame-escape rejection consume the same record.
+
+Tuple, array and nominal constructors, constant projections, owned field
+extraction, record replacement, storage moves, effect payloads and saved
+continuations retain those value facts. Joins preserve exact field identity only
+when incoming values agree; moved fields lose their former owner's authority.
+Handler expiry invalidates nested tokens while preserving possible control
+contents. Opaque memory, dynamic-index extraction and bounded structural growth
+cannot manufacture exact identities. Immutable shared product nodes avoid
+duplicating resident proof trees at each saved verifier state.
+
+Execution then exposed a runtime layout check admitting ordinary callable values
+but not control tokens with the same retained callable signature. That shared
+layout check now recognizes the signature of labels and resumptions as well.
+It does not authorize a call: live-destination authentication still occurs in
+the control engine. Wrong callable parameter layouts remain rejected.
+
+Final focused verification passes **25 tests** with no failures or ignores
+(`target/resumption-products-focused-v2.log`): nine library units, two source
+fusion groups and 14 bytecode resumption tests. These include original fresh/
+decoded source execution, raw nested tuple/array snapshot extraction in standalone
+and whole-program execution, field-sensitive joins and expiry, bounded unknown
+coverage, exact signature mismatch, and existing rejections of forged snapshots,
+mutable-storage laundering, escaped captures, cross-frame transfers and expired
+tokens. The first diagnostic run (`target/resumption-products-boundary-v1.log`)
+had passed the verifier and exposed the runtime layout failure; it is superseded
+by the completed final gate, not counted as a passing gate.
+
+No broad service/library sweep was repeated. The latest source-library matrix
+remains cache 105's 16 passes and 15 failures. The active native/mixed handler
+positive from cache 106 still reaches unsupported `InstallHandlerOwned`, and
+ordinary native captured-callable storage remains a separate open ABI. General
+resumption transfer through borrowed storage or ordinary call frames, full
+helper-family fusion and mandatory-tail activation transfer remain unfinished.
+Existing source resumption escape admission and its restricted immediate rewrite
+still need migration; this does not establish general closure-capture lifetime
+conformance. Compiler/library completion and self-hosting remain open.
+
+Source cache generation is 107 and verifier generation is 37. Bytecode schema/
+generation and the native ABI are unchanged. The source closure audit passes;
+its 11,455 contracts remain open rather than certified by this focused gate.
+
 ## Cache 106: lexical handler and resumption binders through fusion
 
 Lexical closure fusion now composes handlers instead of rejecting every handler

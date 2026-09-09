@@ -403,7 +403,7 @@ pub(super) fn before_instruction(
         VmInstruction::DerefCopy { dst, reference } | VmInstruction::DerefMove { dst, reference } =>
             Some((*dst, referent_independent(function, states, *reference))),
         VmInstruction::MakeCallable { dst, captures, .. } => Some((*dst, captures.iter().all(|capture|
-            source(*capture) && !states.labels[*capture as usize] && !states.resumptions[*capture as usize]))),
+            source(*capture) && !states.labels[*capture as usize] && !states.resumptions[*capture as usize].contains()))),
         VmInstruction::MemoryIntrinsic { dst, primitive, arguments, .. } => {
             let independent = match primitive {
                 MemoryPrimitive::Null | MemoryPrimitive::Dangling | MemoryPrimitive::Allocate
