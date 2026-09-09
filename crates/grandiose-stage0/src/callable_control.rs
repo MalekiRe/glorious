@@ -15,6 +15,11 @@ use crate::{
 };
 use std::{collections::BTreeMap, sync::Arc};
 
+#[cfg(test)]
+mod tests;
+mod payloads;
+pub(crate) use payloads::{InvocationPayload, ResolvedPayload, resolve_payload};
+
 #[derive(Clone, Copy)]
 pub struct ControlBody<'a> {
     pub body: &'a TypedBody,
@@ -326,6 +331,177 @@ impl ControlSummarySet {
             .iter()
             .map(|(brand, summary)| (*brand, summary))
     }
+
+    /// Validate dependency seals once for the frozen analysis batch. A local
+    /// body match alone cannot validate a helper whose implementation changed.
+    pub(crate) fn bind<'a>(
+        &'a self,
+        bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    ) -> Result<BoundControlSummaries<'a>, ControlUnknown> {
+        let mut checked = std::collections::BTreeSet::new();
+        let mut interfaces = std::collections::BTreeSet::new();
+        for summary in self.summaries.values() {
+            for (key, seal) in &summary.dependencies {
+                if !checked.insert(*key) { continue; }
+                let Some(input) = bodies.get(key) else {
+                    return Err(ControlUnknown::MissingBody(CallableBrand::Named(*key)));
+                };
+                let interface_matches = !interfaces.insert((input.interface as *const ElaboratedInterface,
+                    Arc::as_ptr(&seal.interface))) || same_interface(input.interface, &seal.interface);
+                if !same_body(input.body, &seal.body)
+                    || crate::signature::host_contract_fingerprint(*key, input.signature) != seal.identity.contract
+                    || !interface_matches {
+                    return Err(ControlUnknown::InvalidContract(*key));
+                }
+            }
+        }
+        Ok(BoundControlSummaries { summaries: self })
+    }
+}
+
+/// May-outcomes, conditional on reaching an invocation after its strict
+/// operands. Projecting guards to a union is conservative; this grants no
+/// exact invocation count, mutation ordering, or branch-correlation proof.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InvocationControl {
+    pub normal: bool,
+    pub labels: std::collections::BTreeSet<LabelBrand>,
+    pub outer_transfer: bool,
+    pub terminal_operation: bool,
+    pub cancellation: bool,
+    pub divergence: bool,
+    pub unknown: bool,
+    pub transfers: Vec<InvocationTransfer>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InvocationTransfer {
+    /// None denotes a label supplied from outside this independently checked
+    /// body. It is not an invented local destination.
+    pub target: Option<LabelBrand>,
+    pub payload: InvocationPayload,
+}
+
+impl InvocationControl {
+    fn include(&mut self, outcome: &ControlOutcome, callable: CallableBrand, payload: Option<InvocationPayload>) {
+        match outcome {
+            ControlOutcome::Return(_) => self.normal = true,
+            ControlOutcome::LabelExit { target: ControlLabelTarget::Lexical { brand, activation }, .. }
+                if activation.calls.is_empty() && activation.location.callable == callable => {
+                    self.labels.insert(*brand);
+                    self.transfers.push(InvocationTransfer { target: Some(*brand), payload: payload.expect("label payload projection") });
+                }
+            ControlOutcome::LabelExit { .. } => {
+                self.outer_transfer = true;
+                self.transfers.push(InvocationTransfer { target: None, payload: payload.expect("label payload projection") });
+            }
+            ControlOutcome::TerminalOperation { .. } => self.terminal_operation = true,
+            ControlOutcome::Cancellation => self.cancellation = true,
+            ControlOutcome::Divergence => self.divergence = true,
+            ControlOutcome::UnresolvedInvocation(_) | ControlOutcome::Unknown(_) => self.unknown = true,
+        }
+    }
+}
+
+pub(crate) struct BoundControlSummaries<'a> {
+    summaries: &'a ControlSummarySet,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BodyInvocationControl {
+    body: Arc<TypedBody>,
+    calls: BTreeMap<CoreId, InvocationControl>,
+}
+
+impl BodyInvocationControl {
+    pub(crate) fn matches(&self, body: &TypedBody) -> bool { same_body(body, &self.body) }
+    pub(crate) fn get(&self, id: CoreId) -> Option<&InvocationControl> { self.calls.get(&id) }
+}
+
+impl BoundControlSummaries<'_> {
+    pub(crate) fn body(&self, owner: DefKey) -> Option<BodyInvocationControl> {
+        let root = self.summaries.get(CallableBrand::Named(owner))?;
+        let seal = root.dependencies.get(&owner)?;
+        if seal.valid.is_err() { return None; }
+        let body = seal.body.clone();
+        let mut calls = BTreeMap::<CoreId, InvocationControl>::new();
+        for (callable, summary) in self.summaries.iter().filter(|(_, summary)| summary.identity.definition == owner) {
+            for (site, coverage) in summary.calls() {
+                // Expanded helper/closure activations have their own frame.
+                // Only standalone observations belong to this arena's owners.
+                if !site.calls.is_empty() || site.location.callable != callable { continue; }
+                let control = calls.entry(site.location.expression).or_default();
+                match coverage {
+                    ControlCallCoverage::Alternatives(paths) if !paths.is_empty() => {
+                        for path in paths {
+                            let payload = if let ControlOutcome::LabelExit { value, .. } = &path.outcome {
+                                let inputs = path.events.iter().find_map(|event| match event {
+                                    ControlEvent::Invoke { site: actual, callee, arguments } if actual == site => Some((callee, arguments)),
+                                    _ => None,
+                                });
+                                Some(match inputs {
+                                    Some((callee, arguments)) => self.observed_payload(value, callee, arguments),
+                                    None => InvocationPayload::unknown(value.ty.clone()),
+                                })
+                            } else { None };
+                            control.include(&path.outcome, callable, payload);
+                        }
+                    }
+                    _ => control.unknown = true,
+                }
+            }
+        }
+        // A gap in an enclosing execution does not invalidate a callee's
+        // independently checked abstract contract. Compose that contract only
+        // at statically selected calls and only with positively known label
+        // operands. This is conditional on *reaching the invocation*, not a
+        // fabricated observation of the preceding computation or its guards.
+        for (index, expression) in body.expressions.iter().enumerate() {
+            let id = CoreId(index as u32);
+            if calls.get(&id).is_some_and(|control| !control.unknown) { continue; }
+            if let Some(control) = self.declared_call_control(&body, expression) {
+                calls.insert(id, control);
+            }
+        }
+        Some(BodyInvocationControl { body, calls })
+    }
+
+    fn declared_call_control(&self, body: &TypedBody, expression: &crate::CoreExpr) -> Option<InvocationControl> {
+        let CoreKind::Call { callee, arguments, .. } = &expression.kind else { return None; };
+        let definition = match &body.expression(*callee).kind {
+            CoreKind::Function { definition, host_import: None, .. } => *definition,
+            CoreKind::TraitMethod { method, deferred: None, .. } => *method,
+            _ => return None,
+        };
+        let summary = self.summaries.get(CallableBrand::Named(definition))?;
+        let substitutions = summary.dependencies.get(&definition).and_then(|seal|
+            crate::callable_declarations::selected_template(&seal.interface, body.expression(*callee)))
+            .map(|template| template.arguments);
+        let mut control = InvocationControl::default();
+        if summary.alternatives.is_empty() { control.unknown = true; }
+        for path in &summary.alternatives {
+            match &path.outcome {
+                ControlOutcome::LabelExit { target: ControlLabelTarget::Symbolic(ControlOrigin::Parameter(parameter)), value } => {
+                    match arguments.get(*parameter as usize).map(|argument| &body.expression(*argument).kind) {
+                        Some(CoreKind::LabelValue { brand }) => {
+                            control.labels.insert(*brand);
+                            let mut payload = payloads::declared_payload(value);
+                            if let Some(arguments) = &substitutions { payload.instantiate_types(arguments); }
+                            control.transfers.push(InvocationTransfer {
+                                target: Some(*brand), payload,
+                            });
+                        }
+                        // An unknown/aliased operand is not proof that the
+                        // symbolic target leaves this caller's local labels.
+                        _ => control.unknown = true,
+                    }
+                }
+                ControlOutcome::LabelExit { .. } => control.unknown = true,
+                outcome => control.include(outcome, CallableBrand::Named(definition), None),
+            }
+        }
+        Some(control)
+    }
 }
 
 #[derive(Clone)]
@@ -488,8 +664,19 @@ pub fn derive_control_summaries(
     bodies: &BTreeMap<DefKey, ControlBody<'_>>,
     limits: ControlSummaryLimits,
 ) -> ControlSummarySet {
+    derive_control_summaries_with_check(bodies, limits, &mut |_, _| Ok::<_, std::convert::Infallible>(()))
+        .unwrap_or_else(|never| match never {})
+}
+
+pub(crate) fn derive_control_summaries_with_check<E>(
+    bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    limits: ControlSummaryLimits,
+    check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
+) -> Result<ControlSummarySet, E> {
     let mut interfaces = BTreeMap::new();
-    let seals: BTreeMap<_, _> = bodies.iter().map(|(key, input)| {
+    let mut seals = BTreeMap::new();
+    for (key, input) in bodies {
+        check(*key, input.body.expressions.len() as u64 + 1)?;
         let (interface, solver) = interfaces.entry(input.interface as *const ElaboratedInterface as usize)
             .or_insert_with(|| (Arc::new(input.interface.clone()), crate::TraitSolver::new(input.interface)));
         let mut solver = solver.fresh_query();
@@ -510,12 +697,12 @@ pub fn derive_control_summaries(
             Err(ControlUnknown::InvalidContract(*key))
         } else { Ok(()) };
         let interface = interface.clone();
-        (*key, Arc::new(Seal {
+        seals.insert(*key, Arc::new(Seal {
             identity: ControlBodyIdentity { definition: *key, body: input.body.semantic_fingerprint(),
                 contract: crate::signature::host_contract_fingerprint(*key, input.signature) },
             body: Arc::new(input.body.clone()), interface, valid,
-        }))
-    }).collect();
+        }));
+    }
     let mut output = ControlSummarySet::default();
     for (owner, input) in bodies {
         let mut roots = vec![(
@@ -545,6 +732,7 @@ pub fn derive_control_summaries(
             }
         }
         for (callable, root, parameters, captures) in roots {
+            check(*owner, 0)?;
             let frame = Frame {
                 callable,
                 owner: *owner,
@@ -595,6 +783,7 @@ pub fn derive_control_summaries(
                 Ok(()) => analyzer.eval(&frame, root, initial),
                 Err(reason) => vec![initial.stop(reason.clone())],
             };
+            check(*owner, analyzer.steps as u64 + 1)?;
             let alternatives = states
                 .into_iter()
                 .map(|state| ControlAlternative {
@@ -616,7 +805,7 @@ pub fn derive_control_summaries(
             );
         }
     }
-    output
+    Ok(output)
 }
 
 fn input_value(origin: ControlOrigin, ty: Type, signature: &CallableSignature) -> ControlValue {
@@ -807,17 +996,29 @@ impl Analyzer<'_, '_> {
                 }
             }
             CoreKind::TraitMethod {
+                evidence,
                 method,
                 trait_arguments,
                 method_arguments,
                 deferred: None,
-                ..
-            } if trait_arguments.is_empty() && method_arguments.is_empty() => {
-                result.shape = ControlValueShape::Callable {
-                    brand: CallableBrand::Named(method),
-                    generic_arguments: Some(vec![]),
-                    captures: vec![],
-                }
+            } => {
+                let selected = crate::CoreExpr {
+                    kind: CoreKind::TraitMethod {
+                        evidence, method,
+                        trait_arguments: trait_arguments.into_iter().map(|value| frame.argument(value)).collect(),
+                        method_arguments: method_arguments.into_iter().map(|value| frame.argument(value)).collect(),
+                        deferred: None,
+                    },
+                    ty: expr.ty.clone(), span: expr.span,
+                };
+                result.shape = match crate::callable_declarations::selected_template(
+                    self.bodies[&frame.owner].interface, &selected,
+                ) {
+                    Some(template) => ControlValueShape::Callable {
+                        brand: CallableBrand::Named(method), generic_arguments: Some(template.arguments), captures: vec![],
+                    },
+                    None => ControlValueShape::OpaqueCallable,
+                };
             }
             CoreKind::LabelValue { brand } => {
                 let Some(target) = frame.labels.get(&brand) else {

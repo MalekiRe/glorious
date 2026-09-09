@@ -95,12 +95,14 @@ impl StagedTypedBody {
         self,
         signatures: &ElaboratedInterface,
         abort_primitive: Option<DefKey>,
+        continuations: Arc<crate::core_continuations::CoreContinuations>,
         diagnostics: &mut Vec<CompileDiagnostic>,
     ) -> PublishedBody {
         let Self { definition, is_constant, valid, core, lexical_bounds,
             lexical_effect_bindings, solver, budget } = self;
         let flow = PlaceFlow::analyze_with_frozen_solver(
             &core, signatures, &lexical_bounds, &lexical_effect_bindings, &solver, abort_primitive,
+            continuations,
         );
         diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
             diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
@@ -1933,12 +1935,35 @@ impl StageZeroCompiler {
         // from this complete immutable batch without source-order guessing.
         let abort_primitive = runtime_manifest.as_ref()
             .and_then(|manifest| manifest.primitives.get(&PrimitiveRole::Abort)).copied();
+        let control_signatures = staged_bodies.iter().filter_map(|staged|
+            crate::callable_declarations::body_signature(&signatures, staged.definition)
+                .map(|signature| (staged.definition, signature))).collect::<BTreeMap<_, _>>();
+        let control_bodies = staged_bodies.iter().filter_map(|staged|
+            control_signatures.get(&staged.definition).map(|signature| (staged.definition,
+                crate::callable_control::ControlBody { body: &staged.core, signature, interface: &signatures })))
+            .collect::<BTreeMap<_, _>>();
+        let control_budgets = staged_bodies.iter().map(|staged| (staged.definition, staged.budget.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let control_summaries = crate::callable_control::derive_control_summaries_with_check(
+            &control_bodies, Default::default(), &mut |definition, cost|
+                session.checkpoint_in(&control_budgets[&definition], cost),
+        )?;
+        let bound_control = control_summaries.bind(&control_bodies)
+            .map_err(|reason| ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180",
+                format!("callable control batch failed dependency validation: {reason:?}"))]))?;
+        let continuations = staged_bodies.iter().map(|staged| {
+            crate::core_continuations::CoreContinuations::derive_with_invocations(
+                &staged.core, bound_control.body(staged.definition),
+            ).map(|facts| (staged.definition, Arc::new(facts)))
+        }).collect::<Result<BTreeMap<_, _>, _>>()
+            .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant(error.code, error.message)]))?;
         let mut body_products = Vec::with_capacity(staged_bodies.len());
         for staged in staged_bodies {
             // Observe cancellation at the new phase boundary without
             // changing the existing semantic work charges or body budget.
             session.checkpoint_in(&staged.budget, 0)?;
-            body_products.push(staged.analyze(&signatures, abort_primitive, &mut diagnostics));
+            let facts = continuations[&staged.definition].clone();
+            body_products.push(staged.analyze(&signatures, abort_primitive, facts, &mut diagnostics));
         }
         for PublishedBody {
             definition,

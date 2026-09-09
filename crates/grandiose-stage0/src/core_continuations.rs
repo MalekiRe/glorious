@@ -48,6 +48,16 @@ impl Continuation {
         exits: PossibleExits::Unresolved,
     };
 
+    fn invocation(control: &crate::callable_control::InvocationControl) -> Self {
+        let exits = control.labels.iter().copied()
+            .map(PossibleExits::Label)
+            .fold(PossibleExits::None, PossibleExits::join);
+        Self {
+            may_return: control.normal || control.unknown,
+            exits: if control.unknown { PossibleExits::Unresolved } else { exits },
+        }
+    }
+
     fn transfer(target: LabelBrand) -> Self {
         Self {
             may_return: false,
@@ -190,7 +200,7 @@ impl Rule {
         rule
     }
 
-    fn evaluate(&self, facts: &[Option<Continuation>]) -> Continuation {
+    fn evaluate(&self, facts: &[Option<Continuation>], invocation: Option<&crate::callable_control::InvocationControl>) -> Continuation {
         let prefix = self
             .operands
             .iter()
@@ -205,7 +215,7 @@ impl Rule {
             ResultRule::Transfer(target) => prefix.then(Continuation::transfer(target)),
             ResultRule::Rejoin(target) => prefix.rejoin(target),
             ResultRule::Continue => prefix,
-            ResultRule::Invoke => prefix.then(Continuation::OPAQUE),
+            ResultRule::Invoke => prefix.then(invocation.map_or(Continuation::OPAQUE, Continuation::invocation)),
             ResultRule::Choose => {
                 let choices = self
                     .alternatives
@@ -231,10 +241,21 @@ pub(crate) struct CoreContinuations {
     root: CoreId,
     rules: Box<[Rule]>,
     facts: Box<[Continuation]>,
+    invocation_control: Option<crate::callable_control::BodyInvocationControl>,
 }
 
 impl CoreContinuations {
     pub(crate) fn derive(body: &TypedBody) -> Result<Self, CoreDiagnostic> {
+        Self::derive_with_invocations(body, None)
+    }
+
+    pub(crate) fn derive_with_invocations(
+        body: &TypedBody,
+        invocation_control: Option<crate::callable_control::BodyInvocationControl>,
+    ) -> Result<Self, CoreDiagnostic> {
+        if invocation_control.as_ref().is_some_and(|control| !control.matches(body)) {
+            return Err(input_error(body, "invocation outcomes do not match the frozen Core body"));
+        }
         if body.expressions.get(body.root.0 as usize).is_none() {
             return Err(input_error(
                 body,
@@ -266,7 +287,8 @@ impl CoreContinuations {
         }
         let mut facts = vec![None; rules.len()];
         while let Some(index) = ready.pop_front() {
-            facts[index] = Some(rules[index].evaluate(&facts));
+            facts[index] = Some(rules[index].evaluate(&facts,
+                invocation_control.as_ref().and_then(|control| control.get(CoreId(index as u32)))));
             for parent in &parents[index] {
                 pending[*parent] -= 1;
                 if pending[*parent] == 0 {
@@ -284,14 +306,17 @@ impl CoreContinuations {
             root: body.root,
             rules: rules.into_boxed_slice(),
             facts: facts.into_boxed_slice(),
+            invocation_control,
         })
     }
 
     /// Validate the complete dependency projection once at each consumer
-    /// boundary, not per query. Literal spelling and unrelated type/layout
-    /// metadata are intentionally not dependencies of these control facts.
+    /// boundary, not per query. Local-only rules depend on control shape;
+    /// body-derived invocation and payload facts additionally seal the full
+    /// typed input and its validated interprocedural dependencies.
     pub(crate) fn bind(&self, body: &TypedBody) -> Result<&Self, CoreDiagnostic> {
         if self.root != body.root
+            || self.invocation_control.as_ref().is_some_and(|control| !control.matches(body))
             || self.rules.len() != body.expressions.len()
             || !self
                 .rules
@@ -313,6 +338,10 @@ impl CoreContinuations {
 
     pub(crate) fn is_abrupt(&self, id: CoreId) -> bool {
         self.get(id).is_abrupt()
+    }
+
+    pub(crate) fn invocation(&self, id: CoreId) -> Option<&crate::callable_control::InvocationControl> {
+        self.invocation_control.as_ref()?.get(id)
     }
 }
 

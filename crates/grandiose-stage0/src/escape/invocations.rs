@@ -97,6 +97,86 @@ mod tests {
 }
 
 impl Analyzer<'_> {
+    pub(super) fn record_label_exit(&mut self, brand: crate::LabelBrand, value: Value, span: Span) {
+        let value = self.resolved_value(&value);
+        if let Some(label) = self
+            .labels
+            .iter_mut()
+            .rev()
+            .find(|label| label.brand == brand)
+        {
+            label.exits.push(LabelExit {
+                value,
+                environment: self.values.clone(),
+            });
+        } else {
+            self.report_return_escape(&value, span);
+        }
+    }
+
+    pub(super) fn record_invocation_exits(
+        &mut self,
+        call: CoreId,
+        callable: &Value,
+        arguments: &[Value],
+        span: Span,
+    ) {
+        let Some(control) = self.continuations.invocation(call).cloned() else {
+            return;
+        };
+        if control.unknown {
+            return;
+        }
+        for transfer in control.transfers {
+            let value = self.invocation_payload(&transfer.payload, callable, arguments, span);
+            if let Some(target) = transfer.target {
+                self.record_label_exit(target, value, span);
+            } else {
+                self.report_return_escape(&value, span);
+            }
+        }
+    }
+
+    fn invocation_payload(
+        &mut self,
+        payload: &crate::callable_control::InvocationPayload,
+        callable: &Value,
+        arguments: &[Value],
+        span: Span,
+    ) -> Value {
+        let value = crate::callable_control::resolve_payload(payload, callable, arguments, self);
+        self.materialize_payload(value, span)
+    }
+
+    fn materialize_payload(
+        &mut self,
+        value: crate::callable_control::ResolvedPayload<Value>,
+        span: Span,
+    ) -> Value {
+        use crate::callable_control::ResolvedPayload;
+        match value {
+            ResolvedPayload::Inputs { values, .. } => join(values),
+            ResolvedPayload::Aggregate(fields) => Value::Aggregate(
+                fields
+                    .into_iter()
+                    .map(|field| self.materialize_payload(field, span))
+                    .collect(),
+            ),
+            ResolvedPayload::Unknown(ty) => {
+                if crate::core::tail::tail_owned_type(self.signatures, &ty, &mut vec![]) {
+                    Value::FrameIndependent
+                } else {
+                    self.error(
+                        span,
+                        "G5023",
+                        "label payload has no frozen input or frame-independent provenance",
+                    );
+                    Value::None
+                }
+            }
+        }
+    }
+
     pub(super) fn record_invocation_stores(
         &mut self,
         callee: CoreId,

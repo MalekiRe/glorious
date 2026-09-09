@@ -162,3 +162,39 @@ footprints rather than proving complete coverage. The source regressions cover
 direct, borrowed, higher-order, nested and trait-selected invocation, ordinary
 non-invoking generic forwarding, and abrupt argument evaluation. They do not
 establish full guarded provenance or captured native/mixed execution.
+
+## Body-derived invocation outcomes and label payloads
+
+The staged analysis boundary now derives callable-control summaries from the
+complete frozen body batch before ownership checking. Binding validates full
+body, declaration-contract and interface dependency seals. The resulting
+per-body invocation product is consumed by shared continuation facts,
+PlaceFlow and EscapeFlow; quantity checking reuses those continuations.
+Selected implementation bodies and call sites share declaration substitution
+with materialization. Summary work is charged to the request's body budgets,
+and cancellation returns no partial published product.
+
+Invocation facts distinguish normal return, exact local-label rejoin, outer
+transfer, terminal operation, cancellation, divergence and unknown behavior.
+They are may-outcomes conditional on reaching a call after strict operands,
+not exact guard-correlated storage states. An unobserved call after an unknown
+prefix may compose an independently checked static callee contract; only an
+explicitly represented label operand supplies a local target. Unknown or
+aliased targets do not acquire a destination from a bottom return type.
+
+Label payloads are typed projections from the same control alternatives onto
+evaluated explicit or captured inputs. Both ownership and escape instantiate
+these relations through the existing read-only invocation input adapters.
+Missing projections require independent frame-independence proof, not an empty
+reference footprint. Label exits retain payload snapshots and backing loans
+until rejoin; actual invocation consumes its input snapshots before temporary
+receiver and argument owners are released. Closure formation does not execute
+the enclosing body's label transfers.
+
+This slice fixes helper-driven label ownership and reference transfer, not
+complete guarded resource analysis. Operation/cancellation ownership states
+still use their conservative existing path. Generic unknown callbacks,
+nominal payloads without input provenance, unified storage identities and
+structural fusion of closures capturing outer labels remain open. The latter
+has an active failing source regression; this checkpoint does not relax its
+label-lifetime check or claim captured native/mixed execution.

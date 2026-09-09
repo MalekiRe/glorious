@@ -70,6 +70,7 @@ impl EscapeFlow {
                 })
                 .collect(),
             values: ValueEnvironment::default(),
+            labels: vec![],
             diagnostics: vec![],
         };
         // Parameters may carry references through structural aggregates. They
@@ -164,6 +165,16 @@ struct ValueEnvironment {
     regions: crate::placeflow::regions::RegionGraph<Value>,
 }
 
+struct LabelExit {
+    value: Value,
+    environment: ValueEnvironment,
+}
+
+struct LabelBoundary {
+    brand: crate::LabelBrand,
+    exits: Vec<LabelExit>,
+}
+
 impl ValueEnvironment {
     fn define(&mut self, name: String, value: Value) {
         let identity = self.next;
@@ -227,6 +238,7 @@ struct Analyzer<'a> {
     signatures: &'a crate::ElaboratedInterface,
     loan_roots: BTreeSet<String>,
     values: ValueEnvironment,
+    labels: Vec<LabelBoundary>,
     diagnostics: Vec<EscapeDiagnostic>,
 }
 
@@ -359,8 +371,24 @@ impl Analyzer<'_> {
                 self.values.define(name, evaluated);
                 Value::None
             }
-            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
-                self.value(body)
+            CoreKind::Label { brand, body } => {
+                let incoming = self.values.clone();
+                self.labels.push(LabelBoundary { brand, exits: vec![] });
+                let normal = self.value(body);
+                let mut label = self.labels.pop().expect("active escape label");
+                assert_eq!(label.brand, brand);
+                if !self.continuations.is_abrupt(body) {
+                    label.exits.push(LabelExit { value: normal, environment: self.values.clone() });
+                }
+                let (values, environments) = label.exits.into_iter()
+                    .map(|exit| (exit.value, exit.environment)).unzip();
+                self.values = joined_environments(&incoming, environments);
+                join(values)
+            }
+            CoreKind::Transfer { brand, value } => {
+                let payload = self.value(value);
+                if !self.continuations.is_abrupt(value) { self.record_label_exit(brand, payload, expression.span); }
+                Value::None
             }
             CoreKind::Assign { place, value } => {
                 let evaluated = self.value(value);
@@ -408,12 +436,14 @@ impl Analyzer<'_> {
                 // retain that result provenance without leaking its local
                 // bindings or writes into the enclosing creation site.
                 let outer_values = self.values.clone();
+                let outer_labels = std::mem::take(&mut self.labels);
                 for (name, ty) in &parameters {
                     self.values.define(name.clone(), parameter_value(ty));
                 }
                 let returned = self.value(body);
                 let returned_snapshot = self.resolved_value(&returned);
                 self.values = outer_values;
+                self.labels = outer_labels;
 
                 // Formation does not execute the body or insert hypothetical
                 // external arguments into captured storage. Invocation applies
@@ -496,7 +526,8 @@ impl Analyzer<'_> {
                 }
                 let values = self.strict_values(arguments.clone());
                 if values.len() == arguments.len() && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
-                    self.record_invocation_stores(callee, callable, &arguments, &values, expression.span);
+                    self.record_invocation_stores(callee, callable.clone(), &arguments, &values, expression.span);
+                    self.record_invocation_exits(id, &callable, &values, expression.span);
                 }
                 if mandatory_tail {
                     for (argument, value) in arguments.iter().zip(&values) {

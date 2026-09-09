@@ -226,6 +226,145 @@ fn direct_label_continuations_keep_their_own_move_and_minimum_use_states() {
 }
 
 #[test]
+fn helper_label_exits_keep_their_own_move_and_minimum_use_states() {
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+            fn select(value:Token, flag:Flag) -> Token {{
+                handle flag {{ Flag::Yes => leave(value,@select), Flag::No => () }};
+                value
+            }} pub fn main() -> i64 {{ consume(select(Token {{}},Flag::{flag})) }}"));
+        accepts(&format!("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+            fn select(value:Token, flag:Flag) -> i64 {{
+                @done: () {{
+                    handle flag {{ Flag::Yes => leave((),@done), Flag::No => () }}
+                }};
+                consume(value)
+            }} pub fn main() -> i64 {{ select(Token {{}},Flag::{flag}) }}"));
+    }
+    for (declaration, invocation) in [
+        ("trait Leave { fn leave<T,L>(receiver:i64, value:T, target:L) -> ! where L:Label<T>; } impl Leave for i64 { fn leave<T,L>(receiver:i64, value:T, target:L) -> ! where L:Label<T> { target(value) } }", "Leave::leave(0,value,@select)"),
+        ("trait Leave<U> { fn leave<T,L>(receiver:i64, value:T, target:L) -> ! where L:Label<T>; } impl<U> Leave<U> for i64 { fn leave<T,L>(receiver:i64, value:T, target:L) -> ! where L:Label<T> { target(value) } }", "Leave<i64>::leave(0,value,@select)"),
+    ] {
+        for flag in ["Yes", "No"] {
+            accepts(&format!("{declaration} fn select(value:Token, flag:Flag) -> Token {{
+                handle flag {{ Flag::Yes => {invocation}, Flag::No => () }}; value
+            }} pub fn main() -> i64 {{ consume(select(Token {{}},Flag::{flag})) }}"));
+        }
+    }
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+            fn select<F>(value:Token, flag:Flag, observe:F) -> Token where F:Fn<(),Output=()> {{
+                observe();
+                handle flag {{ Flag::Yes => leave(value,@select), Flag::No => () }}; value
+            }} pub fn main() -> i64 {{ consume(select(Token {{}},Flag::{flag},() -> () {{ () }})) }}"));
+    }
+}
+
+#[test]
+fn higher_order_captured_outer_label_exits_preserve_ownership() {
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn invoke<F>(task:F) -> ! where F:Fn<(),Output = ! > {{ task() }}
+            fn select(value:Token, flag:Flag) -> Token {{
+                handle flag {{ Flag::Yes => invoke(() -> ! {{ @select(value) }}), Flag::No => () }}; value
+            }} pub fn main() -> i64 {{ consume(select(Token {{}},Flag::{flag})) }}"));
+    }
+}
+
+#[test]
+fn helper_label_rejoins_cannot_hide_double_use() {
+    let source = format!("{TOKEN}
+        fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+        fn select(value:Token, flag:Flag) -> i64 {{
+            @done: () {{ handle flag {{
+                Flag::Yes => {{ consume(value); leave((),@done) }}, Flag::No => ()
+            }} }};
+            consume(value)
+        }} pub fn main() -> i64 {{ select(Token {{}},Flag::Yes) }}");
+    for optimization in ["0", "2"] {
+        let error = StageZeroCompiler::new().compile(request(&source, optimization))
+            .expect_err("a helper's rejoined move must reach the suffix");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5003"), "{error:#?}");
+    }
+}
+
+#[test]
+fn helper_label_exits_preserve_protected_operands_and_reference_payloads() {
+    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        fn pair(value:Token, result:i64) -> i64 { consume(value); result }
+        pub fn main() -> i64 { pair(Token {}, @done: i64 { leave(42,@done) }) }");
+    rejects("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        fn pair(value:Token, result:i64) -> i64 { consume(value); result }
+        pub fn main() -> i64 { pair(Token {}, leave(42,@main)) }");
+    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        fn forward<'a>(value:&'a i64) -> &'a i64 { leave(value,@forward) }
+        pub fn main() -> i64 { let value:i64=42; *forward(&value) }");
+}
+
+#[test]
+fn helper_label_exits_cannot_return_a_local_reference_payload() {
+  for main in ["*bad()", "42"] {
+    let source = format!("{TOKEN}
+        fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+        pub fn bad() -> &i64 {{ let value:i64=42; leave(&value,@bad) }}
+        pub fn main() -> i64 {{ {main} }}");
+    for optimization in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(error) => error,
+            Ok(_) => panic!("a helper cannot erase an escaping local reference: main={main}"),
+        };
+        assert!(error.diagnostics().iter().any(|diagnostic|
+            matches!(diagnostic.code, "G5013" | "G5014" | "G5017" | "G5022" | "G5023")), "{error:#?}");
+    }
+  }
+}
+
+#[test]
+fn rejoined_helper_reference_payloads_keep_their_backing_loan() {
+    let source = format!("{TOKEN}
+        fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+        pub fn main() -> i64 {{ let mut value:i64=41;
+            let reference = @done: &i64 {{ leave(&value,@done) }};
+            value=42; *reference
+        }}");
+    for optimization in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(error) => error,
+            Ok(_) => panic!("a rejoined reference must retain its source loan"),
+        };
+        assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5007" | "G5013" | "G5017" | "G5022" | "G5023")), "{error:#?}");
+    }
+}
+
+#[test]
+fn rejoined_helper_reference_payloads_allow_valid_uses() {
+    for exit in ["leave(&value,@done)", "@done(&value)"] {
+        accepts(&format!("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+            pub fn main() -> i64 {{ let mut value:i64=41;
+                {{ let reference = @done: &i64 {{ {exit} }}; *reference; }};
+                value=42; value
+            }}"));
+    }
+    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        pub fn main() -> i64 { let mut value:i64=41;
+            { let reference = @done: &mut i64 { leave(&mut value,@done) }; *reference=42; };
+            value
+        }");
+    accepts("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        pub fn main() -> i64 { let value:i64=42;
+            let (reference,number) = @done: (&i64,i64) { leave((&value,2),@done) };
+            number; *reference
+        }");
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> {{ target(value) }}
+            pub fn main() -> i64 {{ let value:i64=42;
+                let reference = @done: &i64 {{ handle Flag::{flag} {{
+                    Flag::Yes => leave(&value,@done), Flag::No => &value
+                }} }}; *reference
+            }}"));
+    }
+}
+
+#[test]
 fn named_linear_owners_transfer_or_deconstruct_without_byte_residents() {
     accepts("pub fn main() -> i64 { let value = Token {}; consume(value) }");
     accepts(

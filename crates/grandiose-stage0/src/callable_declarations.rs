@@ -74,6 +74,60 @@ pub(crate) struct SelectedTemplate {
     pub arguments: Vec<GenericArgument>,
 }
 
+fn implementation_body_signature(
+    implementation: &crate::signature::ElaboratedImplementation,
+    method: &crate::CallableSignature,
+) -> crate::CallableSignature {
+    let mut signature = method.clone();
+    signature.generic_kinds = implementation
+        .generic_kinds
+        .iter()
+        .chain(&method.generic_kinds)
+        .copied()
+        .collect();
+    signature.generics = signature.generic_kinds.len() as u32;
+    signature
+        .where_bounds
+        .extend(implementation.where_bounds.clone());
+    signature.where_bounds.push((
+        implementation.self_ty.clone(),
+        implementation.relation.clone(),
+    ));
+    signature
+        .where_outlives
+        .extend(implementation.where_outlives.clone());
+    signature
+        .universal_bounds
+        .extend(implementation.universal_bounds.clone());
+    signature
+        .where_associated_type_bindings
+        .extend(implementation.where_associated_type_bindings.clone());
+    signature
+        .where_associated_effect_bindings
+        .extend(implementation.where_associated_effect_bindings.clone());
+    signature
+}
+
+/// The declaration contract for an independently checked body. Constants and
+/// value initializers do not acquire a fabricated function-body contract.
+pub(crate) fn body_signature(
+    signatures: &ElaboratedInterface,
+    definition: DefKey,
+) -> Option<crate::CallableSignature> {
+    if let Some(ElaboratedHeader::Callable(signature)) = signatures.definitions.get(&definition) {
+        return Some(signature.clone());
+    }
+    signatures.definitions.iter().find_map(|(key, header)| {
+        let ElaboratedHeader::Implementation(implementation) = header else {
+            return None;
+        };
+        implementation.methods.iter().find_map(|(name, signature)| {
+            (crate::implementation_method_key(*key, name) == definition)
+                .then(|| implementation_body_signature(implementation, signature))
+        })
+    })
+}
+
 pub(crate) fn receiver_candidate(ty: &Type) -> Option<&Type> {
     let Type::Callable {
         parameters, result, ..
@@ -121,14 +175,7 @@ pub(crate) fn selected_template(
                 receiver.as_ref(),
             )
             .ok()?;
-            let mut signature = signature.clone();
-            signature.generic_kinds = implementation
-                .generic_kinds
-                .iter()
-                .chain(&signature.generic_kinds)
-                .copied()
-                .collect();
-            signature.generics = signature.generic_kinds.len() as u32;
+            let signature = implementation_body_signature(implementation, signature);
             Some(SelectedTemplate {
                 signature,
                 arguments,

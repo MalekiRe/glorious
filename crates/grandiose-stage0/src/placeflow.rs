@@ -485,8 +485,10 @@ impl PlaceFlow {
         effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
         solver: &crate::TraitSolver,
         abort_primitive: Option<crate::DefKey>,
+        continuations: std::sync::Arc<crate::core_continuations::CoreContinuations>,
     ) -> Self {
-        Self::analyze_root(body, body.root, &body.parameters, Some(signatures), bounds, effect_bindings, Some(solver), abort_primitive)
+        Self::analyze_root_with_captures(body, body.root, &body.parameters, &[], Some(signatures), bounds,
+            effect_bindings, Some(solver), abort_primitive, Some(continuations))
     }
 
     /// Analyze one lifted callable body as an independent storage owner.
@@ -1288,6 +1290,7 @@ impl Analyzer<'_> {
 
     fn release_expression_results(&mut self, incoming: &BTreeSet<CoreId>, keep: Option<CoreId>, span: Span) {
         let consumed = self.pending_results.iter().filter(|id| !incoming.contains(id) && Some(**id) != keep)
+            .filter(|id| !self.label_continuations.iter().any(|label| label.id == **id))
             .copied().collect::<Vec<_>>();
         for id in consumed {
             self.release_result_loans(id, span);
@@ -1366,7 +1369,7 @@ impl Analyzer<'_> {
                 }
             }
             CoreKind::Label { brand, body } => {
-                self.enter_label_continuation(brand);
+                self.enter_label_continuation(id, brand);
                 // Labels are control boundaries, but their body is also a
                 // lexical storage region. Capture that region at analysis
                 // time while Core still tells us exactly which branded label
@@ -1394,11 +1397,17 @@ impl Analyzer<'_> {
                     .then_some(next_scope)
                     .unwrap_or(target);
                 self.label_storage_exits.insert(brand, (source, target));
+                if self.normal_continuation { self.preserve_expression_result(id, body); }
                 self.finish_label_continuation(brand, e.span);
             }
             CoreKind::Transfer { brand, value } => {
                 self.visit_with_live_after(value, live_after);
-                if self.normal_continuation { self.record_label_continuation(brand, e.span); }
+                if self.normal_continuation {
+                    if let Some(target) = self.label_continuations.iter().rev().find(|label| label.brand == brand).map(|label| label.id) {
+                        self.preserve_expression_result(target, value);
+                    }
+                    self.record_label_continuation(brand, e.span);
+                }
             }
             CoreKind::Let { name, value } => {
                 // A strict initializer which transfers out or evaluates to
@@ -1593,7 +1602,7 @@ impl Analyzer<'_> {
                     during_call.insert(owner.clone());
                     self.visit_closure_environment(&environment, e.span, Some(owner.as_str()));
                     self.visit_sequence(&arguments, &during_call);
-                    if operands_complete && self.normal_continuation { self.record_invocation_stores(callee, Some(&owner), &arguments, id); }
+                    if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, Some(&owner), &arguments, id, e.span); }
                     self.release_owner_loans(&owner, e.span);
                 } else {
                     if matches!(reference_shape, CallReferenceShape::None) {
@@ -1610,19 +1619,14 @@ impl Analyzer<'_> {
                         let mut during_call = live_after.clone();
                         during_call.insert(owner.clone());
                         self.visit_call_operands(callee, &arguments, &during_call);
+                        if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, None, &logical_arguments, id, e.span); }
                         self.release_owner_loans(&owner, e.span);
                         self.ephemeral_borrow_owner = previous;
                         self.nonretaining_call_owner = previous_capture;
                     } else {
                         self.visit_call_operands(callee, &arguments, live_after);
+                        if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, None, &logical_arguments, id, e.span); }
                     }
-                }
-                if operands_complete && self.normal_continuation {
-                    if !matches!(self.body.expression(callee).kind, CoreKind::Closure { .. }) {
-                        self.record_invocation_stores(callee, None, &logical_arguments, id);
-                    }
-                    if self.minimum_definitely_aborts(id) { self.minimum_states.clear(); }
-                    else { self.check_minimum_call_suspensions(callee, &arguments, e.span); }
                 }
             }
             CoreKind::Perform {
@@ -1895,6 +1899,13 @@ impl Analyzer<'_> {
             let values = std::iter::once(callee).chain(arguments.iter().copied()).collect::<Vec<_>>();
             self.visit_sequence(&values, live_after);
         }
+    }
+
+    fn finish_invocation_inputs(&mut self, callee: CoreId, owner: Option<&str>, arguments: &[CoreId], call: CoreId, span: Span) {
+        self.record_invocation_stores(callee, owner, arguments, call);
+        if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
+        else { self.check_minimum_call_suspensions(callee, arguments, span); }
+        self.apply_invocation_control(call, owner, span);
     }
 
     fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {

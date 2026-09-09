@@ -12,13 +12,26 @@ pub(super) struct Value {
 }
 
 impl Value {
-    fn core(id: CoreId) -> Self {
+    pub(super) fn core(id: CoreId) -> Self {
         Self {
             core: Some(id),
             owners: BTreeSet::new(),
             path: vec![],
             fallback_regions: BTreeSet::new(),
             fallback_loans: BTreeSet::new(),
+        }
+    }
+
+    pub(super) fn callable(id: CoreId, owner: Option<&str>) -> Self {
+        match owner {
+            Some(owner) => Self {
+                core: None,
+                owners: BTreeSet::from([owner.to_owned()]),
+                path: vec![],
+                fallback_regions: BTreeSet::new(),
+                fallback_loans: BTreeSet::new(),
+            },
+            None => Self::core(id),
         }
     }
 }
@@ -101,16 +114,7 @@ impl Analyzer<'_> {
         let Some(signatures) = self.signatures else {
             return;
         };
-        let callee_value = match owner {
-            Some(owner) => Value {
-                core: None,
-                owners: BTreeSet::from([owner.to_owned()]),
-                path: vec![],
-                fallback_regions: BTreeSet::new(),
-                fallback_loans: BTreeSet::new(),
-            },
-            None => Value::core(callee),
-        };
+        let callee_value = Value::callable(callee, owner);
         let arguments = arguments
             .iter()
             .map(|argument| Operand {
@@ -176,6 +180,67 @@ impl Analyzer<'_> {
         }
         if changed {
             self.refresh_logical_loans(call);
+        }
+    }
+
+    pub(super) fn record_payload_origins(
+        &mut self,
+        owner: &str,
+        payload: crate::callable_control::ResolvedPayload<Value>,
+        source: CoreId,
+    ) {
+        use crate::callable_control::ResolvedPayload;
+        match payload {
+            ResolvedPayload::Aggregate(fields) => {
+                for (index, field) in fields.into_iter().enumerate() {
+                    self.record_payload_origins(
+                        &projection_key(owner, &[index as u32]),
+                        field,
+                        source,
+                    );
+                }
+            }
+            ResolvedPayload::Inputs { ty, values } => {
+                let Some(signatures) = self.signatures else {
+                    return;
+                };
+                let mut leaves = vec![];
+                let _ =
+                    crate::core::reference_leaf_paths(signatures, &ty, &mut vec![], &mut leaves);
+                leaves.extend(regions::callable_paths(signatures, &ty, false));
+                for (path, ty) in leaves {
+                    let destination = projection_key(owner, &path);
+                    for value in &values {
+                        let Some(projected) = <Self as Inputs>::project(self, value, &path) else {
+                            continue;
+                        };
+                        if matches!(ty, Type::Callable { .. }) {
+                            let sources = self.invocation_owners(&projected);
+                            self.forward_capture_origins(&destination, &sources);
+                        }
+                        let (regions, loans) = self.invocation_origins(&projected);
+                        self.logical
+                            .origins
+                            .entry(destination.clone())
+                            .or_default()
+                            .extend(regions);
+                        for loan in loans {
+                            self.install_reference_alias(&destination, loan, source);
+                        }
+                    }
+                }
+            }
+            ResolvedPayload::Unknown(ty) => {
+                if self.signatures.is_some_and(|signatures| {
+                    !crate::core::tail::tail_owned_type(signatures, &ty, &mut vec![])
+                }) {
+                    self.error(
+                        self.body.expression(source).span,
+                        "G5023",
+                        "label payload has no frozen input or frame-independent provenance".into(),
+                    );
+                }
+            }
         }
     }
 

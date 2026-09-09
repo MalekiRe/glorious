@@ -5,6 +5,59 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 98: shared invocation outcomes and label payload provenance
+
+Body-derived callable summaries now feed the shared continuation product and
+ownership/escape consumers before staged bodies are published. Binding checks
+the full frozen dependency batch, while request cancellation and work budgets
+cover summary derivation. Selected trait implementation contracts reuse the
+same declaration and substitution rules as executable materialization.
+
+Ordinary and selected generic helpers that transfer to a supplied label retain
+their own move and minimum-use states. The original false rejections are in
+`target/shared-call-outcomes-before-v1.log`. A preceding unresolved call no
+longer prevents composing an independently checked static helper contract;
+unresolved label operands still cannot fabricate a local or outer destination.
+The product retains distinct normal, label, outer-transfer, operation,
+cancellation, divergence and unknown may-outcomes. It does not preserve exact
+guard correlation or prove complete interprocedural storage behavior.
+
+Reference-bearing label payloads project from the same alternatives onto
+evaluated explicit/captured inputs through shared read-only adapters. Escape
+checks retain the destination's payload and environment; ownership retains its
+backing loan through rejoin. An unused public helper that returned a dead local
+reference was incorrectly accepted (`target/shared-call-outcomes-payload-v2.log`),
+as was mutation while a helper-rejoined reference remained live
+(`target/shared-call-outcomes-rejoined-loan-before-v1.log`). Both now reject.
+Legal direct/helper shared references, unique references, tuple payloads and
+conditional normal/transfer joins execute fresh and decoded at O0/O2
+(`target/shared-call-outcomes-rejoined-loan-after-v4.log`). Protected linear
+operands and early function-return payloads have paired acceptance/rejection
+coverage. Unknown payload provenance requires a structural frame-independence
+proof; nominal physical layout is not a substitute for logical provenance.
+
+Six rule units cover static contracts after unknown prefixes, unresolved label
+operands, stale body/dependency seals, interrupted derivation, instantiated
+payload types and common explicit/captured projection with missing coverage.
+The final selected integration run has 1,944 passes, 17 failures and no ignores
+(`target/shared-call-outcomes-integration-v2.log`). All 313 unit,
+25 borrowed-callable, 38 callable-control, 270 Core, 111 destruction,
+39 fixed-array/container, 22 request/revision, 891 service and 176 library API
+tests pass. Minimum-use has 23 passes and the new active G4179 regression below.
+The four tail-label tests pass; mandatory-tail retains 16 passes and its existing
+activation-transfer ABI failure. The source-library matrix improves to
+16 passes and 15 failures: SourceMap now compiles and executes, and the other
+15 failures are unchanged. The all-target compile check passes
+(`target/shared-call-outcomes-check-v1.log`).
+
+The new outer-label-capturing higher-order closure positive remains actively
+failing with G4179. It is not ignored or rewritten into a callback-local label.
+Structural fusion and label-lifetime admission, operation/cancellation resource
+states, fully guarded storage identity and captured native/mixed execution
+remain open. Source cache generation is 98; bytecode, verifier and native
+format generations are unchanged. Full compiler/library conformance and
+self-hosting remain incomplete.
+
 ## Cache 97: shared captured and explicit invocation stores
 
 PlaceFlow and EscapeFlow now consume one typed may-store rule producer for

@@ -7,13 +7,30 @@ still mask later ones. The language and standard-library specifications remain
 authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
-The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/shared-invocation-integration-v3.log`, cache 97). This includes a source
+The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
+ignored (`target/shared-call-outcomes-integration-v2.log`, cache 98). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 98 feeds sealed body-derived invocation outcomes and typed label payload
+projections into shared continuations, ownership and escape checking. Generic
+helper label exits preserve their destination's move/minimum-use state and
+reference provenance, including backing loans after local rejoin. Static
+callee contracts remain usable after an unknown prefix without fabricating an
+unresolved label operand's destination. SourceMap now compiles and executes.
+The final selected run has 1,944 passes and 17 failures: 15 unchanged source
+cases, the existing tail-transfer ABI case and a new active positive for an
+outer-label-capturing higher-order closure (G4179). All 891 service,
+39 fixed-array/container and 176 library API tests pass, as does the all-target
+compile check. Full guard correlation, operation/cancellation resource states,
+shared storage identity, outer-label closure fusion and captured native/mixed
+execution remain open. See `implementation-progress.md` and
+`docs/compiler-architecture.md` for evidence and scope.
+
+The following cache 97 and earlier checkpoints are historical.
 
 Cache 97 consolidates captured and explicit invocation may-store rules across
 ownership and escape checking. It retains callback stores through borrowed
