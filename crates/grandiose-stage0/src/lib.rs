@@ -11,6 +11,7 @@ pub mod artifact_cache;
 pub mod bootstrap;
 pub mod coherence;
 pub mod core;
+mod core_continuations;
 pub mod callable_control;
 pub mod refinement;
 pub mod dependency;

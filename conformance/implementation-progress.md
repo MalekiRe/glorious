@@ -5,6 +5,43 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 95: shared continuation rules and semantic consumers
+
+Typed Core's local continuation projection is now a shared immutable product.
+Explicit source-order operand, choice, transfer and label-rejoin rules are
+solved once over the Core graph. PlaceFlow, its minimum-use checks, EscapeFlow
+and UseFlow consume those same facts; lifted closures reuse the parent arena's
+product. The old recursive continuation query inside PlaceFlow is removed.
+Consumers reject absent or stale control-input projections rather than treating
+missing facts as permission to ignore a suffix.
+
+Possible normal return and possible nonlocal exits are independent. A transfer
+evaluates its payload first, and a conditionally exiting prefix retains its
+alternative destination even when a later operation definitely transfers.
+Opaque invocation/handler behavior stays unresolved. This fixes the two
+demonstrated G5024 false rejections in
+`target/shared-continuation-transfer-before-v1.log` and
+`target/shared-continuation-conditional-before-v1.log`. The regressions now
+execute both relevant branches, fresh and decoded at O0/O2, while the new
+conditional double-use negative requires G5003.
+
+The final selected integration run passes 1,913 tests with 18 failures and no
+ignores (`target/shared-continuation-integration-v3.log`). Passing suites include
+all 298 unit, 270 Core, 38 callable-control, 17 minimum-use, 111 destruction,
+33 fixed-array/container, 22 request/revision, 891 service and 176 library API
+tests. The active factory-local closure escape negative, existing tail-call ABI
+case and 16 source-library cases remain failing; the source matrix retains
+15 passes. The all-target compile check passes
+(`target/shared-continuation-check-v3.log`).
+
+The eight rule-unit tests include composition laws, exact label identity,
+unknown exits, stale/missing inputs and a 20,000-layer shared graph without
+recursive expansion. This does not prove total compiler cost conformance.
+Interprocedural guarded resource states, complete operation-handler control,
+shared storage/capture provenance and captured native/mixed execution remain
+open. See `AGENTS.md` and `docs/compiler-architecture.md` for the ongoing
+architecture contract; this first migrated slice is not full conformance.
+
 ## Cache 94: raw callable residents and stored receivers
 
 Native raw storage now carries callable definition keys and execution-domain

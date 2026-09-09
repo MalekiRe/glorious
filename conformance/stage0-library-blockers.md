@@ -8,12 +8,24 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **15 passing / 16 failing tests**, none
-ignored (`target/integration-callable-raw-storage-source-v1.log`, cache 94). This includes a source
+ignored (`target/shared-continuation-integration-v3.log`, cache 95). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 95 consolidates local continuation reasoning into a frozen rule product
+shared by ownership, escape and quantity checking. Definite and conditional
+transfer payloads preserve their actual destinations and rejoined owner states;
+missing/stale products are rejected. The selected integration run has 1,913
+passes and the same 18 named failures: the factory-local closure escape
+negative, tail-call ABI case and 16 source-library cases. All 891 service and
+176 library API tests pass. This is the first architectural migration slice;
+full interprocedural guarded control and storage/capture provenance remain
+open. See `implementation-progress.md` and `docs/compiler-architecture.md`.
+
+The following cache 94 and earlier checkpoints are historical.
 
 Cache 94 enables callable raw storage with execution-domain environment leases;
 the previously ignored execution test and all 33 fixed-array/container tests now
@@ -26,8 +38,6 @@ is preserved as an active failing escape-checking regression. Captured
 native/mixed invocation, higher-order capture/store propagation, guarded
 control/resource integration and physical cost conformance remain open. See
 `implementation-progress.md` for evidence and the checkpoint's limits.
-
-The following cache 92 and earlier checkpoints are historical.
 
 Cache 92 retains callable capture footprints in logical owners and records
 captured owner stores. The combined run passes 1,860 tests, with the same five

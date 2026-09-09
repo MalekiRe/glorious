@@ -17,6 +17,32 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn escape_and_quantity_consumers_require_matching_shared_continuation_facts() {
+    let (mut core, signatures) = core_and_signatures_for("shared-continuation-consumers@0.1.0",
+        "pub fn main() -> i64 { @done: i64 { @done(42) } }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+    assert!(EscapeFlow::analyze_with_interface(&core, &flow, &signatures).diagnostics.is_empty());
+    assert!(UseFlow::analyze_with_interface(&core, &flow, &signatures).diagnostics.is_empty());
+
+    // A default/absent table cannot be treated as evidence of no exits.
+    let absent = PlaceFlow::default();
+    assert!(EscapeFlow::analyze(&core, &absent).diagnostics.iter().any(|error| error.code == "G4180"));
+    assert!(UseFlow::analyze(&core, &absent).diagnostics.iter().any(|error| error.code == "G4180"));
+
+    // Retarget an actual edge without giving either consumer a new product.
+    let transfer = core.expressions.iter_mut().find(|expression|
+        matches!(expression.kind, CoreKind::Transfer { .. })).unwrap();
+    let CoreKind::Transfer { brand, .. } = &mut transfer.kind else { unreachable!() };
+    brand.label += 1;
+    assert!(EscapeFlow::analyze_with_interface(&core, &flow, &signatures).diagnostics.iter()
+        .any(|error| error.code == "G4180"));
+    assert!(UseFlow::analyze_with_interface(&core, &flow, &signatures).diagnostics.iter()
+        .any(|error| error.code == "G4180"));
+}
+
+#[test]
 fn contextual_byte_slice_literals_retain_element_evidence_across_open_regions() {
     let core = core_for("contextual-byte-slice@0.1.0",
         "use std::*; pub fn main<'a>(bytes: Slice<'a,u8>) -> Ordering { Slice::lex_compare(bytes, b\".\") }");

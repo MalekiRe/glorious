@@ -108,6 +108,78 @@ fn rejoined_bottom_typed_arms_do_not_hide_later_double_use() {
 }
 
 #[test]
+fn transfer_operands_rejoin_before_the_enclosing_transfer_can_run() {
+    accepts("pub fn main() -> i64 {
+        let value = Token {};
+        @outer: () {
+            @inner: () { @outer(@inner(())) };
+            consume(value);
+            @outer(())
+        };
+        42
+    }");
+    accepts("fn pair(value: Token, result: i64) -> i64 { consume(value); result }
+        pub fn main() -> i64 {
+            pair(Token {}, @outer: i64 {
+                @inner: () { @outer(@inner(())) };
+                42
+            })
+        }");
+    rejects("pub fn main() -> i64 {
+        let value = Token {};
+        @outer: () {
+            @inner: () { @outer(@inner(())) };
+            consume(value);
+            @outer(())
+        };
+        consume(value)
+    }");
+}
+
+#[test]
+fn conditional_transfer_payloads_preserve_both_label_continuations() {
+    for flag in ["Yes", "No"] {
+        accepts(&format!("fn select(value: Token, flag: Flag) -> i64 {{
+            @outer: () {{
+                @inner: () {{
+                    @outer(handle flag {{
+                        Flag::Yes => @inner(()),
+                        Flag::No => {{ consume(value); () }}
+                    }})
+                }};
+                consume(value);
+                @outer(())
+            }};
+            42
+        }} pub fn main() -> i64 {{ select(Token {{}}, Flag::{flag}) }}"));
+    }
+}
+
+#[test]
+fn conditional_transfer_payloads_cannot_hide_double_use_after_rejoin() {
+    let source = format!("{TOKEN}fn select(value: Token, flag: Flag) -> i64 {{
+        @outer: () {{
+            @inner: () {{
+                @outer(handle flag {{
+                    Flag::Yes => {{ consume(value); @inner(()) }},
+                    Flag::No => {{ consume(value); () }}
+                }})
+            }};
+            consume(value);
+            @outer(())
+        }};
+        42
+    }} pub fn main() -> i64 {{ select(Token {{}}, Flag::Yes) }}");
+    for optimization in ["0", "2"] {
+        let error = match StageZeroCompiler::new().compile(request(&source, optimization)) {
+            Err(error) => error,
+            Ok(_) => panic!("a conditional payload transfer must retain the moved state at its rejoin"),
+        };
+        assert!(error.diagnostics().iter().any(|error| error.code == "G5003"), "{error:#?}");
+    }
+}
+
+#[test]
 fn direct_label_continuations_keep_their_own_move_and_minimum_use_states() {
     accepts("effect Ask { ask() -> (); }
         fn select(value:Token) -> Token {

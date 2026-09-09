@@ -1,7 +1,6 @@
 //! Ownership facts derived solely from Typed Core before MIR lowering.
 
 use crate::{
-    LabelBrand,
     core::{
         CallReferenceOrigin, CallReferenceShape, CaptureMode, CoreId, CoreKind, CorePattern,
         CorePlace, RefinementBrand, TypedBody,
@@ -25,17 +24,6 @@ use minimum::{MinimumBinding, MinimumDisposition, MinimumHandler};
 struct Projection {
     root: String,
     fields: Vec<u32>,
-}
-
-/// A strict child which never reaches the next source-ordered operand.  A
-/// label transfer is kept distinct from `Never`: a label consumes transfers to
-/// its own brand and turns them back into an ordinary result for the enclosing
-/// continuation, whereas a transfer targeting an outer label skips all
-/// siblings still inside the current label body.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AbruptExit {
-    Never,
-    Transfer(LabelBrand),
 }
 
 impl Projection {
@@ -415,6 +403,9 @@ pub struct FlowDiagnostic {
 }
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
+    /// Shared local continuation facts, derived before resource analysis.
+    /// Private construction prevents consumers from fabricating skip proofs.
+    continuations: Option<std::sync::Arc<crate::core_continuations::CoreContinuations>>,
     /// Exact manifest-bound abort declaration. This machine leaf has no
     /// cleanup continuation; arbitrary `!` functions do not gain that proof.
     pub(crate) abort_primitive: Option<crate::DefKey>,
@@ -457,6 +448,14 @@ pub struct PlaceFlow {
     pub diagnostics: Vec<FlowDiagnostic>,
 }
 impl PlaceFlow {
+    pub(crate) fn continuations_for(&self, body: &TypedBody)
+        -> Result<&crate::core_continuations::CoreContinuations, crate::CoreDiagnostic>
+    {
+        self.continuations.as_ref().ok_or_else(||
+            crate::core_continuations::input_error(body, "ownership product has no frozen continuation facts"))?
+            .bind(body)
+    }
+
     pub fn analyze(body: &TypedBody) -> Self {
         Self::analyze_root(body, body.root, &body.parameters, None, &[], &[], None, None)
     }
@@ -533,7 +532,7 @@ impl PlaceFlow {
         abort_primitive: Option<crate::DefKey>,
     ) -> Self {
         Self::analyze_root_with_captures(body, root, parameters, &[], signatures, bounds,
-            effect_bindings, frozen_solver, abort_primitive)
+            effect_bindings, frozen_solver, abort_primitive, None)
     }
 
     /// A borrowed capture names its caller-owned referent in Core. Its source
@@ -553,7 +552,8 @@ impl PlaceFlow {
             .chain(parameters.iter().cloned()).collect::<Vec<_>>();
         let modes = environment.captures.iter().map(|capture| capture.mode).collect::<Vec<_>>();
         Self::analyze_root_with_captures(body, root, &abi, &modes, signatures,
-            &parent.lexical_bounds, &parent.lexical_effect_bindings, solver, parent.abort_primitive)
+            &parent.lexical_bounds, &parent.lexical_effect_bindings, solver, parent.abort_primitive,
+            parent.continuations.clone())
     }
 
     fn analyze_root_with_captures(
@@ -566,9 +566,22 @@ impl PlaceFlow {
         effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
         frozen_solver: Option<&crate::TraitSolver>,
         abort_primitive: Option<crate::DefKey>,
+        continuations: Option<std::sync::Arc<crate::core_continuations::CoreContinuations>>,
     ) -> Self {
+        let continuations = match continuations {
+            Some(facts) => facts.bind(body).map(|_| facts.clone()),
+            None => crate::core_continuations::CoreContinuations::derive(body).map(std::sync::Arc::new),
+        };
+        let continuations = match continuations {
+            Ok(facts) => facts,
+            Err(error) => return Self {
+                diagnostics: vec![FlowDiagnostic { code: error.code, span: error.span, message: error.message }],
+                ..Self::default()
+            },
+        };
         let mut a = Analyzer {
             body,
+            continuations: &continuations,
             signatures,
             lexical_bounds: bounds,
             lexical_effect_bindings: effect_bindings,
@@ -677,6 +690,7 @@ impl PlaceFlow {
             })
             .collect();
         Self {
+            continuations: Some(continuations.clone()),
             abort_primitive,
             lexical_bounds: bounds.to_vec(),
             lexical_effect_bindings: effect_bindings.to_vec(),
@@ -709,6 +723,7 @@ struct Analyzer<'a> {
     normal_continuation: bool,
     label_continuations: Vec<control::LabelBoundary>,
     body: &'a TypedBody,
+    continuations: &'a crate::core_continuations::CoreContinuations,
     signatures: Option<&'a ElaboratedInterface>,
     lexical_bounds: &'a [(Type, crate::ElaboratedTraitReference)],
     lexical_effect_bindings: &'a [crate::ElaboratedAssociatedEffectBinding],
@@ -1386,7 +1401,7 @@ impl Analyzer<'_> {
                 // reserving the binding before the initializer would let a
                 // forged post-transfer suffix retarget later PlaceFlow facts
                 // through a local that cannot exist at runtime.
-                if Self::abrupt_exit(self.body, value).is_some() {
+                if self.continuations.is_abrupt(value) {
                     self.visit_with_live_after(value, live_after);
                     return;
                 }
@@ -1460,7 +1475,7 @@ impl Analyzer<'_> {
                 // must not reinitialize a moved place, consume a destination
                 // loan, or record reference provenance on an unreachable
                 // store edge.
-                if Self::abrupt_exit(self.body, value).is_some() {
+                if self.continuations.is_abrupt(value) {
                     return;
                 }
                 if let CorePlace::Deref { reference, .. } = &place {
@@ -1470,7 +1485,7 @@ impl Analyzer<'_> {
                     // reference carrier, and retain its result loan through
                     // the store just as for an ordinary dereference.
                     self.visit_reference_handle(*reference, live_after);
-                    if Self::abrupt_exit(self.body, *reference).is_some() {
+                    if self.continuations.is_abrupt(*reference) {
                         return;
                     }
                     self.use_deref_reference(*reference, e.span, true);
@@ -1484,7 +1499,7 @@ impl Analyzer<'_> {
                     if let CorePlace::Deref { reference, .. } = destination {
                         fields.reverse();
                         self.visit_reference_handle(*reference, live_after);
-                        if Self::abrupt_exit(self.body, *reference).is_some() {
+                        if self.continuations.is_abrupt(*reference) {
                             return;
                         }
                         self.use_projected_deref_reference(*reference, &fields, e.span, true);
@@ -1532,7 +1547,7 @@ impl Analyzer<'_> {
                 } else if self.projection(value).is_none() {
                     self.visit_with_live_after(borrowed_place_base(self.body, value), live_after);
                 }
-                if Self::abrupt_exit(self.body, value).is_some() {
+                if self.continuations.is_abrupt(value) {
                     return;
                 }
                 let owner = Self::result_owner(id);
@@ -1558,8 +1573,8 @@ impl Analyzer<'_> {
                 ..
             } => {
                 let logical_arguments = arguments.clone();
-                let operands_complete = Self::abrupt_exit(self.body, callee).is_none()
-                    && arguments.iter().all(|argument| Self::abrupt_exit(self.body, *argument).is_none());
+                let operands_complete = !self.continuations.is_abrupt(callee)
+                    && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument));
                 self.reject_opaque_reference_result(reference_shape, &e.ty, e.span, "call");
                 if let CoreKind::Closure { environment, .. } =
                     self.body.expression(callee).kind.clone()
@@ -1622,7 +1637,7 @@ impl Analyzer<'_> {
                     "effect operation",
                 );
                 self.visit_sequence(&arguments, live_after);
-                if arguments.iter().all(|argument| Self::abrupt_exit(self.body, *argument).is_none()) {
+                if arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
                     self.check_minimum_suspension(&effect, operation, e.span);
                 }
             }
@@ -1888,7 +1903,7 @@ impl Analyzer<'_> {
         // broader than a top-level `Transfer`: `Never` and an outer-label
         // transfer can be nested in a let, assignment, aggregate, or call.
         // Conversely, a transfer consumed by its own `Label` is an ordinary
-        // value again, so `abrupt_exit` deliberately does not classify that
+        // value again, so its shared continuation fact does not classify that
         // enclosing label expression as terminal.
         let reachable = values
             .iter()
@@ -1897,7 +1912,7 @@ impl Analyzer<'_> {
                 if *terminated {
                     return None;
                 }
-                if Self::abrupt_exit(self.body, value).is_some() {
+                if self.continuations.is_abrupt(value) {
                     *terminated = true;
                 }
                 Some(value)
@@ -1931,7 +1946,7 @@ impl Analyzer<'_> {
             } else {
                 self.visit_with_live_after(*value, &future);
             }
-            if !discard_prefix && index + 1 < values.len() && Self::abrupt_exit(self.body, *value).is_none() {
+            if !discard_prefix && index + 1 < values.len() && !self.continuations.is_abrupt(*value) {
                 // Once evaluated, an operand is no longer in its source
                 // place, but its owner remains resident until the enclosing
                 // operation runs. A later transfer/cancellation must prove
@@ -1939,87 +1954,9 @@ impl Analyzer<'_> {
                 operand_owners.insert(self.retain_minimum_operand(*value));
             }
         }
-        if reachable.last().is_none_or(|value| Self::abrupt_exit(self.body, *value).is_none()) {
+        if reachable.last().is_none_or(|value| !self.continuations.is_abrupt(*value)) {
             self.release_minimum_owners(&operand_owners);
         }
-    }
-
-    /// Determine whether evaluating `id` can reach the following strict
-    /// operand. The calculation is structural and source ordered; it does
-    /// not infer effects or reinterpret handler control. A completed label
-    /// consumes only its own brand, preserving its regular continuation while
-    /// allowing an inner label to propagate a transfer to an enclosing label.
-    fn abrupt_exit(body: &TypedBody, id: CoreId) -> Option<AbruptExit> {
-        let expression = body.expression(id);
-        let structural_exit = match &expression.kind {
-            CoreKind::ConstValue(_) => None,
-            CoreKind::Transfer { brand, .. } => Some(AbruptExit::Transfer(*brand)),
-            CoreKind::Label { brand, body: child } => match Self::abrupt_exit(body, *child) {
-                Some(AbruptExit::Transfer(target)) if target == *brand => None,
-                // Bottom in the body says that it cannot return to its own
-                // continuation. It does not say that it bypasses this label:
-                // completion arms and indirect calls can leave to this very
-                // destination. Only a known different brand propagates here;
-                // otherwise the label's frozen result type decides below.
-                Some(AbruptExit::Never) => None,
-                exit => exit,
-            },
-            CoreKind::Let { value, .. }
-            | CoreKind::Borrow { value, .. }
-            | CoreKind::Deref(value)
-            | CoreKind::Move(value)
-            | CoreKind::ReleaseAvailable(value)
-            | CoreKind::PatternTest { subject: value, .. }
-            | CoreKind::Field { base: value, .. } => Self::abrupt_exit(body, *value),
-            CoreKind::Assign { value, place } => Self::abrupt_exit(body, *value).or_else(|| {
-                let mut destination = place;
-                while let CorePlace::Field { base, .. } = destination {
-                    destination = base;
-                }
-                match destination {
-                    CorePlace::Deref { reference, .. } => Self::abrupt_exit(body, *reference),
-                    _ => None,
-                }
-            }),
-            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
-                Self::first_abrupt_exit(body, values)
-            }
-            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
-                Self::first_abrupt_exit(body, fields)
-            }
-            CoreKind::IntrinsicCall { arguments, .. } => Self::first_abrupt_exit(body, arguments),
-            CoreKind::Call {
-                callee, arguments, ..
-            } => Self::abrupt_exit(body, *callee)
-                .or_else(|| Self::first_abrupt_exit(body, arguments)),
-            CoreKind::Perform { arguments, .. } => Self::first_abrupt_exit(body, arguments),
-            // A handler can turn a terminal performance into an ordinary arm
-            // result. Its frozen result type, rather than the computation
-            // child, is authoritative at this boundary.
-            CoreKind::Handle { .. }
-            | CoreKind::Completion { .. }
-            | CoreKind::Closure { .. }
-            | CoreKind::Literal(_)
-            | CoreKind::Local(_)
-            | CoreKind::Resumption { .. }
-            | CoreKind::LabelValue { .. }
-            | CoreKind::Function { .. }
-            | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant { .. }
-            | CoreKind::Error => None,
-        };
-        // Inspect structural children before trusting the frozen bottom type.
-        // In particular, a block containing `transfer done value` is `Never`
-        // at the source site, but the enclosing `label done` consumes that
-        // exact branded edge and continues with the transferred value.
-        structural_exit
-            .or_else(|| matches!(expression.ty, Type::Never).then_some(AbruptExit::Never))
-    }
-
-    fn first_abrupt_exit(body: &TypedBody, values: &[CoreId]) -> Option<AbruptExit> {
-        values
-            .iter()
-            .find_map(|value| Self::abrupt_exit(body, *value))
     }
 
     /// Source-free local-use collection over Typed Core. Names are deliberately
@@ -4314,15 +4251,6 @@ impl Analyzer<'_> {
             message,
         })
     }
-}
-
-/// Shared source-order control fact for ownership consumers which traverse
-/// Typed Core after PlaceFlow. A `true` result means evaluation of this strict
-/// expression cannot reach its following sibling; EscapeFlow and UseFlow must
-/// therefore not publish borrow, move, escape, or quantitative facts for that
-/// syntactic suffix.
-pub(crate) fn strict_expression_abrupt(body: &TypedBody, id: CoreId) -> bool {
-    Analyzer::abrupt_exit(body, id).is_some()
 }
 
 /// A generic body is checked once, before every VM instance materializes its

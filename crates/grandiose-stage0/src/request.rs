@@ -266,7 +266,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // can transfer back to that label, including completion-arm rejoins.
 // Cache 94 provides execution-domain callable residents in native raw storage.
 // Native format 8 uses the same complete 40-byte callable layout.
-pub const STAGE0_CACHE_GENERATION: u32 = 94;
+// Cache 95 shares frozen continuation rules across semantic consumers and
+// preserves transfers performed while evaluating another transfer's payload.
+pub const STAGE0_CACHE_GENERATION: u32 = 95;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

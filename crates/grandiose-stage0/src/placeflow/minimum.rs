@@ -41,7 +41,7 @@ impl Analyzer<'_> {
         value: CoreId,
         clauses: &[crate::core::CoreHandlerClause],
     ) -> bool {
-        if Self::abrupt_exit(self.body, value).is_some() {
+        if self.continuations.is_abrupt(value) {
             return false;
         }
         match &self.body.expression(value).kind {
@@ -279,11 +279,11 @@ impl Analyzer<'_> {
                 CoreKind::Function { definition, .. } if definition == abort)
                     && arguments
                         .iter()
-                        .all(|argument| Self::abrupt_exit(self.body, *argument).is_none())
+                        .all(|argument| !self.continuations.is_abrupt(*argument))
             }
             CoreKind::Block(values) => values
                 .iter()
-                .find(|value| Self::abrupt_exit(self.body, **value).is_some())
+                .find(|value| self.continuations.is_abrupt(**value))
                 .is_some_and(|value| self.minimum_definitely_aborts(*value)),
             CoreKind::Let { value, .. } | CoreKind::Transfer { value, .. } => {
                 self.minimum_definitely_aborts(*value)

@@ -12,7 +12,7 @@ use crate::{
         CallableId, CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
         CorePlace, TypedBody, instantiate_nominal_field_type,
     },
-    placeflow::{FlowEventKind, MoveFact, PlaceFlow, strict_expression_abrupt},
+    placeflow::{FlowEventKind, MoveFact, PlaceFlow},
     quantity::{Quantity, QuantityError},
     signature::{ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout},
     source::Span,
@@ -126,8 +126,15 @@ impl UseFlow {
         if !ownership.diagnostics.is_empty() {
             return Self::default();
         }
+        let continuations = match ownership.continuations_for(body) {
+            Ok(facts) => facts,
+            Err(error) => return Self { diagnostics: vec![UseDiagnostic {
+                code: error.code, span: error.span, message: error.message,
+            }], ..Self::default() },
+        };
         let mut analyzer = Analyzer {
             body,
+            continuations,
             ownership,
             signatures,
             next_key: 0,
@@ -448,6 +455,7 @@ struct Environment {
 }
 
 struct Analyzer<'a> {
+    continuations: &'a crate::core_continuations::CoreContinuations,
     body: &'a TypedBody,
     ownership: &'a PlaceFlow,
     signatures: Option<&'a ElaboratedInterface>,
@@ -642,7 +650,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Let { name, value } => {
                 let summary = self.expression(value, environment);
-                if strict_expression_abrupt(self.body, value) {
+                if self.continuations.is_abrupt(value) {
                     return summary;
                 }
                 let binding = self.binding_for_value(value, environment);
@@ -657,7 +665,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Assign { place, value } => {
                 let summary = self.expression(value, environment);
-                if strict_expression_abrupt(self.body, value) {
+                if self.continuations.is_abrupt(value) {
                     return summary;
                 }
                 // Assignment stores a capability beyond this expression's
@@ -704,7 +712,7 @@ impl Analyzer<'_> {
                 let summary = self.sequence(arguments.clone(), environment, expression.span);
                 if arguments
                     .iter()
-                    .any(|argument| strict_expression_abrupt(self.body, *argument))
+                    .any(|argument| self.continuations.is_abrupt(*argument))
                 {
                     return summary;
                 }
@@ -957,7 +965,7 @@ impl Analyzer<'_> {
         for value in values {
             let next = self.expression(value, environment);
             summary = self.compose(span, summary, next);
-            if strict_expression_abrupt(self.body, value) {
+            if self.continuations.is_abrupt(value) {
                 break;
             }
         }
@@ -1010,8 +1018,8 @@ impl Analyzer<'_> {
                     environment,
                     expression.span,
                 );
-                if strict_expression_abrupt(self.body, callee)
-                    || arguments.iter().any(|argument| strict_expression_abrupt(self.body, *argument)) {
+                if self.continuations.is_abrupt(callee)
+                    || arguments.iter().any(|argument| self.continuations.is_abrupt(*argument)) {
                     return Some(prefix);
                 }
                 // The operation can only be intercepted after entering the
@@ -1092,14 +1100,14 @@ impl Analyzer<'_> {
         // Evaluating a callee value does not execute its closure body. Its
         // captures execute only below after direct invocation is known.
         let mut summary = self.expression(callee, environment);
-        if strict_expression_abrupt(self.body, callee) {
+        if self.continuations.is_abrupt(callee) {
             return summary;
         }
         let evaluated_arguments = self.sequence(arguments.clone(), environment, span);
         summary = self.compose(span, summary, evaluated_arguments);
         if arguments
             .iter()
-            .any(|argument| strict_expression_abrupt(self.body, *argument))
+            .any(|argument| self.continuations.is_abrupt(*argument))
         {
             return summary;
         }

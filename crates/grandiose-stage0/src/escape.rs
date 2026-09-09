@@ -12,7 +12,7 @@ use crate::{
         CallReferenceOrigin, CallReferenceShape, CoreId, CoreKind, CorePlace, EnvironmentBrand,
         TypedBody,
     },
-    placeflow::{PlaceFlow, strict_expression_abrupt},
+    placeflow::PlaceFlow,
     source::Span,
     types::{EffectRow, GenericArgument, Type},
 };
@@ -44,8 +44,15 @@ impl EscapeFlow {
     pub fn analyze_with_interface(
         body: &TypedBody, flow: &PlaceFlow, signatures: &crate::ElaboratedInterface,
     ) -> Self {
+        let continuations = match flow.continuations_for(body) {
+            Ok(facts) => facts,
+            Err(error) => return Self { diagnostics: vec![EscapeDiagnostic {
+                code: error.code, span: error.span, message: error.message,
+            }] },
+        };
         let mut analyzer = Analyzer {
             body,
+            continuations,
             signatures,
             // A direct borrow must already have entered the ownership flow.
             // Retaining these roots lets us fail closed if Core ever grows a
@@ -207,6 +214,7 @@ enum Capture {
 
 struct Analyzer<'a> {
     body: &'a TypedBody,
+    continuations: &'a crate::core_continuations::CoreContinuations,
     signatures: &'a crate::ElaboratedInterface,
     loan_roots: BTreeSet<String>,
     values: ValueEnvironment,
@@ -310,7 +318,7 @@ impl Analyzer<'_> {
             | CoreKind::PatternTest { .. }
             | CoreKind::IntrinsicCall { .. } => Value::None,
             CoreKind::Local(name) => self.values.get(&name).cloned().unwrap_or(Value::None),
-            CoreKind::Borrow { value, .. } if strict_expression_abrupt(self.body, value) => {
+            CoreKind::Borrow { value, .. } if self.continuations.is_abrupt(value) => {
                 self.value(value);
                 Value::None
             }
@@ -348,7 +356,7 @@ impl Analyzer<'_> {
                 value_at_path(&self.value(base), &[index]).unwrap_or(Value::None),
             CoreKind::Let { name, value } => {
                 let evaluated = self.value(value);
-                if strict_expression_abrupt(self.body, value) {
+                if self.continuations.is_abrupt(value) {
                     return Value::None;
                 }
                 self.values.define(name, evaluated);
@@ -359,7 +367,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Assign { place, value } => {
                 let evaluated = self.value(value);
-                if strict_expression_abrupt(self.body, value) {
+                if self.continuations.is_abrupt(value) {
                     return Value::None;
                 }
                 self.assign(place, evaluated, expression.span);
@@ -374,7 +382,7 @@ impl Analyzer<'_> {
                         bindings.insert(name.clone());
                     }
                     result = self.value(value);
-                    if strict_expression_abrupt(self.body, value) {
+                    if self.continuations.is_abrupt(value) {
                         break;
                     }
                 }
@@ -490,7 +498,7 @@ impl Analyzer<'_> {
                 // it forwards, so relaying `&local` through a helper cannot
                 // erase a later return/suspension/drop-check obligation.
                 self.value(callee);
-                if strict_expression_abrupt(self.body, callee) {
+                if self.continuations.is_abrupt(callee) {
                     return Value::None;
                 }
                 let values = self.strict_values(arguments.clone());
@@ -505,7 +513,7 @@ impl Analyzer<'_> {
                         }
                     }
                 }
-                if strict_expression_abrupt(self.body, id) {
+                if self.continuations.is_abrupt(id) {
                     return Value::None;
                 }
                 let callable_paths = crate::placeflow::regions::callable_result_paths(self.signatures, self.body.expression(callee));
@@ -570,7 +578,7 @@ impl Analyzer<'_> {
                     exits.push(self.value(clause.body));
                     restore_bindings(&mut self.values, &incoming,
                         clause.bindings.iter().map(|(name, _)| name.clone()));
-                    if !strict_expression_abrupt(self.body, clause.body) {
+                    if !self.continuations.is_abrupt(clause.body) {
                         environments.push(self.values.clone());
                     }
                 }
@@ -635,7 +643,7 @@ impl Analyzer<'_> {
                         pattern_bindings(&refinement.pattern, &mut bindings);
                     }
                     restore_bindings(&mut self.values, &incoming, bindings);
-                    if !strict_expression_abrupt(self.body, clause.body) {
+                    if !self.continuations.is_abrupt(clause.body) {
                         environments.push(self.values.clone());
                     }
                 }
@@ -750,7 +758,7 @@ impl Analyzer<'_> {
         let mut evaluated = Vec::with_capacity(values.len());
         for value in values {
             evaluated.push(self.value(value));
-            if strict_expression_abrupt(self.body, value) {
+            if self.continuations.is_abrupt(value) {
                 break;
             }
         }
@@ -776,7 +784,7 @@ impl Analyzer<'_> {
             return None;
         };
         let values = self.strict_values(arguments);
-        if strict_expression_abrupt(self.body, id) {
+        if self.continuations.is_abrupt(id) {
             return None;
         }
         for value in &values {

@@ -86,3 +86,29 @@ For each migrated slice:
 Do not count a renamed visitor, an unused fact table, or a broad rewrite without
 consumer-level evidence as completion. Full compiler/library conformance and
 self-hosting remain separate end-to-end acceptance requirements.
+
+## First migrated boundary: local continuation facts
+
+`crates/grandiose-stage0/src/core_continuations.rs` projects Typed Core into
+source-ordered operand, choice, transfer and label-rejoin rules. It solves their
+dependencies once and publishes a shared immutable product. PlaceFlow owns that
+product, lifted closures reuse it, and escape and quantity checking validate
+the same control-input projection before querying it. The previous recursive
+continuation query embedded in PlaceFlow has been removed.
+
+Possible normal return and possible nonlocal exits are independent facts. A
+prefix may either return or leave to another label; a later definite transfer
+must not erase that alternative. Unknown invocation exits remain unknown, and
+an enclosing label can consume only positively known matching targets or
+conservatively retain a possible rejoin. This product proves strict-suffix
+unreachability, not complete absence of effects or cancellation.
+
+The rule tests cover sequence/choice composition laws, conditional and definite
+transfer payloads, exact label identity, stale/missing inputs, and a deeply
+shared graph without recursive expansion. Source regressions check that both
+branches preserve the correct owner state after rejoining, including rejection
+of a double use. See `conformance/implementation-progress.md` for gate results.
+
+This is the first migrated slice, not the end of the architectural work.
+Interprocedural guarded resource states, complete operation-handler control,
+and shared storage/capture provenance still require consumer-level migration.
