@@ -1,0 +1,88 @@
+# Compiler architecture contract
+
+The language and standard-library specifications define correctness. This
+document defines how we organize the implementation; it does not alter those
+specifications or waive any conformance requirement.
+
+## Goal
+
+Represent semantic meaning as shared, typed facts, then derive and validate the
+properties required by the next intermediate representation. Avoid teaching
+separate passes their own versions of control flow, capture propagation, or
+reference provenance. Phase separation is valuable only when the boundaries
+preserve meaning and the consumers actually use the shared products.
+
+## Responsibilities
+
+1. Elaboration resolves source syntax and produces validated Typed Core with
+   explicit identities and contracts. Later phases must not recover semantic
+   authority from source spelling or incidental tree shape.
+2. Analysis derives control, storage/provenance, and resource relations from
+   that input. Analyses may depend on one another through explicit products;
+   recursive dependencies require a defined fixed point or a conservative
+   unknown result, not source-order guessing.
+3. Validation checks language obligations against those facts. Failure rejects
+   the program; a transformation must not repair an invalid source program by
+   silently changing its behavior, ownership, or lifetime.
+4. Lowering transforms validated representations under explicit preconditions.
+   Preserve semantic identities and evidence, and independently validate the
+   receiving representation. Do not recompute earlier semantic decisions.
+5. Runtime machinery implements the chosen representation and ABI: allocation,
+   leases, frame lifetimes, foreign calls, and execution environments remain
+   concrete mechanisms with explicit lifecycle and safety contracts.
+
+## Required distinctions
+
+- A storage owner's identity is distinct from a reference handle's local slot
+  and from the referent reached through that handle.
+- A closure's capture is an implicit invocation input. Its provenance and
+  possible stores must compose with explicit inputs and higher-order calls.
+- Normal return, local-label rejoin, outer transfer, cancellation, divergence,
+  and unresolved behavior are distinct control outcomes. Preserve evaluation
+  order and branch/return guards when joining resource states.
+- Missing observations and analysis limits mean unknown, not an empty set of
+  effects, borrows, exits, or ownership obligations. A known empty result needs
+  positive evidence of complete coverage.
+- Source Copy, byte relocation, borrowed access, and ownership transfer are
+  different operations even when they use similar physical instructions.
+
+## Rule and product design
+
+Use small typed rules with explicit premises and conclusions. Their
+implementation can be ordinary Rust or Glorious functions; declarative syntax
+is not a substitute for correct domains, composition, or invariants. Local
+rewrites and global dataflow analyses are different mechanisms and should not
+be forced through one abstraction.
+
+Prefer immutable published products with identities/dependencies that allow
+consumers to reject stale or mismatched evidence. Keep mutation inside the
+producer or solver. Unknowns, resource limits, cancellation, and diagnostics
+must remain explicit parts of the contract.
+
+For each change, identify the authoritative fact producer and its consumers.
+Extend that producer instead of adding a consumer-side special case. If a
+boundary cannot express the needed fact, change the boundary and migrate its
+consumers rather than recovering the fact independently downstream.
+
+## Incremental migration and acceptance
+
+The initial consolidation target is the Typed Core control/ownership boundary:
+shared continuation facts and guarded invocation outcomes consumed by ownership,
+escape, and quantity checking. Storage/capture provenance follows the same
+producer/consumer discipline. Existing callable-control summaries are useful
+building blocks, but their presence alone does not establish integration.
+
+For each migrated slice:
+
+1. Preserve a regression demonstrating the old failure or disagreement.
+2. State the shared product's invariants and unknown behavior.
+3. Migrate the actual consumers and remove the displaced inference path.
+4. Test aliases, aggregates, captures, higher-order composition, branches,
+   abnormal exits, and invalid/stale inputs where applicable.
+5. Run relevant fresh/decoded and VM/native execution gates when the change
+   reaches those boundaries. Report known failures rather than masking them.
+6. Commit and push the verified checkpoint, documenting what remains open.
+
+Do not count a renamed visitor, an unused fact table, or a broad rewrite without
+consumer-level evidence as completion. Full compiler/library conformance and
+self-hosting remain separate end-to-end acceptance requirements.
