@@ -269,7 +269,7 @@ impl LlvmNativeModule {
         arguments: *const *const u8,
         result: *mut u8,
     ) -> u32 {
-        let Ok(environment) = super::float_env::NativeFloatEnvironment::enter() else {
+        let Ok(environment) = crate::vm_backend::float_env::FloatEnvironment::enter() else {
             context.fault = 16;
             return 1;
         };

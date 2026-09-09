@@ -31,6 +31,7 @@ use crate::{
 use crate::MemoryPrimitive;
 
 mod codec;
+mod float_env;
 pub use codec::{
     STAGE0_ARTIFACT_MAGIC, STAGE0_MAX_DECODE_FUNCTIONS, STAGE0_MAX_DECODE_INSTRUCTIONS,
     STAGE0_MAX_DECODE_REGISTERS, STAGE0_MAX_DECODE_TEXT_BYTES, STAGE0_PROGRAM_MAGIC,
@@ -12780,6 +12781,13 @@ fn execute(
     function: &VmFunction,
     budget: &mut ExecutionBudget,
 ) -> Result<VmValue, VmArtifactError> {
+    float_env::with_profile(|| execute_in_float_profile(function, budget))
+}
+
+fn execute_in_float_profile(
+    function: &VmFunction,
+    budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
     require_execution_contract(function, budget)?;
     if budget.limits.max_call_depth == 0 {
         return Err(VmArtifactError::CallDepthLimit {
@@ -15278,6 +15286,23 @@ enum RuntimeExecutionOutcome {
 }
 
 fn execute_program_with_tail_boundary(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    arguments: &[VmValue],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+    profile: Option<&mut VmAuthoringProfile>,
+    native_return: bool,
+    capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
+    borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
+    tail_boundary: Option<&mut dyn RuntimeTailBoundary>,
+) -> Result<RuntimeExecutionOutcome, VmArtifactError> {
+    float_env::with_profile(|| execute_program_in_float_profile(program, definition, arguments, depth,
+        budget, host, profile, native_return, capture_environment, borrowed_callers, tail_boundary))
+}
+
+fn execute_program_in_float_profile(
     program: &CandidateVmProgram,
     definition: DefKey,
     arguments: &[VmValue],
@@ -17860,6 +17885,15 @@ fn execute_program_with_tail_boundary(
 }
 
 fn execute_host_call(
+    host: &mut dyn VmHost,
+    capability: &str,
+    symbol: &str,
+    arguments: &[VmValue],
+) -> Result<VmValue, VmArtifactError> {
+    float_env::with_profile(|| execute_host_call_in_float_profile(host, capability, symbol, arguments))
+}
+
+fn execute_host_call_in_float_profile(
     host: &mut dyn VmHost,
     capability: &str,
     symbol: &str,

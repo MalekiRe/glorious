@@ -40,10 +40,25 @@ f64 when the destination is f32. Checked float-to-integer leaves validate ordere
 half-open power-of-two bounds before truncation, rejecting NaN, infinities, and
 out-of-range inputs with the VM's checked-leaf error. Public `as<T>` saturation,
 NaN-to-zero, and other conversion policy remain ordinary standard-library source.
-Generated entries and the mixed worker establish the selected floating-point
-environment, with gradual underflow and masked exceptions, and restore the
-caller's complete x87/SSE control and status state on return. Embedding rounding
-modes and flush-to-zero/denormals-are-zero settings do not change source results.
+Generated entries, the mixed worker, standalone bytecode entries, and native
+callback re-entry share one floating-point environment guard, with gradual
+underflow and masked exceptions. It restores the caller's control/status state
+on success, failure, and unwinding. Host/native calls and generated allocator/VM
+callbacks have their own guard, so a foreign callback that changes the thread's
+floating-point modes cannot affect subsequent source instructions. Embedding
+rounding modes and flush-to-zero/denormals-are-zero settings do not change source
+results on the executed x86-64 profile.
+
+The small C machine helper uses the target's own `fenv_t`, `FE_DFL_ENV`, and
+nearest-rounding definitions. Rust holds only bounded aligned opaque storage;
+C compile-time assertions check its capacity/alignment against the actual host
+headers. It neither hard-codes a libc layout nor implements source arithmetic
+or conversion policy. WebAssembly needs no mutable-environment guard because its
+scalar operations have fixed nearest-even/non-stop semantics, as specified by
+the [WebAssembly numeric execution rules](https://webassembly.github.io/spec/core/exec/numerics.html#floating-point-operations).
+Other native hosts compile this helper against their own C environment rather
+than inheriting the GNU struct layout; the executed hostile-mode matrix currently
+covers x86-64 GNU/Linux, not a claim of cross-host runtime validation.
 
 Ordinary direct calls use a uniform native slot ABI. Mandatory tail transfers
 return to a native dispatcher that recycles two aligned argument packets. They

@@ -1007,10 +1007,12 @@ unsafe extern "C" fn callback_entry(
     // SAFETY: the registered native implementation may use only this live
     // invocation's context, synchronously and without retaining it.
     let context = unsafe { &mut *context.cast::<CallbackContext<'_, '_>>() };
-    let outcome = catch_unwind(AssertUnwindSafe(|| unsafe {
-        context.invoke(slots, count, result)
-    }))
-    .unwrap_or_else(|_| Err(error("bytecode callback panicked")));
+    let outcome = super::float_env::with_profile(|| {
+        catch_unwind(AssertUnwindSafe(|| unsafe {
+            context.invoke(slots, count, result)
+        }))
+        .unwrap_or_else(|_| Err(error("bytecode callback panicked")))
+    });
     match outcome {
         Ok(()) => VmNativeStatus::Ok,
         Err(failure) => {
@@ -1117,8 +1119,10 @@ pub(super) fn execute(
         result_home,
         callback_failure: None,
     };
-    let outcome = catch_unwind(AssertUnwindSafe(|| (binding.function)(&mut call)))
-        .unwrap_or_else(|_| Err(error("native implementation panicked")));
+    let outcome = super::float_env::with_profile(|| {
+        catch_unwind(AssertUnwindSafe(|| (binding.function)(&mut call)))
+            .unwrap_or_else(|_| Err(error("native implementation panicked")))
+    });
     if let Some(failure) = call.callback_failure {
         return Err(failure);
     }

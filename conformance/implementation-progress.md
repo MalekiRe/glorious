@@ -5,6 +5,27 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 89: shared VM/native floating environment
+
+VM and native execution now share a scoped floating-environment guard using
+the host C implementation's `fenv_t`, default environment and nearest rounding.
+This replaces the native-only hardcoded GNU layout. Entry points restore the
+caller's full environment on success, error and unwinding; foreign callbacks
+restore the compiler-selected profile before generated execution continues.
+Wasm uses its fixed scalar IEEE profile without a host environment bridge.
+Source-level conversion policy remains in the standard library.
+
+Six hostile-environment test groups cover VM/native paths, callback changes,
+subnormals, rounding, exception modes and restoration. The combined main-tree
+run passes 2,346 tests (`target/integration-shared-float-v1.log`), including all
+891 service, 176 library API, eight conversion and 180 VM-backend tests. The
+same five generic-helper exit cases and 16 source-library cases fail; the
+source matrix retains 15 passes. The all-target compile check also passes
+(`target/shared-float-all-targets-v1.log`). Runtime hostile-profile evidence is from
+GNU/Linux x86-64; the isolated wasm compile check passes, but this is not a
+claim of runtime testing on every host platform. Compiler-time floating-point
+determinism and full guarded control contracts remain separate follow-ups.
+
 ## Cache 88: value-resident callable contracts
 
 Integrates the isolated `3257cae6..a7dff60b` callable-contract delta while

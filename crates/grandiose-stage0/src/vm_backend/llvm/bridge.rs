@@ -242,9 +242,9 @@ pub(in crate::vm_backend) unsafe fn run(
 }
 
 unsafe fn run_local(module: LlvmNativeModule, limits: VmExecutionLimits) -> Result<i64, LlvmError> {
-    let environment = crate::vm_backend::llvm::float_env::NativeFloatEnvironment::enter()?;
+    let environment = crate::vm_backend::float_env::FloatEnvironment::enter().map_err(LlvmError::Runtime)?;
     let result = unsafe { run_local_with_float_environment(module, limits) };
-    environment.restore()?;
+    environment.restore().map_err(LlvmError::Runtime)?;
     result
 }
 
@@ -480,19 +480,21 @@ unsafe extern "C" fn invoke_vm(
         return 1;
     }
     invocation.call.budget.instructions = context.instructions;
-    let outcome = catch_unwind(AssertUnwindSafe(|| unsafe {
-        invoke_vm_checked(
-            invocation,
-            context,
-            index,
-            slots,
-            result,
-            tail_slots,
-            tail_storage,
-            tail_next,
-        )
-    }))
-    .unwrap_or_else(|_| Err(super::error("generated native VM callback panicked")));
+    let outcome = crate::vm_backend::float_env::with_profile(|| {
+        catch_unwind(AssertUnwindSafe(|| unsafe {
+            invoke_vm_checked(
+                invocation,
+                context,
+                index,
+                slots,
+                result,
+                tail_slots,
+                tail_storage,
+                tail_next,
+            )
+        }))
+        .unwrap_or_else(|_| Err(super::error("generated native VM callback panicked")))
+    });
     context.instructions = invocation.call.budget.instructions;
     match outcome {
         Ok(tail) => {

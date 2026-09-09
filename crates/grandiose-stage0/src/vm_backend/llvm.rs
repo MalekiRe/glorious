@@ -5,7 +5,6 @@
 //! control must never become an ordinary native call by accident.
 
 mod emit;
-pub(super) mod float_env;
 mod layout;
 mod load;
 pub(super) mod memory;

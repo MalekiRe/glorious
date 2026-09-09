@@ -54,14 +54,16 @@ unsafe extern "C" fn allocate(
     if domain.failure.is_some() {
         return 1;
     }
-    let outcome = catch_unwind(AssertUnwindSafe(|| unsafe {
-        allocate_checked(
-            domain, context, operation, pointer, old_size, alignment, size, result,
-        )
-    }))
-    .unwrap_or_else(|_| {
-        Err(VmArtifactError::NativeMemory {
-            message: "generated allocator panicked",
+    let outcome = crate::vm_backend::float_env::with_profile(|| {
+        catch_unwind(AssertUnwindSafe(|| unsafe {
+            allocate_checked(
+                domain, context, operation, pointer, old_size, alignment, size, result,
+            )
+        }))
+        .unwrap_or_else(|_| {
+            Err(VmArtifactError::NativeMemory {
+                message: "generated allocator panicked",
+            })
         })
     });
     match outcome {
