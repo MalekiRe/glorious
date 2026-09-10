@@ -33,9 +33,24 @@ fn exercise() / Ask {
     assert_true(Vec::partition_by(&mut values, selected) == 2);
 }
 
+fn exercise_contextual() / Ask {
+    let mapped = Result::map(Result<i64,i64>::Ok(41), { value => Ask::ask(value + 1) });
+    assert_true(handle mapped { Result::Ok(42) => true, _ => false });
+    let mut optional: Option<i64> = None;
+    assert_true(*Option::get_or_insert_with(&mut optional, { Ask::ask(42) }) == 42);
+    assert_true(*Option::get_or_insert_with(&mut optional, { Ask::ask(99) }) == 42);
+    assert_true((true if { factory() } else { 0 }) == 42);
+    assert_true((not true if { Ask::ask(99) } else { 42 }) == 42);
+    let mut values = Vec::new();
+    Vec::push(&mut values, 1); Vec::push(&mut values, 3); Vec::push(&mut values, 2);
+    assert_true(Vec::partition_by(&mut values, { value => Ask::ask(*value) < 3 }) == 2);
+}
+
 pub fn main() -> i64 {
     let mut calls = 0;
     handle exercise() { Ask::ask(value) => { calls = calls + 1; value } };
     assert_true(calls == 15);
+    handle exercise_contextual() { Ask::ask(value) => { calls = calls + 1; value } };
+    assert_true(calls == 21);
     42
 }

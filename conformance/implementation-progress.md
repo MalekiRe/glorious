@@ -5,6 +5,74 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 136: scoped contextual effect inference and callable projection composition
+
+Contextual blocks now infer their row from the ordinary call/operation checker's
+requirements. The new direct-operation positive first reproduces G4155 in
+`target/contextual-callable-row-baseline-v1.log`. Each requirement retains its
+actual lexical handler coverage; nested callable formation starts a separate
+inference scope. Unknown subtraction waits for the existing inference propagation
+phase and rejects if it cannot close. A later or enclosing handler cannot supply
+permission retrospectively. Explicit typed closures retain their written row,
+including the empty-row omission rule, instead of silently adopting context.
+
+The inferred body has a private row definition separate from its expected row
+and any unknown callback inputs. Its least-union rule removes only its own
+recursive contribution; other input rows and mixed-kind occurs checks remain
+live. A resumption previously caused an inert body to inherit both effects in
+the caller's wider permission row
+(`target/contextual-callable-row-resumption-baseline-v1.log`). The exact-row
+regression now preserves the empty body row while an independent, later callback
+still determines its own effect operand. Ordinary equality remains distinct
+from this body-definition rule; unknown multi-operand partitions are not guessed.
+
+Whole row holes now bind associated projections as rows, not only named members.
+The shared normalizer can select the sealed Fn/RunsIn relation of a known
+callable whose Output/Effects retain lexical projections; ordinary implementation
+heads still require their existing known-head proof. Receiver, safety and residual
+prerequisites remain checked by the existing callable evidence producer. After
+normalization, source permission checking retries the same subset constraint.
+Generic callback forwarding exposed another formation bug: F:Fn was treated as
+permission to capture &F. Ordinary owned generic uses now use the existing
+copy-or-move producer, with Copy requiring its actual quantity evidence.
+
+The library's missing infix `if` declaration and `not` precedence are corrected
+in both root and prelude exports: left 5 and prefix 6, per standard-library §4.
+No compiler recognition of those names is added. The callback source case keeps
+its original 15-performance check, then exercises compact Result mapping, lazy
+Option insertion, infix branching and vector partition. Six additional
+performances produce 21 total; the `not true if ...` case must skip its body.
+
+Verification and remaining integration:
+
+- Direct/named operations, independent callback rows, symbolic projections,
+  nested/partial handlers, explicit resumptions and later callback constraints
+  are covered in `effect_unions`. Unadmitted effects, changed explicit
+  annotations, partial/later handler coverage and ambiguous union partitions
+  remain negative requirements. All 16 groups pass in the final run:
+  `target/contextual-callable-row-unions-final-v1.log`.
+- Generic projected forwarding executes fresh/decoded VM O0/O2 and generated
+  native O0/O2 for its pure closed graph. Its unused may-effect variant executes
+  under a VM handler; native handler support is not claimed. Final run:
+  `target/contextual-callable-row-native-final-v1.log`.
+- All 34 type integration tests, eight effect-contract groups, 14 frozen Core
+  groups and 22 revision tests pass. The new projection unit preserves missing
+  prerequisites, unsafe and unavailable shared-receiver rejection. The new
+  inference unit retains independent unknown rows and nested occurs rejection.
+  Exact frozen row and owned/Copy generic capture assertions pass. Existing
+  returned captured-reference composition also passes
+  (`target/contextual-callable-row-captured-references-v1.log`).
+- The library callback and full source-composition gates both pass separately:
+  `target/contextual-callable-row-library-callbacks-final-v1.log` and
+  `target/contextual-callable-row-library-root-final-v1.log`. Neither is a full
+  library execution sweep. The completed cache-135 sweep below remains the last
+  full-library baseline: **22 passing, 10 failing**.
+
+This does not finish general higher-ranked closure input generalization, symbolic
+generic row subtraction, complete guarded Environment/RunsIn interfaces, native
+handlers, all library execution gates or self-hosting. Cache is 136; verifier 41,
+interface 22, native ABI 13, bytecode 72 and VM schema 116 are unchanged.
+
 ## Cache 135: selected invocation contracts and callback effect propagation
 
 The full-library root now compiles and executes the foundation case through
@@ -62,10 +130,15 @@ Verification:
   remain. Six existing fixtures now encounter G4155 because their generic Fn
   bounds omit Effects while their bodies declare purity. Their original sources
   and assertions are preserved; the suite is not reported green.
-- The 32-case library integration run is still active at this checkpoint
-  (`target/selected-call-contract-library-integration-v1.log`); budget,
-  float_convert and float_parse have reported failures. Its terminal results
-  and causes remain to be recorded, not inferred from root composition.
+- The 32-case library integration run completed with **22 passing, 10 failing**
+  in 1327.32 seconds (`target/selected-call-contract-library-integration-v1.log`).
+  Budget has six minimum-use/discard obligations. Float conversion and iterator
+  encounter unresolved nominal/tuple pattern subjects. IO has a rigid outlives
+  failure. Iterator callbacks, sorting and traversal retain privacy and/or
+  higher-ranked lifetime failures. Float shortest and random reach unproved
+  executable tail carriers. Float parsing executes but reaches the unchanged
+  16 MiB allocation limit. Full source composition passes in this run; none of
+  these failing execution gates is waived or converted into success.
 
 Unannotated higher-ranked closure input generalization, contextual inference of
 new named effects, complete guarded higher-order interfaces, all library execution

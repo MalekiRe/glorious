@@ -258,6 +258,49 @@ fn omitted_fn_effect_equalities_remain_symbolic_not_pure() {
 }
 
 #[test]
+fn inferred_callable_rows_do_not_copy_the_enclosing_permission_row() {
+    let source = r#"
+        effect Read { read() -> i64; }
+        effect Unused { unused() -> (); }
+        fn invoke<F,e: EffectRow>(body: F) -> i64 / {|e}
+            where F: Fn<(),Output=i64,Effects=e> { body() }
+        fn main() -> i64 / {Read,Unused} { invoke({ BODY }) }
+    "#;
+    for (body, effectful) in [("Read::read()", true),
+        ("handle Read::read() { Read::read(k) => k(42) }", false)] {
+        let (core, signatures) = core_and_signatures_for("inferred-exact-callback-row@0.1.0", &source.replace("BODY", body));
+        assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+        assert!(core.validate().is_empty(), "{:?}", core.validate());
+        assert!(core.validate_projection_obligations(&signatures, &[]).is_empty());
+        let performed = core.expressions.iter().find_map(|expression| match &expression.kind {
+            CoreKind::Perform { effect, .. } => Some(effect.clone()), _ => None,
+        }).unwrap();
+        let closure = core.expressions.iter().find(|expression| matches!(expression.kind, CoreKind::Closure { .. })).unwrap();
+        let Type::Callable { effects, .. } = &closure.ty else { panic!("missing callable type"); };
+        let expected = if effectful { grandiose_stage0::EffectRow::closed_instances([performed]) }
+            else { grandiose_stage0::EffectRow::empty() };
+        assert_eq!(*effects, expected);
+    }
+}
+
+#[test]
+fn an_owned_generic_fn_bound_does_not_invent_shared_capture_authority() {
+    for (bound, expected) in [("", grandiose_stage0::CaptureMode::Move),
+        (", F: Use<[0,*]>", grandiose_stage0::CaptureMode::Copy)] {
+        let source = format!("fn main<F>(body: F) -> i64 / {{ <F as Fn<()>>::Effects }}
+            where F: Fn<(),Output=i64>{bound} {{ let task = {{ => body() }}; task() }}");
+        let core = core_for("owned-generic-callable-capture@0.1.0", &source);
+        assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+        assert!(core.validate().is_empty(), "{:?}", core.validate());
+        let environment = core.expressions.iter().find_map(|expression| match &expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment), _ => None,
+        }).unwrap();
+        assert_eq!(environment.captures.len(), 1);
+        assert_eq!(environment.captures[0].mode, expected);
+    }
+}
+
+#[test]
 fn frozen_selected_call_contracts_reject_changed_effects_and_declarations() {
     let (core, signatures) = core_and_signatures_for("frozen-selected-call@0.1.0", r#"
         effect Ask { [1,1] ask() -> (); }

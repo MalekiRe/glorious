@@ -1789,8 +1789,8 @@ impl TraitSolver {
                     return normalized;
                 }
                 let concrete = projection_is_concrete_in_hrtb_scope(&projection, hrtb_binders);
-                let Type::Projection { subject, trait_arguments, item_arguments, .. } = &projection else { unreachable!() };
-                if !concrete && !projection_application_is_selectable(subject, trait_arguments, item_arguments, hrtb_binders) {
+                let Type::Projection { subject, trait_definition, trait_arguments, item_arguments, .. } = &projection else { unreachable!() };
+                if !concrete && !projection_application_is_selectable(subject, *trait_definition, trait_arguments, item_arguments, hrtb_binders) {
                     return Ok(projection);
                 }
                 let residual = projection.clone();
@@ -2324,7 +2324,7 @@ impl TraitSolver {
             let concrete = projection_is_concrete_in_hrtb_scope(&projection.subject, hrtb_binders)
                 && projection.trait_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders))
                 && projection.item_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders));
-            if !concrete && !projection_application_is_selectable(&projection.subject, &projection.trait_arguments, &projection.item_arguments, hrtb_binders) {
+            if !concrete && !projection_application_is_selectable(&projection.subject, projection.trait_definition, &projection.trait_arguments, &projection.item_arguments, hrtb_binders) {
                 result.projections.push(projection);
                 continue;
             }
@@ -3098,7 +3098,7 @@ impl TraitSolver {
                 };
                 let concrete = projection_is_concrete_in_hrtb_scope(&subject, hrtb_binders)
                     && trait_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders));
-                if !concrete && !projection_application_is_selectable(&subject, &trait_arguments, &[], hrtb_binders) {
+                if !concrete && !projection_application_is_selectable(&subject, trait_definition, &trait_arguments, &[], hrtb_binders) {
                     return Ok(GenericArgument::ConstProjection {
                         subject,
                         trait_definition,
@@ -4451,10 +4451,23 @@ impl ProjectionPosition {
 
 fn projection_application_is_selectable(
     subject: &Type,
+    trait_definition: DefKey,
     trait_arguments: &[GenericArgument],
     item_arguments: &[GenericArgument],
     binders: &[u32],
 ) -> bool {
+    let relation = ElaboratedTraitReference { definition: trait_definition, arguments: vec![] };
+    let value = match subject { Type::Reference { referent, .. } => referent.as_ref(), value => value };
+    if (is_intrinsic_callable_trait(&relation) || is_intrinsic_runs_in_trait(&relation))
+        && matches!(value, Type::Callable { .. }) {
+        // The sealed call relation selects a known callable shape, not an
+        // overlapping implementation head. Its Output/Effects can themselves
+        // retain lexical projections. Actual receiver and prerequisite proof
+        // still belongs to callable_evidence in the ordinary selector.
+        return !crate::core::type_contains_inference(subject)
+            && trait_arguments.iter().all(|argument| !crate::core::generic_argument_contains_inference(argument))
+            && item_arguments.iter().all(|argument| projection_argument_is_known(argument, binders, ProjectionPosition::Item));
+    }
     !matches!(subject, Type::Generic(_) | Type::Projection { .. })
         && projection_type_is_known(subject, binders, ProjectionPosition::Head)
         && trait_arguments.iter().all(|argument| projection_argument_is_known(argument, binders, ProjectionPosition::Head))
@@ -4682,6 +4695,39 @@ fn generic_argument_is_concrete_in_hrtb_scope(
 mod tests {
     use super::*;
     use crate::ScalarType;
+
+    #[test]
+    fn intrinsic_callable_projections_keep_symbolic_results_and_receiver_prerequisites() {
+        let relation = ElaboratedTraitReference { definition: crate::intrinsic_callable_trait_definition(),
+            arguments: vec![GenericArgument::Type(Type::Unit)] };
+        let projected_type = |subject| Type::Projection { subject: Box::new(subject),
+            trait_definition: relation.definition, trait_arguments: relation.arguments.clone(), name: "Output".into(),
+            item_generic_kinds: vec![], item_arguments: vec![] };
+        let projected_row = |subject| EffectRow { effects: Default::default(), tails: Default::default(),
+            projections: vec![crate::EffectRowProjection { subject: Box::new(subject),
+                trait_definition: relation.definition, trait_arguments: relation.arguments.clone(), name: "Effects".into(),
+                item_generic_kinds: vec![], item_arguments: vec![] }] };
+        let mut contract = crate::CallableContract::default();
+        contract.residual.where_bounds.push((Type::Generic(1), relation.clone()));
+        let callable = Type::Callable { contract: Box::new(contract), safety: crate::Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(projected_type(Type::Generic(0))),
+            effects: projected_row(Type::Generic(0)), invocation: crate::Quantity::ONCE };
+        let mut solver = TraitSolver::new(&ElaboratedInterface::default());
+        solver.set_lexical_assumptions(vec![TraitGoal { subject: Type::Generic(0), relation: relation.clone() }]);
+        assert_eq!(solver.normalize_type(projected_type(callable.clone())).unwrap(), projected_type(callable.clone()));
+        assert_eq!(solver.normalize_effect_row(projected_row(callable.clone())).unwrap(), projected_row(callable.clone()));
+        solver.set_lexical_assumptions(vec![TraitGoal { subject: Type::Generic(0), relation: relation.clone() },
+            TraitGoal { subject: Type::Generic(1), relation: relation.clone() }]);
+        assert_eq!(solver.normalize_type(projected_type(callable.clone())).unwrap(), projected_type(Type::Generic(0)));
+        assert_eq!(solver.normalize_effect_row(projected_row(callable.clone())).unwrap(), projected_row(Type::Generic(0)));
+        let borrowed = Type::Reference { lifetime: Lifetime::Elided, mutability: crate::Mutability::Shared,
+            referent: Box::new(callable.clone()) };
+        assert_eq!(solver.normalize_effect_row(projected_row(borrowed.clone())).unwrap(), projected_row(borrowed));
+        let mut unsafe_callable = callable;
+        let Type::Callable { safety, .. } = &mut unsafe_callable else { unreachable!() };
+        *safety = crate::Safety::Unsafe;
+        assert_eq!(solver.normalize_effect_row(projected_row(unsafe_callable.clone())).unwrap(), projected_row(unsafe_callable));
+    }
 
     #[test]
     fn structural_projection_normalization_uses_only_the_current_lexical_environment() {

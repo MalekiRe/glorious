@@ -39,6 +39,26 @@ fn row_callable(effects: EffectRow) -> Type {
 }
 
 #[test]
+fn a_whole_effect_row_hole_binds_symbolic_projections_without_erasing_them() {
+    let projection = |subject| EffectRowProjection {
+        subject: Box::new(subject), trait_definition: DefKey(Digest::of_bytes(b"whole-row-projection")),
+        trait_arguments: vec![], name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
+    };
+    for reverse in [false, true] {
+        let mut inference = InferContext::default();
+        let hole = inference.fresh_effects();
+        let expected = EffectRow { effects: BTreeSet::new(), projections: vec![projection(Type::Generic(0))], tails: BTreeSet::new() };
+        let (left, right) = if reverse { (expected.clone(), hole.clone()) } else { (hole.clone(), expected.clone()) };
+        inference.unify(row_callable(left), row_callable(right)).unwrap();
+        assert_eq!(inference.zonk_effects_allowing_generic_tail(hole).unwrap(), expected);
+    }
+    let mut inference = InferContext::default();
+    let hole = inference.fresh_effects();
+    let cyclic = EffectRow { effects: BTreeSet::new(), projections: vec![projection(row_callable(hole.clone()))], tails: BTreeSet::new() };
+    assert!(matches!(inference.unify(row_callable(hole), row_callable(cyclic)), Err(TypeError::EffectOccurs(..))));
+}
+
+#[test]
 fn row_union_equations_wait_for_independent_operand_evidence() {
     let mut inference = InferContext::default();
     let first = inference.fresh_effects();

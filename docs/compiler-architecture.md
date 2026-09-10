@@ -1525,3 +1525,33 @@ full-library root composition, not complete guarded interfaces, general compact
 effect inference, unannotated universal closure generalization or every library
 execution graph. Cache 135 records the changed source boundary; runtime and
 serialized instruction representations are unchanged.
+
+## Body-defined contextual effect rows
+
+The ordinary call and operation checker emits the requirements of an inferred
+compact callable. Every requirement retains its expression's exact complete
+handler coverage. Nested callable formation starts a separate scope, and
+explicit typed closures keep their written declaration rather than acquiring
+the enclosing row. This extends elaboration's effect producer, not a second
+source/Core effect walk. Deferred subtraction participates in ordinary pending
+inference and must close before Typed Core is published.
+
+A body-owned row variable is separate from its contextual expectation and from
+rows of unknown callback inputs. The definition is the least union of its
+requirements: its own recursive resumption contribution adds no new member.
+Independent unknown inputs remain unknown, and recursion beneath mixed-kind
+arguments still fails the ordinary occurs check. Only after defining the body
+row does inference equate it with the selected contextual contract. Permission
+to perform a wider row cannot populate the callable's exact recorded row.
+
+Whole-row holes can bind symbolic associated projections. The shared normalizer
+selects a known callable's compiler-owned Fn/RunsIn relation without demanding
+that its Output/Effects be concrete first. The existing selector still checks
+receiver access, safety and residual predicates; ordinary implementation-head
+selection is unchanged. Source permission checking uses the same subset rule
+again after normalization. An owned F:Fn bound also remains owned evidence:
+capture formation uses its existing copy-or-move rule, not an invented &F bound.
+
+Cache 136 records this inference and formation correction. Generic symbolic
+row subtraction, higher-ranked input generalization, complete guarded interfaces,
+native handlers and full compiler/library/self-hosted acceptance remain open.

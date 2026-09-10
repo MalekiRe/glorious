@@ -858,6 +858,23 @@ fn projected_fn_effect_rows_close_with_the_selected_callable_instance() {
 }
 
 #[test]
+fn contextual_projected_callback_rows_execute_in_generated_code() {
+    let forwarding = "fn invoke<F>(body: F) -> i64 / { <F as Fn<()>>::Effects }
+        where F: Fn<(),Output=i64> { body() }
+        fn forward<F>(body: F) -> i64 / { <F as Fn<()>>::Effects }
+        where F: Fn<(),Output=i64> { invoke({ body() }) }";
+    for outward in ["", "/ Ask"] {
+        let expression = if outward.is_empty() { "forward(answer)" }
+            else { "handle forward(answer) { Ask::ask() => () }" };
+        let source = format!("effect Ask {{ ask() -> (); }} {forwarding}
+            fn answer() -> i64 {outward} {{ 42 }}
+            pub fn main() -> i64 {{ {expression} }}");
+        accepts(&source);
+        if outward.is_empty() { accepts_native(&source); }
+    }
+}
+
+#[test]
 fn selected_call_contracts_survive_generic_lexical_fusion() {
     let source = "fn answer() -> i64 { 42 }
         fn through<L,F>(target: L, body: F) -> i64

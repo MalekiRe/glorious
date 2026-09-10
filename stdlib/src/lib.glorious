@@ -31,7 +31,8 @@ pub mod prelude {
     pub infixr 1 else;
     pub infixl 2 or;
     pub infixl 3 and;
-    pub prefix 4 not;
+    pub infixl 5 if;
+    pub prefix 6 not;
 }
 
 // An ownership-only marker has no resident payload or machine representation.
@@ -3567,7 +3568,8 @@ pub let Option::as_mut = Result::as_mut;
 pub infixr 1 else;
 pub infixl 2 or;
 pub infixl 3 and;
-pub prefix 4 not;
+pub infixl 5 if;
+pub prefix 6 not;
 
 // The right operands are zero-argument Fn values, so they are evaluated only
 // on the selected path. Every discarded payload uses affine erasure.

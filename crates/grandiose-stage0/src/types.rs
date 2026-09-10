@@ -63,6 +63,37 @@ mod partial_substitution_tests {
 }
 
 #[cfg(test)]
+mod inferred_effect_row_tests {
+    use super::*;
+
+    #[test]
+    fn inferred_recursive_rows_remove_only_their_own_union_contribution() {
+        let read = DefKey(Digest::of_bytes(b"inferred-row-read"));
+        let write = DefKey(Digest::of_bytes(b"inferred-row-write"));
+        let mut inference = InferContext::default();
+        let target = inference.fresh_effects();
+        let input = inference.fresh_effects();
+        let mut required = target.clone();
+        required.extend(input.clone());
+        required.extend(EffectRow::closed([read]));
+        inference.define_inferred_effect_row(target.clone(), required).unwrap();
+        assert!(inference.zonk_effects(target.clone()).is_err(), "an independent row is still unknown");
+        inference.unify_effect_rows(input, EffectRow::closed([write])).unwrap();
+        assert_eq!(inference.zonk_effects(target).unwrap(), EffectRow::closed([read, write]));
+
+        let target = inference.fresh_effects();
+        inference.define_inferred_effect_row(target.clone(), target.clone()).unwrap();
+        assert_eq!(inference.zonk_effects(target).unwrap(), EffectRow::empty());
+
+        let target = inference.fresh_effects();
+        let nested = Type::Callable { contract: Default::default(), safety: crate::Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: target.clone(), invocation: Quantity::ONCE };
+        let cyclic = EffectRow::closed_instances([EffectInstance { definition: read, arguments: vec![GenericArgument::Type(nested)] }]);
+        assert!(matches!(inference.define_inferred_effect_row(target, cyclic), Err(TypeError::EffectOccurs(..))));
+    }
+}
+
+#[cfg(test)]
 mod numeric_constraint_tests {
     use super::*;
 
@@ -1583,6 +1614,20 @@ impl InferContext {
             .collect()
     }
 
+    /// A compact body defines the least union of its emitted requirements.
+    /// A recursive resumption contributes that same row, adding no new member.
+    /// This rule is not ordinary row equality or permission-based defaulting:
+    /// other unknown operands and all mixed-kind occurs checks stay live.
+    pub(crate) fn define_inferred_effect_row(&mut self, target: EffectRow, required: EffectRow)
+        -> Result<EffectRow, TypeError> {
+        let target = self.resolve_effects(target).canonicalized();
+        let mut required = self.resolve_effects(required).canonicalized();
+        if let [EffectTail::Infer(variable)] = target.tails.iter().copied().collect::<Vec<_>>().as_slice() {
+            required.tails.remove(&EffectTail::Infer(*variable));
+        }
+        self.unify_effect_rows(target, required)
+    }
+
     pub(crate) fn unify_effect_rows(
         &mut self,
         left: EffectRow,
@@ -1592,6 +1637,16 @@ impl InferContext {
         let right = self.resolve_effects(right).canonicalized();
         if left == right {
             return Ok(left);
+        }
+        // A sole row hole denotes the entire row, including associated
+        // projections. Partitioning fixed projection sets first would reject
+        // the row-kinded analogue of binding a type hole to a projection.
+        for (hole, value) in [(&left, &right), (&right, &left)] {
+            if hole.effects.is_empty() && hole.projections.is_empty()
+                && let [EffectTail::Infer(variable)] = hole.tails.iter().copied().collect::<Vec<_>>().as_slice() {
+                self.bind_effect(*variable, value.clone())?;
+                return Ok(value.clone());
+            }
         }
         let (left_only, right_only) =
             self.partition_effect_instances(&left.effects, &right.effects)?;

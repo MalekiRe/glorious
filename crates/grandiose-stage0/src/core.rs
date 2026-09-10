@@ -3332,6 +3332,8 @@ impl TypedBody {
             pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
+            inferred_effect_requirements: None,
+            pending_callable_effects: vec![],
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
@@ -3585,6 +3587,8 @@ impl TypedBody {
             pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
+            inferred_effect_requirements: None,
+            pending_callable_effects: vec![],
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
@@ -3717,6 +3721,8 @@ impl TypedBody {
             pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
+            inferred_effect_requirements: None,
+            pending_callable_effects: vec![],
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
@@ -3847,6 +3853,8 @@ impl TypedBody {
             pending_callable_erasures: vec![],
             pending_universal: vec![],
             pending_effect_checks: vec![],
+            inferred_effect_requirements: None,
+            pending_callable_effects: vec![],
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
@@ -4126,6 +4134,21 @@ struct PendingEffectCheck {
     span: Span,
 }
 
+/// Requirements emitted by ordinary call/operation checking while a compact
+/// callable's row is inferred. Handler coverage is captured at that expression,
+/// not recovered from a later walk or from the enclosing callable's permission.
+struct InferredEffectRequirement {
+    effects: EffectRow,
+    handled: std::collections::BTreeSet<EffectInstance>,
+}
+
+struct PendingCallableEffects {
+    target: EffectRow,
+    expected: EffectRow,
+    requirements: Vec<InferredEffectRequirement>,
+    span: Span,
+}
+
 struct PendingAssociatedCheck {
     types: Vec<crate::ElaboratedAssociatedTypeBinding>,
     effects: Vec<crate::ElaboratedAssociatedEffectBinding>,
@@ -4258,6 +4281,8 @@ struct Elaborator<'a> {
     pending_callable_erasures: Vec<(Type, Type, Span)>,
     pending_universal: Vec<(crate::QuantifiedWhereBound, TraitSolver, Span)>,
     pending_effect_checks: Vec<PendingEffectCheck>,
+    inferred_effect_requirements: Option<Vec<InferredEffectRequirement>>,
+    pending_callable_effects: Vec<PendingCallableEffects>,
     pending_associated_checks: Vec<PendingAssociatedCheck>,
     pending_rigid_equalities: Vec<PendingRigidEquality>,
     pending_integer_defaults: Vec<PendingIntegerDefault>,
@@ -4773,6 +4798,7 @@ impl Elaborator<'_> {
                     .collect(),
                 None,
                 crate::header::EffectRowHeader::default(),
+                true,
                 body,
                 None,
                 None,
@@ -4782,6 +4808,7 @@ impl Elaborator<'_> {
                 vec![],
                 None,
                 crate::header::EffectRowHeader::default(),
+                true,
                 body,
                 None,
                 Some(captures),
@@ -4792,7 +4819,7 @@ impl Elaborator<'_> {
                 result,
                 effects,
                 body,
-            } => self.closure(parameters, result, effects, body, None, None, expression.span),
+            } => self.closure(parameters, result, effects, false, body, None, None, expression.span),
             // Recovery is a first-class parser outcome, rather than an
             // unsupported source construct. Preserve it as the Core error
             // sentinel so every downstream semantic pass can remain total
@@ -5109,6 +5136,7 @@ impl Elaborator<'_> {
                     .collect(),
                 None,
                 crate::header::EffectRowHeader::default(),
+                true,
                 body,
                 expected,
                 None,
@@ -5118,6 +5146,7 @@ impl Elaborator<'_> {
                 vec![],
                 None,
                 crate::header::EffectRowHeader::default(),
+                true,
                 body,
                 expected,
                 Some(captures),
@@ -5137,6 +5166,7 @@ impl Elaborator<'_> {
                 parameters,
                 result,
                 effects,
+                false,
                 body,
                 expected,
                 None,
@@ -5921,6 +5951,8 @@ impl Elaborator<'_> {
         // of its enclosing expression. Its expected callable row therefore
         // governs any operations in the block, and enclosing handlers cannot
         // be captured as though they would still be active when it runs.
+        let expected_effects = effects;
+        let (effects, previous_inferred) = self.begin_callable_effect_inference(&expected_effects, true);
         let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
         let previous_handled = std::mem::take(&mut self.handled_effects);
         let previous_handled_operations = std::mem::take(&mut self.handled_operations);
@@ -5936,6 +5968,7 @@ impl Elaborator<'_> {
                 }
             })
             .collect::<Vec<_>>();
+        self.finish_callable_effect_inference(effects.clone(), expected_effects, previous_inferred, span);
         self.declared_effects = previous_effects;
         self.unsafe_context = previous_unsafe;
         self.handled_effects = previous_handled;
@@ -5984,6 +6017,7 @@ impl Elaborator<'_> {
         parameters: Vec<ClosureParameter>,
         declared_result: Option<crate::header::HeaderType>,
         effects: crate::header::EffectRowHeader,
+        compact: bool,
         body: ExprId,
         expected: Option<Type>,
         forced_move_captures: Option<Vec<String>>,
@@ -6062,10 +6096,18 @@ impl Elaborator<'_> {
                 (parameter.name, ty)
             })
             .collect::<Vec<_>>();
-        let effects = expected_callable
-            .as_ref()
-            .map(|(_, _, _, effects, _)| effects.clone())
-            .unwrap_or_else(|| self.closure_effects(&effects, span));
+        let effects = if compact {
+            expected_callable.as_ref().map(|(_, _, _, effects, _)| effects.clone())
+                .unwrap_or_else(|| self.inference.fresh_effects())
+        } else {
+            let declared = self.closure_effects(&effects, span);
+            if let Some((_, _, _, expected, _)) = &expected_callable
+                && self.inference.unify_effect_rows(expected.clone(), declared.clone()).is_err() {
+                self.error(span, "G4113", "closure effect annotation does not match its contextual callable row");
+                self.recovered = true;
+            }
+            declared
+        };
         self.locals.enter();
         for (name, ty) in &parameters {
             self.locals.define(name.clone(), ty.clone());
@@ -6081,6 +6123,8 @@ impl Elaborator<'_> {
         // A typed closure freezes an independent callable contract. Check
         // its body against that contract and do not let an enclosing handler
         // discharge effects that may escape with the closure value.
+        let expected_effects = effects;
+        let (effects, previous_inferred) = self.begin_callable_effect_inference(&expected_effects, compact);
         let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
         let previous_handled = std::mem::take(&mut self.handled_effects);
         let previous_handled_operations = std::mem::take(&mut self.handled_operations);
@@ -6115,6 +6159,7 @@ impl Elaborator<'_> {
             self.alloc(CoreKind::Block(prefix), self.expressions[body.0 as usize].ty.clone(), span)
         };
         self.unsafe_context = previous_unsafe;
+        self.finish_callable_effect_inference(effects.clone(), expected_effects, previous_inferred, span);
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
         self.handled_operations = previous_handled_operations;
@@ -7495,12 +7540,12 @@ impl Elaborator<'_> {
             Type::Callable { .. }
                 | Type::Reference { .. }
                 | Type::Infer(_)
-        ) || self.ambient_where_bounds.iter().any(|(subject, relation)|
-            *subject == ty && crate::is_intrinsic_callable_trait(relation))
-            || self.ambient_universal_bounds.iter().any(|bound|
-                bound.subject == ty && crate::is_intrinsic_callable_trait(&bound.relation)) {
+        ) {
             CaptureMode::SharedBorrow
         } else {
+            // F: Fn proves invocation of F, not invocation through &F. An
+            // abstract callable's ordinary value use therefore has the same
+            // copy-or-move formation as other opaque owned residents.
             self.owned_capture_mode(&ty)
         }
     }
@@ -7891,6 +7936,7 @@ impl Elaborator<'_> {
     /// Propagate non-defaultable obligations without freezing or generalizing
     /// the result. Both executable bodies and value boundaries use this phase.
     fn propagate_pending_inference(&mut self) {
+        self.propagate_callable_effect_inference(true);
         let mut pending = std::mem::take(&mut self.pending_callable_bounds);
         let mut associated = std::mem::take(&mut self.pending_associated_checks);
         let mut equalities = std::mem::take(&mut self.pending_rigid_equalities);
@@ -7921,6 +7967,7 @@ impl Elaborator<'_> {
             for equality in equalities {
                 self.retry_rigid_equality(equality, true);
             }
+            self.propagate_callable_effect_inference(true);
             pending = std::mem::take(&mut self.pending_callable_bounds);
             associated = std::mem::take(&mut self.pending_associated_checks);
             equalities = std::mem::take(&mut self.pending_rigid_equalities);
@@ -7973,6 +8020,7 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         self.ambient_outlives.extend_from_slice(self.inference.body_regions().facts());
+        self.propagate_callable_effect_inference(false);
         let pending = std::mem::take(&mut self.pending_callable_bounds);
         let associated = std::mem::take(&mut self.pending_associated_checks);
         let equalities = std::mem::take(&mut self.pending_rigid_equalities);
@@ -10602,7 +10650,7 @@ impl Elaborator<'_> {
     /// body needs its zero-argument callable result contract before it can be
     /// typed.  The declaration's already-instantiated bound and associated
     /// `Output`/`Effects` equalities are the authoritative contract.
-    fn direct_bound_callable_contract(&self, callee: CoreId, parameter: &Type) -> Option<Type> {
+    fn direct_bound_callable_contract(&mut self, callee: CoreId, parameter: &Type) -> Option<Type> {
         let CoreKind::Function {
             definition,
             arguments,
@@ -10647,7 +10695,7 @@ impl Elaborator<'_> {
                     && binding.item_arguments.is_empty())
                 .then(|| binding.value.clone())
             })
-            .unwrap_or_else(EffectRow::empty);
+            .unwrap_or_else(|| self.inference.fresh_effects());
         // A contextual callback is a concrete value for the declaration's
         // `F`.  Preserve any explicit `F: Use<Q>` contract on that value so
         // a closure captured for a zero-use forwarding callback carries the
@@ -13427,7 +13475,100 @@ impl Elaborator<'_> {
         self.check_effects_after_inference(effects, span, true);
     }
 
+    fn begin_callable_effect_inference(&mut self, effects: &EffectRow, compact: bool)
+        -> (EffectRow, Option<Vec<InferredEffectRequirement>>) {
+        let mut row = self.inference.resolve_effect_structure(effects.clone());
+        let infer = compact && row.tails
+            .iter().any(|tail| matches!(tail, crate::EffectTail::Infer(_)));
+        if infer {
+            // Give this definition its own row. An unknown input callback's
+            // row may also occur in the expected contract; that does not make
+            // the input a recursive reference to this body's definition.
+            row.tails.retain(|tail| !matches!(tail, crate::EffectTail::Infer(_)));
+            row.extend(self.inference.fresh_effects());
+        }
+        (row, std::mem::replace(&mut self.inferred_effect_requirements, infer.then(Vec::new)))
+    }
+
+    fn finish_callable_effect_inference(&mut self, target: EffectRow, expected: EffectRow,
+        previous: Option<Vec<InferredEffectRequirement>>, span: Span) {
+        let requirements = std::mem::replace(&mut self.inferred_effect_requirements, previous);
+        if let Some(requirements) = requirements {
+            self.retry_callable_effect_inference(PendingCallableEffects { target, expected, requirements, span }, true);
+        }
+    }
+
+    fn retry_callable_effect_inference(&mut self, check: PendingCallableEffects, defer: bool) {
+        // The written prefix of a contextual contract remains a declaration.
+        // Only its inference operands are supplied by the body's requirements.
+        let mut row = check.target.clone();
+        row.tails.retain(|tail| !matches!(tail, crate::EffectTail::Infer(_)));
+        for requirement in &check.requirements {
+            let mut required = self.inference.resolve_effect_structure(requirement.effects.clone());
+            if !requirement.handled.is_empty() {
+                required = self.normalize_selectable_effect_row(required);
+                let handled = self.inference.resolve_effect_structure(EffectRow::closed_instances(requirement.handled.clone()));
+                // Subtract only proved exact instances. An unresolved row can
+                // become handled after later operands constrain its producer;
+                // retaining that equation is different from assuming purity.
+                if !required.tails.is_empty() || !required.projections.is_empty()
+                    || effect_row_contains_inference(&required) || effect_row_contains_inference(&handled) {
+                    if defer { self.pending_callable_effects.push(check); }
+                    else {
+                        self.error(check.span, "G4155", "contextual callable effect subtraction remains unresolved");
+                        self.recovered = true;
+                    }
+                    return;
+                }
+                required.effects.retain(|effect| !handled.effects.contains(effect));
+            }
+            row.extend(required);
+        }
+        let definition = self.inference.define_inferred_effect_row(check.target, row);
+        if definition.and_then(|row| self.inference.unify_effect_rows(check.expected, row)).is_err() {
+            self.error(check.span, "G4155", "inferred contextual callable row does not satisfy its selected effect contract");
+            self.recovered = true;
+        }
+    }
+
+    fn propagate_callable_effect_inference(&mut self, defer: bool) {
+        loop {
+            let pending = std::mem::take(&mut self.pending_callable_effects);
+            let count = pending.len();
+            if count == 0 { break; }
+            for check in pending { self.retry_callable_effect_inference(check, defer); }
+            if self.pending_callable_effects.len() >= count { break; }
+        }
+    }
+
+    fn record_inferred_call_effects(&mut self, effects: &EffectRow) -> bool {
+        if self.inferred_effect_requirements.is_none() { return false; }
+        let mut handled = self.handled_effects.clone();
+        handled.extend(self.exhaustively_handled_effects(&self.handled_operations));
+        self.inferred_effect_requirements.as_mut().unwrap().push(InferredEffectRequirement {
+            effects: effects.clone(), handled,
+        });
+        true
+    }
+
     fn check_effects_after_inference(&mut self, effects: &EffectRow, span: Span, defer: bool) {
+        if self.record_inferred_call_effects(effects) { return; }
+        if defer && !self.pending_callable_effects.is_empty() {
+            self.propagate_callable_effect_inference(true);
+            let required = self.inference.resolve_effect_structure(effects.clone());
+            if self.pending_callable_effects.iter().any(|check| {
+                [&check.target, &check.expected].into_iter().any(|row| {
+                    let target = self.inference.resolve_effect_structure(row.clone());
+                    !target.tails.is_disjoint(&required.tails)
+                })
+            }) {
+                self.pending_effect_checks.push(PendingEffectCheck {
+                    effects: effects.clone(), declared: self.declared_effects.clone(),
+                    handled: self.handled_effects.clone(), operations: self.handled_operations.clone(), span,
+                });
+                return;
+            }
+        }
         if defer && self.inference.zonk_effects_allowing_generic_tail(effects.clone()).is_err() {
             // Keep the lexical handler authority: a handler installed later
             // must never retroactively authorize this call.
@@ -13509,6 +13650,9 @@ impl Elaborator<'_> {
                 return;
             }
         };
+        if self.inference.constrain_effect_subset(effects.clone(), self.declared_effects.clone()).is_ok() {
+            return;
+        }
         if !effects.projections.is_empty() {
             self.error(span, "G4155", "call has an unresolved associated effect-row projection");
             self.recovered = true;
@@ -13536,6 +13680,9 @@ impl Elaborator<'_> {
             self.handled_operations
                 .contains(&(effect.clone(), operation))
         });
+        if !self.handled_effects.contains(effect)
+            && !self.effect_is_covered_by_active_operations(effect) && !handled_operation
+            && self.record_inferred_call_effects(&EffectRow::closed_instances([effect.clone()])) { return; }
         if !self.declared_effects.effects.contains(effect)
             && !self.handled_effects.contains(effect)
             && !self.effect_is_covered_by_active_operations(effect)

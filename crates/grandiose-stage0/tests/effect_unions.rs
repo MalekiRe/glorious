@@ -29,6 +29,152 @@ const SOURCE: &str = r#"
 "#;
 
 #[test]
+fn contextual_callback_rows_are_inferred_from_their_own_bodies() {
+    let source = r#"#![no_std]
+        effect Read { read() -> i64; }
+        effect Offset { offset() -> (); }
+        fn read() -> i64 / Read { Read::read() }
+        fn offset() / Offset { Offset::offset() }
+        fn invoke<F,e: EffectRow>(body: F) -> i64 / {|e}
+            where F: Fn<(),Output=i64,Effects=e> { body() }
+        pub fn main() -> i64 {
+            handle invoke({ BODY }) { Read::read() => 42, Offset::offset() => () }
+        }
+    "#;
+    for body in ["Read::read()", "read()", "offset(); read()",
+        "Offset::offset(); Read::read()", "invoke({ offset(); read() })",
+        "handle read() { Read::read() => 42 }",
+        "handle read() { Read::read(k) => k(42) }",
+        "offset(); handle read() { Read::read(k) => k(42) }",
+        "let task = () -> i64 / Read { read() }; task()"] {
+        for level in ["0", "2"] {
+            let mut input = request(&source.replace("BODY", body));
+            input.codegen_options.insert("optimization-level".into(), level.into());
+            let artifact = StageZeroCompiler::new().compile(input)
+                .unwrap_or_else(|error| panic!("{body} O{level}: {error:#?}")).artifact.unwrap();
+            assert_eq!(artifact.run_i64().unwrap(), 42);
+            assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn contextual_rows_wait_for_independent_callback_input_evidence() {
+    let source = r#"#![no_std]
+        effect Read { read() -> i64; }
+        fn relay<e: EffectRow>(body: (() -> i64 / {|e}) -> i64 / {|e}, input: () -> i64 / {|e})
+            -> i64 / {|e} { body(input) }
+        pub fn main() -> i64 {
+            handle relay({ f => f() }, { Read::read() }) { Read::read() => 42 }
+        }
+    "#;
+    for level in ["0", "2"] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), level.into());
+        let artifact = StageZeroCompiler::new().compile(input).unwrap_or_else(|error| panic!("{error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn independent_contextual_rows_and_symbolic_projections_remain_distinct() {
+    let source = r#"#![no_std]
+        effect Read { read() -> i64; }
+        effect Offset { offset() -> (); }
+        fn read() -> i64 / Read { Read::read() }
+        fn offset() / Offset { Offset::offset() }
+        fn both<F,G,e1: EffectRow,e2: EffectRow>(first: F, second: G) -> i64 / {|e1,e2}
+            where F: Fn<(),Output=i64,Effects=e1>, G: Fn<(),Output=(),Effects=e2> {
+            second(); first()
+        }
+        fn invoke<F>(body: F) -> i64 / { <F as Fn<()>>::Effects }
+            where F: Fn<(),Output=i64> { body() }
+        fn forward<F>(body: F) -> i64 / { <F as Fn<()>>::Effects }
+            where F: Fn<(),Output=i64> { invoke({ body() }) }
+        pub fn main() -> i64 {
+            handle EXPRESSION { Read::read() => 42, Offset::offset() => () }
+        }
+    "#;
+    for expression in ["both({ read() }, { offset() })", "invoke({ read() })", "forward(read)"] {
+        let artifact = StageZeroCompiler::new().compile(request(&source.replace("EXPRESSION", expression)))
+            .unwrap_or_else(|error| panic!("{expression}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn inferred_callback_rows_keep_handler_and_nested_callable_boundaries() {
+    let source = r#"#![no_std]
+        effect Read { read() -> i64; }
+        fn read() -> i64 / Read { Read::read() }
+        fn pure<F>(body: F) -> i64 where F: Fn<(),Output=i64,Effects={}> { body() }
+        pub fn main() -> i64 { let task = { => { BODY } }; pure(task) }
+    "#;
+    for body in ["handle read() { Read::read() => 42 }",
+        "let inner = () -> i64 / Read { read() }; 42",
+        "let inner = { => read() }; 42"] {
+        let artifact = StageZeroCompiler::new().compile(request(&source.replace("BODY", body)))
+            .unwrap_or_else(|error| panic!("{body}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn inferred_callback_effects_cannot_borrow_permission_or_override_annotations() {
+    let source = r#"#![no_std]
+        effect Read { read() -> i64; }
+        fn invoke<F,e: EffectRow>(body: F) -> i64 / {|e}
+            where F: Fn<(),Output=i64,Effects=e> { body() }
+        fn explicit<F>(body: F) -> i64 / Read
+            where F: Fn<(),Output=i64,Effects=Read> { body() }
+        pub fn main() -> i64 { EXPRESSION }
+    "#;
+    for expression in ["invoke({ Read::read() })",
+        "handle { let task = () -> i64 { Read::read() }; task() } { Read::read() => 42 }",
+        "handle explicit(() -> i64 { Read::read() }) { Read::read() => 42 }"] {
+        let rejected = StageZeroCompiler::new().compile(request(&source.replace("EXPRESSION", expression)))
+            .expect_err("inference cannot authorize an unadmitted effect or change an explicit row");
+        assert!(rejected.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G4155" | "G4113")), "{rejected:#?}");
+    }
+}
+
+#[test]
+fn inferred_rows_subtract_only_the_expressions_exact_handler_coverage() {
+    let source = r#"#![no_std]
+        effect Read { read() -> i64; }
+        effect Many { first() -> i64; second() -> i64; }
+        trait Source {
+            type Effects: EffectRow;
+            fn read(value: Self) -> i64 / { <Self as Source>::Effects };
+        }
+        impl Source for i64 {
+            type Effects = {Read};
+            fn read(value: i64) -> i64 / Read { Read::read() }
+        }
+        fn many() -> i64 / Many { Many::first() }
+        fn pure<F>(body: F) -> i64 where F: Fn<(),Output=i64,Effects={}> { body() }
+        pub fn main() -> i64 { let task = { => { BODY } }; pure(task) }
+    "#;
+    for body in ["handle Source::read(0) { Read::read() => 42 }",
+        "handle Many::first() { Many::first() => 42 }",
+        "handle { handle many() { Many::first() => 42 } } { Many::second() => 42 }"] {
+        let artifact = StageZeroCompiler::new().compile(request(&source.replace("BODY", body)))
+            .unwrap_or_else(|error| panic!("{body}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+    for body in ["handle many() { Many::first() => 42 }",
+        "Many::first(); handle 42 { Many::first() => 42, Many::second() => 42 }"] {
+        let error = StageZeroCompiler::new().compile(request(&source.replace("BODY", body)))
+            .expect_err("a partial or later handler cannot discharge the earlier call row");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4168"), "{error:#?}");
+    }
+}
+
+#[test]
 fn independent_callback_rows_union_and_survive_reordered_generic_forwarding() {
     let outcome = StageZeroCompiler::new().compile(request(SOURCE)).unwrap();
     let artifact = outcome.artifact.unwrap();
