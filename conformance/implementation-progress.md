@@ -5,6 +5,43 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Active carrier-destination regression checkpoint (cache 119 unchanged)
+
+The remaining `nested_unique_reborrow_uses_the_carrier_access_region` failure
+is not caused by a loan expiring too late at the second getter call. At the
+first `*a` assignment, PlaceFlow derives destination keys for both `backing`
+and `window` from the reference's loan union. `window` must remain borrowed
+for the returned reference's lifetime, but it is not the storage replaced by
+that assignment. The same destination query also drives resident-reference
+replacement, so bypassing the carrier guard would leave the storage update
+contract incorrect. The unchanged baseline fails with `G5004`
+(`target/carrier-destination-baseline-v1.log`).
+
+Four additional active source tests preserve that distinction for an entire
+reference-containing `Slot`, not only a scalar write:
+
+- Direct reborrowing through the carrier, replacing the slot and reading its
+  new reference executes fresh/decoded VM O0/O2
+  (`target/carrier-destination-direct-v3.log`: one passing test).
+- The corresponding helper-returned reborrow still fails. Replacing `*target`
+  reports `G5004` for the carrier, and the scalar function result additionally
+  reports `G5013` for the old/new backing loans. Its success assertion remains
+  active and unchanged.
+- Replacing a carrier while its child reference remains live still rejects.
+- Mutating the newly borrowed backing value before reading the replaced slot
+  still rejects with `G5007`.
+
+The latter three tests have two passes and one failure in
+`target/carrier-destination-boundary-v1.log`. These are regression evidence,
+not an implementation fix or a passed acceptance gate. No broad suite was run.
+Repair requires the authoritative reference-origin product to distinguish
+retained lifetime obligations from possible referent storage, including unknown
+target coverage. Alias transfer, returned payloads, storage projection,
+strong/weak replacement and continuation joins must transport that distinction.
+Reference validity alone does not prove an exact destination; dropping the
+carrier's retained loan would weaken the already-passing negative obligations.
+Compiler, full-library and self-hosted acceptance remain incomplete.
+
 ## Cache 119: authenticated reference leaves retain their loan debt
 
 The active cache-118 generic getter failed because its valid physical reference

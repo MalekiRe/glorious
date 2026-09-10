@@ -129,6 +129,26 @@ fn nested_unique_reborrow_uses_the_carrier_access_region() {
 }
 
 #[test]
+fn direct_referent_replacement_updates_backing_storage_not_its_carrier() {
+    accepts("struct Slot<'a> { value: &'a i64 } struct Carrier<'a,'b> { target: &'b mut Slot<'a> } pub fn main() -> i64 { let first = 40; let second = 42; let mut slot = Slot { value: &first }; let mut carrier = Carrier { target: &mut slot }; let target = &mut *carrier.target; *target = Slot { value: &second }; *carrier.target.value }");
+}
+
+#[test]
+fn returned_referent_replacement_updates_backing_storage_not_its_carrier() {
+    accepts("struct Slot<'a> { value: &'a i64 } struct Carrier<'a,'b> { target: &'b mut Slot<'a> } fn get<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> { &mut *carrier.target } pub fn main() -> i64 { let first = 40; let second = 42; let mut slot = Slot { value: &first }; let mut carrier = Carrier { target: &mut slot }; let target = get(&mut carrier); *target = Slot { value: &second }; *get(&mut carrier).value }");
+}
+
+#[test]
+fn returned_referent_replacement_retains_the_new_backing_loan() {
+    rejects("struct Slot<'a> { value: &'a i64 } struct Carrier<'a,'b> { target: &'b mut Slot<'a> } fn get<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> { &mut *carrier.target } pub fn main() -> i64 { let first = 40; let mut second = 42; let mut slot = Slot { value: &first }; let mut carrier = Carrier { target: &mut slot }; let target = get(&mut carrier); *target = Slot { value: &second }; second = 43; *get(&mut carrier).value }", &["G5007"]);
+}
+
+#[test]
+fn returned_referent_keeps_its_carrier_suspended() {
+    rejects("struct Window<'a> { storage: &'a mut i64 } fn get<'a,'b>(value: &'b mut Window<'a>) -> &'b mut i64 { &mut *value.storage } pub fn main() -> i64 { let mut backing = 41; let mut replacement = 42; let mut window = Window { storage: &mut backing }; let child = get(&mut window); window = Window { storage: &mut replacement }; *child }", &["G5004", "G5007"]);
+}
+
+#[test]
 fn imported_generic_reference_carriers_preserve_input_regions() {
     accepts_with_dependency("use views::{Window, get, relay}; pub fn main() -> i64 { let backing = 42; let mut carrier = Window { storage: &backing }; let result = get(relay(&mut carrier)); *result }",
         Some("pub struct Window<'a,T> { pub storage: &'a T } pub fn get<'a,T>(value: &Window<'a,T>) -> &'a T { value.storage } pub fn relay<'a,T>(value: &'a mut T) -> &'a mut T { value }"));
