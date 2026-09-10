@@ -1985,3 +1985,35 @@ still lacks its complete lifetime contract. An indirect replay fixture also
 exposes stale resident quantity on a specialized callable parameter; its known
 environment is Copy, but cleanup still receives the template's narrower quantity.
 Neither remaining source regression is waived by the executable audit.
+
+## Closed resident quantity constraints
+
+Ownership MIR publishes its existing quantity equations as a retained product:
+declaration inputs, known constructors, structural products, forwarding, captures,
+replacement residents and writable exposure. Specialization substitutes the
+normal closed types and solves those same equations again. It no longer copies
+the template's owner quantities unchanged. Ownership-created consuming temporaries
+extend the same product rather than losing their forwarding relation.
+
+The existing trait/structural quantity solver distinguishes a declared contract
+from additional sealed resident evidence. A known callable capture layout may
+prove resident Copy independently of the callable's invocation interval. Unknown
+environments and resumptions retain their declared interval; an empty capture
+list alone proves nothing. Nested structural fields use the same solver and
+nominal restrictions remain selected through ordinary declared prerequisites.
+Resident refinements cannot select a source trait implementation or widen the
+contract of storage exposed to an unknown writer.
+
+Cleanup consumes the resulting closed owner inventory without a replay-specific
+callable exception. A private dependency seal binds those quantities to the
+receiving specialized instance, types, operations, loans and capture contracts
+after symbolic-target representation mapping. Independent structural validation
+and proof binding reject edited or mismatched inputs. Nonconverging constraints
+reject instead of publishing a partial solution.
+
+Cache 149 records this ownership/specialization correction; executable verifier,
+bytecode and native ABI generations are unchanged. The indirect-callee replay
+regression and its owned-Copy-capture composition now pass across engines. Receiver
+replacement still lacks its complete lifetime contract. Borrowed invocation,
+helper-local symbolic delimiters, foreign-control admission, mandatory-tail fusion
+and full zero-marshalling/performance acceptance remain separate open obligations.

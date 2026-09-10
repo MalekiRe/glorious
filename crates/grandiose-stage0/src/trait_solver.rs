@@ -374,6 +374,13 @@ pub struct TraitSolver {
     callable_environments: Vec<Type>,
 }
 
+/// Declared Use is permission at an opaque source boundary. A closed resident
+/// can additionally carry a sealed physical capture layout. The same nominal
+/// restriction and structural rules apply to both; resident refinements cannot
+/// prove a source trait prerequisite while selecting a manual Use declaration.
+#[derive(Clone, Copy)]
+enum UseEvidence { Declared, Resident }
+
 #[derive(Clone, Copy)]
 pub(crate) enum AssociatedItemKind {
     Type,
@@ -751,7 +758,11 @@ impl TraitSolver {
         ty: &Type,
         assumptions: &[TraitGoal],
     ) -> Option<crate::Quantity> {
-        self.fresh_query().principal_use_at(ty, 0, assumptions)
+        self.fresh_query().principal_use_at(ty, 0, assumptions, UseEvidence::Declared)
+    }
+
+    pub(crate) fn resident_use(&self, ty: &Type) -> Option<crate::Quantity> {
+        self.fresh_query().principal_use_at(ty, 0, &[], UseEvidence::Resident)
     }
 
     fn principal_use_at(
@@ -759,6 +770,7 @@ impl TraitSolver {
         ty: &Type,
         depth: u32,
         assumptions: &[TraitGoal],
+        evidence: UseEvidence,
     ) -> Option<crate::Quantity> {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps
             || self.principal_active.contains(ty)
@@ -767,7 +779,7 @@ impl TraitSolver {
         }
         self.steps += 1;
         self.principal_active.push(ty.clone());
-        let result = self.principal_use_inner(ty, depth, assumptions);
+        let result = self.principal_use_inner(ty, depth, assumptions, evidence);
         self.principal_active.pop();
         result
     }
@@ -777,6 +789,7 @@ impl TraitSolver {
         ty: &Type,
         depth: u32,
         assumptions: &[TraitGoal],
+        evidence: UseEvidence,
     ) -> Option<crate::Quantity> {
         use crate::Quantity;
         if crate::types::label::payload(ty).is_some() { return Some(Quantity::UNRESTRICTED); }
@@ -852,7 +865,7 @@ impl TraitSolver {
             }
         }
         if unresolved { return None; }
-        let structural = self.structural_principal_use_at(ty, depth + 1, assumptions);
+        let structural = self.structural_principal_use_at(ty, depth + 1, assumptions, evidence);
         match (declared, structural) {
             (Some(manual), Some(structural)) => structural.contains(manual).then_some(manual),
             // Header validation checks generic restrictions against the
@@ -866,7 +879,7 @@ impl TraitSolver {
     pub(crate) fn structural_principal_use_with_assumptions(
         &self, ty: &Type, assumptions: &[TraitGoal],
     ) -> Option<crate::Quantity> {
-        self.fresh_query().structural_principal_use_at(ty, 0, assumptions)
+        self.fresh_query().structural_principal_use_at(ty, 0, assumptions, UseEvidence::Declared)
     }
 
     pub(crate) fn principal_use_rule_contracts(
@@ -913,7 +926,7 @@ impl TraitSolver {
     }
 
     fn structural_principal_use_at(
-        &mut self, ty: &Type, depth: u32, assumptions: &[TraitGoal],
+        &mut self, ty: &Type, depth: u32, assumptions: &[TraitGoal], evidence: UseEvidence,
     ) -> Option<crate::Quantity> {
         use crate::Quantity;
         let fields = match ty {
@@ -923,7 +936,11 @@ impl TraitSolver {
                 crate::Mutability::Shared => Quantity::UNRESTRICTED,
                 crate::Mutability::Unique => Quantity::AFFINE,
             }),
-            Type::Callable { invocation, .. } => return Some(*invocation),
+            Type::Callable { contract, invocation, .. } => return match evidence {
+                UseEvidence::Declared => Some(*invocation),
+                UseEvidence::Resident => contract.resident_quantity(*invocation,
+                    |capture| self.principal_use_at(capture, depth + 1, assumptions, evidence)),
+            },
             Type::Tuple(fields) => fields.clone(),
             Type::Array(element) => vec![(**element).clone()],
             Type::FixedArray { element, .. } => if ty.fixed_array_length() == Some(0) {
@@ -934,7 +951,7 @@ impl TraitSolver {
             _ => return None,
         };
         fields.iter().try_fold(Quantity::UNRESTRICTED, |quantity, field| {
-            quantity.intersection(self.principal_use_at(field, depth + 1, assumptions)?).ok()
+            quantity.intersection(self.principal_use_at(field, depth + 1, assumptions, evidence)?).ok()
         })
     }
 
@@ -2625,7 +2642,7 @@ impl TraitSolver {
             if self.principal_active.contains(&goal.subject) {
                 return TraitAnswerIndex::Ambiguous;
             }
-            return if self.principal_use_at(&goal.subject, depth + 1, assumptions)
+            return if self.principal_use_at(&goal.subject, depth + 1, assumptions, UseEvidence::Declared)
                 .is_some_and(|principal| principal.contains(*required))
             {
                 TraitAnswerIndex::Proven(assumption_evidence(&goal))
@@ -4695,6 +4712,40 @@ fn generic_argument_is_concrete_in_hrtb_scope(
 mod tests {
     use super::*;
     use crate::ScalarType;
+
+    #[test]
+    fn resident_use_distinguishes_capture_ownership_from_declared_invocation() {
+        use crate::{Mutability, Quantity};
+        let solver = TraitSolver::new(&ElaboratedInterface::default());
+        let callable = |captures: Option<Vec<Type>>, invocation| {
+            let mut contract = crate::CallableContract::default();
+            if let Some(captures) = captures {
+                contract.environment = Some(Box::new(Type::Nominal {
+                    definition: DefKey(Digest::of_bytes(b"quantity-test-environment")), arguments: vec![],
+                }));
+                contract.captures = captures;
+            }
+            Type::Callable { contract: Box::new(contract), safety: crate::Safety::Safe,
+                lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit),
+                effects: EffectRow::empty(), invocation }
+        };
+        for (capture, expected) in [
+            (Type::Scalar(ScalarType::I64), Some(Quantity::UNRESTRICTED)),
+            (Type::Reference { lifetime: Lifetime::Static, mutability: Mutability::Unique, referent: Box::new(Type::Unit) }, Some(Quantity::AFFINE)),
+            (Type::Reference { lifetime: Lifetime::Static, mutability: Mutability::Shared, referent: Box::new(Type::Generic(0)) }, Some(Quantity::UNRESTRICTED)),
+            (Type::Generic(0), None),
+        ] {
+            let resident = callable(Some(vec![capture]), Quantity::ONCE);
+            assert_eq!(solver.principal_use_with_assumptions(&resident, &[]), Some(Quantity::ONCE));
+            assert_eq!(solver.resident_use(&resident), expected);
+            let nested = callable(Some(vec![Type::Tuple(vec![resident])]), Quantity::ONCE);
+            assert_eq!(solver.resident_use(&nested), expected);
+        }
+        for quantity in [Quantity::ONCE, Quantity::AFFINE, Quantity::new(3, Some(3)).unwrap()] {
+            assert_eq!(solver.resident_use(&callable(None, quantity)), Some(quantity),
+                "erased and resumption contracts cannot acquire Copy from an empty capture list");
+        }
+    }
 
     #[test]
     fn intrinsic_callable_projections_keep_symbolic_results_and_receiver_prerequisites() {

@@ -14,6 +14,7 @@ mod layout;
 pub(crate) use layout::validate_layout_closure;
 mod lower;
 mod program;
+mod quantities;
 mod regions;
 mod validate;
 pub(crate) use validate::closed_type;
@@ -191,6 +192,7 @@ pub struct SpecializedMir {
     pub(crate) source_flow: PlaceFlow,
     pub(crate) minimum_discharge: crate::placeflow::DischargedMinimum,
     pub(crate) owners: Vec<Owner>,
+    quantity_proof: Option<std::sync::Arc<quantities::Proof>>,
     pub(crate) loans: Vec<Loan>,
     pub(crate) blocks: Vec<SpecializedBlock>,
     /// Includes ordinary functions and constants, never opaque machine leaves.

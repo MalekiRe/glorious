@@ -532,7 +532,11 @@ impl SpecializedMir {
             closed_row(&closure.environment.runs_in.effects)?;
             closure.body.validate()?;
         }
-        self.validate_graph()
+        self.validate_graph()?;
+        if !self.quantity_proof.as_ref().is_some_and(|proof| proof.matches(self)) {
+            return Err(invalid("specialized resident quantities do not match their closed ownership proof"));
+        }
+        Ok(())
     }
 }
 
@@ -576,6 +580,64 @@ mod tests {
     }
     fn i64_argument() -> Vec<GenericArgument> {
         vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+    }
+
+    fn callable_argument(sealed: bool) -> Vec<GenericArgument> {
+        let mut contract = CallableContract::default();
+        if sealed {
+            contract.environment = Some(Box::new(Type::Unit));
+            contract.after_environment = Some(Box::new(Type::Unit));
+            contract.shared_receiver = true;
+            contract.unique_receiver = true;
+        }
+        vec![GenericArgument::Type(Type::Callable {
+            contract: Box::new(contract), safety: Safety::Safe, lifetime_binders: 0,
+            parameters: vec![], result: Box::new(Type::Scalar(ScalarType::I64)),
+            effects: EffectRow::empty(), invocation: Quantity::ONCE,
+        })]
+    }
+
+    #[test]
+    fn closed_callable_residents_refine_generic_parameters_and_forwarded_products() {
+        for sealed in [false, true] {
+            let body = fixture("pub fn main<T>(value:T) -> ((T,),) { let saved = (value,); (saved,) }", callable_argument(sealed));
+            let expected = Some(if sealed { Quantity::UNRESTRICTED } else { Quantity::ONCE });
+            assert_eq!(body.owners[body.parameters[0].0 as usize].quantity, expected);
+            for instruction in body.blocks.iter().flat_map(|block| &block.instructions) {
+                if matches!(instruction.operation, SpecializedOperation::Construct { aggregate: OwnershipAggregate::Tuple, .. }) {
+                    assert_eq!(body.owners[instruction.destination.0 as usize].quantity, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn closed_quantities_cannot_reuse_a_different_solution_or_changed_owner() {
+        let source = "pub fn main<T>(value:T) -> T { value }";
+        let mut body = fixture(source, callable_argument(false));
+        let sealed = fixture(source, callable_argument(true));
+        body.quantity_proof = sealed.quantity_proof;
+        assert!(body.validate().unwrap_err().0.contains("closed ownership proof"));
+        let mut body = fixture(source, callable_argument(false));
+        body.owners[body.parameters[0].0 as usize].quantity = Some(Quantity::UNRESTRICTED);
+        assert!(body.validate().unwrap_err().0.contains("closed ownership proof"));
+    }
+
+    #[test]
+    fn closed_writable_exposure_keeps_the_declared_resident_bound() {
+        let body = fixture("fn expose<T>(value:&mut T) {} pub fn main<T>(value:T) -> (T,) { let mut saved=(value,); expose(&mut saved); saved }", callable_argument(true));
+        let root = body.loans.iter().find(|loan| loan.unique).unwrap().place.root();
+        assert_eq!(body.owners[root.0 as usize].quantity, Some(Quantity::ONCE));
+    }
+
+    #[test]
+    fn closed_replacement_constraints_preserve_affine_capture_fields() {
+        let body = fixture("pub fn main(value:&mut i64) -> i64 { let mut saved=(() -> i64 {42},); saved.0=() -> i64 {let taken=move value; 42}; saved.0() }", vec![]);
+        let root = body.blocks.iter().flat_map(|block| &block.instructions).find_map(|instruction| match &instruction.operation {
+            SpecializedOperation::Replace { place: ControlPlace::Field { base, .. }, .. } => Some(base.root()),
+            _ => None,
+        }).unwrap();
+        assert_eq!(body.owners[root.0 as usize].quantity, Some(Quantity::AFFINE));
     }
 
     #[test]

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod emission;
 mod graph;
 mod inventory;
+mod quantities;
 // Experimental direct-local path checker. Its join/view model is not yet
 // sufficient for production; imported PlaceFlow remains authoritative here.
 #[cfg(test)]
@@ -266,6 +267,7 @@ pub struct OwnershipMir {
     pub(crate) source_bindings: BTreeMap<crate::placeflow::PlaceBindingOrigin, ControlValue>,
     pub(crate) source_flow: PlaceFlow,
     pub(crate) owners: Vec<Owner>,
+    quantity_rules: quantities::Rules,
     pub(crate) loans: Vec<Loan>,
     pub(crate) blocks: Vec<OwnershipBlock>,
     pub(crate) live_in: Vec<BTreeSet<ControlValue>>,
@@ -404,29 +406,7 @@ impl OwnershipMir {
                     _ if control.parameters().contains(&value) => OwnerKind::Parameter,
                     _ => OwnerKind::Temporary,
                 };
-                let quantity = match &decl.ty {
-                    Type::Callable { invocation, .. } => Some(*invocation),
-                    Type::Reference {
-                        mutability: crate::Mutability::Unique,
-                        ..
-                    } => Some(Quantity::AFFINE),
-                    Type::Reference { .. } | Type::Scalar(_) | Type::Unit | Type::Never => {
-                        Some(Quantity::UNRESTRICTED)
-                    }
-                    ty => signatures
-                        .zip(solver)
-                        .and_then(|(signatures, solver)| {
-                            signatures
-                                .principal_use_interval_with_solver(ty, solver)
-                                .or_else(|| {
-                                    signatures.principal_use_interval_with_bounds_and_solver(
-                                        ty,
-                                        &flow.lexical_bounds,
-                                        solver,
-                                    )
-                                })
-                        }),
-                };
+                let quantity = quantities::declared_quantity(&decl.ty, signatures, solver, &flow.lexical_bounds);
                 Owner {
                     value,
                     kind,
@@ -441,6 +421,7 @@ impl OwnershipMir {
                 }
             })
             .collect::<Vec<_>>();
+        let declared_quantities = owners.iter().map(|owner| owner.quantity).collect();
         for (value, mode) in control.parameters().iter().zip(captures) {
             owners[value.0 as usize].kind = OwnerKind::Capture(*mode);
         }
@@ -637,83 +618,8 @@ impl OwnershipMir {
             };
             value_places.insert(instruction.destination, place);
         }
-        let mut replacements = BTreeMap::<ControlValue, Vec<ControlValue>>::new();
-        let mut exposed_quantities = BTreeMap::new();
-        // Resolve only actual local storage, never the slot holding a reference.
-        // An unknown write through an exposed reference must use the declared
-        // resident contract instead of retaining its initializer's refinement.
-        for instruction in control.blocks().iter().flat_map(|block| &block.instructions) {
-            match &instruction.operation {
-                ControlOperation::Capability(ControlCapabilityOperation::Assign { place, value }) => {
-                    let place = resolve_place(place.clone(), &value_places);
-                    if let Some(destination) = structural_storage_root(&place, control.values()) {
-                        replacements.entry(destination).or_default().push(*value);
-                    }
-                }
-                ControlOperation::Capability(ControlCapabilityOperation::Borrow { place, unique: true }) => {
-                    let place = resolve_place(place.clone(), &value_places);
-                    if let Some(destination) = local_storage_root(&place) {
-                        exposed_quantities.insert(destination, owners[destination.0 as usize].quantity);
-                    }
-                }
-                ControlOperation::Capability(ControlCapabilityOperation::Closure { closure, captures }) => {
-                    for (value, capture) in captures.iter().zip(&control.closures()[closure.0 as usize].environment.captures) {
-                        if capture.mode == crate::CaptureMode::UniqueBorrow {
-                            let place = value_places.get(value).cloned().unwrap_or(ControlPlace::Local(*value));
-                            if let Some(destination) = local_storage_root(&place) {
-                                exposed_quantities.insert(destination, owners[destination.0 as usize].quantity);
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        loop {
-            let mut quantities = owners.iter().map(|owner| owner.quantity).collect::<Vec<_>>();
-            for instruction in control
-                .blocks()
-                .iter()
-                .flat_map(|block| &block.instructions)
-            {
-                let quantity = match &instruction.operation {
-                    // Tuple and array Use is structural. Nominal constructors
-                    // retain the declaration-selected Use rule, which may not
-                    // be the intersection of their physical payloads.
-                    ControlOperation::Tuple(fields) | ControlOperation::Array(fields) =>
-                        Some(product_quantity(fields.iter().copied(), &owners)),
-                    ControlOperation::Read(source)
-                    | ControlOperation::Forward(source)
-                    | ControlOperation::EndScope { value: source, .. } => Some(owners[source.0 as usize].quantity),
-                    ControlOperation::Capability(ControlCapabilityOperation::Closure { closure, captures }) => {
-                        let captures = captures.iter().zip(&control.closures()[closure.0 as usize].environment.captures)
-                            .map(|(value, capture)| (*value, capture.mode)).collect::<Vec<_>>();
-                        Some(environment_quantity(&captures, &owners))
-                    }
-                    _ => None,
-                };
-                if let Some(quantity) = quantity {
-                    quantities[instruction.destination.0 as usize] = quantity;
-                }
-            }
-            // A storage binding must admit every resident assigned to it,
-            // not just its initializer. In particular an initially empty
-            // callable environment cannot authorize copying a later affine
-            // capture environment out of the same variable.
-            for (destination, values) in &replacements {
-                quantities[destination.0 as usize] = quantities[destination.0 as usize].and_then(|quantity|
-                    values.iter().try_fold(quantity, |quantity, value|
-                        quantity.intersection(owners[value.0 as usize].quantity?).ok()));
-            }
-            for (destination, declared) in &exposed_quantities {
-                quantities[destination.0 as usize] = quantities[destination.0 as usize]
-                    .and_then(|quantity| quantity.intersection((*declared)?).ok());
-            }
-            if owners.iter().zip(&quantities).all(|(owner, quantity)| owner.quantity == *quantity) {
-                break;
-            }
-            for (owner, quantity) in owners.iter_mut().zip(quantities) { owner.quantity = quantity; }
-        }
+        let mut quantity_rules = quantities::Rules::produce(&control, &value_places, declared_quantities);
+        quantity_rules.solve(&mut owners, &quantity_rules.declared, &quantity_rules.declared)?;
         let ControlMir {
             definition,
             safety,
@@ -836,6 +742,7 @@ impl OwnershipMir {
                             owner.kind = OwnerKind::Temporary;
                             owner.scope = Some(instruction.scope);
                             owners.push(owner);
+                            quantity_rules.forward_temporary(value);
                             instructions.push(OwnershipInstruction {
                                 scope: instruction.scope,
                                 destination,
@@ -1074,6 +981,7 @@ impl OwnershipMir {
             source_bindings,
             source_flow: flow.clone(),
             owners,
+            quantity_rules,
             loans,
             blocks,
             live_in: vec![],

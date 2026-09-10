@@ -61,6 +61,20 @@ mod abi_refinement_tests {
 }
 
 impl CallableContract {
+    /// A sealed resident environment owns its captures, independently of the
+    /// invocation interval of each callable value. An erased callable (and a
+    /// resumption, whose environment is not a capture layout) retains its
+    /// declared interval; an empty capture list alone is not Copy evidence.
+    pub(crate) fn resident_quantity(
+        &self, invocation: crate::Quantity,
+        mut capture_quantity: impl FnMut(&Type) -> Option<crate::Quantity>,
+    ) -> Option<crate::Quantity> {
+        if self.environment.is_none() { return Some(invocation); }
+        self.captures.iter().try_fold(crate::Quantity::UNRESTRICTED, |quantity, capture| {
+            quantity.intersection(capture_quantity(capture)?).ok()
+        })
+    }
+
     /// A successful assignment may join resident callable refinements. That
     /// is not permission to replace the destination's declared ABI or its
     /// reference regions with the temporary aligned view used by unification.

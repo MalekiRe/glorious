@@ -5,6 +5,38 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 149: closed resident owner quantities
+
+The ownership producer now retains its quantity constraints through specialization.
+Concrete parameter and resident types reseed that same solver, including ordinary
+forwarding, structural products, captures, replacement writes and writable exposure.
+The former unchanged template-quantity copy is removed. Compiler-created consuming
+temporaries extend the retained rules. Cleanup replay reads the closed inventory;
+it receives no special callable or empty-environment exemption.
+
+The existing trait/structural solver consumes sealed capture-layout evidence for
+resident quantities without changing source-declared invocation permissions.
+Erased environments, unknown captures and resumptions do not acquire Copy from an
+empty capture list. Nominal restrictions still use ordinary prerequisite selection,
+and unknown writers remain bounded by the declared storage contract. A private
+dependency seal rejects quantity reuse after changing the specialized instance,
+owner inventory or its receiving inputs.
+
+The preserved indirect replay regression now passes fresh/decoded VM, all-native
+and both mixed partitions at O0/O2, including rejection of forged replay counts
+and concealed effect rows. A new owned-Copy-capture replay composition passes that
+same matrix. All 32 ownership validator tests, 16 specialization validator tests
+and the resident/declaration quantity distinction test pass. The final handler
+integration checkpoint passes all 48 cases other than the explicitly excluded
+receiver-replacement regression; that test remains active and is not ignored.
+
+Cache 149 changes; verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+Receiver replacement during argument evaluation remains an active native lifetime
+failure. Borrowed resumption invocation, helper-local symbolic delimiters,
+foreign-control admission, mandatory-tail fusion and full zero-marshalling/
+performance acceptance remain open. This checkpoint does not claim those gates
+or full compiler/library/self-hosted conformance.
+
 ## Cache 148: outward operations and cross-frame clause audits
 
 The existing executable control verifier now publishes reachable outward

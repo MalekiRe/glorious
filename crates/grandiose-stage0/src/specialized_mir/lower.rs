@@ -266,6 +266,8 @@ impl SpecializedMir {
         for value in &mut values {
             value.ty = substitution.ty(&value.ty)?;
         }
+        let owners = ownership.close_owner_quantities(&values, signatures, &substitution.solver)
+            .map_err(|error| SpecializedError(error.0))?;
         let result = substitution.ty(result)?;
         let mut loans = ownership.loans.clone();
         for loan in &mut loans {
@@ -604,7 +606,8 @@ impl SpecializedMir {
             source_bindings: ownership.source_bindings.clone(),
             source_flow: ownership.source_flow.clone(),
             minimum_discharge,
-            owners: ownership.owners.clone(),
+            owners,
+            quantity_proof: None,
             loans,
             blocks,
             dependencies,
@@ -617,6 +620,7 @@ impl SpecializedMir {
         };
         result.seal_call_targets();
         result.freeze_layouts(signatures)?;
+        result.quantity_proof = Some(super::quantities::Proof::seal(&result));
         result.validate()?;
         Ok(result)
     }

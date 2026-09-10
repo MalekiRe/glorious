@@ -362,8 +362,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 143 consumes the original continuation on the final exact replay.
 // Cache 144 composes ordered capability execution paths through checked helpers.
 // Cache 147 audits delimiter-wide executable replay counts.
-// Cache 148 audits callee performances and forwarded ordinary continuations.
-pub const STAGE0_CACHE_GENERATION: u32 = 148;
+// Cache 149 closes the ownership producer's resident quantity constraints.
+pub const STAGE0_CACHE_GENERATION: u32 = 149;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

@@ -235,6 +235,17 @@ fn indirect_callee_effect_rows_cannot_hide_replay_clause_audits() {
 }
 
 #[test]
+fn indirect_replay_preserves_a_specialized_copy_capture_environment() {
+    candidate("effect Ask { [3,3] ask() -> i64; }
+        fn invoke<F>(task:F) -> i64 / Ask where F:Fn<(),Output=i64,Effects={Ask}> { task() }
+        pub fn main() -> i64 {
+            let number=14;
+            let task=move(number) { number + Ask::ask() };
+            handle invoke(task) { Ask::ask() with k => k(0)+k(0)+k(0) }
+        }");
+}
+
+#[test]
 fn indirect_callee_effect_rows_cannot_hide_one_shot_clause_audits() {
     let original = candidate("effect Ask { [1,1] ask() -> i64; }
         fn leaf() -> i64 / Ask { Ask::ask() }
