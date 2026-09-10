@@ -36,6 +36,37 @@ fn read_only_storage_contract_requires_complete_sealed_execution() {
 }
 
 #[test]
+fn absent_performance_requires_complete_execution_not_an_empty_permission_row() {
+    let fixture = Fixture::new("#![no_std] effect Ask { [0,1] ask() -> i64; } fn quiet() -> i64 / Ask { 0 } fn relay() -> i64 / Ask { quiet() } fn perform() -> i64 / Ask { Ask::ask() }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let quiet = summaries.get(CallableBrand::Named(fixture.names["quiet"])).unwrap();
+    assert!(ControlCallCoverage::Alternatives(quiet.alternatives()).without_performance(None));
+    let perform = summaries.get(CallableBrand::Named(fixture.names["perform"])).unwrap();
+    assert!(!ControlCallCoverage::Alternatives(perform.alternatives()).without_performance(None));
+    let event = perform.alternatives().iter().flat_map(|path| &path.events)
+        .find(|event| matches!(event, ControlEvent::Perform { .. })).unwrap().clone();
+    let mut returning_after_performance = quiet.alternatives().to_vec();
+    returning_after_performance[0].events.push(event);
+    assert!(!ControlCallCoverage::Alternatives(&returning_after_performance).without_performance(None),
+        "normal completion alone does not exclude an earlier suspension");
+    let owner = fixture.names["relay"];
+    let bound = summaries.bind(&inputs).unwrap();
+    assert!(bound.body(owner).unwrap().get(fixture.call_to(owner, fixture.names["quiet"])).unwrap().without_performance());
+    assert!(!InvocationControl::default().without_performance());
+    assert!(!ControlCallCoverage::Unknown(ControlUnknown::Limit).without_performance(None));
+    assert!(!ControlCallCoverage::Alternatives(&[]).without_performance(None));
+    for outcome in [ControlOutcome::Cancellation, ControlOutcome::Unknown(ControlUnknown::OpaqueCall)] {
+        let mut paths = quiet.alternatives().to_vec();
+        let mut additional = paths[0].clone();
+        additional.outcome = outcome;
+        paths.push(additional);
+        assert!(!ControlCallCoverage::Alternatives(&paths).without_performance(None),
+            "a returning sibling cannot erase cancellation or incomplete coverage");
+    }
+}
+
+#[test]
 fn an_empty_body_does_not_prove_absent_cleanup_writes() {
     let fixture = Fixture::new("#![no_std] struct Probe { value: i64 } impl Use<[0,1]> for Probe {} impl Drop for Probe { drop(&mut self) -> {} } fn consume(value: Probe) {} fn forward<T>(value:T) -> T { value } fn main(value: Probe) { consume(value); }");
     let inputs = fixture.inputs();
@@ -44,6 +75,8 @@ fn an_empty_body_does_not_prove_absent_cleanup_writes() {
     assert!(ControlCallCoverage::Alternatives(consume.alternatives()).is_complete());
     assert!(!ControlCallCoverage::Alternatives(consume.alternatives()).storage_read_only(None),
         "an implicit destructor is not an empty storage effect");
+    assert!(ControlCallCoverage::Alternatives(consume.alternatives()).without_performance(None),
+        "source cleanup cannot perform algebraic effects even when its writes are unknown");
     let forward = summaries.get(CallableBrand::Named(fixture.names["forward"])).unwrap();
     assert!(!ControlCallCoverage::Alternatives(forward.alternatives()).storage_read_only(None),
         "open cleanup behavior requires separate proof");

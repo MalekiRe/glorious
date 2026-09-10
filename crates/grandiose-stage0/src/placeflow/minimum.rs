@@ -213,7 +213,13 @@ impl Analyzer<'_> {
             })
     }
 
-    pub(super) fn check_minimum_call_suspensions(&mut self, callee: CoreId, arguments: &[CoreId], span: Span) {
+    pub(super) fn check_minimum_call_suspensions(&mut self, call: CoreId, callee: CoreId, arguments: &[CoreId], span: Span) {
+        // Consume the shared body's execution proof, not the declaration's
+        // permission row, when complete coverage excludes all performances.
+        // Label/outer-transfer dispositions are still checked independently.
+        if self.continuations.invocation(call).is_some_and(|control| control.without_performance()) {
+            return;
+        }
         let ty = &self.body.expression(callee).ty;
         let mut callable = ty;
         while let Type::Reference { referent, .. } = callable { callable = referent; }

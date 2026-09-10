@@ -5,6 +5,57 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 133: performance absence from shared executable control
+
+Tracing the library's retained-owner failures exposed an independent source
+analysis bug: a function declaring but never performing an effect was treated
+as cancelling its caller's retained linear owner. The new positive regression
+reproduces G5024 before the change
+(`target/minimum-effect-permission-baseline-v1.log`).
+
+The existing callable-control producer now derives a complete no-performance
+fact from its execution alternatives and ordered events. It shares invocation
+projection with the storage-read-only proof, retaining their separate meanings.
+Minimum-use checking consumes this fact instead of reconstructing cancellation
+from a may-effect row when checked execution excludes every performance. Unknown
+coverage retains the old conservative obligation; normal return alone is not
+an absence proof. Label and outer-transfer disposition checks remain active.
+
+The first consumer change repaired direct/transitive calls but left an alias
+inside a handler unobserved. The same ordered evaluator now evaluates protected
+computations, retaining their ordinary results only when every alternative
+proves no performance. Otherwise handler behavior and invocation coverage stay
+unknown. This removes the unconditional opaque-handler stop for this proved
+case, without introducing another body walker or assuming handlers always resume.
+
+Verification:
+
+- Direct, transitive and aliased unused-effect calls pass fresh/decoded VM
+  O0/O2; an unused generic effect-row case also passes generated native O0/O2
+  (`target/minimum-effect-permission-native-v1.log`). Actual optional cancellation
+  behind a returning sibling/transitive helper still rejects. The initial
+  negative fixture's handler syntax was corrected before this check; its required
+  ownership rejection was not weakened.
+- All 38 callable-control integration tests and **40 of 41** minimum-use tests
+  pass (`target/minimum-effect-permission-integration-v2.log`). The unchanged
+  `direct_label_continuations_keep_their_own_move_and_minimum_use_states` fixture
+  expects G5024 for its final source but first encounters G4108/G4111: its
+  `#![no_std]` source uses `+` without declaring its fixity. The suite remains
+  failing; its source and assertion are preserved.
+- All 28 callable-control unit tests pass, including incomplete/empty coverage,
+  prior-performance versus normal-return, cancellation siblings and cleanup's
+  distinct storage obligation
+  (`target/minimum-effect-permission-control-units-v2.log`). All 22 revision/cache
+  tests pass (`target/minimum-effect-permission-revision-v1.log`).
+- The fresh full-library root still fails with the **same 11 G5024 diagnostics**
+  (`target/minimum-effect-permission-library-root-v1.log`). The generic callback
+  and associated-effect obligations are not discharged by this absence proof.
+
+No library signature or ownership requirement was weakened. Complete guarded
+generic cancellation/resource contracts, native handlers, compiler/library
+conformance and self-hosted acceptance remain open. Cache is 133; verifier 41,
+interface 22, native ABI 13, bytecode 72 and VM schema 116 are unchanged.
+
 ## Cache 132 / verifier 41: checked callback entries and executed storage exposure
 
 The original generic fold/callback tail regression now executes in fresh and

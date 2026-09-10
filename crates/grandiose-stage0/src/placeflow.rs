@@ -2201,7 +2201,7 @@ impl Analyzer<'_> {
     fn finish_invocation_inputs(&mut self, callee: CoreId, owner: Option<&str>, arguments: &[CoreId], call: CoreId, span: Span) {
         self.record_invocation_stores(callee, owner, arguments, call);
         if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
-        else { self.check_minimum_call_suspensions(callee, arguments, span); }
+        else { self.check_minimum_call_suspensions(call, callee, arguments, span); }
         self.apply_invocation_control(call, owner, span);
     }
 

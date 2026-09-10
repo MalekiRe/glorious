@@ -820,6 +820,47 @@ fn cleanup_bearing_nonlocal_exits_do_not_fabricate_positive_uses() {
 }
 
 #[test]
+fn unused_effect_permissions_do_not_invent_owner_cancellation() {
+    for callee in ["quiet()", "relay()", "{ let quiet = quiet; quiet() }"] {
+        accepts(&format!("effect Ask {{ [0,1] ask() -> i64; }}
+            fn quiet() -> i64 / Ask {{ 0 }}
+            fn relay() -> i64 / Ask {{ quiet() }}
+            pub fn main() -> i64 {{ handle {{
+                let value = Token {{}}; {callee}; consume(value)
+            }} {{ Ask::ask() with _ => 0 }} }}"));
+    }
+    let generic = "fn quiet<e: EffectRow>() -> i64 / {| e} { 0 }
+        fn retain<e: EffectRow>(value: Token) -> i64 / {| e} {
+            quiet<e>(); consume(value)
+        }
+        pub fn main() -> i64 { retain<{}>(Token {}) }";
+    accepts(generic);
+    let source = format!("{TOKEN}{generic}");
+    for optimization in [0, 2] {
+        use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+        let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap()).unwrap();
+        // SAFETY: execute only this locally checked, closed source fixture.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
+fn observed_cancellation_cannot_hide_behind_a_returning_sibling() {
+    rejects("effect Ask { [0,1] ask() -> i64; }
+        fn choose(flag: Flag) -> i64 / Ask {
+            handle flag { Flag::Yes => 0, Flag::No => Ask::ask() }
+        }
+        fn relay(flag: Flag) -> i64 / Ask { choose(flag) }
+        fn retain(value: Token, flag: Flag) -> i64 / Ask {
+            relay(flag); consume(value)
+        }
+        pub fn main() -> i64 { handle { retain(Token {}, Flag::No) } {
+            Ask::ask() with _ => 42
+        }}");
+}
+
+#[test]
 fn canceling_a_continuation_cannot_destroy_its_linear_residents() {
     rejects(
         "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { let value = Token {}; Ask::ask(); consume(value) } { Ask::ask() with _ => 42 } }",

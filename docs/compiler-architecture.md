@@ -1427,3 +1427,33 @@ O0/O2. It does not establish general indirect-entry/result provenance, complete
 guarded resource contracts, native handlers, full library acceptance or
 self-hosting. Cache generation 132 and verifier generation 41 record this proof
 boundary; runtime and serialized instruction representations are unchanged.
+
+## Absent performances versus may-effect permissions
+
+The shared callable-control coverage producer derives absence of algebraic
+performance from complete execution alternatives and their ordered events. A
+returning outcome alone is insufficient: earlier performance, cancellation,
+terminal operations, unknown paths and empty coverage cannot establish absence.
+The existing invocation-frame projection excludes strict caller operands from
+this callee-only fact. Storage-read-only and performance-absence checks share
+that projection but retain separate obligations: source cleanup cannot perform
+outward effects even when its storage writes are unknown.
+
+PlaceFlow's minimum-use suspension consumer now uses this checked invocation
+fact before falling back to the conservative declared effect row. A may row
+cannot invent a cancellation edge when complete execution excludes performance.
+Label transfers and their owner dispositions remain independently checked;
+unknown callbacks still require cancellation-safe retained state.
+
+The same control evaluator interprets a handler's protected computation. When
+every alternative proves no performance, no operation clause can run or replay
+that computation, so normal and label results retain ordinary alias/provenance
+facts. A performing or unsupported alternative keeps the whole handler unknown
+and marks its invocation coverage incomplete. This does not model resumption or
+cancellation generally, nor fabricate clause execution from the permitted row.
+
+Cache generation 133 records this source-analysis correction. It repairs direct,
+transitive, aliased and generic unused-effect regressions without adding a new
+Core walker or granting zero use to retained linear owners. General guarded
+generic cancellation/resource contracts remain incomplete: the full library
+still reports its 11 G5024 obligations, and self-hosted acceptance remains open.

@@ -265,6 +265,26 @@ impl ControlCallCoverage<'_> {
     /// from an empty may-store source set. The event match is intentionally
     /// exhaustive: adding a new execution event must classify its writes.
     fn storage_read_only(&self, invocation: Option<&ControlSite>) -> bool {
+        self.events_satisfy(invocation, |event| match event {
+            ControlEvent::Borrow { .. } | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
+            ControlEvent::Perform { .. } | ControlEvent::UnresolvedCleanup { .. } => false,
+        })
+    }
+
+    /// A may-effect row is not an observed suspension. Only complete checked
+    /// execution coverage can certify absence; partial returning paths cannot.
+    fn without_performance(&self, invocation: Option<&ControlSite>) -> bool {
+        self.events_satisfy(invocation, |event| match event {
+            ControlEvent::Perform { .. } => false,
+            // Source destruction cannot perform outward algebraic effects.
+            // Its unknown writes remain a separate storage-proof obligation.
+            ControlEvent::UnresolvedCleanup { .. } | ControlEvent::Borrow { .. }
+            | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
+        }) && matches!(self, Self::Alternatives(paths) if paths.iter().all(|path|
+            !matches!(path.outcome, ControlOutcome::TerminalOperation { .. } | ControlOutcome::Cancellation)))
+    }
+
+    fn events_satisfy(&self, invocation: Option<&ControlSite>, accepts: impl Fn(&ControlEvent) -> bool) -> bool {
         self.is_complete() && matches!(self, Self::Alternatives(paths) if paths.iter().all(|path|
             path.events.iter().filter(|event| {
                 let site = match event {
@@ -274,13 +294,10 @@ impl ControlCallCoverage<'_> {
                 };
                 invocation.is_none_or(|call| {
                     // Strict operands and earlier caller events are not part
-                    // of the callee's conditional storage contract.
+                    // of the callee's conditional execution contract.
                     site.calls.starts_with(&call.calls) && site.calls.get(call.calls.len()) == Some(&call.location)
                 })
-            }).all(|event| match event {
-                ControlEvent::Borrow { .. } | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
-                ControlEvent::Perform { .. } | ControlEvent::UnresolvedCleanup { .. } => false,
-            })))
+            }).all(&accepts)))
     }
 }
 
@@ -489,6 +506,9 @@ pub(crate) struct InvocationControl {
     /// Positively complete absence of storage writes in this invocation.
     /// Unknown control/effects never acquire this permission.
     storage_read_only: bool,
+    /// Complete executable absence of algebraic performance, independent of
+    /// the declared may-effect row and of normal/label-return disposition.
+    without_performance: bool,
     /// Targets of the callee value itself, not exits executed inside a helper.
     direct_labels: std::collections::BTreeSet<LabelBrand>,
     other_callee: bool,
@@ -537,6 +557,7 @@ impl ClosureControl {
 
 impl InvocationControl {
     pub(crate) fn storage_read_only(&self) -> bool { self.storage_read_only }
+    pub(crate) fn without_performance(&self) -> bool { self.without_performance }
     pub(crate) fn direct_label(&self) -> Option<LabelBrand> {
         (!self.unknown && !self.other_callee && self.direct_labels.len() == 1)
             .then(|| *self.direct_labels.first().unwrap())
@@ -720,9 +741,10 @@ impl BoundControlSummaries<'_> {
                 // Only standalone observations belong to this arena's owners.
                 if !site.calls.is_empty() || site.location.callable != callable { continue; }
                 let control = calls.entry(site.location.expression).or_insert_with(|| InvocationControl {
-                    storage_read_only: true, ..Default::default()
+                    storage_read_only: true, without_performance: true, ..Default::default()
                 });
                 control.storage_read_only &= evidence.coverage.storage_read_only(Some(site));
+                control.without_performance &= evidence.coverage.without_performance(Some(site));
                 // Keep the unconditional gap even while projecting positive
                 // payload dependencies from a represented guarded execution.
                 control.unknown |= !evidence.coverage.is_complete();
@@ -783,7 +805,7 @@ impl BoundControlSummaries<'_> {
             && let Some(target) = labels.binders().find(|brand|
                 crate::types::label::matches_brand(&operand.ty, *brand)) {
             return Some(InvocationControl {
-                storage_read_only: true,
+                storage_read_only: true, without_performance: true,
                 labels: [target].into(), direct_labels: [target].into(),
                 transfers: vec![InvocationTransfer { target: Some(target), payload: InvocationPayload {
                     ty: payload.clone(), source: payloads::PayloadSource::Argument { index: 0, path: vec![] },
@@ -827,6 +849,7 @@ impl BoundControlSummaries<'_> {
         let mut control = InvocationControl {
             declared_function: definition, other_callee: true,
             storage_read_only: ControlCallCoverage::Alternatives(&summary.alternatives).storage_read_only(None),
+            without_performance: ControlCallCoverage::Alternatives(&summary.alternatives).without_performance(None),
             ..Default::default()
         };
         if summary.alternatives.is_empty() { control.unknown = true; }
@@ -1892,13 +1915,25 @@ impl Analyzer<'_, '_> {
                     ControlUnknown::Unsupported("mutation"),
                 );
             }
-            CoreKind::Handle { .. } => {
-                return self.stop_unvisited(
-                    frame,
-                    id,
-                    state,
-                    ControlUnknown::Unsupported("operation handler"),
-                );
+            CoreKind::Handle { computation, .. } => {
+                // Interpret the protected computation with the same ordered
+                // evaluator. Without a performance, no handler clause can
+                // run or replay it; aliases and normal/label results retain
+                // their ordinary input provenance. A single unsupported or
+                // performing alternative keeps the whole handler unresolved.
+                let prefix = state.events.len();
+                let states = self.eval(frame, computation, state);
+                let paths = states.iter().map(|state| {
+                    let mut path = state.alternative();
+                    path.events = path.events.into_iter().skip(prefix).collect();
+                    path
+                }).collect::<Vec<_>>();
+                if ControlCallCoverage::Alternatives(&paths).without_performance(None) {
+                    return states;
+                }
+                let reason = ControlUnknown::Unsupported("operation handler");
+                self.unvisited(frame, id, &reason);
+                return states.into_iter().map(|state| state.stop(reason.clone())).collect();
             }
             CoreKind::IntrinsicCall { .. } => {
                 return self.stop_unvisited(
