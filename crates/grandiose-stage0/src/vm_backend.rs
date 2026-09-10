@@ -6459,10 +6459,10 @@ struct VerifiedFunctionControl {
 }
 
 fn verify_function_control(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
-    verify_function_control_with_reference_inputs(function, check_return_flag, assume_parameter_destructors, false, false, transfer_proofs)
+    verify_function_control_with_reference_inputs(function, check_return_flag, assume_parameter_destructors, &BTreeSet::new(), false, transfer_proofs)
 }
 
-fn verify_function_control_with_reference_inputs(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, reference_contents_only: bool, assume_parameter_invocations: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
+fn verify_function_control_with_reference_inputs(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, referent_only_inputs: &BTreeSet<u32>, assume_parameter_invocations: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -6560,7 +6560,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
             source_storage,
             reference_origins: vec![ReferenceOriginSet::Empty; function.registers.len()],
             frame_independent: (0..function.registers.len()).map(|index| index < function.parameters as usize
-                && !(reference_contents_only && matches!(function.registers[index], VmType::Reference { .. }))).collect(),
+                && !referent_only_inputs.contains(&(index as u32))).collect(),
             referent_independent: (0..function.registers.len()).map(|index| index < function.parameters as usize).collect(),
             local_labels: vec![None; function.registers.len()],
             destruction_preserves_frames: (0..function.registers.len())

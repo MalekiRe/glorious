@@ -245,6 +245,104 @@ fn mandatory_tail_vm_invalidates_referent_proofs_when_borrowed_storage_is_replac
 }
 
 #[test]
+fn mandatory_tail_vm_infers_mixed_reference_input_requirements() {
+    let entry = DefKey(Digest::of_bytes(b"mixed-tail-entry"));
+    let relay = DefKey(Digest::of_bytes(b"mixed-tail-relay"));
+    let helper = DefKey(Digest::of_bytes(b"mixed-tail-helper"));
+    let wrapper = DefKey(Digest::of_bytes(b"mixed-tail-wrapper"));
+    let finish = DefKey(Digest::of_bytes(b"mixed-tail-finish"));
+    let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+    let slot = VmType::Reference { unique: true, referent: Box::new(reference.clone()) };
+    let function = |definition, parameters, registers, instructions| VmFunction {
+        definition, parameters, registers, instructions, safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0,
+    };
+    for reversed in [false, true] {
+        for route in 0..3 {
+            let transitive = route != 0;
+            let recursive = route == 2;
+            for local in [false, true] {
+                let (destination, source) = if reversed { (1, 0) } else { (0, 1) };
+                let parameters = if reversed { vec![reference.clone(), slot.clone(), VmType::Unit] }
+                    else { vec![slot.clone(), reference.clone(), VmType::Unit] };
+                let wrapper_body = if recursive {
+                    function(wrapper, 3, vec![parameters[0].clone(), parameters[1].clone(),
+                        VmType::I64, VmType::I64, VmType::Bool, VmType::Unit, VmType::I64, VmType::I64], vec![
+                        VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                        VmInstruction::ConstI64 { dst: 3, value: 0 },
+                        VmInstruction::CompareI64 { dst: 4, left: 2, right: 3, op: grandiose_stage0::VmCompare::Equal },
+                        VmInstruction::BranchBool { condition: 4, then_target: 4, else_target: 6 },
+                        VmInstruction::CallOwned { dst: 5, callee: helper, arguments: vec![0, 1] },
+                        VmInstruction::Return { value: 5 },
+                        VmInstruction::ConstI64 { dst: 6, value: 1 },
+                        VmInstruction::WrappingSubI64 { dst: 7, left: 2, right: 6 },
+                        VmInstruction::CallOwned { dst: 5, callee: wrapper, arguments: vec![0, 1, 7] },
+                        VmInstruction::Return { value: 5 },
+                    ])
+                } else {
+                    function(wrapper, 2, parameters.clone(), vec![
+                        VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                        VmInstruction::CallOwned { dst: 2, callee: helper, arguments: vec![0, 1] },
+                        VmInstruction::Return { value: 2 },
+                    ])
+                };
+                let mut arguments = if reversed { vec![4, 2] } else { vec![2, 4] };
+                if recursive { arguments.push(6); }
+                let mut program = CandidateVmProgram {
+                    schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+                    fingerprint: Digest::of_bytes(b"mixed-tail-unsealed"), entry,
+                    host_capabilities: vec![], callable_environments: BTreeMap::new(),
+                    functions: BTreeMap::from([
+                        (entry, function(entry, 0, vec![VmType::I64, reference.clone(), VmType::I64], vec![
+                            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                            VmInstruction::ConstI64 { dst: 0, value: 42 },
+                            VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false },
+                            VmInstruction::CallOwned { dst: 2, callee: relay, arguments: vec![1] },
+                            VmInstruction::Return { value: 2 },
+                        ])),
+                        (relay, function(relay, 1, vec![reference.clone(), reference.clone(), slot.clone(),
+                            VmType::I64, reference.clone(), VmType::Unit, VmType::I64], vec![
+                            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                            VmInstruction::Copy { dst: 1, src: 0 },
+                            VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: true, reborrow: false },
+                            VmInstruction::ConstI64 { dst: 3, value: 99 },
+                            if local { VmInstruction::Borrow { dst: 4, src: 3, fields: vec![], unique: false, reborrow: false } }
+                                else { VmInstruction::Copy { dst: 4, src: 0 } },
+                            VmInstruction::ConstI64 { dst: 6, value: 2 },
+                            VmInstruction::CallOwned { dst: 5, callee: if transitive { wrapper } else { helper },
+                                arguments },
+                            VmInstruction::TailCallOwned { callee: finish, arguments: vec![1] },
+                        ])),
+                        (helper, function(helper, 2, parameters.clone(), vec![
+                            VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
+                            VmInstruction::DerefStore { reference: destination, src: source },
+                            VmInstruction::ConstUnit { dst: 2 },
+                            VmInstruction::Return { value: 2 },
+                        ])),
+                        (wrapper, wrapper_body),
+                        (finish, function(finish, 1, vec![reference.clone(), VmType::I64], vec![
+                            VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                            VmInstruction::DerefCopy { dst: 1, reference: 0 },
+                            VmInstruction::Return { value: 1 },
+                        ])),
+                    ]),
+                };
+                program.fingerprint = program.computed_fingerprint();
+                for result in [verify_vm_program(program.clone()), decode_and_verify_program(&encode_program(&program))] {
+                    if local {
+                        assert!(matches!(result, Err(VmArtifactError::UnprovenTailCarrier { function, register: 1, .. }) if function == relay),
+                            "reversed={reversed} route={route}: {result:?}");
+                    } else {
+                        assert_eq!(result.unwrap_or_else(|error| panic!("reversed={reversed} route={route}: {error:?}"))
+                            .run_i64().unwrap(), 42);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn mandatory_tail_vm_proves_incoming_reference_copies_aggregates_and_read_only_calls() {
     let reference = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
     for instructions in [

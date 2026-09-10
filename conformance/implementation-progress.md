@@ -5,6 +5,50 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 130 / verifier 39: per-input executable tail preservation
+
+The branch-joined vector tail regression now executes in fresh and decoded VM
+and generated native O0/O2. The old verifier weakened all reference parameters
+together: it could not express that the local vector borrow needs independent
+contents while the inserted reference needs its own independent address graph.
+
+The executable summary now carries a checked per-input conjunction, replacing
+the separate all-whole-input and all-reference-content sets. The existing control
+verifier checks each candidate conjunction; recursive propagation only strengthens
+requirements and rechecks callers. Ordinary and tail calls discharge the same
+product. Raw pointers receive no referent-only permission, and invocation and
+destruction requirements remain independent. No source-name exception or new
+instruction walker was introduced.
+
+Verification:
+
+- All 10 targeted VM tail groups pass, including the new mixed-input test's
+  six valid and six local-pointer cases through direct, transitive and recursive
+  calls in both argument orders. Every case is checked as a fresh candidate and
+  after decoding (`target/tail-runtime-mixed-input-vm-final-v1.log`). Existing
+  raw writes/copies, destructor/callback mutation, local aliases, replacement and
+  label-destination negative gates remain active and pass.
+- Restoring the pre-change verifier reproduces the new positive's unproved
+  carrier rejection (`target/tail-runtime-mixed-input-baseline-v1.log`). The
+  original vector source previously reached G7042; it now passes the verifier
+  and executes to 42 (`target/tail-runtime-mixed-input-source-v2.log`). Once
+  admitted, that fixture exposed its missing raw-storage execution permission;
+  its runner now uses the established trusted bundled-library API. The source
+  and expected result are unchanged, and native O0/O2 checks were added.
+- Full mandatory-tail integration is **20 passing, 3 failing**
+  (`target/tail-runtime-source-integration-v1.log`). All 22 revision/cache tests
+  pass (`target/tail-runtime-revision-v1.log`).
+
+The remaining tail failures are abstract callback invocation preservation
+(G7042), the older stateless-callable tail ABI mismatch (G7041), and the existing
+diagnostic assertion expecting G4403 instead of the earlier G5017 rejection.
+Their sources and assertions remain unchanged. This executable-boundary repair
+does not change source minimum-use analysis: the last full-library gate still
+has the 11 G5024 obligations recorded at cache 129. Full guarded resource
+contracts, native handlers, compiler/library conformance and self-hosting remain
+unfinished. Cache generation is 130 and verifier generation is 39; interface 22,
+native ABI 13, bytecode 72 and VM schema 116 are unchanged.
+
 ## Cache 129: nested reference-result contents and heap getter reads
 
 The shared callable reference contract now retains reference leaves reached

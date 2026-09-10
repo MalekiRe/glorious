@@ -138,8 +138,12 @@ fn mandatory_tail_keeps_branch_joined_incoming_logical_residents() {
     for optimization in ["0", "2"] {
         let artifact = compile_at(source, optimization)
             .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
-        assert_eq!(artifact.run_i64().unwrap(), 42);
-        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        // SAFETY: this locally compiled fixture uses the bundled Vec raw
+        // storage implementation, like the standard-library execution tests.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(run_native(source, optimization.parse().unwrap()), 42);
     }
 }
 

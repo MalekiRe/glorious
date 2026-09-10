@@ -1324,3 +1324,33 @@ write destinations, complete guarded storage or executable tail preservation
 after mutation. The branch-joined vector regression now reaches the independent
 runtime tail verifier; full library minimum-use and self-hosting gates remain
 open.
+
+## Per-input executable frame-preservation requirements
+
+The executable tail verifier publishes a checked conjunction for each preserving
+helper. Inputs require an independent transitive address graph unless that exact
+typed reference parameter has been proved to require only independent referent
+contents. Borrowing a local container and inserting an incoming reference can
+therefore have different requirements within one call. Raw pointers do not gain
+the weaker typed-reference proof.
+
+The existing bytecode control verifier establishes these contracts under explicit
+input hypotheses. A candidate weakening is checked together with every previously
+accepted weakening; individually successful probes are not combined without
+checking their conjunction. A stronger memory-preservation proof also suffices.
+Recursive graph propagation starts with weak hypotheses and only strengthens
+contracts, rechecking callers when a requirement changes. No source annotation,
+helper name or separate instruction walker supplies the proof.
+
+Ordinary and tail calls discharge the same per-input contract before retaining
+frame facts. The previous all-whole-input and all-reference-content summary sets
+are replaced by this product. Destruction and invocation preservation remain
+separate requirements; unknown callbacks still revoke the relevant facts. Existing
+local replacement, raw mutation and saved-continuation invalidation rules remain
+in force. Decoding recomputes the summaries from the executable graph.
+
+This repairs the branch-joined vector tail regression through fresh/decoded VM
+and generated native execution. It does not prove the behavior of an abstract
+callable parameter or repair an incompatible tail ABI. Verifier generation 39
+records the changed proof contract; runtime storage and portable instruction
+encoding are unchanged.
