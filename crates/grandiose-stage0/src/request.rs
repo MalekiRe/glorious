@@ -295,7 +295,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // snapshots before fusion, replacing the source-only immediate-call rewrite.
 // Cache 109 preserves factory-created capture dependencies and quantity
 // identities through shared invocation results and value-based control fusion.
-pub const STAGE0_CACHE_GENERATION: u32 = 109;
+// Cache 110 binds generated callable residents to the checked native frame
+// layouts and the existing execution-domain capture environment protocol.
+pub const STAGE0_CACHE_GENERATION: u32 = 110;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

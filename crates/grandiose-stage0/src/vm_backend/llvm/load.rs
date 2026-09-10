@@ -368,13 +368,18 @@ impl LlvmNativeModule {
             .position(|key| *key == entry)
             .expect("planned entry");
         let mut context = NativeContext::new(limits);
-        let mut memory = crate::vm_backend::native_memory::NativeMemory::default();
+        let mut budget = crate::vm_backend::ExecutionBudget {
+            native_memory: Default::default(), unsafe_execution: true, limits,
+            instructions: 0, allocated_elements: 0,
+        };
         let mut allocation =
-            super::memory::AllocationContext::new(&mut memory, limits.max_native_bytes);
+            super::memory::AllocationContext::new(&mut budget.native_memory, limits.max_native_bytes);
+        let callables = super::callables::CallableContext::new(self, &mut budget);
         // SAFETY: these local domain/context addresses outlive this synchronous
         // native invocation, including all nested native calls.
         unsafe {
             allocation.install(&mut context);
+            callables.install(&mut context);
         }
         let mut result = std::mem::MaybeUninit::<i64>::uninit();
         // SAFETY: the module owns its entry, no arguments are expected, and
@@ -383,6 +388,10 @@ impl LlvmNativeModule {
             self.invoke_native(index, &mut context, std::ptr::null(), result.as_mut_ptr().cast())
         };
         if let Some(error) = allocation.failure {
+            return Err(LlvmError::Runtime(error));
+        }
+        if let Some(error) = callables.failure.borrow_mut().take() {
+            if context.fault != 0 { context.result(status)?; }
             return Err(LlvmError::Runtime(error));
         }
         context.result(status)?;

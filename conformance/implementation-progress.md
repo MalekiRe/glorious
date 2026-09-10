@@ -5,6 +5,74 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 110 / native ABI 9: generated ordinary callable environments
+
+The native callable ABI now uses the VM's existing execution-domain resident
+registry and capture homes. Construction no longer emits tokenless callable
+bytes. Indirect invocation and environment destruction select checked generated
+machine code; no bytecode interpreter executes these all-native bodies. Borrowed
+receivers retain their actual environment and initialization state, while source
+Copy creates independent owned captures. Partial capture consumption survives
+the invocation loan and only the remaining owners are destroyed.
+
+Native frame layouts and initialization paths are retained with the immutable
+code witness. Both the callable runtime and the existing mixed bridge consume
+that published plan, replacing the mixed bridge's separate layout/path rebuild.
+Byte transfers preserve callable leases across products, parameters, results,
+label edges, tail packets and raw allocations. Partial writes revoke a lease even
+if the bits are unchanged. Stack-lease scopes close on every body/dispatcher exit;
+they do not substitute for source destruction. Initialization checks prevent
+moved captures from becoming native scalar reads, and callable runtime storage
+shares the existing bounded instruction, heap and activation budgets.
+
+The complete native integration target has **29 passes and one known failure**,
+none ignored (`target/native-callable-native-integration-v9.log`). All six new
+native callable groups pass. Their O0/O2 cases cover factory/product returns,
+nested and borrowed captures, repeated mutable receivers, independent source
+copies, ordinary and partial-capture Drop, raw-heap transfers, rejection of a
+matching-bit partial overwrite, arithmetic faults and activation limits. Positive
+source cases also execute fresh/decoded VM bytecode; O0 fixtures assert that an
+actual captured body remains in the native graph. Existing native/mixed scalar,
+float, reference, ownership, partial-storage, allocation and tail checks pass.
+
+The preserved `erased_label_products_preserve_captures_in_native_and_mixed_execution`
+test now passes its first all-native execution, then still fails with
+`mixed-engine capture loans are not implemented`. It is not counted as a passing
+gate. Generated host wrappers and VM callback entry still lack the required
+capture restoration/sidecar contract, so admitting those graphs would be wrong.
+Dedicated new groups separately establish all-native O0/O2 execution.
+
+The supplemental boundary gate passes **12 tests**, none failed or ignored
+(`target/native-callable-boundaries-v10.log`): nine library units, one native/mixed
+owned-label group, one external native authority rejection and one build identity
+check. These retain the shared registry's cross-domain/forgery, receiver authority,
+copy/lease lifetime and recursive release checks, plus native partial-label
+initialization. They do not turn the active mixed capture failure into a pass.
+
+The final extended factory group also passes
+(`target/native-callable-tail-layout-v13.log`), adding owned callable tail
+transport and branch-selected constructors with different capture layouts.
+Both use fresh/decoded VM and native O0/O2 execution. The preceding v11/v12
+attempts corrected the new fixture's pattern/contextual-block syntax; no
+compiler behavior or original regression was changed to admit it.
+
+Earlier diagnostic runs caught two new-fixture declaration mistakes (a missing
+factory result type and a by-value Drop receiver) and an incorrectly expected
+heap diagnostic where the existing activation-allocation guard rejects first.
+Those fixtures were corrected; the original mixed regression is unchanged.
+
+No broad source-library/service sweep was repeated. The library matrix remains
+cache 105's 16 passes and 15 failures. Mixed captured-callable execution, native
+owned handlers, borrowed/cross-frame resumptions, full helper-family fusion,
+mandatory-tail activation fusion and guarded storage outcomes remain open.
+This is not complete native conformance, compiler/library completion or
+self-hosting acceptance.
+
+Source cache generation is 110 and native ABI generation is 9. Verifier
+generation remains 38, bytecode remains 72 and its schema remains 116.
+The refreshed source closure audit passes with 100 locked source files; all
+11,455 public contracts remain open.
+
 ## Cache 109 / verifier 38: checked factory capabilities and owned label edges
 
 The shared invocation result now carries body-sealed callable constructors and

@@ -187,32 +187,23 @@ impl GeneratedPlans {
         let mut callbacks = BTreeMap::new();
         let mut initialization = BTreeMap::new();
         let mut parameter_plans = BTreeMap::new();
-        for definition in &module.plan().functions {
+        for (index, definition) in module.plan().functions.iter().enumerate() {
             let function = &module.plan().program.program.functions[definition];
-            let descriptors = function.nominal_copy_descriptors.clone().into();
-            let parameters = function.registers[..function.parameters as usize]
-                .iter()
-                .map(|ty| value_plan(ty, &descriptors))
-                .collect::<Result<Vec<_>, _>>()?;
+            let frame = &module.plan().frame_layouts[index];
+            let parameters = frame.layouts[..function.parameters as usize].to_vec();
             initialization.insert(
                 *definition,
-                parameters
-                    .iter()
-                    .map(|layout| {
-                        crate::vm_backend::llvm::initialization_paths(layout).map_err(runtime_error)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
+                frame.paths[..function.parameters as usize].to_vec(),
             );
             parameter_plans.insert(*definition, parameters.clone());
             if !module.plan().vm_functions.contains(definition) {
                 continue;
             }
-            let result = super::super::return_type(function)?;
             callbacks.insert(
                 *definition,
                 Arc::new(CallbackPlan {
                     parameters,
-                    result: value_plan(&result, &descriptors)?,
+                    result: frame.result.clone(),
                 }),
             );
         }
@@ -429,16 +420,21 @@ fn invoke_native(
         &mut invocation.call.budget.native_memory,
         invocation.call.budget.limits.max_native_bytes,
     );
+    let callables = crate::vm_backend::llvm::callables::CallableContext::new(module, invocation.call.budget);
     // SAFETY: the shared domain and this binding remain at stable addresses
     // throughout this synchronous native call and all VM callbacks.
     unsafe {
         allocation.install(&mut context);
+        callables.install(&mut context);
     }
     // SAFETY: every argument/result has been prepared using the exact linked
     // slot plan, with owned arguments retaining their original backing address.
     let status = unsafe { module.invoke_native(index, &mut context, arguments.as_ptr(), result) };
     invocation.call.budget.instructions = context.instructions;
     if let Some(error) = allocation.failure {
+        return Err(error);
+    }
+    if let Some(error) = callables.failure.borrow_mut().take() {
         return Err(error);
     }
     if let Some(failure) = invocation.failure {

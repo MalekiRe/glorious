@@ -5,6 +5,7 @@
 //! control must never become an ordinary native call by accident.
 
 mod emit;
+pub(super) mod callables;
 mod layout;
 mod load;
 pub(super) mod memory;
@@ -20,19 +21,11 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 8;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:mixed-tail-v5";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 9;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:resident-callables-v6";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
-
-pub(super) fn initialization_paths(
-    layout: &super::native_memory::NativeLayout,
-) -> Result<Vec<Vec<u32>>, LlvmError> {
-    let mut paths = BTreeSet::new();
-    emit::collect_paths(layout, &mut vec![], &mut paths)?;
-    Ok(paths.into_iter().collect())
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmAbiDescriptor {
@@ -126,6 +119,7 @@ pub struct LlvmIrProgram {
     pub(super) functions: Vec<DefKey>,
     pub(super) vm_functions: BTreeSet<DefKey>,
     pub(super) tail_packets: Vec<TailPacketLayout>,
+    pub(super) frame_layouts: std::sync::Arc<[emit::FunctionPlan]>,
 }
 
 #[derive(Clone, Debug)]
@@ -224,6 +218,7 @@ impl LlvmIrProgram {
             layouts: plan.layouts.clone(),
             functions: plan.functions.clone(),
             tail_packets: plan.tail_packets(),
+            frame_layouts: plan.plans.clone().into(),
             program,
             vm_functions,
         })
@@ -327,6 +322,9 @@ pub(super) struct NativeContext {
         unsafe extern "C" fn(*mut NativeContext, u32, *mut u8, u64, u64, u64, *mut *mut u8) -> u32,
     >,
     pub(super) fault_register: u32,
+    pub(super) callable_context: *mut std::ffi::c_void,
+    pub(super) callable: Option<unsafe extern "C" fn(*mut NativeContext, u32, u32, u32, u32, *const *const u8, *mut u8) -> u32>,
+    pub(super) residents: Option<unsafe extern "C" fn(*mut NativeContext, u32, *mut u8, *const u8, u64)>,
 }
 
 impl NativeContext {
@@ -347,6 +345,9 @@ impl NativeContext {
             allocation_context: std::ptr::null_mut(),
             allocate: None,
             fault_register: 0,
+            callable_context: std::ptr::null_mut(),
+            callable: None,
+            residents: None,
         }
     }
     pub(super) fn result(&self, status: u32) -> Result<(), LlvmError> {

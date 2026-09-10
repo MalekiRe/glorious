@@ -153,6 +153,7 @@ impl Body<'_, '_> {
                     self.declarations
                         .insert("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)".into());
                 }
+                self.line(format!("call void @g1_residents(ptr %ctx, i32 0, ptr {destination}, ptr {source}, i64 {bytes})"));
                 self.line(format!("call void @llvm.{intrinsic}.p0.p0.i64(ptr {destination}, ptr {source}, i64 {bytes}, i1 false)"));
                 self.line(format!("br label %{completed}"));
                 self.block(&completed);

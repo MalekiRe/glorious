@@ -35,6 +35,126 @@ fn compile(source: &str) -> LlvmIrProgram {
 }
 
 #[test]
+fn ordinary_native_callable_environments_execute_and_return_through_products() {
+    for source in [
+        "pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; reader() }",
+        "fn make(value:i64) -> () -> i64 { move (value) { value } } pub fn main() -> i64 { let reader = make(42); reader() }",
+        "fn keep<T>(value:T) -> T { value } pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; let (reader,) = keep((reader,)); reader() }",
+        "fn invoke<F>(task:F) -> i64 where F:Fn<(),Output=i64> { task() } fn relay<F>(task:F) -> i64 where F:Fn<(),Output=i64> { tail invoke(task) } pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; relay(reader) }",
+        "enum Flag { Yes, No } fn make(flag:Flag) -> () -> i64 { let value = 42; let pair = (20,22); handle flag { Flag::Yes => move (value) { value }, Flag::No => move (pair) { pair.0 + pair.1 } } } pub fn main() -> i64 { make(Flag::Yes)() + make(Flag::No)() - 42 }",
+    ] {
+        for optimization in [0, 2] {
+            let mut input = request(source);
+            input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+            let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap())
+                .unwrap_or_else(|error| panic!("{source}: {error:#?}"));
+            if optimization == 0 {
+                assert!(ir.function_keys().iter().any(|key| ir.function(*key).unwrap().captures != 0),
+                    "the native environment ABI must actually be exercised");
+            }
+            assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+            assert_eq!(grandiose_stage0::decode_and_verify_program(&ir.vm_program().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }
+                .unwrap_or_else(|error| panic!("{source}: {error:#?}")).0, 42);
+        }
+    }
+}
+
+#[test]
+fn ordinary_native_callable_loans_copy_and_capture_destruction_compose() {
+    for source in [
+        "fn make() -> () -> i64 { let mut seed = 41; move (seed) { seed = seed + 1; seed } } pub fn main() -> i64 { make()() }",
+        "fn make<'a>(value:&'a i64) -> () -> i64 { let inner = move (value) { *value }; move (inner) { inner() } } pub fn main() -> i64 { let value = 42; make(&value)() }",
+        "fn twice<F>(body:&F) -> i64 where for<'a> &'a F:Fn<(),Output=i64,Effects={}> { body() + body() } pub fn main() -> i64 { let value = 21; let reader = move (value) { value }; twice(&reader) }",
+        "pub fn main() -> i64 { let value = 21; let reader = move (value) { value }; let second = reader; reader() + second() }",
+        "pub fn main() -> i64 { let mut seed = 19; let mut task = move (seed) { seed = seed + 1; seed }; let first = (&mut task)(); let second = (&mut task)(); first + second + 1 }",
+        "pub fn main() -> i64 { let mut seed = 20; let mut first = move (seed) { seed = seed + 1; seed }; let mut second = first; (&mut first)() + (&mut second)() }",
+        "struct Probe<'a> { counter:&'a mut i64 } impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.counter = *self.counter + 1; } } pub fn main() -> i64 { let mut counter = 41; { let probe = Probe { counter:&mut counter }; let task = move (probe) { let observation = &probe; () }; () }; counter }",
+    ] {
+        for optimization in [0, 2] {
+            let mut input = request(source);
+            input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+            let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap())
+                .unwrap_or_else(|error| panic!("{source}: {error:#?}"));
+            assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+            assert_eq!(grandiose_stage0::decode_and_verify_program(&ir.vm_program().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }
+                .unwrap_or_else(|error| panic!("{source}: {error:#?}")).0, 42);
+        }
+    }
+}
+
+#[test]
+fn ordinary_native_callable_partial_captures_destroy_each_remaining_owner_once() {
+    let source = "struct Probe<'a> { counter:&'a mut i64 } impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.counter = *self.counter + 1; } }
+        pub fn main() -> i64 { let mut left = 20; let mut right = 20; {
+            let pair = (Probe { counter:&mut left }, Probe { counter:&mut right });
+            let task = move (pair) { let first = pair.0; () }; task()
+        }; left + right }";
+    for optimization in [0, 2] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("{source}: {error:#?}"));
+        assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&ir.vm_program().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }
+            .unwrap_or_else(|error| panic!("{source}: {error:#?}")).0, 42);
+    }
+}
+
+#[test]
+fn ordinary_native_callable_raw_heap_transport_preserves_its_environment() {
+    let source = "pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; unsafe { let restored = native_take(native_home(reader)); restored() } }";
+    for optimization in [0, 2] {
+        let mut input = memory_request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        assert_eq!(unsafe { ir.vm_program().run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { grandiose_stage0::decode_and_verify_program(&ir.vm_program().canonical_bytes()).unwrap()
+            .run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
+fn ordinary_native_callable_partial_raw_overwrite_cannot_retain_authority() {
+    let source = "pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; unsafe {
+        let pointer = native_home(reader); native_rewrite_prefix(pointer);
+        let restored = native_take(pointer); restored()
+    } }";
+    for optimization in [0, 2] {
+        let mut input = memory_request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        assert!(matches!(unsafe { ir.vm_program().run_i64_with_unsafe(Default::default()) },
+            Err(VmArtifactError::NativeMemory { message }) if message.contains("callable")));
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert!(matches!(unsafe { native.run_i64_profiled(Default::default()) },
+            Err(LlvmError::Runtime(VmArtifactError::NativeMemory { message })) if message.contains("callable")));
+    }
+}
+
+#[test]
+fn ordinary_native_callable_faults_and_activation_limits_remain_explicit() {
+    for optimization in [0, 2] {
+        let ir = compile("pub fn main() -> i64 { let value = 42; let task = move (value) { value / 0 }; task() }");
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert!(matches!(unsafe { native.run_i64_profiled(Default::default()) },
+            Err(LlvmError::Runtime(VmArtifactError::DivisionByZero))));
+        let limits = VmExecutionLimits { max_native_allocation_bytes: 1, ..Default::default() };
+        let failure = unsafe { native.run_i64_profiled(limits) };
+        assert!(matches!(failure,
+            Err(LlvmError::Runtime(VmArtifactError::NativeAbi { message }))
+                if message.contains("native activation")), "{failure:#?}");
+    }
+}
+
+#[test]
 fn erased_label_products_cross_native_and_mixed_forwarding_abis() {
     check_erased_label_product("let ((destination,), value) = native_keep(((@main,),42)); destination(value)");
 }
@@ -483,6 +603,13 @@ const MEMORY_HELPERS: &str = r#"
             let value = __g1_memory_read(__g1_memory_as_const(pointer));
             __g1_memory_deallocate(__g1_memory_cast<T,u8>(pointer), __g1_memory_size_of<T>(), __g1_memory_align_of<T>());
             value
+        }
+    }
+    pub unsafe fn native_rewrite_prefix<T>(pointer: *mut T) {
+        unsafe {
+            let word = __g1_memory_cast<T,u64>(pointer);
+            let bits = __g1_memory_read(__g1_memory_as_const(word));
+            __g1_memory_write(word, bits);
         }
     }
     pub unsafe fn native_grow(pointer: *mut i64) -> *mut i64 {

@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-09 from the current source and cache 109 verification below,
+Updated 2026-09-09 from the current source and cache 110 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,24 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 110 / native ABI 9 integrates ordinary callable environments into generated
+execution. Native construction, invocation, copying and destruction share the
+existing authenticated resident/capture storage, and the native/mixed runtime
+consumers use the emitter's retained frame layouts and initialization paths.
+All-native O0/O2 checks cover actual captures, factories/products, receiver loans,
+independent copies, partial-capture cleanup and raw-memory authority.
+
+The complete native target has 29 passes and one known failure. The original
+captured-callable native/mixed fixture now passes its first native execution but
+still rejects the mixed graph: capture restoration across generated host wrappers
+and VM callback entry remains unimplemented. The failure is preserved, not waived.
+Native owned handlers, borrowed/cross-frame resumptions, full helper-family entry,
+mandatory-tail activation fusion and guarded storage outcomes also remain open.
+No broad source-library/service sweep was repeated; its latest matrix is still
+cache 105 above. Exact evidence is in `implementation-progress.md`.
+
+The following cache 109 and earlier checkpoints are historical.
 
 Cache 109 / verifier 38 carries checked factory constructors and typed capture
 inputs through the shared invocation payload. Lifetime/place analysis, the

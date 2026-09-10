@@ -1,7 +1,23 @@
 
-; Shared C-layout execution limits. No per-instruction host or VM callbacks.
-%G1Context = type { i64, i64, i64, i64, i32, i32, i32, i32, i64, ptr, ptr, i64, ptr, ptr, i32 }
+; Shared C-layout execution limits and execution-domain resident operations.
+%G1Context = type { i64, i64, i64, i64, i32, i32, i32, i32, i64, ptr, ptr, i64, ptr, ptr, i32, ptr, ptr, ptr }
 declare void @llvm.memmove.p0.p0.i64(ptr, ptr, i64, i1)
+
+define internal void @g1_residents(ptr %ctx, i32 %op, ptr %dst, ptr %src, i64 %bytes) {
+entry:
+  %at = getelementptr %G1Context, ptr %ctx, i32 0, i32 17
+  %callback = load ptr, ptr %at, align 8
+  call void %callback(ptr %ctx, i32 %op, ptr %dst, ptr %src, i64 %bytes)
+  ret void
+}
+
+define internal i32 @g1_callable(ptr %ctx, i32 %op, i32 %function, i32 %pc, i32 %register, ptr %slots, ptr %result) {
+entry:
+  %at = getelementptr %G1Context, ptr %ctx, i32 0, i32 16
+  %callback = load ptr, ptr %at, align 8
+  %status = call i32 %callback(ptr %ctx, i32 %op, i32 %function, i32 %pc, i32 %register, ptr %slots, ptr %result)
+  ret i32 %status
+}
 
 define internal i32 @g1_fault(ptr %ctx, i32 %code) {
 entry:

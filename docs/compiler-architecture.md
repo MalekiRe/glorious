@@ -575,3 +575,40 @@ Borrowing exposes mutable storage and discards its exact snapshot proof while
 retaining possible control contents. General resumption transfer through borrowed
 storage or ordinary call frames remains unsupported, as does the native handler
 ABI. This repairs resident product composition, not those separate boundaries.
+
+## Generated ordinary callable environments
+
+The native emitter publishes and retains its checked frame layouts and logical
+initialization paths with the immutable code/ABI witness. Generated callable
+operations and the existing mixed bridge consume those exact plans; the mixed
+bridge no longer independently reconstructs its parameter/result layouts or
+initialization paths. Register and result layouts must support their complete
+resident shape before the native plan is published.
+
+Generated construction uses the existing execution-domain callable registry:
+bytes contain a verified definition identity and an authenticated environment
+token with an address lease, not a process function pointer or a zero placeholder.
+Captured inputs inhabit the same NativeHome/RuntimeCaptureEnvironment storage
+used by the VM. Invocation lends those homes and their initialization sidecars
+to the selected generated body, then restores the updated residents. Borrowed
+receivers retain that same environment; source Copy duplicates owned captures.
+Environment destruction dispatches to the checked generated destructor, including
+cleanup of partially consumed products. These callbacks implement storage and
+dispatch; they do not interpret the source body or invoke the bytecode engine.
+
+Byte transport carries address leases through arguments, results, aggregates,
+label edges, tail packets and raw memory. Partial overwrites revoke authority
+even when the replacement bits match. Native body/dispatcher scopes retire
+compiler-owned stack leases on ordinary, tail and error exits without treating
+lease release as source destruction. Scalar reads respect initialization flags;
+a moved callable receiver or incomplete source Copy cannot read uninitialized
+storage. Capture homes and the trampoline's bounded activation/sidecar storage
+share the existing memory and instruction budgets.
+
+This supplies ordinary captured-callable execution in an all-native closed
+graph. It does not yet supply mixed-engine capture loans: generated host wrappers
+and VM callback entry still need explicit capture restoration and initialization
+contracts. Those graphs remain rejected, including the preserved mixed captured-
+callable regression. Public external callback/result authority is unchanged.
+Native owned handlers, borrowed/cross-frame resumption transfer, full helper-family
+fusion and mandatory-tail activation fusion remain separate open obligations.

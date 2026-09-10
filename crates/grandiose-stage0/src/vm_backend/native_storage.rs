@@ -942,7 +942,7 @@ impl NativeHome {
         unsafe { self.initialize_native_with_holes(budget, None) }
     }
 
-    unsafe fn initialize_native_with_holes(
+    pub(super) unsafe fn initialize_native_with_holes(
         &self,
         budget: &mut ExecutionBudget,
         holes: Option<&BTreeSet<Vec<u32>>>,
