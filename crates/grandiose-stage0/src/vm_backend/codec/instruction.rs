@@ -1099,13 +1099,15 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             callee,
             arguments,
         }
+        | VmInstruction::CallPrepared { dst, callee, arguments }
         | VmInstruction::CallIndirect {
             dst,
             callee,
             arguments,
         } => {
             output.push(
-                if matches!(value, VmInstruction::CallIndirectOwned { .. }) {
+                if matches!(value, VmInstruction::CallPrepared { .. }) { 219 }
+                else if matches!(value, VmInstruction::CallIndirectOwned { .. }) {
                     206
                 } else {
                     30
@@ -1147,6 +1149,14 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&src.to_le_bytes());
             output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
             for field in fields { output.extend_from_slice(&field.to_le_bytes()); }
+        }
+        VmInstruction::PrepareInvocation { dst, src, fields, reborrow } => {
+            output.push(218);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&src.to_le_bytes());
+            output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
+            for field in fields { output.extend_from_slice(&field.to_le_bytes()); }
+            output.push(u8::from(*reborrow));
         }
         VmInstruction::Trap => output.push(43),
     }

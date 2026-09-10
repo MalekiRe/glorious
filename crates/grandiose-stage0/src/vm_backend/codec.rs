@@ -31,7 +31,8 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 // Schema 117 distinguishes optional one-shot cancellation and carries the
 // protected ownership partition for all owned handler policies.
 // Schema 118 carries checked replay-handle transport independently of Copy.
-pub const STAGE0_VM_SCHEMA: u32 = 118;
+// Schema 119 distinguishes receiver preparation and its consuming invocation.
+pub const STAGE0_VM_SCHEMA: u32 = 119;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;

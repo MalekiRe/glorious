@@ -307,6 +307,12 @@ impl OwnershipMir {
                             mode: *mode,
                         })?;
                     }
+                    OwnershipOperation::PrepareInvocation(place) => {
+                        if self.checked_place_type(place)? != self.checked_type(instruction.destination)?
+                            || self.checked_owner(instruction.destination)?.kind != OwnerKind::View {
+                            return Err(invalid("invocation receiver must be a same-typed non-owning view"));
+                        }
+                    }
                     OwnershipOperation::MovePlace(place) => {
                         self.checked_place_type(place)?;
                         if !self.writable_place(place)? {

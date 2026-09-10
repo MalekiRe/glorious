@@ -320,6 +320,62 @@ mod tests {
     }
 
     #[test]
+    fn prepared_field_receivers_preserve_order_without_transferring_the_owner() {
+        let function = helper(vec![declaration(),
+            VmInstruction::PrepareInvocation { dst: 2, src: 0, fields: vec![0], reborrow: false },
+            VmInstruction::CallPrepared { dst: 3, callee: 2, arguments: vec![1] },
+            VmInstruction::PrepareInvocation { dst: 5, src: 0, fields: vec![0], reborrow: false },
+            VmInstruction::CallPrepared { dst: 4, callee: 5, arguments: vec![3] },
+            VmInstruction::Return { value: 4 }],
+            vec![VmType::Tuple(vec![callable()]), VmType::I64, callable(), VmType::I64, VmType::I64, callable()], 2);
+        let contract = proof(function.clone()).expect("preparing a field must not move its owner");
+        assert!(matches!(contract.normal.0.as_slice(), [trace] if matches!(trace.as_slice(),
+            [Event::Invoke { input: first, .. }, Event::Invoke { input: second, .. }]
+            if first == second && first.input == 0 && first.fields == [0])));
+        let mut forged = function;
+        forged.instructions[1] = VmInstruction::TakeProjection { dst: 2, base: 0, fields: vec![0] };
+        assert!(proof(forged).is_none(), "moving a field must not forge invocation preparation");
+    }
+
+    #[test]
+    fn prepared_receivers_cannot_escape_copy_reprepare_or_use_ordinary_invocation() {
+        for invalid in [
+            VmInstruction::Copy { dst: 4, src: 2 },
+            VmInstruction::Move { dst: 4, src: 2 },
+            VmInstruction::PrepareInvocation { dst: 4, src: 2, fields: vec![], reborrow: false },
+            VmInstruction::CallIndirectOwned { dst: 3, callee: 2, arguments: vec![1] },
+            VmInstruction::DestroyCallable { dst: 5, value: 2 },
+        ] {
+            let function = helper(vec![declaration(),
+                VmInstruction::PrepareInvocation { dst: 2, src: 0, fields: vec![], reborrow: false },
+                invalid.clone(), VmInstruction::Return { value: 1 }],
+                vec![callable(), VmType::I64, callable(), VmType::I64, callable(), VmType::Unit], 2);
+            assert!(proof(function).is_none(), "accepted {invalid:?}");
+        }
+        let escaping = helper(vec![VmInstruction::DeclareResult { result: callable(), returns: true },
+            VmInstruction::PrepareInvocation { dst: 1, src: 0, fields: vec![], reborrow: false },
+            VmInstruction::Return { value: 1 }], vec![callable(), callable()], 1);
+        assert!(proof(escaping).is_none());
+        let reused = helper(vec![declaration(),
+            VmInstruction::PrepareInvocation { dst: 2, src: 0, fields: vec![], reborrow: false },
+            VmInstruction::CallPrepared { dst: 3, callee: 2, arguments: vec![1] },
+            VmInstruction::CallPrepared { dst: 4, callee: 2, arguments: vec![3] },
+            VmInstruction::Return { value: 4 }],
+            vec![callable(), VmType::I64, callable(), VmType::I64, VmType::I64], 2);
+        assert!(proof(reused).is_none(), "a prepared receiver is consumed once");
+    }
+
+    #[test]
+    fn receiver_preparation_cannot_turn_borrowed_storage_into_owned_fn_permission() {
+        let function = helper(vec![declaration(),
+            VmInstruction::PrepareInvocation { dst: 2, src: 0, fields: vec![], reborrow: true },
+            VmInstruction::CallPrepared { dst: 3, callee: 2, arguments: vec![1] },
+            VmInstruction::Return { value: 3 }],
+            vec![VmType::Reference { unique: false, referent: Box::new(callable()) }, VmType::I64, callable(), VmType::I64], 2);
+        assert!(verify_function_control(&function, false, false, &Default::default()).is_err());
+    }
+
+    #[test]
     fn source_copy_cannot_duplicate_owned_resumption_inputs() {
         let pair = VmType::Tuple(vec![VmType::I64, callable()]);
         for (ty, copied, result) in [

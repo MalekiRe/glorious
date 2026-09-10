@@ -38,6 +38,21 @@ fn strict_calls_are_ordered_before_their_aggregate() {
 }
 
 #[test]
+fn a_callable_field_prepares_its_receiver_before_strict_arguments() {
+    let mir = normalize("fn answer(value:i64) -> i64 { value }
+        fn argument() -> i64 { 42 }
+        pub fn main() -> i64 { let saved = (answer,); saved.0(argument()) }");
+    let instructions = mir.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
+    let (position, receiver) = instructions.iter().enumerate().find(|(_, instruction)|
+        matches!(instruction.operation, Op::PrepareInvocation)).unwrap();
+    assert!(matches!(receiver.operands.as_slice(), [EvaluationOperand::Place(EvaluationPlace::Field { index: 0, .. })]));
+    let calls = instructions[position + 1..].iter().filter(|instruction| matches!(instruction.operation, Op::Call(_))).collect::<Vec<_>>();
+    assert_eq!(calls.len(), 2);
+    assert!(matches!(&calls[1].operation, Op::Call(contract) if contract.prepared_receiver));
+    assert_eq!(calls[1].operands[0], EvaluationOperand::Value(receiver.value));
+}
+
+#[test]
 fn lazy_rhs_is_a_deferred_region() {
     let mir = normalize("fn probe() -> Bool { true } pub fn main() -> Bool { false and { probe() } }");
     let root = &mir.regions()[mir.entry().0 as usize];

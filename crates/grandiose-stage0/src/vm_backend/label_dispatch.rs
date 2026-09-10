@@ -172,7 +172,8 @@ pub(super) fn opaque_targets(function: &VmFunction, instruction: &VmInstruction,
     let tainted = |register: &u32| states.labels.get(*register as usize) == Some(&true);
     let may_rejoin = match instruction {
         VmInstruction::Call { arguments, .. } | VmInstruction::CallOwned { arguments, .. } => arguments.iter().any(tainted),
-        VmInstruction::CallIndirect { callee, arguments, .. } | VmInstruction::CallIndirectOwned { callee, arguments, .. } =>
+        VmInstruction::CallIndirect { callee, arguments, .. } | VmInstruction::CallIndirectOwned { callee, arguments, .. }
+        | VmInstruction::CallPrepared { callee, arguments, .. } =>
             tainted(callee) || arguments.iter().any(tainted),
         _ => false,
     };

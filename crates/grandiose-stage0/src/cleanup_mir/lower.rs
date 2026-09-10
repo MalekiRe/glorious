@@ -117,6 +117,7 @@ impl CleanupMir {
                     },
                     S::Read(value) => CleanupOperation::Read(*value),
                     S::ReadReference(value) => CleanupOperation::ReadReference(*value),
+                    S::PrepareInvocation(place) => CleanupOperation::PrepareInvocation(place.clone()),
                     S::ReadPlace { place, mode } => {
                         body.flag(place.clone())?;
                         CleanupOperation::ReadPlace {

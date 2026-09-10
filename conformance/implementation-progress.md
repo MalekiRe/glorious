@@ -5,6 +5,45 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 145: evaluated invocation receivers
+
+Evaluation, Control, Ownership, Specialized, Cleanup and Runtime MIR now preserve
+an explicit prepared receiver before argument evaluation. Its call contract and
+receiving validators distinguish that view from moving/copying the source owner.
+Symbolic direct targets still erase through their existing target product. The
+executable resident domain authenticates preparation and forbids all consumers
+except the single consuming invocation, including source Copy, relocation,
+re-preparation, ordinary indirect calls, disposal and escape. Borrowed-place
+preparation cannot invent owned Fn permission.
+
+The shared runtime retains the non-owning carrier role through suspension.
+Replay rebases its evaluated callable through the existing branch-wide identity
+map, sharing an outer environment and selecting a duplicated protected owner as
+appropriate. A native carrier is detached before installing the rebased view.
+Prepared views never independently copy a source environment.
+
+The focused helper-proof gate passes 14 tests and replay storage passes four,
+including plain/native prepared carriers with owned and outer environments.
+Evaluation MIR passes 14 tests and Ownership MIR passes six. Native borrowed
+capture composition and unique stored-callable invocation also pass. The former
+generic-field helper regression passes fresh/decoded VM, all-native and both
+mixed partitions at O0/O2. New positive source gates cover ordinary mutable
+capture fields and computed receiver-before-argument evaluation. The existing
+decoded missing-invocation mutation still rejects after targeting the new opcode.
+
+Two additional source regressions remain active and are explicitly excluded
+from the integration checkpoint: replacing a prepared receiver during its
+argument reaches destroyed native environment authority, while replaying an
+argument performance is rejected by cleanup's callable-owner quantity check.
+Neither failure is converted into a passing expectation or ignored test.
+The remaining 40 handler-integration cases pass the full execution matrix.
+
+Cache 145, verifier 47, bytecode 75/schema 119 and native ABI 18 change. Receiver
+access/cleanup integration, general borrowed resumption invocation, helper-local
+active delimiters, executable replay-count admission, foreign-control admission,
+mandatory-tail handler fusion and full zero-marshalling/performance acceptance
+remain open. This is a verified pipeline slice, not full native-handler acceptance.
+
 ## Cache 144: ordered helper capability histories
 
 The executable control verifier now carries finite ordered invocation/disposal

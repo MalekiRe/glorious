@@ -196,6 +196,7 @@ pub enum CleanupOperation {
     },
     Read(ControlValue),
     ReadReference(ControlValue),
+    PrepareInvocation(ControlPlace),
     ReadPlace {
         place: ControlPlace,
         mode: ValueTransfer,

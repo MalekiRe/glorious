@@ -11,6 +11,7 @@ pub(super) fn is_frame_transition(instruction: &VmInstruction) -> bool {
     matches!(instruction,
         VmInstruction::Call { .. } | VmInstruction::CallOwned { .. }
         | VmInstruction::CallIndirect { .. } | VmInstruction::CallIndirectOwned { .. }
+        | VmInstruction::CallPrepared { .. } | VmInstruction::PrepareInvocation { .. }
         | VmInstruction::TailCallOwned { .. } | VmInstruction::Return { .. }
         | VmInstruction::MakeCallable { .. } | VmInstruction::DestroyCallable { .. }
         | VmInstruction::MakeLabel { .. } | VmInstruction::Leave { .. }

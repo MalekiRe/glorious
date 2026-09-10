@@ -1860,3 +1860,39 @@ moving a generic callable field for its first call makes a second call fail at
 runtime. Its regression remains active. Complete borrowed invocation, executable
 replay-count admission, foreign-control admission, mandatory-tail handler fusion
 and zero-marshalling/performance acceptance remain open.
+
+## Evaluated invocation receiver views
+
+Evaluation MIR now prepares place-based callees before evaluating arguments.
+The frozen call contract identifies that receiver; Control MIR independently
+matches it to its producer and rejects other consumers. Preparation is not an
+ordinary read, source Copy, field move, or source `&F` coercion. Ownership,
+specialization and cleanup preserve a same-typed non-owning receiver operation.
+Static symbolic targets retain their existing erasure; runtime receivers use
+explicit preparation and consuming-call instructions. Ordinary expression
+caching cannot substitute a call-specific view for an owned Core value.
+
+The existing executable resident domain wraps prepared views, including views
+of ordinary callables. The verifier requires that wrapper at invocation and
+rejects copying, moving, aggregation, return, disposal and all other executable
+consumers. Borrowed storage cannot manufacture owned Fn permission. Invocation
+unwraps only the authenticated receiver, uses the existing ordered capability
+transition and retires the temporary before taking a resumption snapshot.
+Source owners and capture environments are not copied merely to call a field.
+
+Both engines transport this explicit carrier role in their shared register
+storage. A suspended prepared view is rebased using the existing branch-wide
+owner/environment map, not independently copied or retained as an outer owner.
+Native carrier homes detach when rebasing, while borrowed outer environments
+keep their identity. No second source analysis supplies this runtime role.
+
+Cache 145, verifier 47, bytecode 75/schema 119 and native ABI 18 record the
+boundary. The former generic-field replay failure passes across engines, as do
+ordinary mutable capture fields and strict computed-receiver evaluation. This
+does not complete receiver access/cleanup integration: replacing a receiver in
+its argument still exposes destroyed native environment authority, and an
+argument performance under replay exposes a remaining callable-owner quantity
+failure in cleanup lowering. Both source regressions remain active. General
+borrowed resumption invocation, executable replay-count admission, foreign-control
+admission, mandatory-tail handler fusion and full zero-marshalling/performance
+acceptance remain open.

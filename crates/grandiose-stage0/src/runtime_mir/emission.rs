@@ -34,7 +34,8 @@ pub(crate) fn emit_operation(
             *dst = transfer.result.expect("checked returning transfer ABI");
             *operands = arguments;
         }
-        MirInstruction::CallIndirectOwned {
+        MirInstruction::CallPrepared { dst, callee, arguments: operands }
+        | MirInstruction::CallIndirectOwned {
             dst,
             callee,
             arguments: operands,

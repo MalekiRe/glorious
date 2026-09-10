@@ -1096,6 +1096,8 @@ pub enum MirInstruction {
         src: MirLocal,
     },
     RetainResumption { dst: MirLocal, src: MirLocal, fields: Vec<u32> },
+    PrepareInvocation { dst: MirLocal, src: MirLocal, fields: Vec<u32>, reborrow: bool },
+    CallPrepared { dst: MirLocal, callee: MirLocal, arguments: Vec<MirLocal> },
     /// Mutate an existing addressable local after its value operand has been
     /// fully evaluated. Unlike `Copy`, this may overwrite initialized storage
     /// or reinitialize storage emptied by `Move`.
@@ -3173,6 +3175,7 @@ fn operation_input_mut(
         | MirInstruction::ResumeReturn { value, .. }
         | MirInstruction::Copy { src: value, .. }
         | MirInstruction::RetainResumption { src: value, .. }
+        | MirInstruction::PrepareInvocation { src: value, .. }
         | MirInstruction::Store { src: value, .. }
         | MirInstruction::Move { src: value, .. }
         | MirInstruction::Borrow { src: value, .. } => operation_input_slot(input, [value]),
@@ -3277,6 +3280,7 @@ fn operation_input_mut(
         MirInstruction::DerefStore { reference, src } => operation_input_slot(input, [reference, src]),
         MirInstruction::ShlI64 { value, count, .. } => operation_input_slot(input, [value, count]),
         MirInstruction::CallIndirectOwned { callee, arguments, .. }
+        | MirInstruction::CallPrepared { callee, arguments, .. }
         | MirInstruction::CallIndirect {
             callee, arguments, ..
         } => operation_input_slot(input, std::iter::once(callee).chain(arguments.iter_mut())),
@@ -3330,6 +3334,7 @@ fn operation_is_effectful(instruction: &MirInstruction) -> bool {
         | MirInstruction::ArrayPushMove { .. }
         | MirInstruction::CallOwned { .. }
         | MirInstruction::CallIndirectOwned { .. }
+        | MirInstruction::CallPrepared { .. }
         | MirInstruction::HostCallOwned { .. }
         | MirInstruction::Call { .. }
         | MirInstruction::CallIndirect { .. }
@@ -4068,6 +4073,7 @@ fn invalidates_alias_visible_constants(instruction: &MirInstruction) -> bool {
         | MirInstruction::ArrayPushMove { .. }
         | MirInstruction::CallOwned { .. }
         | MirInstruction::CallIndirectOwned { .. }
+        | MirInstruction::CallPrepared { .. }
         | MirInstruction::HostCallOwned { .. }
         | MirInstruction::Call { .. }
         | MirInstruction::CallIndirect { .. }
@@ -4243,6 +4249,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Perform { dst, .. }
         | MirInstruction::Copy { dst, .. }
         | MirInstruction::RetainResumption { dst, .. }
+        | MirInstruction::PrepareInvocation { dst, .. }
+        | MirInstruction::CallPrepared { dst, .. }
         | MirInstruction::Store { dst, .. }
         | MirInstruction::Move { dst, .. }
         | MirInstruction::Borrow { dst, .. }
@@ -5395,6 +5403,7 @@ impl MirFunction {
                     }
                     MirInstruction::CallOwned { arguments, .. }
                     | MirInstruction::CallIndirectOwned { arguments, .. }
+                    | MirInstruction::CallPrepared { arguments, .. }
                     | MirInstruction::HostCallOwned { arguments, .. } => {
                         let mut outgoing = BTreeSet::new();
                         for argument in arguments {
@@ -6523,7 +6532,7 @@ impl MirFunction {
         instruction: &MirInstruction,
         specialized_lifted_targets: &BTreeSet<DefKey>,
     ) -> Result<(), String> {
-        if let MirInstruction::CallIndirect { callee, .. } | MirInstruction::CallIndirectOwned { callee, .. } = instruction
+        if let MirInstruction::CallIndirect { callee, .. } | MirInstruction::CallIndirectOwned { callee, .. } | MirInstruction::CallPrepared { callee, .. } = instruction
             && matches!(
                 self.local_type(*callee)?,
                 Type::Callable {
@@ -6539,6 +6548,7 @@ impl MirFunction {
         }
         match instruction {
             MirInstruction::IsInitialized { dst, base, fields }
+            | MirInstruction::PrepareInvocation { dst, src: base, fields, .. }
             | MirInstruction::RetainResumption { dst, src: base, fields }
             | MirInstruction::TakeProjection { dst, base, fields } => {
                 if dst == base {
@@ -6548,7 +6558,12 @@ impl MirFunction {
                 if taking && fields.is_empty() {
                     return Err("MIR projection move requires a nonempty field path".into());
                 }
-                let mut candidates = vec![self.local_type(*base)?.clone()];
+                let source = self.local_type(*base)?;
+                let source = if matches!(instruction, MirInstruction::PrepareInvocation { reborrow: true, .. }) {
+                    let Type::Reference { referent, .. } = source else { return Err("invocation reborrow requires a reference".into()); };
+                    referent.as_ref()
+                } else { source };
+                let mut candidates = vec![source.clone()];
                 for index in fields {
                     let mut projected = Vec::new();
                     for ty in &candidates {
@@ -6573,10 +6588,16 @@ impl MirFunction {
                 }
                 let destination = self.local_type(*dst)?;
                 let retaining = matches!(instruction, MirInstruction::RetainResumption { .. });
+                let preparing = matches!(instruction, MirInstruction::PrepareInvocation { .. });
+                let mut receiver = destination;
+                while let Type::Reference { referent, .. } = receiver { receiver = referent; }
+                if preparing && !matches!(receiver, Type::Callable { .. }) {
+                    return Err("invocation preparation requires a callable receiver".into());
+                }
                 if retaining && !matches!(destination, Type::Callable { .. }) {
                     return Err("MIR resumption transport requires a callable destination".into());
                 }
-                if if taking || retaining { !candidates.contains(destination) }
+                if if taking || retaining || preparing { !candidates.contains(destination) }
                     else { destination != &Type::Scalar(crate::types::ScalarType::Bool) }
                 {
                     return Err("MIR storage projection destination type is inconsistent".into());
@@ -8004,6 +8025,8 @@ pub(crate) fn validate_instruction_semantic_types(instruction: &MirInstruction) 
         | MirInstruction::DestroyCallable { .. }
         | MirInstruction::Copy { .. }
         | MirInstruction::RetainResumption { .. }
+        | MirInstruction::PrepareInvocation { .. }
+        | MirInstruction::CallPrepared { .. }
         | MirInstruction::TakeProjection { .. }
         | MirInstruction::IsInitialized { .. }
         | MirInstruction::Store { .. }
@@ -8674,6 +8697,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::DestroyIf { local, flag } => vec![*local, *flag],
         MirInstruction::Drop { local } => vec![*local],
         MirInstruction::RetainResumption { dst, src, .. }
+        | MirInstruction::PrepareInvocation { dst, src, .. }
         | MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
@@ -8748,6 +8772,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             dst, destination, ..
         } => vec![*dst, *destination],
         MirInstruction::CallIndirectOwned { dst, callee, arguments }
+        | MirInstruction::CallPrepared { dst, callee, arguments }
         | MirInstruction::CallIndirect {
             dst,
             callee,

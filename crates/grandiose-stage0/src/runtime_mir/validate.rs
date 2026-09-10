@@ -1427,7 +1427,7 @@ impl RuntimeMir {
         instruction: &RuntimeOperation,
         specialized_lifted_targets: &BTreeSet<DefKey>,
     ) -> Result<(), String> {
-        if let RuntimeOperation::CallIndirect { callee, .. } = instruction
+        if let RuntimeOperation::CallIndirect { callee, .. } | RuntimeOperation::CallPrepared { callee, .. } = instruction
             && matches!(
                 self.local_type(*callee)?,
                 Type::Callable {
@@ -1443,6 +1443,7 @@ impl RuntimeMir {
         }
         match instruction {
             RuntimeOperation::IsInitialized { dst, base, fields }
+            | RuntimeOperation::PrepareInvocation { dst, src: base, fields, .. }
             | RuntimeOperation::RetainResumption { dst, src: base, fields }
             | RuntimeOperation::TakeProjection { dst, base, fields } => {
                 if dst == base {
@@ -1452,7 +1453,12 @@ impl RuntimeMir {
                 if taking && fields.is_empty() {
                     return Err("MIR projection move requires a nonempty field path".into());
                 }
-                let mut candidates = vec![self.local_type(*base)?.clone()];
+                let source = self.local_type(*base)?;
+                let source = if matches!(instruction, RuntimeOperation::PrepareInvocation { reborrow: true, .. }) {
+                    let Type::Reference { referent, .. } = source else { return Err("invocation reborrow requires a reference".into()); };
+                    referent.as_ref()
+                } else { source };
+                let mut candidates = vec![source.clone()];
                 for index in fields {
                     let mut projected = Vec::new();
                     for ty in &candidates {
@@ -1491,10 +1497,16 @@ impl RuntimeMir {
                 }
                 let destination = self.local_type(*dst)?;
                 let retaining = matches!(instruction, RuntimeOperation::RetainResumption { .. });
+                let preparing = matches!(instruction, RuntimeOperation::PrepareInvocation { .. });
+                let mut receiver = destination;
+                while let Type::Reference { referent, .. } = receiver { receiver = referent; }
+                if preparing && !matches!(receiver, Type::Callable { .. }) {
+                    return Err("invocation preparation requires a callable receiver".into());
+                }
                 if retaining && !matches!(destination, Type::Callable { .. }) {
                     return Err("MIR resumption transport requires a callable destination".into());
                 }
-                if if taking || retaining {
+                if if taking || retaining || preparing {
                     !candidates.contains(destination)
                 } else {
                     destination != &Type::Scalar(crate::types::ScalarType::Bool)

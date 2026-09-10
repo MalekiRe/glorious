@@ -315,6 +315,11 @@ impl CleanupMir {
                         dst,
                         reference: local(*reference),
                     },
+                    CleanupOperation::PrepareInvocation(place) => {
+                        if self.symbols.contains(&instruction.destination) { continue; }
+                        let (root, fields, reborrow) = place_path(place);
+                        RuntimeOperation::PrepareInvocation { dst, src: local(root), fields, reborrow }
+                    }
                     CleanupOperation::ReadPlace { place, mode } => {
                         let (root, fields, reborrow) = place_path(place);
                         if *mode == ValueTransfer::RetainResumption {
@@ -880,18 +885,22 @@ impl CleanupMir {
                             if arguments.len() != 1 {
                                 return None;
                             }
-                            instructions.push(RuntimeOperation::CallIndirect {
+                            instructions.push(if contract.prepared_receiver { RuntimeOperation::CallPrepared {
+                                dst: local(*result), callee: local(*callee), arguments,
+                            } } else { RuntimeOperation::CallIndirect {
                                 dst: local(*result),
                                 callee: local(*callee),
                                 arguments,
-                            });
+                            } });
                         }
                         SpecializedCallTarget::Indirect => {
-                            instructions.push(RuntimeOperation::CallIndirect {
+                            instructions.push(if contract.prepared_receiver { RuntimeOperation::CallPrepared {
+                                dst: local(*result), callee: local(*callee), arguments,
+                            } } else { RuntimeOperation::CallIndirect {
                                 dst: local(*result),
                                 callee: local(*callee),
                                 arguments,
-                            })
+                            } })
                         }
                         target => {
                             let (definition, generic_arguments, host_import) = match target {

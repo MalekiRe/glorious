@@ -223,6 +223,27 @@ impl ControlMir {
             return Err(invalid("missing entry block"));
         }
         self.validate_payload_acceptance()?;
+        let prepared = self.blocks.iter().flat_map(|block| &block.instructions)
+            .filter_map(|instruction| matches!(instruction.operation,
+                ControlOperation::Capability(ControlCapabilityOperation::PrepareInvocation(_)))
+                .then_some(instruction.destination)).collect::<BTreeSet<_>>();
+        for block in &self.blocks {
+            if block.instructions.iter().any(|instruction| instruction.operation.inputs().iter()
+                .any(|value| prepared.contains(value))) {
+                return Err(invalid("prepared receiver escapes its invocation"));
+            }
+            match &block.terminator {
+                ControlTerminator::Invoke { callee, arguments, contract, .. } => {
+                    if contract.prepared_receiver != prepared.contains(callee)
+                        || arguments.iter().any(|value| prepared.contains(value)) {
+                        return Err(invalid("invocation receiver preparation contract disagrees with producer"));
+                    }
+                }
+                terminator if terminator.inputs().iter().any(|value| prepared.contains(value)) =>
+                    return Err(invalid("prepared receiver escapes its invocation")),
+                _ => {}
+            }
+        }
         let mut definitions = BTreeSet::new();
         for label in &self.labels {
             if !valid_label_handler_prefix(label, &self.handlers) {
@@ -707,6 +728,7 @@ mod tests {
             result: ControlValue(6),
             contract: EvaluationCallContract {
                 mandatory_tail: false,
+                prepared_receiver: false,
                 reference_contract: crate::CallReferenceOrigin::None,
                 reference_origin: crate::CallReferenceOrigin::None,
                 reference_shape: crate::CallReferenceShape::None,

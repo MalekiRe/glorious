@@ -189,6 +189,7 @@ impl OwnershipMir {
                     }
                     if let OwnershipOperation::Transfer { value: source, .. }
                     | OwnershipOperation::Read(source)
+                    | OwnershipOperation::PrepareInvocation(ControlPlace::Local(source) | ControlPlace::Temporary(source))
                     | OwnershipOperation::ExitScope { result: source, .. } =
                         instruction.operation
                         && let Some(function) = functions.get(&source).cloned()
@@ -203,6 +204,7 @@ impl OwnershipMir {
                     }
                     if let OwnershipOperation::Transfer { value: source, .. }
                     | OwnershipOperation::Read(source)
+                    | OwnershipOperation::PrepareInvocation(ControlPlace::Local(source) | ControlPlace::Temporary(source))
                     | OwnershipOperation::ExitScope { result: source, .. } =
                         instruction.operation
                         && let Some(method) = trait_methods.get(&source).cloned()
@@ -226,6 +228,7 @@ impl OwnershipMir {
             for instruction in &block.instructions {
                 match &instruction.operation {
                     OwnershipOperation::Read(_)
+                    | OwnershipOperation::PrepareInvocation(_)
                     | OwnershipOperation::Transfer { .. }
                     | OwnershipOperation::ExitScope { .. }
                         if functions.contains_key(&instruction.destination)
@@ -444,6 +447,11 @@ impl OwnershipMir {
                         dst,
                         reference: local(*reference),
                     },
+                    OwnershipOperation::PrepareInvocation(place) => {
+                        if symbols.contains(&instruction.destination) { continue; }
+                        let (root, fields, reborrow) = place_path(place);
+                        MirInstruction::PrepareInvocation { dst, src: local(root), fields, reborrow }
+                    }
                     OwnershipOperation::ReadPlace { place, mode } => {
                         let (root, fields, reborrow) = place_path(place);
                         if *mode == ValueTransfer::RetainResumption {
@@ -974,6 +982,7 @@ impl OwnershipMir {
                     arguments,
                     result,
                     continuation,
+                    contract,
                     ..
                 } => {
                     let arguments = arguments
@@ -1028,11 +1037,13 @@ impl OwnershipMir {
                             arguments,
                         });
                     } else {
-                        instructions.push(MirInstruction::CallIndirect {
+                        instructions.push(if contract.prepared_receiver { MirInstruction::CallPrepared {
+                            dst: local(*result), callee: local(*callee), arguments,
+                        } } else { MirInstruction::CallIndirect {
                             dst: local(*result),
                             callee: local(*callee),
                             arguments,
-                        });
+                        } });
                     }
                     match continuation {
                         Some(target) => MirTerminator::Goto {

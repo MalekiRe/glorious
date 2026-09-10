@@ -177,6 +177,56 @@ fn ordered_replay_helpers_compose_with_forwarded_product_aliases() {
 }
 
 #[test]
+fn ordinary_generic_field_invocation_preserves_the_capture_environment() {
+    candidate("fn twice<F>(task:F) -> i64 where F:Fn<(),Output=i64,Effects={}> {
+            let saved = (task,); saved.0() + saved.0()
+        }
+        pub fn main() -> i64 {
+            let mut count = 20;
+            let task = () -> i64 { count = count + 1; count };
+            twice(task) - 1
+        }");
+}
+
+#[test]
+fn computed_field_receiver_is_evaluated_once_before_its_arguments() {
+    candidate("fn answer(value:i64) -> i64 { value }
+        fn receiver(count:&mut i64) -> ((i64)->i64,) {
+            *count = *count * 10 + 1; (answer,)
+        }
+        fn argument(count:&mut i64) -> i64 { *count = *count * 10 + 2; 30 }
+        pub fn main() -> i64 {
+            let mut count = 0;
+            let result = receiver(&mut count).0(argument(&mut count));
+            result + count
+        }");
+}
+
+#[test]
+fn prepared_receiver_keeps_the_value_selected_before_argument_mutation() {
+    candidate("fn first(value:i64) -> i64 { 42 }
+        fn second(value:i64) -> i64 { 0 }
+        pub fn main() -> i64 {
+            let mut callback: (i64)->i64 = first;
+            let replacement: (i64)->i64 = second;
+            callback({ callback = replacement; 0 })
+        }");
+}
+
+#[test]
+fn field_receiver_prepared_before_an_argument_performance_survives_replay() {
+    candidate("effect Ask { [2,2] ask() -> i64; }
+        fn answer(value:i64) -> i64 { value }
+        pub fn main() -> i64 {
+            handle {
+                let callback: (i64)->i64 = answer;
+                let saved = (callback,);
+                saved.0(Ask::ask())
+            } { Ask::ask() with k => k(19) + k(23) }
+        }");
+}
+
+#[test]
 fn ordered_replay_helpers_compose_with_forwarded_handles() {
     candidate("effect Ask { [2,2] ask() -> i64; }
         fn keep<T>(value:T) -> T { value }
@@ -329,10 +379,10 @@ fn decoded_helper_mutation_cannot_forge_a_guaranteed_resumption() {
         }
         pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => apply(k,0) } }");
     let helper = program.functions.values_mut().find(|function|
-        function.parameters == 2 && function.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }))).unwrap();
-    assert_eq!(helper.instructions.iter().filter(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })).count(), 2);
-    let call = helper.instructions.iter_mut().find(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })).unwrap();
-    let VmInstruction::CallIndirectOwned { dst, .. } = call else { unreachable!() };
+        function.parameters == 2 && function.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::CallPrepared { .. }))).unwrap();
+    assert_eq!(helper.instructions.iter().filter(|instruction| matches!(instruction, VmInstruction::CallPrepared { .. })).count(), 2);
+    let call = helper.instructions.iter_mut().find(|instruction| matches!(instruction, VmInstruction::CallPrepared { .. })).unwrap();
+    let VmInstruction::CallPrepared { dst, .. } = call else { unreachable!() };
     *call = VmInstruction::ConstI64 { dst:*dst, value:42 };
     program.fingerprint = program.computed_fingerprint();
     assert!(verify_vm_program(program.clone()).is_err(), "removing a helper invocation must leave the handler suspended");

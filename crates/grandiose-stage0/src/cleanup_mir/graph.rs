@@ -94,6 +94,7 @@ impl CleanupMir {
             // Place layout, transfer permission and sealed capture contracts
             // are checked by the ownership validator, not inferred here.
             CleanupOperation::ReadPlace { place, .. }
+            | CleanupOperation::PrepareInvocation(place)
             | CleanupOperation::MovePlace(place)
             | CleanupOperation::Project { place, .. } => self.place_type(place)? == *ty,
             CleanupOperation::Borrow(_) | CleanupOperation::Capture { .. } => true,
@@ -440,7 +441,7 @@ impl CleanupOperation {
             Self::Transfer { value, .. } | Self::Read(value) | Self::ReadReference(value) => {
                 vec![*value]
             }
-            Self::ReadPlace { place, .. } | Self::MovePlace(place) => vec![place.root()],
+            Self::ReadPlace { place, .. } | Self::MovePlace(place) | Self::PrepareInvocation(place) => vec![place.root()],
             Self::Project { place, base, .. } => vec![place.root(), *base],
             Self::Borrow(id) => loans
                 .get(id.0 as usize)

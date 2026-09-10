@@ -16,7 +16,7 @@ impl OwnershipOperation {
             Self::Transfer { value, .. } | Self::Read(value) | Self::ReadReference(value) => {
                 vec![*value]
             }
-            Self::ReadPlace { place, .. } | Self::MovePlace(place) => vec![place.root()],
+            Self::ReadPlace { place, .. } | Self::MovePlace(place) | Self::PrepareInvocation(place) => vec![place.root()],
             Self::Project { place, base, .. } => vec![*base, place.root()],
             Self::Borrow(id) => loans
                 .get(id.0 as usize)
@@ -120,6 +120,7 @@ impl OwnershipMir {
             // Place layout, transfer permission and sealed capture contracts
             // are checked by the ownership validator, not inferred here.
             OwnershipOperation::ReadPlace { place, .. }
+            | OwnershipOperation::PrepareInvocation(place)
             | OwnershipOperation::MovePlace(place)
             | OwnershipOperation::Project { place, .. } => self.checked_place_type(place)? == ty,
             OwnershipOperation::Borrow(_) | OwnershipOperation::Capture { .. } => true,

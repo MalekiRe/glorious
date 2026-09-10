@@ -64,6 +64,7 @@ pub enum SpecializedOperation {
     },
     Read(ControlValue),
     ReadReference(ControlValue),
+    PrepareInvocation(ControlPlace),
     ReadPlace {
         place: ControlPlace,
         mode: ValueTransfer,
@@ -240,7 +241,7 @@ impl SpecializedOperation {
             Self::Transfer { value, .. } | Self::Read(value) | Self::ReadReference(value) => {
                 vec![*value]
             }
-            Self::ReadPlace { place, .. } | Self::MovePlace(place) => vec![place.root()],
+            Self::ReadPlace { place, .. } | Self::MovePlace(place) | Self::PrepareInvocation(place) => vec![place.root()],
             Self::Project { place, base, .. } => vec![place.root(), *base],
             Self::Borrow(id) => loans
                 .get(id.0 as usize)

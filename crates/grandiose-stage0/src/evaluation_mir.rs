@@ -102,6 +102,8 @@ pub enum EvaluationOperand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EvaluationCallContract {
     pub mandatory_tail: bool,
+    /// The receiver was evaluated as an invocation-only view before arguments.
+    pub prepared_receiver: bool,
     pub reference_contract: CallReferenceOrigin,
     pub reference_origin: CallReferenceOrigin,
     pub reference_shape: CallReferenceShape,
@@ -135,6 +137,9 @@ pub struct EvaluationCompletionArm {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvaluationOperation {
+    /// Evaluate the callable resident without source Copy or ownership transfer.
+    /// Only the associated invocation may consume this temporary view.
+    PrepareInvocation,
     Literal(String),
     ConstValue(GenericArgument),
     ReadLocal(String),
@@ -521,7 +526,7 @@ impl EvaluationInstruction {
             Op::ReleaseAvailable => values && arity == 1 && self.ty == Type::Unit,
             Op::Transfer(_) => values && arity == 1 && self.ty == Type::Never,
             Op::Move => arity == 1,
-            Op::Borrow { .. } => matches!(&self.operands[..], [EvaluationOperand::Place(_)]),
+            Op::Borrow { .. } | Op::PrepareInvocation => matches!(&self.operands[..], [EvaluationOperand::Place(_)]),
             Op::Assign => matches!(
                 &self.operands[..],
                 [EvaluationOperand::Value(_), EvaluationOperand::Place(_)]
@@ -891,6 +896,7 @@ impl Builder<'_> {
         if ty == Type::Never || matches!(&operation, EvaluationOperation::Call(contract) if contract.mandatory_tail) {
             sequence.terminal = Some(value);
         }
+        let caches_expression = !matches!(operation, EvaluationOperation::PrepareInvocation);
         sequence.instructions.push(EvaluationInstruction {
             value,
             source,
@@ -899,7 +905,10 @@ impl Builder<'_> {
             operation,
             operands,
         });
-        sequence.values.insert(source, value);
+        // A prepared receiver belongs to this call, not to the Core value's
+        // ordinary expression cache. Shared Core operands can still be read
+        // or transferred normally at another occurrence.
+        if caches_expression { sequence.values.insert(source, value); }
         Ok(value)
     }
 
@@ -1146,7 +1155,17 @@ impl Builder<'_> {
                 {
                     ty = Type::Never;
                 }
-                operands = self.values(&[callee], sequence)?;
+                let direct_label = !mandatory_tail && arguments.len() == 1
+                    && self.facts.and_then(|facts| facts.invocation(source))
+                        .and_then(|invocation| invocation.direct_label()).is_some();
+                let prepared_receiver = !direct_label && matches!(self.body.expression(callee).kind,
+                    CoreKind::Local(_) | CoreKind::Resumption { .. } | CoreKind::Field { .. } | CoreKind::Deref(_));
+                operands = if prepared_receiver {
+                    let place = self.borrowed_place(callee, sequence)?;
+                    let value = self.emit(callee, self.body.expression(callee).ty.clone(),
+                        Op::PrepareInvocation, vec![EvaluationOperand::Place(place)], sequence)?;
+                    vec![EvaluationOperand::Value(value)]
+                } else { self.values(&[callee], sequence)? };
                 if sequence.terminal.is_none() {
                     operands.extend(self.values(&arguments, sequence)?);
                 }
@@ -1163,6 +1182,7 @@ impl Builder<'_> {
                 } else {
                     Op::Call(EvaluationCallContract {
                         mandatory_tail,
+                        prepared_receiver,
                         reference_contract,
                         reference_origin,
                         reference_shape,
@@ -1191,6 +1211,7 @@ impl Builder<'_> {
                     terminal,
                     contract: EvaluationCallContract {
                         mandatory_tail: false,
+                        prepared_receiver: false,
                         reference_contract,
                         reference_origin,
                         reference_shape,

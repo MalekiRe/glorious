@@ -145,6 +145,7 @@ pub enum ControlCapabilityOperation {
     Borrow { place: ControlPlace, unique: bool },
     ReadReference(ControlValue),
     ReadPlace(ControlPlace),
+    PrepareInvocation(ControlPlace),
     Move(ControlPlace),
     Assign { place: ControlPlace, value: ControlValue },
     Label(ControlLabelId),
@@ -157,7 +158,7 @@ impl ControlCapabilityOperation {
             Self::Record { fields, .. } | Self::Enum { fields, .. } => fields.clone(),
             Self::Project { base, .. } => vec![*base],
             Self::Test { subject, .. } => vec![*subject],
-            Self::Borrow { place, .. } | Self::Move(place) | Self::ReadPlace(place) => vec![place.root()],
+            Self::Borrow { place, .. } | Self::Move(place) | Self::ReadPlace(place) | Self::PrepareInvocation(place) => vec![place.root()],
             Self::ReadReference(value) => vec![*value],
             Self::Assign { place, value } => vec![*value, place.root()],
             Self::Closure { captures, .. } => captures.clone(),
@@ -171,7 +172,7 @@ impl ControlCapabilityOperation {
                 if (*mutability == Mutability::Unique) == *unique && referent.as_ref() == place.ty(body)?
                     && crate::types::label::payload(referent).is_none()),
             Self::ReadReference(value) => matches!(body.ty(*value)?, Type::Reference { referent, .. } if referent.as_ref() == result),
-            Self::Move(place) | Self::ReadPlace(place) => place.ty(body)? == result,
+            Self::Move(place) | Self::ReadPlace(place) | Self::PrepareInvocation(place) => place.ty(body)? == result,
             // Source/Core establish the directional outlives obligation.
             // A stored value crosses the same representation boundary as a
             // forwarded value or call input; regions are not stored operands.
@@ -383,6 +384,12 @@ impl Builder<'_> {
                 Op::Assign { value: operands[0], place: self.place(place, names)? }
             },
             EvalOp::Deref => Op::ReadReference(operands[0]),
+            EvalOp::PrepareInvocation => {
+                let EvaluationOperand::Place(place) = &instruction.operands[0] else {
+                    return Err(ControlError::Invalid("invocation receiver lacks place".into()));
+                };
+                Op::PrepareInvocation(self.place(place, names)?)
+            }
             EvalOp::Borrow { unique } => {
                 let EvaluationOperand::Place(place) = &instruction.operands[0] else { return Err(ControlError::Invalid("borrow lacks place".into())); };
                 let lowered = self.place(place, names)?;

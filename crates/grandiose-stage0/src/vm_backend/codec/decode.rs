@@ -942,7 +942,7 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 reference: self.u32()?,
             }),
-            opcode @ (195 | 196 | 217) => {
+            opcode @ (195 | 196 | 217 | 218) => {
                 let dst = self.u32()?;
                 let base = self.u32()?;
                 let count = self.count("storage field projections", MAX_DECODE_TYPE_DEPTH)?;
@@ -950,7 +950,9 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     fields.push(self.u32()?);
                 }
-                Ok(if opcode == 217 {
+                Ok(if opcode == 218 {
+                    VmInstruction::PrepareInvocation { dst, src: base, fields, reborrow: self.boolean()? }
+                } else if opcode == 217 {
                     VmInstruction::RetainResumption { dst, src: base, fields }
                 } else if opcode == 195 {
                     VmInstruction::TakeProjection { dst, base, fields }
@@ -1888,7 +1890,7 @@ impl<'a> Decoder<'a> {
                 target: self.u32()?,
                 destination: self.u32()?,
             }),
-            opcode @ (30 | 206) => {
+            opcode @ (30 | 206 | 219) => {
                 let dst = self.u32()?;
                 let callee = self.u32()?;
                 let count = self.count("indirect-call arguments", MAX_DECODE_REGISTERS)?;
@@ -1896,6 +1898,7 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     arguments.push(self.u32()?);
                 }
+                if opcode == 219 { return Ok(VmInstruction::CallPrepared { dst, callee, arguments }); }
                 let instruction = VmInstruction::CallIndirect {
                     dst,
                     callee,

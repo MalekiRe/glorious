@@ -919,6 +919,8 @@ pub enum VmInstruction {
         src: u32,
     },
     RetainResumption { dst: u32, src: u32, fields: Vec<u32> },
+    PrepareInvocation { dst: u32, src: u32, fields: Vec<u32>, reborrow: bool },
+    CallPrepared { dst: u32, callee: u32, arguments: Vec<u32> },
     /// Start an addressable source-storage slot. `binding` is the dense
     /// frozen MIR provenance identity retained for independently decoded
     /// artifacts; it is not a register-derived lookup.
@@ -1300,6 +1302,7 @@ impl VmInstruction {
     fn consumed_arguments(&self) -> Option<&[u32]> {
         match self {
             Self::CallOwned { arguments, .. } | Self::CallIndirectOwned { arguments, .. }
+            | Self::CallPrepared { arguments, .. }
             | Self::HostCallOwned { arguments, .. } | Self::TailCallOwned { arguments, .. } => Some(arguments),
             Self::StoreOwned { src, .. } => Some(std::slice::from_ref(src)),
             Self::MakeTupleOwned { fields, .. } | Self::MakeArrayOwned { fields, .. }
@@ -5536,6 +5539,12 @@ pub(crate) fn lower_instruction(
         MirInstruction::RetainResumption { dst, src, fields } => VmInstruction::RetainResumption {
             dst: dst.0, src: src.0, fields: fields.clone(),
         },
+        MirInstruction::PrepareInvocation { dst, src, fields, reborrow } => VmInstruction::PrepareInvocation {
+            dst: dst.0, src: src.0, fields: fields.clone(), reborrow: *reborrow,
+        },
+        MirInstruction::CallPrepared { dst, callee, arguments } => VmInstruction::CallPrepared {
+            dst: dst.0, callee: callee.0, arguments: arguments.iter().map(|value| value.0).collect(),
+        },
         MirInstruction::Move { dst, src } => VmInstruction::Move {
             dst: dst.0,
             src: src.0,
@@ -6655,6 +6664,27 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
         states.last_instruction = Some(pc);
         let mut advances = true;
         let instruction = &function.instructions[pc];
+        // Prepared views have exactly one executable consumer. In particular
+        // byte relocation or aggregate construction may not turn the view into
+        // an owner (or conceal its lifetime from continuation transport).
+        let mut invalid_prepared_use = false;
+        native_storage::visit_locals(instruction, |local| {
+            if matches!(states.resumptions.get(local as usize), Some(ResumptionValue::Prepared(_)))
+                && !matches!(instruction, VmInstruction::CallPrepared { callee, dst, arguments }
+                    if *callee == local && dst != callee && !arguments.contains(callee)) {
+                invalid_prepared_use = true;
+            }
+        });
+        if invalid_prepared_use { return Err(VmArtifactError::HandlerResumeUnavailable); }
+        let prepared_receiver = if let VmInstruction::CallPrepared { callee, dst, arguments } = instruction {
+            read(&states, *callee)?;
+            if callee == dst || arguments.contains(callee) { return Err(VmArtifactError::HandlerResumeUnavailable); }
+            let ResumptionValue::Prepared(value) = &states.resumptions[*callee as usize] else {
+                return Err(VmArtifactError::HandlerResumeUnavailable);
+            };
+            states.resumptions[*callee as usize] = value.as_ref().clone();
+            Some(*callee)
+        } else { None };
         tail_provenance::expose_storage(instruction, &mut states.address_exposed);
         if let Some((target, transferred)) = label_dispatch::transfer(function, instruction, &states, &transfer_proofs.label_dispatches)? {
             propagate_state(&mut incoming, &mut worklist, target, &transferred)?;
@@ -6678,6 +6708,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
         let captured_call = match instruction {
             VmInstruction::CallIndirect { dst, callee, arguments }
             | VmInstruction::CallIndirectOwned { dst, callee, arguments }
+            | VmInstruction::CallPrepared { dst, callee, arguments }
                 if states.resumptions.get(*callee as usize).and_then(ResumptionValue::frame).is_some() => {
                 read(&states, *callee)?;
                 let [value] = arguments.as_slice() else { return Err(VmArtifactError::CallArity { expected: 1, found: arguments.len() as u32 }); };
@@ -6695,13 +6726,15 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
             _ => None,
         };
         let resumption_index = captured_call.as_ref().map(|(_, index)| *index);
+        if captured_call.is_some() && let Some(callee) = prepared_receiver { states.retire_value(callee); }
         let resumption_consumes = instruction.consumed_arguments().is_some();
         let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
         if function.captures != 0 && callable_access::is_execution_boundary(instruction) {
             captures_intact_at_boundaries &= states.registers.iter().take(function.captures as usize).all(|state| *state == Some(true));
         }
         if let VmInstruction::Call { dst, arguments, .. } | VmInstruction::CallOwned { dst, arguments, .. }
-            | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. } = instruction {
+            | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. }
+            | VmInstruction::CallPrepared { dst, arguments, .. } = instruction {
             seed_terminal_call_handlers(function, pc, *dst, arguments, resumption_consumes, &states, &mut incoming, &mut worklist)?;
         }
         // The non-consuming constructor opcodes copy their input carriers.
@@ -7477,6 +7510,38 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 expect_type(function, *dst, VmType::Bool)?;
                 write(&mut states, *dst)?;
+            }
+            VmInstruction::PrepareInvocation { dst, src, fields, reborrow } => {
+                read(&states, *src)?;
+                if dst == src { return Err(VmArtifactError::HandlerResumeUnavailable); }
+                let source = register_type(function, *src)?;
+                let source = if *reborrow {
+                    let VmType::Reference { referent, .. } = &source else { return Err(VmArtifactError::NotCallable { register: *src }); };
+                    referent.as_ref()
+                } else { &source };
+                let destination = register_type(function, *dst)?;
+                if destination.callable_receiver().is_none()
+                    || !projected_storage_types(function, source, fields)?.contains(&destination) {
+                    return Err(VmArtifactError::NotCallable { register: *src });
+                }
+                if *reborrow {
+                    let VmType::Reference { unique, .. } = register_type(function, *src)? else { unreachable!() };
+                    let permitted = match &destination {
+                        VmType::Callable { shared_receiver, unique_receiver, .. } =>
+                            if unique { *unique_receiver } else { *shared_receiver },
+                        VmType::Reference { unique: child, .. } => unique || !*child,
+                        _ => false,
+                    };
+                    if !permitted { return Err(VmArtifactError::NotCallable { register: *src }); }
+                }
+                let value = states.resumptions[*src as usize].project(fields);
+                if !matches!(value, ResumptionValue::None | ResumptionValue::Input(_) | ResumptionValue::Token(_)) {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let labels = states.labels[*src as usize];
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = labels;
+                states.resumptions[*dst as usize] = ResumptionValue::Prepared(Arc::new(value));
             }
             VmInstruction::RetainResumption { dst, src, fields } => {
                 read(&states, *src)?;
@@ -8918,6 +8983,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 states.resumptions[*dst as usize] = ResumptionValue::None;
             }
             VmInstruction::CallIndirectOwned { dst, callee, arguments }
+            | VmInstruction::CallPrepared { dst, callee, arguments }
             | VmInstruction::CallIndirect {
                 dst,
                 callee,
@@ -9168,6 +9234,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 states.retire_value(argument);
             }
         }
+        if let Some(callee) = prepared_receiver { states.retire_value(callee); }
         if advances {
             propagate_state(&mut incoming, &mut worklist, (pc + 1) as u32, &states)?;
         }
@@ -10251,6 +10318,31 @@ fn retain_resumption(registers: &RuntimeRegisters, handlers: &[RuntimeHandlerFra
     Ok(value)
 }
 
+/// Snapshot the evaluated receiver, retaining its environment identity. This
+/// is neither source Copy nor a borrow of the source slot holding the value.
+fn prepare_invocation(registers: &RuntimeRegisters, callers: &[RuntimeProgramCaller], src: u32,
+    fields: &[u32], reborrow: bool, budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError>
+{
+    let value = registers.values.get(src as usize).and_then(Option::as_ref)
+        .ok_or(VmArtifactError::UseAfterMove { register: src })?;
+    if !reborrow {
+        return match value {
+            VmValue::Resident(home) => home.load(fields, budget),
+            value => project_reference(value, fields),
+        };
+    }
+    let value = match value {
+        VmValue::Resident(home) => home.load(&[], budget)?,
+        value => value.clone(),
+    };
+    let VmValue::Reference { target, fields: prefix, .. } = value else {
+        return Err(VmArtifactError::NotCallable { register: src });
+    };
+    let mut prefix = prefix.to_vec();
+    prefix.extend_from_slice(fields);
+    load_reference_target(registers, callers, &target, &prefix, budget)
+}
+
 #[derive(Clone, Debug)]
 enum ReferenceTarget {
     /// Checked source storage with a stable address and tracked initialization.
@@ -10296,6 +10388,10 @@ struct RuntimeHandlerFrame {
 #[derive(Clone, Default)]
 struct RuntimeRegisters {
     values: Vec<Option<VmValue>>,
+    /// Non-owning, invocation-only carriers produced by PrepareInvocation.
+    /// The verifier forbids every other transport. Snapshots retain this
+    /// storage role so replay rebases the view, never source-copies its owner.
+    prepared_receivers: BTreeSet<u32>,
     source_storage: BTreeMap<u32, u64>,
     native_plan: Option<Arc<native_storage::NativeFramePlan>>,
     native_homes: BTreeMap<u32, Arc<native_storage::NativeHome>>,
@@ -10377,6 +10473,7 @@ impl RuntimeRegisters {
 
     fn instruction_result(&mut self, pc: usize) {
         if let Some(local) = self.native_plan.as_ref().and_then(|plan| plan.results[pc]) {
+            self.prepared_receivers.remove(&local);
             self.native_write(local);
         }
     }
@@ -10534,6 +10631,7 @@ impl RuntimeRegisters {
     /// This disarms ownership without running source destruction a second time.
     fn retire_call_arguments(&mut self, arguments: &[u32]) {
         for &argument in arguments {
+            self.prepared_receivers.remove(&argument);
             self.clear_value(argument);
         }
     }
@@ -12532,7 +12630,8 @@ fn returning_resumption_call(
 ) -> Result<Option<(VmInstruction, u64)>, VmArtifactError> {
     let (dst, callee, arguments) = match instruction {
         VmInstruction::CallIndirect { dst, callee, arguments }
-        | VmInstruction::CallIndirectOwned { dst, callee, arguments } => (*dst, *callee, arguments),
+        | VmInstruction::CallIndirectOwned { dst, callee, arguments }
+        | VmInstruction::CallPrepared { dst, callee, arguments } => (*dst, *callee, arguments),
         _ => return Ok(None),
     };
     let VmValue::Resumption { frame, .. } = registers.copy_value(callee, budget)? else { return Ok(None); };
@@ -13121,6 +13220,9 @@ fn execute_in_float_profile(
             return Err(VmArtifactError::HandlerStateMismatch);
         }
         let captured_call = returning_resumption_call(&instruction, &registers, budget)?;
+        if captured_call.is_some() && let VmInstruction::CallPrepared { callee, .. } = &instruction {
+            registers.retire_call_arguments(&[*callee]);
+        }
         let resumption_index = captured_call.as_ref().map(|(_, id)| handlers.iter().rposition(|frame| frame.id == *id)
             .ok_or(VmArtifactError::HandlerResumeUnavailable)).transpose()?;
         let instruction = captured_call.map_or(instruction, |(instruction, _)| instruction);
@@ -14213,6 +14315,10 @@ fn execute_in_float_profile(
                 pc = target;
                 continue;
             }
+            VmInstruction::PrepareInvocation { dst, src, fields, reborrow } => {
+                registers[dst as usize] = Some(prepare_invocation(&registers, &[], src, &fields, reborrow, budget)?);
+                registers.prepared_receivers.insert(dst);
+            }
             VmInstruction::RetainResumption { dst, src, fields } => {
                 registers[dst as usize] = Some(retain_resumption(&registers, &handlers, src, &fields, budget)?);
             }
@@ -14931,6 +15037,7 @@ fn execute_in_float_profile(
                 });
             }
             VmInstruction::CallIndirectOwned { callee, arguments, .. }
+            | VmInstruction::CallPrepared { callee, arguments, .. }
             | VmInstruction::CallIndirect {
                 callee, arguments, ..
             } => {
@@ -15643,6 +15750,9 @@ fn execute_program_in_float_profile(
             return Err(VmArtifactError::HandlerStateMismatch);
         }
         let captured_call = returning_resumption_call(instruction, &registers, budget)?;
+        if captured_call.is_some() && let VmInstruction::CallPrepared { callee, .. } = instruction {
+            registers.retire_call_arguments(&[*callee]);
+        }
         let resumption_index = captured_call.as_ref().map(|(_, id)| handlers.iter().rposition(|frame| frame.id == *id)
             .ok_or(VmArtifactError::HandlerResumeUnavailable)).transpose()?;
         let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
@@ -16801,6 +16911,10 @@ fn execute_program_in_float_profile(
                 pc = target;
                 continue;
             }
+            VmInstruction::PrepareInvocation { dst, src, fields, reborrow } => {
+                registers[*dst as usize] = Some(prepare_invocation(&registers, &callers, *src, fields, *reborrow, budget)?);
+                registers.prepared_receivers.insert(*dst);
+            }
             VmInstruction::RetainResumption { dst, src, fields } => {
                 registers[*dst as usize] = Some(retain_resumption(&registers, &handlers, *src, fields, budget)?);
             }
@@ -17857,6 +17971,7 @@ fn execute_program_in_float_profile(
                 });
             }
             VmInstruction::CallIndirectOwned { dst, callee, arguments }
+            | VmInstruction::CallPrepared { dst, callee, arguments }
             | VmInstruction::CallIndirect {
                 dst,
                 callee,
@@ -17875,6 +17990,9 @@ fn execute_program_in_float_profile(
                     VmValue::Resident(home) => home.load(&[], budget)?,
                     value => value,
                 };
+                if matches!(instruction, VmInstruction::CallPrepared { .. }) {
+                    registers.retire_call_arguments(&[*callee]);
+                }
                 let callee_value = match callee_value {
                     VmValue::Reference { target, fields, .. } => {
                         let value = load_reference_target(&registers, &callers, &target, &fields, budget)?;

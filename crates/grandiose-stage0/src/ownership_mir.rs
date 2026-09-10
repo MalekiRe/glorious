@@ -141,6 +141,7 @@ pub enum OwnershipOperation {
     },
     Read(ControlValue),
     ReadReference(ControlValue),
+    PrepareInvocation(ControlPlace),
     ReadPlace {
         place: ControlPlace,
         mode: ValueTransfer,
@@ -430,6 +431,9 @@ impl OwnershipMir {
                         Some(Quantity::UNRESTRICTED);
                 }
                 match &instruction.operation {
+                    ControlOperation::Capability(ControlCapabilityOperation::PrepareInvocation(_)) => {
+                        owners[instruction.destination.0 as usize].kind = OwnerKind::View;
+                    }
                     ControlOperation::Capability(ControlCapabilityOperation::Test {
                         subject,
                         ..
@@ -736,6 +740,8 @@ impl OwnershipMir {
                         mode: transfer(value),
                     },
                     ControlOperation::Read(value) => OwnershipOperation::Read(value),
+                    ControlOperation::Capability(ControlCapabilityOperation::PrepareInvocation(place)) =>
+                        OwnershipOperation::PrepareInvocation(place),
                     ControlOperation::Discard(value) => {
                         // A lexical read is a view, not an owner to destroy.
                         // Materialize its consuming use explicitly, preserving

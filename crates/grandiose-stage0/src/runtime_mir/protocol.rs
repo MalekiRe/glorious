@@ -182,7 +182,8 @@ impl RuntimeMir {
                         arguments.clone(),
                         Some(*dst),
                     )),
-                    RuntimeOperation::CallIndirect {
+                    RuntimeOperation::CallPrepared { dst, callee, arguments }
+                    | RuntimeOperation::CallIndirect {
                         dst,
                         callee,
                         arguments,
@@ -431,6 +432,7 @@ pub(super) fn consumed_carriers(operation: &RuntimeOperation) -> &[MirLocal] {
     match operation {
         RuntimeOperation::Call { arguments, .. }
         | RuntimeOperation::CallIndirect { arguments, .. }
+        | RuntimeOperation::CallPrepared { arguments, .. }
         | RuntimeOperation::HostCall { arguments, .. }
         | RuntimeOperation::Perform { arguments, .. } => arguments,
         RuntimeOperation::Resume { value, .. }

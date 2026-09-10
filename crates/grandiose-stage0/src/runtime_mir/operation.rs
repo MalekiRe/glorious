@@ -115,6 +115,7 @@ impl RuntimeOperation {
             Self::DestroyIf { .. } => None,
             Self::Copy { dst, .. } => Some(*dst),
             Self::RetainResumption { dst, .. } => Some(*dst),
+            Self::PrepareInvocation { dst, .. } | Self::CallPrepared { dst, .. } => Some(*dst),
             Self::Store { dst, .. } => Some(*dst),
             Self::Move { dst, .. } => Some(*dst),
             Self::Borrow { dst, .. } => Some(*dst),
@@ -852,7 +853,7 @@ impl RuntimeOperation {
                 values.push(*flag);
                 values
             }
-            Self::Copy { dst, src, .. } | Self::RetainResumption { dst, src, .. } => {
+            Self::Copy { dst, src, .. } | Self::RetainResumption { dst, src, .. } | Self::PrepareInvocation { dst, src, .. } => {
                 let mut values = Vec::new();
                 values.push(*dst);
                 values.push(*src);
@@ -1371,7 +1372,8 @@ impl RuntimeOperation {
                 values.push(*destination);
                 values
             }
-            Self::CallIndirect {
+            Self::CallPrepared { dst, callee, arguments }
+            | Self::CallIndirect {
                 dst,
                 callee,
                 arguments,
@@ -1902,6 +1904,8 @@ pub enum RuntimeOperation {
         src: MirLocal,
     },
     RetainResumption { dst: MirLocal, src: MirLocal, fields: Vec<u32> },
+    PrepareInvocation { dst: MirLocal, src: MirLocal, fields: Vec<u32>, reborrow: bool },
+    CallPrepared { dst: MirLocal, callee: MirLocal, arguments: Vec<MirLocal> },
     Store {
         dst: MirLocal,
         src: MirLocal,
@@ -2632,6 +2636,8 @@ impl RuntimeOperation {
             crate::MirInstruction::DestroyIf { local, flag } => Self::DestroyIf { local, flag },
             crate::MirInstruction::Copy { dst, src } => Self::Copy { dst, src },
             crate::MirInstruction::RetainResumption { dst, src, fields } => Self::RetainResumption { dst, src, fields },
+            crate::MirInstruction::PrepareInvocation { dst, src, fields, reborrow } => Self::PrepareInvocation { dst, src, fields, reborrow },
+            crate::MirInstruction::CallPrepared { dst, callee, arguments } => Self::CallPrepared { dst, callee, arguments },
             crate::MirInstruction::Store { dst, src } => Self::Store { dst, src },
             crate::MirInstruction::Move { dst, src } => Self::Move { dst, src },
             crate::MirInstruction::Borrow {
@@ -3224,6 +3230,8 @@ impl RuntimeOperation {
             Self::DestroyIf { local, flag } => crate::MirInstruction::DestroyIf { local, flag },
             Self::Copy { dst, src } => crate::MirInstruction::Copy { dst, src },
             Self::RetainResumption { dst, src, fields } => crate::MirInstruction::RetainResumption { dst, src, fields },
+            Self::PrepareInvocation { dst, src, fields, reborrow } => crate::MirInstruction::PrepareInvocation { dst, src, fields, reborrow },
+            Self::CallPrepared { dst, callee, arguments } => crate::MirInstruction::CallPrepared { dst, callee, arguments },
             Self::Store { dst, src } => crate::MirInstruction::Store { dst, src },
             Self::Move { dst, src } => crate::MirInstruction::Move { dst, src },
             Self::Borrow {

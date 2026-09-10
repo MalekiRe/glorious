@@ -86,6 +86,10 @@ impl OwnershipMir {
                         check: bool|
          -> Result<(), OwnershipError> {
             let consumed = match &instruction.operation {
+                OwnershipOperation::PrepareInvocation(place) => {
+                    if check { require(path(self, &views, place), moved)?; }
+                    None
+                }
                 OwnershipOperation::Project { place, mode, .. }
                 | OwnershipOperation::ReadPlace { place, mode } => {
                     let place = path(self, &views, place);

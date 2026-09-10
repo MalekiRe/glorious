@@ -31,6 +31,9 @@ pub(super) enum ResumptionValue {
     Expired,
     Token(u32),
     Input(InputPath),
+    /// A single-use invocation view; even an ordinary callable view may not
+    /// become an owned value, escape its activation, or be source-copied.
+    Prepared(Arc<ResumptionValue>),
     Product(Arc<BTreeMap<u32, ResumptionValue>>),
 }
 
@@ -43,6 +46,7 @@ impl ResumptionValue {
             layouts: &[super::VmNominalCopyDescriptor], depth: usize, nodes: &mut usize,
         ) -> bool {
             use super::VmType;
+            if matches!(value, ResumptionValue::Prepared(_)) { return false; }
             if !value.contains() { return true; }
             if depth >= MAX_DEPTH || *nodes == 0 { return false; }
             *nodes -= 1;
@@ -78,7 +82,7 @@ impl ResumptionValue {
     pub(super) fn has_local_or_unknown(&self) -> bool {
         match self {
             Self::None | Self::Input(_) => false,
-            Self::Token(_) | Self::Unknown | Self::Expired => true,
+            Self::Token(_) | Self::Unknown | Self::Expired | Self::Prepared(_) => true,
             Self::Product(fields) => fields.values().any(Self::has_local_or_unknown),
         }
     }
@@ -111,6 +115,7 @@ impl ResumptionValue {
         if *nodes == 0 { return false; }
         *nodes -= 1;
         match self {
+            Self::Prepared(value) => depth > 0 && value.within_budget(depth - 1, nodes),
             Self::Product(fields) => depth > 0
                 && fields.values().all(|value| value.within_budget(depth - 1, nodes)),
             _ => true,
@@ -157,6 +162,7 @@ impl ResumptionValue {
 
     pub(super) fn expire(&mut self, frame: u32) {
         match self {
+            Self::Prepared(value) => Arc::make_mut(value).expire(frame),
             Self::Token(actual) if *actual == frame => *self = Self::Expired,
             Self::Product(fields) => for value in Arc::make_mut(fields).values_mut() { value.expire(frame); },
             _ => {},

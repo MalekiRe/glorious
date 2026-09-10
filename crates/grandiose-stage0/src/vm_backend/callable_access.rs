@@ -39,12 +39,13 @@ fn aliases(function: &VmFunction) -> Vec<bool> {
         for instruction in &function.instructions {
             let Some(dst) = native_storage::instruction_result(instruction) else { continue; };
             if aliases.get(dst as usize) != Some(&false)
-                || !function.registers.get(dst as usize).is_some_and(|ty| carries_reference(function, ty)) { continue; }
+                || !(matches!(instruction, VmInstruction::PrepareInvocation { .. })
+                    || function.registers.get(dst as usize).is_some_and(|ty| carries_reference(function, ty))) { continue; }
             let mut tainted = false;
             native_storage::visit_locals(instruction, |value| {
                 if value != dst { tainted |= aliases.get(value as usize) == Some(&true); }
             });
-            if let VmInstruction::Borrow { src, .. } = instruction {
+            if let VmInstruction::Borrow { src, .. } | VmInstruction::PrepareInvocation { src, .. } = instruction {
                 tainted |= *src < function.captures;
             }
             if tainted { aliases[dst as usize] = true; changed = true; }
@@ -56,6 +57,7 @@ fn aliases(function: &VmFunction) -> Vec<bool> {
 pub(super) fn is_execution_boundary(instruction: &VmInstruction) -> bool {
     matches!(instruction, VmInstruction::Call { .. } | VmInstruction::CallOwned { .. }
         | VmInstruction::CallIndirect { .. } | VmInstruction::CallIndirectOwned { .. }
+        | VmInstruction::CallPrepared { .. }
         | VmInstruction::HostCall { .. } | VmInstruction::HostCallOwned { .. }
         | VmInstruction::Perform { .. } | VmInstruction::PerformOwned { .. }
         | VmInstruction::TailCallOwned { .. } | VmInstruction::Return { .. }
@@ -96,7 +98,8 @@ pub(super) fn verify_claim(function: &VmFunction, shared: bool, unique: bool, ca
                 permits_shared &= !arguments.iter().any(|argument| aliases_capture(*argument)
                     && function.registers.get(*argument as usize).is_some_and(|ty| carries_unique(function, ty, &mut BTreeSet::new())));
             }
-            VmInstruction::CallIndirect { callee, arguments, .. } | VmInstruction::CallIndirectOwned { callee, arguments, .. } => {
+            VmInstruction::CallIndirect { callee, arguments, .. } | VmInstruction::CallIndirectOwned { callee, arguments, .. }
+            | VmInstruction::CallPrepared { callee, arguments, .. } => {
                 if captured(*callee) || aliases_capture(*callee) {
                     match function.registers.get(*callee as usize) {
                         Some(VmType::Reference { unique: false, .. }) => {},

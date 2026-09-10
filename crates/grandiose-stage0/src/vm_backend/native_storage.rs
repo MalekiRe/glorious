@@ -138,6 +138,8 @@ pub(super) fn instruction_result(instruction: &VmInstruction) -> Option<u32> {
         | VmInstruction::CaptureResumption { dst, .. }
         | VmInstruction::Copy { dst, .. }
         | VmInstruction::RetainResumption { dst, .. }
+        | VmInstruction::PrepareInvocation { dst, .. }
+        | VmInstruction::CallPrepared { dst, .. }
         | VmInstruction::Store { dst, .. } | VmInstruction::StoreOwned { dst, .. }
         | VmInstruction::Move { dst, .. }
         | VmInstruction::Borrow { dst, .. }
@@ -539,6 +541,7 @@ pub(super) fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u3
             visit(*value);
         }
         VmInstruction::RetainResumption { dst, src, .. }
+        | VmInstruction::PrepareInvocation { dst, src, .. }
         | VmInstruction::Copy { dst, src, .. }
         | VmInstruction::Store { dst, src, .. } | VmInstruction::StoreOwned { dst, src }
         | VmInstruction::Move { dst, src, .. }
@@ -586,6 +589,7 @@ pub(super) fn visit_locals(instruction: &VmInstruction, mut visit: impl FnMut(u3
             visit(*destination);
         }
         VmInstruction::CallIndirectOwned { dst, callee, arguments }
+        | VmInstruction::CallPrepared { dst, callee, arguments }
         | VmInstruction::CallIndirect {
             dst,
             callee,

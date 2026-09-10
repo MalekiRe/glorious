@@ -286,6 +286,7 @@ fn preserving_calls(functions: &BTreeMap<DefKey, VmFunction>) -> BTreeSet<DefKey
 fn locally_preserving(function: &VmFunction, instruction: &VmInstruction) -> bool {
     match instruction {
         VmInstruction::CallIndirect { .. } | VmInstruction::CallIndirectOwned { .. }
+        | VmInstruction::CallPrepared { .. }
         | VmInstruction::HostCall { .. } | VmInstruction::HostCallOwned { .. }
         | VmInstruction::Perform { .. } | VmInstruction::PerformOwned { .. }
         | VmInstruction::DestroyCallable { .. } => false,
@@ -445,7 +446,8 @@ pub(super) fn before_instruction(
         VmInstruction::Call { callee, arguments, .. } | VmInstruction::CallOwned { callee, arguments, .. } => {
             call_preserving_invocations(function, states, proofs, callee, arguments)
         }
-        VmInstruction::CallIndirect { callee, arguments, .. } | VmInstruction::CallIndirectOwned { callee, arguments, .. } =>
+        VmInstruction::CallIndirect { callee, arguments, .. } | VmInstruction::CallIndirectOwned { callee, arguments, .. }
+        | VmInstruction::CallPrepared { callee, arguments, .. } =>
             invocation_preserving(function, states, *callee)
                 && destruction_preserving(function, states, *callee)
                 && arguments.iter().all(|argument| invocation_preserving(function, states, *argument)
@@ -501,7 +503,7 @@ pub(super) fn before_instruction(
         | VmInstruction::ProjectArray { base, .. } | VmInstruction::TakeProjection { base, .. } => invocation(*base),
         VmInstruction::TakeArrayElement { value, .. } => invocation(*value),
         VmInstruction::UpdateRecord { base, value, .. } => invocation(*base) && invocation(*value),
-        VmInstruction::Borrow { src, .. } => invocation(*src),
+        VmInstruction::Borrow { src, .. } | VmInstruction::PrepareInvocation { src, .. } => invocation(*src),
         VmInstruction::DerefCopy { reference, .. } | VmInstruction::DerefMove { reference, .. } => invocation(*reference),
         VmInstruction::MakeCallable { callee, captures, .. } =>
             call_preserving_invocations(function, states, proofs, callee, captures),
@@ -510,7 +512,7 @@ pub(super) fn before_instruction(
     let destruction_proof = match instruction {
         // Disposing a lexical label releases only a control capability. It
         // neither invokes the target nor owns a callable capture environment.
-        VmInstruction::MakeLabel { .. } => true,
+        VmInstruction::MakeLabel { .. } | VmInstruction::PrepareInvocation { .. } => true,
         VmInstruction::Call { .. } | VmInstruction::CallOwned { .. } => call_result_destruction,
         VmInstruction::Copy { src, .. } | VmInstruction::Move { src, .. }
         | VmInstruction::Store { src, .. } | VmInstruction::StoreOwned { src, .. } => destruction(*src),
@@ -531,7 +533,8 @@ pub(super) fn before_instruction(
     let frame_proof = match instruction {
         // Its destruction is harmless, but the live label still depends on
         // this frame and can never be an independent tail carrier.
-        VmInstruction::MakeLabel { dst, .. } | VmInstruction::RetainResumption { dst, .. } => Some((*dst, false)),
+        VmInstruction::MakeLabel { dst, .. } | VmInstruction::RetainResumption { dst, .. }
+        | VmInstruction::PrepareInvocation { dst, .. } => Some((*dst, false)),
         VmInstruction::Call { .. } | VmInstruction::CallOwned { .. } => result_proof,
         VmInstruction::Copy { dst, src } | VmInstruction::Move { dst, src }
         | VmInstruction::Store { dst, src } | VmInstruction::StoreOwned { dst, src } => Some((*dst, source(*src))),

@@ -361,6 +361,7 @@ impl SpecializedMir {
                     && matches!(
                         instruction.operation,
                         SpecializedOperation::Read(_)
+                            | SpecializedOperation::PrepareInvocation(_)
                             | SpecializedOperation::Transfer { .. }
                             | SpecializedOperation::ExitScope { .. }
                     );

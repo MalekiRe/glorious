@@ -458,6 +458,7 @@ impl SpecializedMir {
                     },
                     OOperation::Read(value) => SpecializedOperation::Read(*value),
                     OOperation::ReadReference(value) => SpecializedOperation::ReadReference(*value),
+                    OOperation::PrepareInvocation(place) => SpecializedOperation::PrepareInvocation(substitution.place(place)?),
                     OOperation::ReadPlace { place, mode } => SpecializedOperation::ReadPlace {
                         place: substitution.place(place)?,
                         mode: *mode,
@@ -627,6 +628,7 @@ impl SpecializedMir {
             for instruction in &block.instructions {
                 match &instruction.operation {
                     SpecializedOperation::Read(_)
+                    | SpecializedOperation::PrepareInvocation(_)
                     | SpecializedOperation::Transfer { .. }
                     | SpecializedOperation::ExitScope { .. }
                         if targets.contains_key(&instruction.destination) => {}
@@ -726,6 +728,7 @@ impl SpecializedMir {
                 if !mutable.contains(&instruction.destination)
                     && !targets.contains_key(&instruction.destination)
                     && let SpecializedOperation::Read(source)
+                    | SpecializedOperation::PrepareInvocation(ControlPlace::Local(source) | ControlPlace::Temporary(source))
                     | SpecializedOperation::Transfer { value: source, .. }
                     | SpecializedOperation::ExitScope { result: source, .. } =
                         instruction.operation

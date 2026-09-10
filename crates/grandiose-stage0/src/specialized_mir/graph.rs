@@ -99,6 +99,7 @@ impl SpecializedMir {
             // Place layout, transfer permission and sealed capture contracts
             // are checked by the ownership validator, not inferred here.
             SpecializedOperation::ReadPlace { place, .. }
+            | SpecializedOperation::PrepareInvocation(place)
             | SpecializedOperation::MovePlace(place)
             | SpecializedOperation::Project { place, .. } => self.checked_place_type(place)? == ty,
             SpecializedOperation::Borrow(_) | SpecializedOperation::Capture { .. } => true,

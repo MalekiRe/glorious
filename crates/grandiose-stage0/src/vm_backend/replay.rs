@@ -66,7 +66,7 @@ pub(super) fn shared(
     index: u32,
     outer: &BTreeMap<u32, Option<u64>>,
 ) -> bool {
-    outer
+    !registers.prepared_receivers.contains(&index) && outer
         .get(&index)
         .is_some_and(|brand| *brand == registers.source_storage.get(&index).copied())
 }
@@ -193,6 +193,7 @@ impl Duplication<'_> {
     {
         self.budget.reserve_value("replayed registers", registers.len())?;
         for (index, value) in registers.values.iter().enumerate() {
+            if registers.prepared_receivers.contains(&(index as u32)) { continue; }
             if registers.capture_environment.as_ref().is_some_and(|environment|
                 environment.owned.get(index) == Some(&false)) { continue; }
             if !shared(registers, index as u32, outer) && let Some(value) = value {
@@ -226,6 +227,18 @@ impl Duplication<'_> {
             if shared(registers, local, outer) { continue; }
             registers.native_homes.remove(&local);
             if let Some(value) = registers.values[index].take() {
+                if registers.prepared_receivers.contains(&local) {
+                    // The view's native home is just a carrier. Rebase its
+                    // resident against the already allocated branch owners,
+                    // then give this branch its own carrier on next entry.
+                    let value = match value {
+                        VmValue::Resident(home) => home.load(&[], self.budget)?,
+                        value => value,
+                    };
+                    registers.values[index] = Some(self.rebase(value)?);
+                    registers.native_write(local);
+                    continue;
+                }
                 let borrowed = registers.capture_environment.as_ref().is_some_and(|environment|
                     environment.owned.get(index) == Some(&false));
                 let value = if borrowed { self.rebase(value)? } else { self.copy_owned(value)? };
@@ -359,6 +372,39 @@ pub(super) fn fork(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_prepared_receivers_rebase_to_their_owner_without_copying_it() {
+        for native_carrier in [false, true] { for outer_owner in [false, true] {
+            let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false,
+                limits: Default::default(), instructions: 0, allocated_elements: 0 };
+            let definition = DefKey(Digest::of_bytes(b"prepared-receiver-replay"));
+            let signature = VmType::Callable { shared_receiver: true, unique_receiver: true,
+                safety: Safety::Safe, parameters: vec![], result: Box::new(VmType::I64), effects: Box::default() };
+            let environment = RuntimeCaptureEnvironment::new(vec![VmValue::I64(42)]);
+            let owner = VmValue::Callable { callee: definition, captures: environment.clone(), signature: signature.clone() };
+            let mut registers = RuntimeRegisters { values: vec![Some(owner.clone()), Some(owner)],
+                prepared_receivers: BTreeSet::from([1]), ..Default::default() };
+            if native_carrier {
+                let layout = Arc::new(native_memory::native_layout(&signature, &Arc::from([]), &mut vec![]).unwrap());
+                let home = native_storage::NativeHome::new(layout, &mut budget).unwrap();
+                home.store(&[], registers.values[1].as_ref().unwrap(), &mut budget).unwrap();
+                registers.values[1] = Some(VmValue::Resident(home.clone()));
+                registers.native_homes.insert(1, home);
+            }
+            let retained = shared_registers(&registers, true, if outer_owner { &[] } else { &[0] }, &mut budget).unwrap();
+            let original = RuntimeContinuation { target: 0, dst: 0, registers,
+                performed: RuntimePerformed { effect: definition, effect_arguments: vec![], operation: 0, payloads: None },
+                above: vec![], pending_leave: None, remaining_replays: 2, program: None };
+            let copied = fork(&original, 0, &retained, &mut 0, &mut budget).unwrap();
+            let VmValue::Callable { captures: copied_owner, .. } = copied.registers.values[0].as_ref().unwrap() else { panic!() };
+            let VmValue::Callable { captures: copied_view, .. } = copied.registers.values[1].as_ref().unwrap() else { panic!() };
+            assert!(Arc::ptr_eq(copied_owner, copied_view));
+            assert_eq!(Arc::ptr_eq(copied_view, &environment), outer_owner);
+            assert!(copied.registers.prepared_receivers.contains(&1));
+            assert!(original.registers.prepared_receivers.contains(&1));
+        } }
+    }
 
     #[test]
     fn final_replay_transfers_original_storage_and_retires_its_budget() {
