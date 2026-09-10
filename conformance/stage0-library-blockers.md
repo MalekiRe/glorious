@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 116 verification below,
+Updated from the current source and cache 117 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,31 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 117 couples normal result values and storage snapshots in EscapeFlow,
+using the existing shared continuation authority. Terminal branches retain their
+actual transfers but do not contribute placeholder normal results. PlaceFlow
+preserves a handler computation's result loans on its normal outgoing edge.
+Direct operation evaluation now keeps an invoked terminal payload separate from
+its absent result, and distinguishes it from an unexecuted operation whose
+argument exits. No second evaluation fallback or new control walker is needed.
+
+Verification has 471 distinct passes and three failing tests. Two unchanged
+existing failures reproduce at pre-change `1263ea85` (a destroyed callable
+environment and a carrier-reborrow rejection). The new generic-reference
+label helper passes VM execution but leaves unsupported native `MakeLabel`
+materialization; its native success test remains active and failing. Direct
+completion transfers pass native O0/O2. No whole-target green claim follows.
+
+The final full-library root **still fails** with 68 diagnostic records and no
+suppression marker (`target/normal-result-library-final-v13.log`). The sorting
+source correction removed its inference errors, but `split_at` still supplies
+an opaque generic result before the views are bound. That missing provenance
+remains a priority; normal-exit filtering is not a substitute for its contract.
+See `implementation-progress.md` for exact regression and execution scope.
+The source matrix remains the historical 16 passing / 15 failing result above.
+General handler payloads, guarded storage, native handlers and self-hosting
+remain open. The following source-only and cache 116 entries are historical.
 
 The subsequent source-only sorting correction supplies the erased temporary
 view's missing `T` as `SliceMut<'_,T>`. Positive annotation/constructor and negative

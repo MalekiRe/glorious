@@ -1716,9 +1716,15 @@ impl Analyzer<'_> {
                 let incoming = incoming_state.states.clone();
                 let incoming_refinements = self.refinements.clone();
                 let incoming_minimum = self.minimum_states.clone();
-                let mut exits = if self.minimum_handler_completes_normally(computation, &clauses) {
-                    vec![incoming_state.clone()]
-                } else { vec![] };
+                let mut exits = vec![];
+                if self.minimum_handler_completes_normally(computation, &clauses) {
+                    // The unhandled normal edge transfers the computation's
+                    // result to the handler expression, just as a returning
+                    // clause does. Retain its loan aliases in that same edge's
+                    // snapshot before visiting the independent clause paths.
+                    self.preserve_expression_result(id, computation);
+                    exits.push(self.capture_continuation());
+                }
                 for (clause_index, clause) in clauses.into_iter().enumerate() {
                     self.restore_continuation(&incoming_state);
                     self.refinements = incoming_refinements.clone();

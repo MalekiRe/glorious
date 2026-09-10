@@ -5,6 +5,86 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 117: normal result snapshots and terminal payloads
+
+EscapeFlow previously excluded terminal branches from the continuing storage
+state but still joined their placeholder values into the normal result. Its
+completion, handler and label result joins now use the same value/environment
+exit snapshot. The existing bound continuation product decides normal-exit
+admission; unknown coverage retains a possible result. Actual terminal evaluation
+and outer-label payload/debt checks remain in force. Completion arms do not run
+after a definitely terminal strict subject.
+
+PlaceFlow also failed to transfer the normal protected computation's reference
+aliases into the handler expression's result owner. That edge now preserves its
+result through the same existing loan-transfer mechanism as a returning clause,
+before capturing its continuing ownership snapshot.
+
+Direct operation evaluation now distinguishes a terminal argument prefix from
+an invoked operation. A terminal operation retains its executed payload even
+though it has no normal result. The enclosing handler consumes that evaluation
+once instead of retrying it when the result is absent. The payload still receives
+suspension/escape checks, while an operation bypassed by an argument's transfer
+does not publish a payload that never crossed the operation boundary.
+
+The new source regressions cover direct/generic/aliased terminal branches,
+handler normal and terminal computation paths, returned terminal payloads,
+strict-argument exits and invalid local-reference transfers. Positive sources
+execute fresh and decoded VM artifacts at O0/O2; the completion branch sources
+with direct transfers also execute generated native code at O0/O2. Generic invalid label payloads
+reject earlier at the callable lifetime contract (`G4143`), while direct local
+escapes retain `G5013`/`G5017`; an abandoned protected local in a terminal payload
+retains `G5015`. The initial normal-result and terminal-payload failures are
+preserved in `target/normal-result-provenance-baseline-v2.log` and
+`target/normal-result-terminal-payload-baseline-v9.log`.
+
+Verification records **471 distinct passing checks and three failing tests**:
+
+- 367 unit and 30 borrowed-callable checks pass; borrowed temporaries have six
+  passes and one failure (`target/normal-result-provenance-integration-v12.log`).
+- Eight effect-contract checks pass; expected reborrows have 14 passes and one
+  failure (`target/normal-result-provenance-integration-v14.log`).
+- Sixteen handler re-entry and 22 request checks pass
+  (`target/normal-result-provenance-integration-v17.log`).
+- The final new target has eight passes and one active native failure
+  (`target/normal-result-provenance-final-v18.log`). The full target is not green.
+
+The two unchanged existing failures reproduce at the exact pre-change commit
+`1263ea85`: `inferred_completion_references_remain_readable_and_assignable`
+fails with a destroyed callable environment
+(`target/normal-result-callable-lifetime-baseline-v15.log`), and
+`nested_unique_reborrow_uses_the_carrier_access_region` rejects replacing a
+carrier while a child reborrow is considered live
+(`target/normal-result-carrier-access-baseline-v16.log`). Neither fixture was
+edited, ignored or counted as passing.
+
+The new generic/aliased completion sources pass the VM but still require
+unsupported native `MakeLabel` materialization at source O0. Their native success
+requirement is preserved in the separate active test
+`generic_completion_reference_results_execute_in_generated_code`, without an
+ignore marker or expected-failure assertion. Direct-transfer native success
+does not establish generic-helper proof erasure or native label conformance.
+
+The final full-library probe **still fails** with 68 diagnostic records and no
+diagnostic-limit suppression marker (`target/normal-result-library-final-v13.log`,
+26.92 seconds). This follows both the source correction below and the resource
+boundary repairs; the count is not a successful library execution or a count of
+independently fixed bugs. Sorting's library inference errors are absent, while
+its `get` provenance and swap loan errors remain. Other open diagnostics include
+random API mismatches, graph result/provenance, custom-Drop extraction, unsafe
+UTF-8 operations, tail provenance and minimum-use obligations.
+
+This is not a complete handler or nominal-provenance migration. The sorting
+helper's remaining `split_at` result is opaque before its completion binds the
+two views; excluding terminal branch placeholders cannot supply that missing
+generic result contract. General handler payload discovery, guarded storage
+states and native handlers remain open. No diagnostic or allocation budget was
+raised, and the 31-test library matrix was not rerun.
+Cache generation is 117; interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 are unchanged. The refreshed GSC-2 source closure locks 100
+Glorious files and retains all 11,455 public contracts as open. Full conformance,
+library completion and self-hosted-compiler acceptance remain unestablished.
+
 ## Source correction: sorting's erased element type
 
 The `sorting_swap` temporary `SliceMut` lacked an element-type argument. Its

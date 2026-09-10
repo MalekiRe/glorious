@@ -203,14 +203,29 @@ struct ValueEnvironment {
     regions: crate::placeflow::regions::RegionGraph<Value>,
 }
 
-struct LabelExit {
+/// A result travels with the storage snapshot of the same continuation.
+/// Normal branches and exact label transfers share this representation;
+/// a definitely terminal branch contributes neither a normal value nor state.
+struct ValueExit {
     value: Value,
     environment: ValueEnvironment,
 }
 
+/// Evaluating an operation's strict prefix is distinct from invoking it, and
+/// an invoked terminal operation has a payload but no ordinary result.
+enum PerformedValue {
+    PrefixExit,
+    Invoked {
+        effect: crate::EffectInstance,
+        operation: u32,
+        payloads: Vec<Value>,
+        result: Option<Value>,
+    },
+}
+
 struct LabelBoundary {
     brand: crate::LabelBrand,
-    exits: Vec<LabelExit>,
+    exits: Vec<ValueExit>,
 }
 
 impl ValueEnvironment {
@@ -433,13 +448,8 @@ impl Analyzer<'_> {
                 let normal = self.value(body);
                 let mut label = self.labels.pop().expect("active escape label");
                 assert_eq!(label.brand, brand);
-                if !self.continuations.is_abrupt(body) {
-                    label.exits.push(LabelExit { value: normal, environment: self.values.clone() });
-                }
-                let (values, environments) = label.exits.into_iter()
-                    .map(|exit| (exit.value, exit.environment)).unzip();
-                self.values = joined_environments(&incoming, environments);
-                let result = join(values);
+                label.exits.extend(self.normal_exit(body, normal));
+                let result = self.join_exits(&incoming, label.exits);
                 self.report_control_scope_escape(ControlBrand::Label(brand), &result, &incoming, expression.span);
                 result
             }
@@ -665,10 +675,11 @@ impl Analyzer<'_> {
                 }
                 join(result.into_iter().chain(returned).collect())
             }
-            CoreKind::Perform { .. } => self
-                .performed_value(id)
-                .map(|(_, _, _, value)| value)
-                .unwrap_or(Value::None),
+            CoreKind::Perform { .. } => match self.performed_value(id) {
+                Some(PerformedValue::Invoked { result, .. }) => result.unwrap_or(Value::None),
+                Some(PerformedValue::PrefixExit) => Value::None,
+                None => unreachable!("a performed Core node has an operation evaluation"),
+            },
             CoreKind::Handle {
                 computation,
                 clauses,
@@ -678,19 +689,19 @@ impl Analyzer<'_> {
                 // borrowed/external value that crossed the suspension rather
                 // than re-evaluating argument Core in each arm.
                 let performed = self.performed_value(computation);
-                let computation = performed
-                    .as_ref()
-                    .map(|(_, _, _, value)| value.clone())
-                    .unwrap_or_else(|| self.value(computation));
+                let computed = match &performed {
+                    Some(PerformedValue::Invoked { result, .. }) => result.clone().unwrap_or(Value::None),
+                    Some(PerformedValue::PrefixExit) => Value::None,
+                    None => self.value(computation),
+                };
                 let incoming = self.values.clone();
                 // A handler may complete normally without selecting an
                 // operation arm, so the computation is one of its dynamic
                 // exits alongside every matching clause.
-                let mut exits = vec![computation.clone()];
-                let mut environments = vec![incoming.clone()];
+                let mut exits: Vec<_> = self.normal_exit(computation, computed).into_iter().collect();
                 for clause in clauses {
                     self.values = incoming.clone();
-                    if let Some((effect, operation, payloads, _)) = &performed
+                    if let Some(PerformedValue::Invoked { effect, operation, payloads, .. }) = &performed
                         && *effect == clause.effect
                         && *operation == clause.operation
                     {
@@ -711,15 +722,11 @@ impl Analyzer<'_> {
                         self.report_control_scope_escape(ControlBrand::Resumption(id), &result, &incoming, clause.span);
                         restore_bindings(&mut self.values, &incoming, [name]);
                     }
-                    exits.push(result);
                     restore_bindings(&mut self.values, &incoming,
                         clause.bindings.iter().map(|(name, _)| name.clone()));
-                    if !self.continuations.is_abrupt(clause.body) {
-                        environments.push(self.values.clone());
-                    }
+                    exits.extend(self.normal_exit(clause.body, result));
                 }
-                self.values = joined_environments(&incoming, environments);
-                join(exits)
+                self.join_exits(&incoming, exits)
             }
             CoreKind::Completion {
                 computation,
@@ -729,6 +736,9 @@ impl Analyzer<'_> {
             } => {
                 let subject = computation;
                 let computation = self.value(computation);
+                // Completion patterns run only after their strict subject
+                // returns. Transfers already retained their own exit snapshots.
+                if self.continuations.is_abrupt(subject) { return Value::None; }
                 let incoming = self.values.clone();
                 // Core admits a Completion only after its pattern matrix has
                 // proved it exhaustive. Unlike an effect handler, normal
@@ -737,7 +747,6 @@ impl Analyzer<'_> {
                 // temporary `Option<&T>` look like the enclosing function's
                 // return value even when every arm consumed the reference.
                 let mut exits = Vec::with_capacity(clauses.len());
-                let mut environments = Vec::with_capacity(clauses.len());
                 for (index, clause) in clauses.into_iter().enumerate() {
                     self.values = incoming.clone();
                     self.bind_pattern_value(&clause.pattern, computation.clone());
@@ -772,19 +781,16 @@ impl Analyzer<'_> {
                             }
                         }
                     }
-                    exits.push(self.value(clause.body));
+                    let result = self.value(clause.body);
                     let mut bindings = BTreeSet::new();
                     pattern_bindings(&clause.pattern, &mut bindings);
                     if let Some(refinement) = &clause.refinement {
                         pattern_bindings(&refinement.pattern, &mut bindings);
                     }
                     restore_bindings(&mut self.values, &incoming, bindings);
-                    if !self.continuations.is_abrupt(clause.body) {
-                        environments.push(self.values.clone());
-                    }
+                    exits.extend(self.normal_exit(clause.body, result));
                 }
-                self.values = joined_environments(&incoming, environments);
-                join(exits)
+                self.join_exits(&incoming, exits)
             }
         };
         let value = self.seed_logical_value(format!("<expression-{}>", id.0), &expression.ty, value);
@@ -794,6 +800,21 @@ impl Analyzer<'_> {
         } else {
             value
         }
+    }
+
+    fn normal_exit(&self, expression: CoreId, value: Value) -> Option<ValueExit> {
+        // Unknown continuation coverage retains a possible normal result.
+        // Only the bound shared continuation product can exclude this edge.
+        (!self.continuations.is_abrupt(expression)).then(|| ValueExit {
+            value, environment: self.values.clone(),
+        })
+    }
+
+    fn join_exits(&mut self, incoming: &ValueEnvironment, exits: Vec<ValueExit>) -> Value {
+        let (values, environments) = exits.into_iter()
+            .map(|exit| (exit.value, exit.environment)).unzip();
+        self.values = joined_environments(incoming, environments);
+        join(values)
     }
 
     /// Reconstruct the escaped value shape from the same immutable region map
@@ -905,11 +926,12 @@ impl Analyzer<'_> {
     }
 
     /// Evaluate a direct operation exactly once and retain both its payload
-    /// values and frozen result provenance for the enclosing handler.
+    /// values and frozen result provenance for the enclosing handler. `None`
+    /// means this is not an operation, not that an operation failed to return.
     fn performed_value(
         &mut self,
         id: CoreId,
-    ) -> Option<(crate::EffectInstance, u32, Vec<Value>, Value)> {
+    ) -> Option<PerformedValue> {
         let expression = self.body.expression(id).clone();
         let CoreKind::Perform {
             effect,
@@ -922,22 +944,23 @@ impl Analyzer<'_> {
         else {
             return None;
         };
+        let invoked = arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument));
         let values = self.strict_values(arguments);
-        if self.continuations.is_abrupt(id) {
-            return None;
+        if !invoked {
+            return Some(PerformedValue::PrefixExit);
         }
         for value in &values {
             self.report_suspension_escape(value, expression.span);
         }
-        let result = self.reference_result_value(
+        let result = (!self.continuations.is_abrupt(id)).then(|| self.reference_result_value(
             &reference_origin,
             reference_shape,
             &expression.ty,
             values.clone(),
             expression.span,
             "effect operation",
-        );
-        Some((effect, operation, values, result))
+        ));
+        Some(PerformedValue::Invoked { effect, operation, payloads: values, result })
     }
 
     fn bind_pattern_value(&mut self, pattern: &crate::core::CorePattern, value: Value) {

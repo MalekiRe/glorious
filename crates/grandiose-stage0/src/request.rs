@@ -308,7 +308,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 21;
 // instantiate complete operation signatures and validate frozen applications.
 // Cache 116 shares lexical, kinded projection normalization across signatures,
 // Core and materialization, including mixed-kind cycles and callable binders.
-pub const STAGE0_CACHE_GENERATION: u32 = 116;
+// Cache 117 couples normal-result values and storage snapshots, preserves the
+// handler computation's result loans and retains terminal operation payloads.
+pub const STAGE0_CACHE_GENERATION: u32 = 117;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

@@ -875,3 +875,31 @@ reinterpreted as an empty row or successful contract.
 This is a repaired semantic boundary, not a complete compiler or library. The
 full-library root still fails, and no GSC-2 bootstrap or native-handler readiness
 follows from these normalization checks.
+
+## Normal result snapshots and executed operation payloads
+
+EscapeFlow joins normal values and their storage environments through one exit
+snapshot representation, also used by exact local-label transfers. The bound
+shared continuation product decides whether an evaluated expression can supply
+a normal exit. A terminal arm still executes its argument, store and transfer
+checks, but its placeholder value cannot contaminate a sibling's result shape.
+Unknown continuation coverage retains a possible normal exit. Completion arms
+do not execute after a definitely terminal strict subject.
+
+PlaceFlow preserves a handler computation's normal result in the handler's
+existing result-loan owner before capturing that edge's ownership snapshot.
+Returning clauses use the same transfer mechanism. Merely retaining the
+computation's storage state did not preserve its outgoing reference aliases.
+
+Direct operation evaluation distinguishes an exited argument prefix from an
+invoked operation, and retains an invoked terminal operation's payload separately
+from its absent normal result. Handler payload binding consumes that evaluation
+once; a non-returning operation no longer triggers a second evaluation fallback.
+Terminal payloads retain the existing suspension/escape obligations, while an
+operation whose argument exits never publishes an unexecuted payload.
+
+This repairs those source resource boundaries, not complete guard-correlated
+handler execution. General handler payload discovery, the remaining independent
+minimum-handler completion logic, opaque nominal-result reference coverage and
+native handlers remain open. No new continuation walker or runtime representation
+was introduced, and normal-result exclusion does not erase outer-transfer debt.

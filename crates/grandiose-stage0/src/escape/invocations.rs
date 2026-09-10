@@ -206,7 +206,7 @@ impl Analyzer<'_> {
             .rev()
             .find(|label| label.brand == brand)
         {
-            label.exits.push(LabelExit {
+            label.exits.push(ValueExit {
                 value,
                 environment: self.values.clone(),
             });

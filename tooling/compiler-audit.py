@@ -74,6 +74,7 @@ def main():
         ROOT / "crates/grandiose-stage0/tests/signature.rs",
         ROOT / "crates/grandiose-stage0/tests/trait_solver.rs",
         ROOT / "crates/grandiose-stage0/tests/projection_normalization.rs",
+        ROOT / "crates/grandiose-stage0/tests/normal_result_provenance.rs",
         ROOT / "crates/grandiose-stage0/tests/core.rs",
         ROOT / "crates/grandiose-stage0/tests/destruction.rs",
         ROOT / "crates/grandiose-stage0/tests/lifetime_inference.rs",
