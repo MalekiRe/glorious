@@ -179,36 +179,6 @@ impl TraitSolver {
     }
 
 
-    /// Recover the already checked lexical Fn row for a call's exact input
-    /// types. This is effect accounting, not new callable/access evidence.
-    pub(crate) fn lexical_call_effects(&self, subject: &Type, inputs: &[Type]) -> Option<EffectRow> {
-        let mut selected = None;
-        let inputs = Type::Tuple(inputs.to_vec());
-        for argument in [inputs.clone(), if inputs == Type::Tuple(vec![]) { Type::Unit } else { inputs }] {
-            let goal = TraitGoal { subject: subject.clone(), relation: ElaboratedTraitReference {
-                definition: crate::intrinsic_callable_trait_definition(),
-                arguments: vec![GenericArgument::Type(argument)],
-            } };
-            let mut rows = Vec::new();
-            if self.lexical_assumptions.contains(&goal) {
-                rows.push(self.assumed_effect_bindings.iter().find(|binding|
-                    binding.subject == goal.subject && binding.relation == goal.relation
-                        && binding.name == "Effects" && binding.item_arguments.is_empty())
-                    .map_or_else(EffectRow::empty, |binding| binding.value.clone()));
-            }
-            for bound in self.lexical_universal.iter().filter_map(|bound| bound.for_goal(&goal)) {
-                rows.push(bound.effect_bindings.iter().find(|binding|
-                    binding.name == "Effects" && binding.item_arguments.is_empty())
-                    .map_or_else(EffectRow::empty, |binding| binding.value.clone()));
-            }
-            for row in rows {
-                if selected.as_ref().is_some_and(|selected| *selected != row) { return None; }
-                selected = Some(row);
-            }
-        }
-        selected
-    }
-
     pub(super) fn remember_callable_environments(&mut self, ty: &Type) {
         fn argument(solver: &mut TraitSolver, value: &GenericArgument) {
             match value {

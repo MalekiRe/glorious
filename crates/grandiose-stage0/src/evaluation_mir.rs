@@ -1098,12 +1098,13 @@ impl Builder<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
+                invocation,
                 reference_contract,
                 reference_origin,
                 reference_shape,
                 mandatory_tail,
             } => {
-                if matches!(&self.body.expression(callee).ty, Type::Callable { result, .. } if **result == Type::Never)
+                if matches!(&invocation.declaration, Type::Callable { result, .. } if **result == Type::Never)
                 {
                     ty = Type::Never;
                 }

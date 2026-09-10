@@ -845,6 +845,71 @@ fn cleanup_bearing_nonlocal_exits_do_not_fabricate_positive_uses() {
 }
 
 #[test]
+fn projected_fn_effect_rows_close_with_the_selected_callable_instance() {
+    let retain = "fn retain<T,F>(value: T, body: F) -> T / { <F as Fn<()>>::Effects }
+        where F: Fn<(),Output=()> { body(); value }";
+    let pure = format!("{retain} fn quiet() {{}}
+        pub fn main() -> i64 {{ consume(retain(Token {{}}, quiet)) }}");
+    accepts(&pure);
+    accepts_native(&pure);
+    rejects_conditional(&format!("{retain}
+        effect Ask {{ [0,1] ask() -> (); }} fn ask() / Ask {{ Ask::ask() }}
+        pub fn main() -> i64 {{ handle {{ consume(retain(Token {{}}, ask)) }} {{ Ask::ask() with _ => 42 }} }}"));
+}
+
+#[test]
+fn selected_call_contracts_survive_generic_lexical_fusion() {
+    let source = "fn answer() -> i64 { 42 }
+        fn through<L,F>(target: L, body: F) -> i64
+        where L: Label<i64>, F: Fn<(),Output=i64,Effects={}> { target(body()) }
+        pub fn main() -> i64 { label done {
+            let task = () -> i64 { through(@done, answer) }; task()
+        }}";
+    accepts(source);
+    accepts_native(source);
+}
+
+#[test]
+fn contextual_callback_rows_are_inferred_for_direct_and_operator_calls() {
+    let declaration = "pub infixl 2 gate; fn answer() -> i64 { 42 }
+        fn gate<F,e: EffectRow>(left: i64, next: F) -> i64 / {| e}
+        where F: Fn<(),Output=i64,Effects=e> { next() }";
+    for expression in ["gate(0, { 42 })", "0 gate { 42 }", "gate(0, { answer() })", "0 gate { answer() }"] {
+        accepts(&format!("{declaration} pub fn main() -> i64 {{ {expression} }}"));
+    }
+}
+
+#[test]
+fn explicit_quantified_observers_preserve_selected_call_effects() {
+    let observer = "fn observe<T,F,e: EffectRow>(value: T, observer: &mut F) -> T / {| e}
+        where for<'call> &'call mut F: Fn<(&'call T,),Output=(),Effects=e> {
+            observer(&value); value
+        }";
+    let pure = format!("{observer}
+        fn quiet<'a>(value: &'a Token) {{}}
+        pub fn main() -> i64 {{
+            let mut callback: for<'a> (&'a Token) -> () = quiet;
+            consume(observe(Token {{}}, &mut callback))
+        }}");
+    accepts(&pure);
+    accepts_native(&pure);
+    rejects_conditional(&format!("{observer}
+        effect Ask {{ [0,1] ask() -> (); }}
+        fn ask<'a>(value: &'a Token) / Ask {{ Ask::ask() }}
+        pub fn main() -> i64 {{
+            let mut callback: for<'a> (&'a Token) -> () / Ask = ask;
+            handle {{ consume(observe(Token {{}}, &mut callback)) }} {{ Ask::ask() with _ => 42 }}
+        }}"));
+    accepts(&format!("{observer}
+        effect Ask {{ [1,1] ask() -> (); }}
+        fn ask<'a>(value: &'a Token) / Ask {{ Ask::ask() }}
+        pub fn main() -> i64 {{
+            let mut callback: for<'a> (&'a Token) -> () / Ask = ask;
+            handle {{ consume(observe(Token {{}}, &mut callback)) }} {{ Ask::ask() => () }}
+        }}"));
+}
+
+#[test]
 fn quantified_observer_calls_retain_their_conditional_owner_contract() {
     accepts("fn observe<T,F,e: EffectRow>(value: T, observer: &mut F) -> T / {| e}
         where for<'call> &'call mut F: Fn<(&'call T,),Output=(),Effects=e> {

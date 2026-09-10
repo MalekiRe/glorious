@@ -1677,8 +1677,8 @@ impl<T> Vec<T> {
         Vec::append(&mut *value, scratch)
     }
 
-    pub fn partition_by<F>(value: &mut Self, predicate: F) -> usize
-        where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
+    pub fn partition_by<F,e: EffectRow>(value: &mut Self, predicate: F) -> usize / {| e}
+        where F: Fn<(&T,), Output = Bool, Effects = e>, F: Use<[0, *]> {
         let length = Vec::len(& *value);
         vec_partition_by_from(&mut *value, predicate, 0, length)
     }
@@ -1838,8 +1838,8 @@ fn vec_sort_stable_into_scratch<T>(value: &mut Vec<T>, scratch: &mut Vec<T>) -> 
 // examined resident; capture-free named functions and closures with
 // duplicable captures satisfy that contract without a special VM callback
 // type.
-fn vec_partition_by_from<T, F>(value: &mut Vec<T>, predicate: F, left: usize, end: usize) -> usize
-    where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
+fn vec_partition_by_from<T,F,e: EffectRow>(value: &mut Vec<T>, predicate: F, left: usize, end: usize) -> usize / {| e}
+    where F: Fn<(&T,), Output = Bool, Effects = e>, F: Use<[0, *]> {
     handle left >= end {
         true => left,
         false => handle predicate(Vec::get_unchecked(& *value, left)) {
@@ -3429,32 +3429,32 @@ impl<A, E> Result<A, E> {
         not(Result::is_ok(value))
     }
 
-    pub fn map<B, F>(value: Self, transform: F) -> Result<B, E>
-        where F: Fn<(A), Output = B> {
+    pub fn map<B,F,e: EffectRow>(value: Self, transform: F) -> Result<B, E> / {| e}
+        where F: Fn<(A,), Output = B, Effects = e> {
         handle value {
             Result::Ok(item) => Result::Ok(transform(item)),
             Result::Err(error) => Result::Err(error),
         }
     }
 
-    pub fn map_err<E2, F>(value: Self, transform: F) -> Result<A, E2>
-        where F: Fn<(E), Output = E2> {
+    pub fn map_err<E2,F,e: EffectRow>(value: Self, transform: F) -> Result<A, E2> / {| e}
+        where F: Fn<(E,), Output = E2, Effects = e> {
         handle value {
             Result::Ok(item) => Result::Ok(item),
             Result::Err(error) => Result::Err(transform(error)),
         }
     }
 
-    pub fn and_then<B, F>(value: Self, transform: F) -> Result<B, E>
-        where F: Fn<(A), Output = Result<B, E>> {
+    pub fn and_then<B,F,e: EffectRow>(value: Self, transform: F) -> Result<B, E> / {| e}
+        where F: Fn<(A,), Output = Result<B, E>, Effects = e> {
         handle value {
             Result::Ok(item) => transform(item),
             Result::Err(error) => Result::Err(error),
         }
     }
 
-    pub fn or_else<E2, F>(value: Self, transform: F) -> Result<A, E2>
-        where F: Fn<(E), Output = Result<A, E2>> {
+    pub fn or_else<E2,F,e: EffectRow>(value: Self, transform: F) -> Result<A, E2> / {| e}
+        where F: Fn<(E,), Output = Result<A, E2>, Effects = e> {
         handle value {
             Result::Ok(item) => Result::Ok(item),
             Result::Err(error) => transform(error),
@@ -3526,8 +3526,8 @@ impl<T> Option<T> {
     // no candidate T is constructed and then erased when the option is already
     // occupied.  The closure itself is affine because that occupied branch does
     // not invoke it.
-    pub fn get_or_insert_with<'a, F>(target: &'a mut Self, make: F) -> &'a mut T
-        where F: Fn<(), Output = T>, F: Use<[0, 1]> {
+    pub fn get_or_insert_with<'a,F,e: EffectRow>(target: &'a mut Self, make: F) -> &'a mut T / {| e}
+        where F: Fn<(), Output = T, Effects = e>, F: Use<[0, 1]> {
         handle *target {
             Result::Ok(_) => &mut target.0,
             None => {
@@ -3571,32 +3571,32 @@ pub prefix 4 not;
 
 // The right operands are zero-argument Fn values, so they are evaluated only
 // on the selected path. Every discarded payload uses affine erasure.
-pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
-    where F: Fn<(), Output = B>, A: Use<[0, 1]> {
+pub fn if<A,E,B,F,e: EffectRow>(condition: Result<A, E>, body: F) -> Result<B, E> / {| e}
+    where F: Fn<(), Output = B, Effects = e>, A: Use<[0, 1]> {
     handle condition {
         Result::Ok(_) => Result::Ok(body()),
         Result::Err(error) => Result::Err(error),
     }
 }
 
-pub fn else<A, E, F>(value: Result<A, E>, fallback: F) -> A
-    where F: Fn<(), Output = A>, E: Use<[0, 1]> {
+pub fn else<A,E,F,e: EffectRow>(value: Result<A, E>, fallback: F) -> A / {| e}
+    where F: Fn<(), Output = A, Effects = e>, E: Use<[0, 1]> {
     handle value {
         Result::Ok(item) => item,
         Result::Err(_) => fallback(),
     }
 }
 
-pub fn and<A, E, B, F>(value: Result<A, E>, next: F) -> Result<B, E>
-    where F: Fn<(), Output = Result<B, E>>, A: Use<[0, 1]> {
+pub fn and<A,E,B,F,e: EffectRow>(value: Result<A, E>, next: F) -> Result<B, E> / {| e}
+    where F: Fn<(), Output = Result<B, E>, Effects = e>, A: Use<[0, 1]> {
     handle value {
         Result::Ok(_) => next(),
         Result::Err(error) => Result::Err(error),
     }
 }
 
-pub fn or<A, E, E2, F>(value: Result<A, E>, alternative: F) -> Result<A, E2>
-    where F: Fn<(), Output = Result<A, E2>>, E: Use<[0, 1]> {
+pub fn or<A,E,E2,F,e: EffectRow>(value: Result<A, E>, alternative: F) -> Result<A, E2> / {| e}
+    where F: Fn<(), Output = Result<A, E2>, Effects = e>, E: Use<[0, 1]> {
     handle value {
         Result::Ok(item) => Result::Ok(item),
         Result::Err(_) => alternative(),
@@ -3615,8 +3615,8 @@ pub fn not<A, E>(value: Result<A, E>) -> Result<E, A> {
 // keeps the label in the traversal frame: a callback need not own the label
 // merely to request an early exit, and the alternatives remain an explicit
 // source-level result protocol.
-fn fold_until_from<A, F, L>(index: usize, end: usize, accumulator: A, exit: L, step: F) -> A
-    where F: Fn<(A, usize), Output = Result<A, A>>, F: Use<[0, *]>, L: Label<A> {
+fn fold_until_from<A,F,L,e: EffectRow>(index: usize, end: usize, accumulator: A, exit: L, step: F) -> A / {| e}
+    where F: Fn<(A, usize), Output = Result<A, A>, Effects = e>, F: Use<[0, *]>, L: Label<A> {
     handle index < end {
         false => accumulator,
         true => handle step(accumulator, index) {
@@ -3625,8 +3625,8 @@ fn fold_until_from<A, F, L>(index: usize, end: usize, accumulator: A, exit: L, s
         },
     }
 }
-pub fn fold_until<A, F, L>(range: Range<usize>, accumulator: A, exit: L, step: F) -> A
-    where F: Fn<(A, usize), Output = Result<A, A>>, F: Use<[0, *]>, L: Label<A> {
+pub fn fold_until<A,F,L,e: EffectRow>(range: Range<usize>, accumulator: A, exit: L, step: F) -> A / {| e}
+    where F: Fn<(A, usize), Output = Result<A, A>, Effects = e>, F: Use<[0, *]>, L: Label<A> {
     fold_until_from(range.start, range.end, accumulator, exit, step)
 }
 
@@ -3635,15 +3635,15 @@ pub fn fold_until<A, F, L>(range: Range<usize>, accumulator: A, exit: L, step: F
 // invocation is the tail position of the Continue arm. The short aliases are
 // ordinary bindings, not parser keywords.
 pub enum LoopStep<S, B> { Continue(S), Break(B) }
-fn loop_state_from<S, B, F>(state: S, body: F) -> B
-    where F: Fn<(S), Output = LoopStep<S, B>>, F: Use<[0, *]> {
+fn loop_state_from<S,B,F,e: EffectRow>(state: S, body: F) -> B / {| e}
+    where F: Fn<(S,), Output = LoopStep<S, B>, Effects = e>, F: Use<[0, *]> {
     handle body(state) {
         LoopStep::Continue(next) => loop_state_from(next, body),
         LoopStep::Break(result) => result,
     }
 }
-pub fn loop_state<S, B, F>(initial: S, body: F) -> B
-    where F: Fn<(S), Output = LoopStep<S, B>>, F: Use<[0, *]> {
+pub fn loop_state<S,B,F,e: EffectRow>(initial: S, body: F) -> B / {| e}
+    where F: Fn<(S,), Output = LoopStep<S, B>, Effects = e>, F: Use<[0, *]> {
     loop_state_from(initial, body)
 }
 pub let loop = loop_state;

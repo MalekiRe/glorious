@@ -221,6 +221,73 @@ fn nominal_variance_follows_callable_inputs_and_mutable_nested_fields() {
 }
 
 #[test]
+fn frozen_borrowed_unsafe_calls_retain_the_selected_safety_requirement() {
+    let (core, signatures) = core_and_signatures_for("frozen-borrowed-call-safety@0.1.0", r#"
+        unsafe fn raw(value: i64) -> i64 { value }
+        fn main() -> i64 { let task = raw; unsafe { (&task)(42) } }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let mut forged = core.clone();
+    forged.unsafe_scopes.clear();
+    assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4202"));
+    for expression in &mut forged.expressions {
+        if let CoreKind::Call { invocation, .. } = &mut expression.kind
+            && let Type::Callable { safety, .. } = &mut invocation.declaration { *safety = grandiose_stage0::Safety::Safe; }
+    }
+    let rejected = forged.validate_projection_obligations(&signatures, &[]);
+    assert!(rejected.iter().any(|diagnostic| diagnostic.code == "G4304"), "{rejected:?}");
+}
+
+#[test]
+fn omitted_fn_effect_equalities_remain_symbolic_not_pure() {
+    let (rejected, signatures) = core_and_signatures_for("missing-fn-effect-equality@0.1.0", r#"
+        fn main<F>(callback: F) where F: Fn<(),Output=()> { callback() }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(rejected.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "{:?}", rejected.diagnostics);
+    assert!(rejected.expressions.iter().any(|expression| matches!(&expression.kind,
+        CoreKind::Call { invocation, .. } if invocation.effects.projections.len() == 1)));
+
+    let (accepted, signatures) = core_and_signatures_for("symbolic-fn-effect-equality@0.1.0", r#"
+        fn main<F>(callback: F) / { <F as Fn<()>>::Effects }
+            where F: Fn<(),Output=()> { callback() }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(accepted.diagnostics.is_empty(), "{:?}", accepted.diagnostics);
+}
+
+#[test]
+fn frozen_selected_call_contracts_reject_changed_effects_and_declarations() {
+    let (core, signatures) = core_and_signatures_for("frozen-selected-call@0.1.0", r#"
+        effect Ask { [1,1] ask() -> (); }
+        fn ask(value: &i64) / Ask { Ask::ask() }
+        fn main(value: &i64) / Ask { ask(value) }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let checked = core.validate_projection_obligations(&signatures, &[]);
+    assert!(checked.is_empty(), "{checked:?}");
+    let index = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Call { .. })).unwrap();
+    for change_declaration in [false, true] {
+        let mut forged = core.clone();
+        let CoreKind::Call { invocation, .. } = &mut forged.expressions[index].kind else { unreachable!() };
+        invocation.effects = grandiose_stage0::EffectRow::empty();
+        if change_declaration {
+            let Type::Callable { effects, .. } = &mut invocation.declaration else { unreachable!() };
+            *effects = grandiose_stage0::EffectRow::empty();
+        }
+        assert_ne!(forged.semantic_fingerprint(), core.semantic_fingerprint());
+        let rejected = forged.validate_projection_obligations(&signatures, &[]);
+        assert!(rejected.iter().any(|diagnostic| diagnostic.code == "G4304"), "{rejected:?}");
+    }
+    let mut forged = core.clone();
+    let CoreKind::Call { invocation, .. } = &mut forged.expressions[index].kind else { unreachable!() };
+    invocation.declaration = Type::Unit;
+    assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"));
+}
+
+#[test]
 fn frozen_invocation_prerequisites_preserve_free_caller_regions() {
     let (definition, core, signatures) = frontend_for("frozen-caller-region-prerequisites@0.1.0", r#"
         trait Marker<'a> {}

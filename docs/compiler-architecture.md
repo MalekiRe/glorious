@@ -1489,3 +1489,39 @@ serialized guarded-interface format or complete callback/loan replay analysis.
 The library root now retains two quantified observer-row failures; their exact
 call-lifetime relation must survive selection before effect accounting can
 consume it. Full library and self-hosted acceptance remain unproved.
+
+## Selected callable declarations and instantiated invocation effects
+
+Elaboration publishes each call's selected declaration before argument-region
+alignment and its resulting invocation effect row in `CoreCallContract`.
+The declaration is an unrefined callable view: actual receiver permissions,
+capture identities and prerequisites remain on the callee value. Parameter and
+effect regions keep their original relation instead of reconstructing a lexical
+Fn predicate from shortened actual argument views. Missing associated Effects
+equality remains a symbolic projection, never an implicit empty row.
+
+Independent Core validation proves selection from the actual callee's concrete
+callable relation or scoped ordinary/quantified trait evidence. Compiler-owned
+Label evidence supplies its own pure transfer contract, not a default Fn effect
+definition. The shared directional lifetime alignment then checks every argument
+with one substitution and verifies the instantiated declaration row. Unproved
+relations and altered rows reject. Invocation metadata participates in normal
+inference sealing, canonicality, binder scope and body fingerprints. Structural
+fusion maps it through the same invocation frame as other semantic types.
+
+Minimum-use suspension consumes the instantiated row. Handler payload transfer
+uses the pre-alignment parameter/effect relation, and unsafe validation and
+terminal lowering consume the selected safety/result view. The separate lexical
+effect recovery and its PlaceFlow binding transport are removed. Existing
+callee-value prerequisite and receiver checks retain their independent authority;
+the declaration view cannot certify a forged capture environment.
+
+Contextual row checking applies the ordinary complete subset constraint before
+requiring solved allowed-row metadata. Empty requirements can fit an unresolved
+context without granting permission for a missing named effect or rigid tail.
+Library callback declarations propagate their actual selected effect rows through
+ordinary generic signatures. This repairs the quantified observer accounting and
+full-library root composition, not complete guarded interfaces, general compact
+effect inference, unannotated universal closure generalization or every library
+execution graph. Cache 135 records the changed source boundary; runtime and
+serialized instruction representations are unchanged.

@@ -36,6 +36,23 @@ use crate::{
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct CoreId(pub u32);
+/// The selected declaration relation and its instantiated invocation row.
+/// Parameter-region alignment may shorten an argument view without changing
+/// the lexical Fn predicate that supplied this contract. Keep both sides of
+/// that boundary instead of recovering a predicate from the argument types.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CoreCallContract {
+    /// The callable shape, without outer value/capture refinements. Those
+    /// remain on the callee and cannot be certified by this selected view.
+    pub declaration: Type,
+    pub effects: EffectRow,
+}
+impl CoreCallContract {
+    fn declaration_view(mut declaration: Type) -> Type {
+        if let Type::Callable { contract, .. } = &mut declaration { *contract = Default::default(); }
+        declaration
+    }
+}
 /// Fresh body-local identity for an anonymous callable. It is deliberately
 /// separate from a source offset so nested closure allocation has no effect on
 /// named declaration identities or interface fingerprints.
@@ -779,6 +796,7 @@ pub enum CoreKind {
     Call {
         callee: CoreId,
         arguments: Vec<CoreId>,
+        invocation: CoreCallContract,
         /// Requires a checked activation transfer at every optimization level.
         mandatory_tail: bool,
         /// The declaration-level relation observed before generic/HRTB
@@ -1021,7 +1039,8 @@ impl TypedBody {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
                     message: "Typed Core reuses one refinement environment brand for distinct test producers".into() });
             }
-            needs_unsafe_validation |= matches!(expression.ty, Type::Callable { safety: crate::Safety::Unsafe, .. });
+            needs_unsafe_validation |= matches!(&expression.kind, CoreKind::Call { invocation, .. }
+                if matches!(invocation.declaration, Type::Callable { safety: crate::Safety::Unsafe, .. }));
             let owner = CoreId(index as u32);
             if let CoreKind::LabelValue { brand } = expression.kind
                 && !crate::types::label::matches_brand(&expression.ty, brand) {
@@ -1324,20 +1343,9 @@ impl TypedBody {
             let allowed = inherited
                 || (self.unsafe_scopes.contains(&id)
                     && matches!(expression.kind, CoreKind::Block(_)));
-            if let CoreKind::Call { callee, .. } = &expression.kind
+            if let CoreKind::Call { invocation, .. } = &expression.kind
                 && !allowed
-                && self
-                    .expressions
-                    .get(callee.0 as usize)
-                    .is_some_and(|callee| {
-                        matches!(
-                            callee.ty,
-                            Type::Callable {
-                                safety: crate::Safety::Unsafe,
-                                ..
-                            }
-                        )
-                    })
+                && matches!(invocation.declaration, Type::Callable { safety: crate::Safety::Unsafe, .. })
             {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4202",
@@ -1478,6 +1486,10 @@ struct FrozenProjectionTerms<'a> {
 
 fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProjectionTerms<'a>) {
     match kind {
+        CoreKind::Call { invocation, .. } => {
+            terms.types.push(&invocation.declaration);
+            terms.effect_rows.push(&invocation.effects);
+        }
         CoreKind::ConstValue(argument) => terms.arguments.push(argument),
         CoreKind::Closure {
             parameters,
@@ -1564,7 +1576,6 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
-        | CoreKind::Call { .. }
         | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
@@ -1702,6 +1713,11 @@ fn core_kind_is_recovered(kind: &CoreKind) -> bool {
 
 fn core_structural_error(kind: &CoreKind, ty: &Type) -> Option<String> {
     match kind {
+        CoreKind::Call { arguments, invocation, .. } => match &invocation.declaration {
+            Type::Callable { contract, parameters, .. }
+                if **contract == crate::CallableContract::default() && parameters.len() == arguments.len() => None,
+            _ => Some("Typed Core invocation lacks an unrefined callable declaration of the actual arity".into()),
+        },
         CoreKind::Closure {
             callable,
             environment,
@@ -2641,6 +2657,8 @@ pub(crate) fn generic_argument_contains_inference(argument: &GenericArgument) ->
 
 fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::Call { invocation, .. } => type_contains_inference(&invocation.declaration)
+            || effect_row_contains_inference(&invocation.effects),
         CoreKind::ConstValue(argument) => generic_argument_contains_inference(argument),
         CoreKind::Closure {
             parameters,
@@ -2726,7 +2744,6 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
-        | CoreKind::Call { .. }
         | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
@@ -2744,6 +2761,8 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
 /// caches, or fingerprints consume them.
 fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::Call { invocation, .. } => !is_canonical_type_identity(&invocation.declaration)
+            || !is_canonical_effect_row_identity(&invocation.effects),
         CoreKind::ConstValue(argument) => !is_canonical_generic_argument_identity(argument),
         CoreKind::Closure {
             parameters,
@@ -2849,7 +2868,6 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
         | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
-        | CoreKind::Call { .. }
         | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
@@ -2908,6 +2926,8 @@ fn pattern_contains_noncanonical_type_identity(pattern: &CorePattern) -> bool {
 
 fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::Call { invocation, .. } => type_contains_out_of_scope_bound_lifetime(&invocation.declaration)
+            || effect_row_contains_out_of_scope_bound_lifetime(&invocation.effects, &[]),
         CoreKind::ConstValue(argument) => generic_argument_contains_out_of_scope_bound_lifetime(argument, &[]),
         CoreKind::Closure {
             parameters,
@@ -3004,7 +3024,6 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
         | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
-        | CoreKind::Call { .. }
         | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
@@ -8186,10 +8205,13 @@ impl Elaborator<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
+                invocation,
                 reference_origin,
                 reference_shape,
                 ..
             } => {
+                invocation.declaration = CoreCallContract::declaration_view(self.zonk_type(invocation.declaration.clone(), span));
+                invocation.effects = self.zonk_effect_row(invocation.effects.clone(), span);
                 // Generic/HRTB callable signatures preserve a more precise
                 // relationship than the caller's erased local regions.  Once
                 // that contract names a unique source argument, keep it
@@ -10704,6 +10726,7 @@ impl Elaborator<'_> {
                 None => return self.fail(span, "G4105", "called expression is not callable"),
             },
         };
+        let declaration = CoreCallContract::declaration_view(callable.clone());
         let Type::Callable {
             contract,
             safety,
@@ -10905,6 +10928,7 @@ impl Elaborator<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
+                invocation: CoreCallContract { declaration, effects },
                 reference_contract: reference_contract.clone(),
                 reference_origin: reference_contract,
                 reference_shape,
@@ -11102,7 +11126,7 @@ impl Elaborator<'_> {
                 continue;
             };
             let effects = match effects.as_slice() {
-                [] => EffectRow::empty(),
+                [] => callable_contracts::unresolved_fn_effects(subject, relation),
                 [effects] => effects.value.clone(),
                 _ => continue,
             };
@@ -11137,7 +11161,8 @@ impl Elaborator<'_> {
                 };
                 let [output] = opened.type_bindings.as_slice() else { continue; };
                 let effects = match opened.effect_bindings.as_slice() {
-                    [] => EffectRow::empty(), [binding] => binding.value.clone(), _ => continue,
+                    [] => callable_contracts::unresolved_fn_effects(&opened.subject, &opened.relation),
+                    [binding] => binding.value.clone(), _ => continue,
                 };
                 self.inference = inference;
                 return Some(Type::Callable { contract: Default::default(),
@@ -11160,7 +11185,7 @@ impl Elaborator<'_> {
             };
             let [output] = bound.type_bindings.as_slice() else { continue; };
             let effects = match bound.effect_bindings.as_slice() {
-                [] => EffectRow::empty(),
+                [] => callable_contracts::unresolved_fn_effects(&bound.subject, &bound.relation),
                 [binding] => binding.value.clone(),
                 _ => continue,
             };
@@ -13449,21 +13474,10 @@ impl Elaborator<'_> {
             }
         };
         let mut effects = effects;
-        // Instantiation has already mapped callee operands into the caller's
-        // binder space. Permission checking must never replace their exact
-        // row with the caller's (possibly wider) declaration.
-        if !self.inference
-            .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
-            .is_ok_and(|declared| effects.tails.is_subset(&declared.tails))
-        {
-            self.error(
-                span,
-                "G4155",
-                "call has an outward effect-row tail not admitted by this callable",
-            );
-            self.recovered = true;
-            return;
-        }
+        // Test the complete row relation before demanding a closed permission
+        // row. For example {} is a subset of an as-yet-inferred contextual
+        // callback row. An unresolved permission row is neither an error by
+        // itself nor permission for a missing named effect or rigid tail.
         // Preserve a symbolic associated row when the caller has supplied
         // the *same lexical evidence*.  A generic forwarding function such
         // as

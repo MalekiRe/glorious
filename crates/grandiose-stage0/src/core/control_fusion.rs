@@ -511,7 +511,7 @@ impl Fusion<'_> {
                 self.label_result(brand, value);
                 CoreKind::Transfer { brand, value }
             }
-            CoreKind::Call { callee, arguments, mandatory_tail, reference_contract, reference_origin, reference_shape } => {
+            CoreKind::Call { callee, arguments, invocation, mandatory_tail, reference_contract, reference_origin, reference_shape } => {
                 if mandatory_tail && !frame.calls.is_empty() {
                     return Err(diagnostic(span, "expanded mandatory tail invocation requires a fused activation-cleanup contract"));
                 }
@@ -540,7 +540,9 @@ impl Fusion<'_> {
                     let target = target.ok_or_else(|| diagnostic(span, "label-bearing invocation has no complete exact callee selection"))?;
                     return self.invoke(id, frame, target, value, values, span);
                 }
-                let result = self.alloc(CoreKind::Call { callee: value, arguments: values, mandatory_tail, reference_contract, reference_origin, reference_shape }, ty, span);
+                let GenericArgument::EffectRow(effects) = self.argument(frame, GenericArgument::EffectRow(invocation.effects)) else { unreachable!() };
+                let invocation = CoreCallContract { declaration: CoreCallContract::declaration_view(self.ty(frame, invocation.declaration)), effects };
+                let result = self.alloc(CoreKind::Call { callee: value, arguments: values, invocation, mandatory_tail, reference_contract, reference_origin, reference_shape }, ty, span);
                 return Ok(self.with_semantic(result, self.semantic_type(frame, expression.ty)));
             }
             CoreKind::Closure { callable, parameters, environment, body } => {

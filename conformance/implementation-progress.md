@@ -5,6 +5,73 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 135: selected invocation contracts and callback effect propagation
+
+The full-library root now compiles and executes the foundation case through
+decoded VM (`target/selected-call-contract-library-root-v4.log`). The two Inspect
+retained-owner errors are repaired. This is source composition plus one demanded
+execution graph, not execution of every library API or full library acceptance.
+
+Typed Core calls now retain the selected callable declaration before argument
+lifetime alignment, separately from the instantiated invocation effect row.
+Independent validation proves that selection against the actual callee and its
+lexical ordinary/quantified Fn evidence, then checks the argument-region relation
+and instantiated row. Outer callable-value refinements remain on the actual
+callee, not the selected declaration view. Canonicality, sealing, fingerprints
+and lexical fusion transport both terms. Minimum-use suspension and handler
+payload transfer consume the selected contract; the old exact-argument-head
+lexical effect recovery and its separate PlaceFlow binding transport are removed.
+Unsafe-call validation and terminal-call lowering also consume the selected view.
+
+Independent checking exposed another source bug: omitted Fn::Effects equalities
+were silently treated as pure. All ambient invocation selection paths now retain
+the ordinary associated projection when equality is absent, as required by the
+specification's lack of a default Effects definition. An explicitly admitted
+projection remains callable and closes under specialization. Fifteen legacy
+library callback declarations now bind and propagate their callback effect row,
+rather than assuming purity. Their existing ownership bounds are unchanged;
+these are not yet the complete specified guarded Environment/RunsIn contracts.
+Contextual pure calls also use the existing complete subset constraint before
+demanding a solved allowed row: an empty required row fits an unknown contextual
+row without making that row permission for arbitrary effects.
+
+Verification:
+
+- Explicitly quantified observer calls, projected Fn effect rows and generic
+  lexical fusion pass fresh/decoded VM and generated native O0/O2. Optional
+  cancellation retaining a Token rejects in Build and Check; exact-once effects
+  pass. See `target/selected-call-contract-observer-v1.log`,
+  `target/selected-call-contract-projected-v1.log` and
+  `target/selected-call-contract-fusion-v1.log`.
+- Contextual literal and pure named-call blocks pass direct and operator calls
+  (`target/selected-call-contract-contextual-fixed-v3.log`). The prior named-call
+  failure is retained in `target/selected-call-contract-contextual-baseline-v2.log`.
+- All 14 frozen Core test groups, four UseFlow unit tests and 22 revision tests
+  pass. New mutations reject changed declared/instantiated effects, invalid
+  selected declaration shape, missing unsafe scope on a borrowed unsafe callee,
+  and forged safe selection. Missing Fn effect equality rejects an unadmitted
+  pure body but permits explicit projection propagation.
+- `stdlib/tests/callback_effects.glorious` passes decoded VM and observes exactly
+  15 performances across Result's four map/chain APIs, lazy Option insertion,
+  if/else/and/or, loop state, fold and vector partition
+  (`target/selected-call-contract-library-callbacks-v1.log`). Native handler
+  execution is not established by this test.
+- The whole minimum-use suite has **40 passing, 8 failing**
+  (`target/selected-call-contract-minimum-integration-v1.log`). The old no-std
+  operator-fixity mismatch and unannotated observer universal-region leakage
+  remain. Six existing fixtures now encounter G4155 because their generic Fn
+  bounds omit Effects while their bodies declare purity. Their original sources
+  and assertions are preserved; the suite is not reported green.
+- The 32-case library integration run is still active at this checkpoint
+  (`target/selected-call-contract-library-integration-v1.log`); budget,
+  float_convert and float_parse have reported failures. Its terminal results
+  and causes remain to be recorded, not inferred from root composition.
+
+Unannotated higher-ranked closure input generalization, contextual inference of
+new named effects, complete guarded higher-order interfaces, all library execution
+gates, native handlers and self-hosted acceptance remain open. Cache is 135;
+verifier 41, interface 22, native ABI 13, bytecode 72 and VM schema 116 are unchanged.
+
 ## Cache 134: conditional retained-owner contracts at specialization
 
 The unchanged full-library root now reports **2 G5024 diagnostics**, down from

@@ -74,7 +74,6 @@ struct StagedTypedBody {
     valid: bool,
     core: TypedBody,
     lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
-    lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
     solver: TraitSolver,
     budget: Arc<Budget>,
 }
@@ -97,9 +96,9 @@ impl StagedTypedBody {
         abort_primitive: Option<DefKey>,
         continuations: Arc<crate::core_continuations::CoreContinuations>,
     ) -> PlaceFlow {
-        let Self { core, lexical_bounds, lexical_effect_bindings, solver, .. } = self;
+        let Self { core, lexical_bounds, solver, .. } = self;
         PlaceFlow::analyze_with_frozen_solver(
-            core, signatures, lexical_bounds, lexical_effect_bindings, solver, abort_primitive,
+            core, signatures, lexical_bounds, solver, abort_primitive,
             continuations,
         )
     }
@@ -238,7 +237,6 @@ impl BodySession<'_, '_> {
     /// request transaction remains the sole external publication boundary.
     fn stage_typed(self, valid: bool, core: TypedBody,
         lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
-        lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
         solver: TraitSolver,
     ) -> Result<(), ServiceError> {
         let Self {
@@ -256,7 +254,6 @@ impl BodySession<'_, '_> {
             valid,
             core,
             lexical_bounds,
-            lexical_effect_bindings,
             solver,
             budget,
         });
@@ -1748,11 +1745,6 @@ impl StageZeroCompiler {
                         CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span))
                     } else { CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone()) }
                 }));
-                let ambient_effect_bindings = signatures.definitions.get(&declaration.key)
-                    .and_then(|header| match header {
-                        ElaboratedHeader::Callable(signature) => Some(signature.where_associated_effect_bindings.as_slice()),
-                        _ => None,
-                    }).unwrap_or_default();
                 let valid = core_validation.is_empty()
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
@@ -1768,8 +1760,7 @@ impl StageZeroCompiler {
                     core.semantic_fingerprint(),
                     core_dependencies,
                 );
-                body_session.stage_typed(valid, core, ambient_projection_bounds,
-                    ambient_effect_bindings.to_vec(), validation_solver)?;
+                body_session.stage_typed(valid, core, ambient_projection_bounds, validation_solver)?;
             }
             for implementation in node
                 .interface
@@ -1911,8 +1902,6 @@ impl StageZeroCompiler {
                             CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span))
                         } else { CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone()) }
                     }));
-                    let mut ambient_effect_bindings = implementation_signature.where_associated_effect_bindings.clone();
-                    ambient_effect_bindings.extend(method_signature.where_associated_effect_bindings.clone());
                     let valid = core_validation.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();
@@ -1928,8 +1917,7 @@ impl StageZeroCompiler {
                         core.semantic_fingerprint(),
                         core_dependencies,
                     );
-                    body_session.stage_typed(valid, core, ambient_projection_bounds,
-                        ambient_effect_bindings, validation_solver)?;
+                    body_session.stage_typed(valid, core, ambient_projection_bounds, validation_solver)?;
                 }
             }
         }

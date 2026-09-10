@@ -10,9 +10,13 @@ pub(super) fn validate_invocation_prerequisites(
     body: &TypedBody, expression: &CoreExpr, signatures: &ElaboratedInterface,
     scope: &TraitSolver, outlives: &[crate::OutlivesPredicate], diagnostics: &mut Vec<CoreDiagnostic>,
 ) {
-    let CoreKind::Call { callee, arguments, .. } = &expression.kind else { return; };
+    let CoreKind::Call { callee, arguments, invocation, .. } = &expression.kind else { return; };
     let Some(callee) = body.expressions.get(callee.0 as usize) else { return; };
     let mut solver = scope.fresh_query();
+    if let Err(reason) = validate_selected_invocation(body, callee, arguments, invocation, &mut solver, outlives) {
+        diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
+            message: format!("Typed Core invocation {reason}") });
+    }
     let mut valid = true;
     if let Some(selected) = crate::callable_declarations::selected_template(signatures, callee, Some(scope)) {
         valid = selected.signature.instantiate_generic(&selected.arguments)
@@ -47,6 +51,101 @@ pub(super) fn validate_invocation_prerequisites(
     }
     if !valid { diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
         message: "Typed Core invocation does not establish its frozen declaration prerequisites".into() }); }
+}
+
+/// Declaration selection and invocation-region instantiation are distinct
+/// proofs. In particular, the actual arguments are not the head of a lexical
+/// quantified Fn promise after their shorter call views have been aligned.
+fn validate_selected_invocation(
+    body: &TypedBody, callee: &CoreExpr, arguments: &[CoreId], invocation: &CoreCallContract,
+    solver: &mut TraitSolver, outlives: &[crate::OutlivesPredicate],
+) -> Result<(), &'static str> {
+    let declaration = solver.normalize_type(invocation.declaration.clone())
+        .map_err(|_| "has an unresolved selected declaration")?;
+    let Type::Callable { contract, parameters, effects, .. } = &declaration else {
+        return Err("has no selected callable declaration");
+    };
+    if **contract != CallableContract::default() { return Err("puts value refinements on its selected declaration view"); }
+    if !selected_declaration_proven(&callee.ty, &declaration, solver) {
+        return Err("does not establish its selected callable declaration");
+    }
+    if parameters.len() != arguments.len() { return Err("changes its selected declaration arity"); }
+    let mut substitution = CallLifetimeSubstitution { outlives: outlives.to_vec(),
+        nominal_variances: Some(solver.nominal_variances()), preserve_free_generics: true,
+        ..Default::default() };
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        let argument = body.expressions.get(argument.0 as usize).ok_or("has a missing argument")?;
+        if argument.ty == Type::Never { continue; }
+        let actual = solver.normalize_type(argument.ty.clone()).map_err(|_| "has an unresolved argument")?;
+        let actual = if matches!(parameter, Type::Callable { .. }) {
+            crate::types::label::callable(&actual).unwrap_or(actual)
+        } else { actual };
+        let aligned = align_lifetime_types(parameter, &actual, &mut substitution, LifetimeMode::InstantiateBound, 0)
+            .map_err(|_| "does not satisfy its selected argument lifetime relation")?;
+        if !callable_argument_accepts(&aligned, &actual) && InferContext::default().unify(aligned, actual).is_err() {
+            return Err("changes its selected argument type");
+        }
+    }
+    if !substitution.inference_outlives.is_empty() { return Err("retains an unproved argument lifetime relation"); }
+    let effects = substitute_call_effects(effects.clone(), &substitution, 0)
+        .map_err(|_| "retains an uninstantiated declaration effect region")?;
+    let effects = solver.normalize_effect_row(effects).map_err(|_| "has an unresolved declaration effect row")?;
+    let supplied = solver.normalize_effect_row(invocation.effects.clone()).map_err(|_| "has an unresolved invocation effect row")?;
+    if effects != supplied { return Err("changes its instantiated declaration effect row"); }
+    Ok(())
+}
+
+fn selected_declaration_proven(subject: &Type, declaration: &Type, solver: &mut TraitSolver) -> bool {
+    let Ok(subject) = solver.normalize_type(subject.clone()) else { return false; };
+    let value = match &subject { Type::Reference { referent, .. } => referent.as_ref(), ty => ty };
+    if let Type::Callable { contract, .. } = value {
+        let permitted = match &subject {
+            Type::Reference { mutability: Mutability::Shared, .. } => contract.shared_receiver,
+            Type::Reference { mutability: Mutability::Unique, .. } => contract.unique_receiver,
+            _ => true,
+        };
+        return permitted && callable_argument_accepts(declaration, value);
+    }
+    if let Some(callable) = crate::types::label::callable(&subject) { return callable == *declaration; }
+    let Type::Callable { contract, safety: crate::Safety::Safe, lifetime_binders,
+        parameters, result, effects, invocation: crate::Quantity::ONCE } = declaration else { return false; };
+    if **contract != CallableContract::default() { return false; }
+    // Label supplies its compiler-defined pure transfer relation, not an
+    // omitted Fn::Effects equality on an arbitrary bottom-returning value.
+    if *lifetime_binders == 0 && **result == Type::Never && *effects == EffectRow::empty()
+        && let [payload] = parameters.as_slice()
+        && matches!(solver.solve(TraitGoal { subject: subject.clone(), relation: ElaboratedTraitReference {
+            definition: crate::intrinsic_label_trait_definition(), arguments: vec![GenericArgument::Type(payload.clone())],
+        } }), TraitAnswer::Proven { .. }) { return true; }
+    let Some(subject) = crate::types::regions::shift_type_argument(subject, u32::from(*lifetime_binders > 0)) else { return false; };
+    let mut inputs = vec![Type::Tuple(parameters.clone())];
+    if parameters.is_empty() { inputs.push(Type::Unit); }
+    inputs.into_iter().any(|inputs| {
+        let relation = ElaboratedTraitReference { definition: crate::intrinsic_callable_trait_definition(),
+            arguments: vec![GenericArgument::Type(inputs)] };
+        let bound = crate::QuantifiedWhereBound { lifetime_binders: *lifetime_binders,
+            subject: subject.clone(), relation: relation.clone(),
+            type_bindings: vec![crate::ElaboratedAssociatedTypeBinding { subject: subject.clone(), relation: relation.clone(),
+                name: "Output".into(), item_generic_kinds: vec![], item_arguments: vec![], value: (**result).clone() }],
+            effect_bindings: vec![crate::ElaboratedAssociatedEffectBinding { subject: subject.clone(), relation: relation.clone(),
+                name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![], value: effects.clone() }],
+        };
+        if *lifetime_binders > 0 { return solver.proves_universal(&bound); }
+        solver.callable_prerequisites_proven(&CallableSignature {
+            safety: crate::Safety::Safe, generics: 0, generic_kinds: vec![], parameters: vec![], result: Type::Unit,
+            effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
+            where_bounds: vec![(subject.clone(), relation)], where_outlives: vec![],
+            where_associated_type_bindings: bound.type_bindings, where_associated_effect_bindings: bound.effect_bindings,
+            universal_bounds: vec![],
+        })
+    })
+}
+
+pub(super) fn unresolved_fn_effects(subject: &Type, relation: &ElaboratedTraitReference) -> EffectRow {
+    EffectRow { effects: Default::default(), tails: Default::default(), projections: vec![crate::EffectRowProjection {
+        subject: Box::new(subject.clone()), trait_definition: relation.definition,
+        trait_arguments: relation.arguments.clone(), name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
+    }] }
 }
 
 impl Elaborator<'_> {

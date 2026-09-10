@@ -655,9 +655,6 @@ pub struct PlaceFlow {
     /// Lexical trait assumptions checked with this body, inherited by lifted
     /// callables even when their executable identity differs from the owner.
     pub lexical_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
-    /// Associated rows are part of a generic Fn's checked lexical contract,
-    /// not recoverable from its uninstantiated Core callee type alone.
-    pub(crate) lexical_effect_bindings: Vec<crate::ElaboratedAssociatedEffectBinding>,
     /// Frozen lexical storage identities referenced by `move_paths`.
     pub bindings: Vec<PlaceBinding>,
     /// Persistent lexical source-storage arena. `binding_scopes` is dense in
@@ -708,7 +705,7 @@ impl PlaceFlow {
     }
 
     pub fn analyze(body: &TypedBody) -> Self {
-        Self::analyze_root(body, body.root, &body.parameters, None, &[], &[], None, None)
+        Self::analyze_root(body, body.root, &body.parameters, None, &[], None, None)
     }
 
     /// Analyze against the sealed interface that determined each type's
@@ -723,7 +720,7 @@ impl PlaceFlow {
         signatures: &ElaboratedInterface,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
     ) -> Self {
-        Self::analyze_root(body, body.root, &body.parameters, Some(signatures), bounds, &[], None, None)
+        Self::analyze_root(body, body.root, &body.parameters, Some(signatures), bounds, None, None)
     }
 
     /// Reuse only the immutable rule/layout snapshot from this exact sealed
@@ -732,13 +729,12 @@ impl PlaceFlow {
         body: &TypedBody,
         signatures: &ElaboratedInterface,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
-        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
         solver: &crate::TraitSolver,
         abort_primitive: Option<crate::DefKey>,
         continuations: std::sync::Arc<crate::core_continuations::CoreContinuations>,
     ) -> Self {
         Self::analyze_root_with_captures(body, body.root, &body.parameters, &[], Some(signatures), bounds,
-            effect_bindings, Some(solver), abort_primitive, Some(continuations), true, None)
+            Some(solver), abort_primitive, Some(continuations), true, None)
     }
 
     /// Analyze one lifted callable body as an independent storage owner.
@@ -752,7 +748,7 @@ impl PlaceFlow {
         root: CoreId,
         parameters: &[(String, Type)],
     ) -> Self {
-        Self::analyze_root(body, root, parameters, None, &[], &[], None, None)
+        Self::analyze_root(body, root, parameters, None, &[], None, None)
     }
 
     pub fn analyze_lifted_with_interface(
@@ -771,7 +767,7 @@ impl PlaceFlow {
         signatures: &ElaboratedInterface,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
     ) -> Self {
-        Self::analyze_root(body, root, parameters, Some(signatures), bounds, &[], None, None)
+        Self::analyze_root(body, root, parameters, Some(signatures), bounds, None, None)
     }
 
     fn analyze_root(
@@ -780,12 +776,11 @@ impl PlaceFlow {
         parameters: &[(String, Type)],
         signatures: Option<&ElaboratedInterface>,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
-        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
         frozen_solver: Option<&crate::TraitSolver>,
         abort_primitive: Option<crate::DefKey>,
     ) -> Self {
         Self::analyze_root_with_captures(body, root, parameters, &[], signatures, bounds,
-            effect_bindings, frozen_solver, abort_primitive, None, true, None)
+            frozen_solver, abort_primitive, None, true, None)
     }
 
     /// A borrowed capture names its caller-owned referent in Core. Its source
@@ -805,7 +800,7 @@ impl PlaceFlow {
             .chain(parameters.iter().cloned()).collect::<Vec<_>>();
         let modes = environment.captures.iter().map(|capture| capture.mode).collect::<Vec<_>>();
         Self::analyze_root_with_captures(body, root, &abi, &modes, signatures,
-            &parent.lexical_bounds, &parent.lexical_effect_bindings, solver, parent.abort_primitive,
+            &parent.lexical_bounds, solver, parent.abort_primitive,
             parent.continuations.clone(), false, parent.resource_input)
     }
 
@@ -816,7 +811,6 @@ impl PlaceFlow {
         capture_modes: &[CaptureMode],
         signatures: Option<&ElaboratedInterface>,
         bounds: &[(Type, crate::ElaboratedTraitReference)],
-        effect_bindings: &[crate::ElaboratedAssociatedEffectBinding],
         frozen_solver: Option<&crate::TraitSolver>,
         abort_primitive: Option<crate::DefKey>,
         continuations: Option<std::sync::Arc<crate::core_continuations::CoreContinuations>>,
@@ -839,7 +833,6 @@ impl PlaceFlow {
             continuations: &continuations,
             signatures,
             lexical_bounds: bounds,
-            lexical_effect_bindings: effect_bindings,
             frozen_solver,
             abort_primitive,
             states: BTreeMap::new(),
@@ -955,7 +948,6 @@ impl PlaceFlow {
             continuations: Some(continuations.clone()),
             abort_primitive,
             lexical_bounds: bounds.to_vec(),
-            lexical_effect_bindings: effect_bindings.to_vec(),
             bindings: a.bindings.into_entries(),
             storage_scopes: a.storage_scopes,
             binding_scopes: a.binding_scopes,
@@ -1002,7 +994,6 @@ struct Analyzer<'a> {
     continuations: &'a crate::core_continuations::CoreContinuations,
     signatures: Option<&'a ElaboratedInterface>,
     lexical_bounds: &'a [(Type, crate::ElaboratedTraitReference)],
-    lexical_effect_bindings: &'a [crate::ElaboratedAssociatedEffectBinding],
     frozen_solver: Option<&'a crate::TraitSolver>,
     abort_primitive: Option<crate::DefKey>,
     states: BTreeMap<String, LocalState>,
@@ -2206,7 +2197,7 @@ impl Analyzer<'_> {
     fn finish_invocation_inputs(&mut self, callee: CoreId, owner: Option<&str>, arguments: &[CoreId], call: CoreId, span: Span) {
         self.record_invocation_stores(callee, owner, arguments, call);
         if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
-        else { self.check_minimum_call_suspensions(call, callee, arguments, span); }
+        else { self.check_minimum_call_suspensions(call, span); }
         self.apply_invocation_control(call, owner, span);
     }
 
@@ -3935,10 +3926,10 @@ impl Analyzer<'_> {
         &self, computation: CoreId, clause: &crate::core::CoreHandlerClause,
     ) -> Vec<PatternBindingTransfer> {
         let Some(signatures) = self.signatures else { return vec![]; };
-        let CoreKind::Call { callee, arguments, .. } = &self.body.expression(computation).kind else {
+        let CoreKind::Call { invocation, arguments, .. } = &self.body.expression(computation).kind else {
             return vec![];
         };
-        let Type::Callable { parameters, effects, .. } = &self.body.expression(*callee).ty else {
+        let Type::Callable { parameters, effects, .. } = &invocation.declaration else {
             return vec![];
         };
         if !effects.tails.is_empty() || !effects.projections.is_empty() {

@@ -1,0 +1,41 @@
+// Callback permissions are ordinary rows, including through the legacy
+// Result/Option and control helpers. No missing Fn equality proves purity.
+effect Ask { [1,1] ask(value: i64) -> i64; }
+fn transform(value: i64) -> i64 / Ask { Ask::ask(value + 1) }
+fn next(value: i64) -> Result<i64,i64> / Ask { Result::Ok(Ask::ask(value + 1)) }
+fn factory() -> i64 / Ask { Ask::ask(42) }
+fn result_factory() -> Result<i64,i64> / Ask { Result::Ok(Ask::ask(42)) }
+fn step(value: i64) -> LoopStep<i64,i64> / Ask { LoopStep::Break(Ask::ask(value)) }
+fn fold_step(value: i64, index: usize) -> Result<i64,i64> / Ask { Result::Ok(Ask::ask(value + as<i64>(index))) }
+fn selected(value: &i64) -> Bool / Ask { Ask::ask(*value) < 3 }
+
+fn exercise() / Ask {
+    let mapped = Result::map(Result<i64,i64>::Ok(41), transform);
+    assert_true(handle mapped { Result::Ok(42) => true, _ => false });
+    let mapped_error = Result::map_err(Result<i64,i64>::Err(41), transform);
+    assert_true(handle mapped_error { Result::Err(42) => true, _ => false });
+    let chained = Result::and_then(Result<i64,i64>::Ok(41), next);
+    assert_true(handle chained { Result::Ok(42) => true, _ => false });
+    let recovered = Result::or_else(Result<i64,i64>::Err(41), next);
+    assert_true(handle recovered { Result::Ok(42) => true, _ => false });
+    let mut optional: Option<i64> = None;
+    assert_true(*Option::get_or_insert_with(&mut optional, factory) == 42);
+    assert_true(*Option::get_or_insert_with(&mut optional, factory) == 42);
+    assert_true(handle if(true, factory) { Result::Ok(42) => true, _ => false });
+    assert_true(else(Result<i64,()>::Err(()), factory) == 42);
+    assert_true(handle and(Result<(),i64>::Ok(()), result_factory) { Result::Ok(42) => true, _ => false });
+    assert_true(handle or(Result<i64,()>::Err(()), result_factory) { Result::Ok(42) => true, _ => false });
+    assert_true(loop_state(42, step) == 42);
+    let folded = label finished { fold_until(Range { start: 0, end: 2 }, 41, @finished, fold_step) };
+    assert_true(folded == 42);
+    let mut values = Vec::new();
+    Vec::push(&mut values, 1); Vec::push(&mut values, 3); Vec::push(&mut values, 2);
+    assert_true(Vec::partition_by(&mut values, selected) == 2);
+}
+
+pub fn main() -> i64 {
+    let mut calls = 0;
+    handle exercise() { Ask::ask(value) => { calls = calls + 1; value } };
+    assert_true(calls == 15);
+    42
+}

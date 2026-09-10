@@ -309,46 +309,15 @@ impl Analyzer<'_> {
         callable_lane(ty, self.lexical_bounds)
     }
 
-    pub(super) fn check_minimum_call_suspensions(&mut self, call: CoreId, callee: CoreId, arguments: &[CoreId], span: Span) {
+    pub(super) fn check_minimum_call_suspensions(&mut self, call: CoreId, span: Span) {
         // Consume the shared body's execution proof, not the declaration's
         // permission row, when complete coverage excludes all performances.
         // Label/outer-transfer dispositions are still checked independently.
         if self.continuations.invocation(call).is_some_and(|control| control.without_performance()) {
             return;
         }
-        let ty = &self.body.expression(callee).ty;
-        let mut callable = ty;
-        while let Type::Reference { referent, .. } = callable { callable = referent; }
-        let effects = match callable {
-            Type::Callable { effects, .. } => effects.clone(),
-            _ => {
-                let inputs = arguments.iter().map(|argument| self.body.expression(*argument).ty.clone()).collect::<Vec<_>>();
-                if let Some(effects) = self.frozen_solver.and_then(|solver| solver.lexical_call_effects(ty, &inputs)) {
-                    effects
-                } else {
-                let Some((_, relation)) = self.lexical_bounds.iter().find(|(subject, relation)| {
-                    subject == ty && crate::is_intrinsic_callable_trait(relation)
-                }) else {
-                    // A checked indirect call whose row cannot be recovered
-                    // is not proof of purity. In particular, quantified
-                    // borrowed Fn predicates must not bypass cancellation.
-                    self.check_minimum_scope(&self.minimum_bindings.keys().cloned().collect(), span);
-                    return;
-                };
-                // The optional Effects equality defaults to the empty row
-                // only for this identity-checked intrinsic Fn contract.
-                self.lexical_effect_bindings
-                    .iter()
-                    .find(|binding| {
-                        binding.subject == *ty
-                            && binding.relation == *relation
-                            && binding.name == "Effects"
-                            && binding.item_arguments.is_empty()
-                    })
-                    .map_or_else(crate::EffectRow::empty, |binding| binding.value.clone())
-                }
-            }
-        };
+        let CoreKind::Call { invocation, .. } = &self.body.expression(call).kind else { unreachable!() };
+        let effects = invocation.effects.clone();
         if !effects.tails.is_empty() || !effects.projections.is_empty() {
             // An open row is a conditional contract, not permission to lose
             // an owner. Preserve each guarded residual state for the closed

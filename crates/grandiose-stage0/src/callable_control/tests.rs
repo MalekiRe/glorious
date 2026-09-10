@@ -219,7 +219,7 @@ fn stored_reference_liveness_follows_live_aliases_into_ordinary_and_captured_sto
         let owner = fixture.names["main"];
         let body = &fixture.bodies[&owner];
         let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, bound.body(owner)).unwrap();
-        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &[],
+        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[],
             &crate::TraitSolver::new(&fixture.interface), None, Arc::new(facts));
         assert!(flow.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"),
             "{source}\n{:?}\n{:#?}", flow.diagnostics, flow.events);
@@ -281,7 +281,7 @@ fn retained_capture_storage_results_compose_after_reborrows_and_unknown_prefixes
             Some((CoreId(index as u32), expression.span, body.expression(callee).ty.clone(), control.get(CoreId(index as u32)).cloned()))
         }).collect::<Vec<_>>();
         let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, Some(control)).unwrap();
-        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &[],
+        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[],
             &crate::TraitSolver::new(&fixture.interface), None, Arc::new(facts));
         let escape = crate::EscapeFlow::analyze_with_interface(body, &flow, &fixture.interface);
         if !flow.diagnostics.is_empty() || !escape.diagnostics.is_empty() {
@@ -303,7 +303,7 @@ fn returned_factory_capability_requires_the_exact_checked_body_batch() {
     let solver = crate::TraitSolver::new(&fixture.interface);
     let flows = fixture.bodies.iter().map(|(owner, body)| {
         let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, bound.body(*owner)).unwrap();
-        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &[], &solver,
+        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &solver,
             None, std::sync::Arc::new(facts));
         assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
         (*owner, flow)

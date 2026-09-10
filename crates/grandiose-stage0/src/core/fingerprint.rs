@@ -409,6 +409,7 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
+                invocation,
                 reference_contract,
                 reference_origin,
                 reference_shape,
@@ -418,6 +419,8 @@ impl CoreFingerprintEncoder<'_> {
                 self.debug(mandatory_tail);
                 self.id(*callee);
                 self.ids(arguments);
+                self.ty(&invocation.declaration);
+                self.effect_row(&invocation.effects);
                 self.debug(reference_contract);
                 self.debug(reference_origin);
                 self.debug(reference_shape);

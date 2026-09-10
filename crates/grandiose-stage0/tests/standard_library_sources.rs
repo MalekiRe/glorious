@@ -95,6 +95,7 @@ source_case!(float_math, "../../../stdlib/tests/float_math.glorious", "src/found
 source_case!(float_convert, "../../../stdlib/tests/float_convert.glorious", "src/foundation.glorious", "src/integer.glorious", "src/integer_text.glorious", "src/float.glorious", "src/float_parse.glorious", "src/float_math.glorious", "src/float_convert.glorious");
 source_case!(iterator, "../../../stdlib/tests/iterator.glorious", "src/foundation.glorious", "src/memory.glorious", "src/iterator.glorious");
 source_case!(iterator_callbacks, "../../../stdlib/tests/iterator_callbacks.glorious", "src/foundation.glorious", "src/memory.glorious", "src/iterator.glorious", "src/iterator_callbacks.glorious");
+source_case!(callback_effects, "../../../stdlib/tests/callback_effects.glorious", "src/foundation.glorious");
 source_case!(traversal, "../../../stdlib/tests/traversal.glorious", "src/foundation.glorious", "src/traversal.glorious");
 source_case!(sorting, "../../../stdlib/tests/sorting.glorious", "src/foundation.glorious", "src/memory.glorious", "src/sorting.glorious");
 
