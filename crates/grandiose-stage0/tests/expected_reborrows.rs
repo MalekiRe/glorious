@@ -199,3 +199,39 @@ fn static_and_caller_views_join_at_the_checked_result_region() {
         assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
     }
 }
+
+#[test]
+fn evaluated_static_views_keep_their_declared_reference_contract() {
+    let source = "use std::*; pub let literal = { let view: Slice<'static,u8> = b\"*\"; view }; pub fn main() -> i64 { as<i64>(*Slice::get_unchecked(literal, 0)) }";
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(request(source, optimization)).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the checked source indexes its trusted, one-byte static view.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
+fn helper_created_static_views_replace_an_empty_payload() {
+    // Active acceptance regression: invocation may-stores must represent
+    // replacement variant payloads, including references created by the
+    // helper rather than supplied by an incoming reference-bearing value.
+    let source = r#"use std::*;
+        enum Maybe<T> { Some(T), None(()) }
+        struct State { previous: Maybe<Slice<'static,u8>> }
+        fn set(state: &mut State) { let view: Slice<'static,u8> = b"*"; state.previous = Maybe::Some(view); }
+        fn select(state: State) -> Slice<'static,u8> {
+            handle state.previous { Maybe::Some(value) => value, Maybe::None(_) => b"!" }
+        }
+        pub fn main() -> i64 { let mut state = State { previous: Maybe::None(()) }; set(&mut state); as<i64>(*Slice::get_unchecked(select(state), 0)) }
+    "#;
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(request(source, optimization)).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the helper stores a one-byte static view and the source
+        // indexes only its first byte through the trusted Slice primitive.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}

@@ -149,9 +149,20 @@ impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
     fn reference_known(&self, value: &Value) -> bool {
         reference_is_known(&self.resolved_value(value))
     }
+    fn reference_empty(&self, value: &Value) -> bool { reference_is_empty(&self.resolved_value(value)) }
+}
+
+pub(super) fn reference_is_empty(value: &Value) -> bool {
+    match value {
+        Value::ReferenceFree => true,
+        Value::Reference { targets: Some(targets), .. } => reference_is_empty(targets),
+        Value::Joined(values) | Value::Alternatives(values) => !values.is_empty() && values.iter().all(reference_is_empty),
+        _ => false,
+    }
 }
 
 pub(super) fn reference_is_known(value: &Value) -> bool {
+    if reference_is_empty(value) { return false; }
     match value {
         Value::Reference { dependencies, authenticated, .. } => *authenticated || reference_is_known(dependencies),
         Value::Borrowed { .. } | Value::ExternalBorrowed => true,
@@ -271,6 +282,8 @@ impl Analyzer<'_> {
                     .map(|field| self.materialize_payload(field, span))
                     .collect(),
             ),
+            ResolvedPayload::Variant(fields) => Value::Variant(fields.into_iter()
+                .map(|field| self.materialize_payload(field, span)).collect()),
             value @ ResolvedPayload::Callable { .. } => {
                 let value = control::known_payload(value, &self.values, &mut self.control_captures, self.signatures).expect("represented constructor");
                 if control::unrepresented_capture(&value) {

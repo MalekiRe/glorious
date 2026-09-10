@@ -49,6 +49,8 @@ fn payload_value(
                 )
             })
         }
+        ResolvedPayload::Variant(fields) => Some(Value::Variant(fields.into_iter()
+            .map(|field| payload_value(field, storage, obligations, signatures, capture).unwrap_or(Value::None)).collect())),
         ResolvedPayload::Callable { constructor, captures, .. } => {
             let environment = constructor.brand();
             let resident_captures = captures.into_iter().map(|(ty, payload)|
@@ -68,7 +70,7 @@ fn payload_value(
         // input projection can still be independently frame-independent
         // (for example, a scalar computed inside the factory). References
         // and opaque callable environments do not receive that permission.
-        ResolvedPayload::Unknown(ty) if capture && crate::core::tail::tail_owned_type(signatures, &ty, &mut vec![]) => Some(Value::FrameIndependent),
+        ResolvedPayload::Unknown(ty) if crate::core::tail::tail_owned_type(signatures, &ty, &mut vec![]) => Some(Value::ReferenceFree),
         ResolvedPayload::Unknown(_) => None,
     }
 }
@@ -106,6 +108,7 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
                 unreachable!("resolve storage snapshots before querying control dependencies")
             }
             Value::None
+            | Value::ReferenceFree
             | Value::FrameIndependent
             | Value::ExternalBorrowed
             | Value::Borrowed { .. } => {}
@@ -125,7 +128,7 @@ pub(super) fn unrepresented_capture(value: &Value) -> bool {
         Value::CallableResident { footprint, resident_captures } => unrepresented_capture(footprint)
             || resident_captures.iter().any(|capture| unrepresented_capture(&capture.value)),
         Value::Logical { physical, arguments } => unrepresented_capture(physical) || arguments.values().any(unrepresented_capture),
-        Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } | Value::Control(_) => false,
+        Value::ReferenceFree | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } | Value::Control(_) => false,
     }
 }
 
@@ -198,7 +201,8 @@ mod tests {
         let storage = ValueEnvironment::default();
         let mut obligations = BTreeMap::new();
         let signatures = crate::ElaboratedInterface::default();
-        assert_eq!(known_payload(ResolvedPayload::Unknown(Type::Unit), &storage, &mut obligations, &signatures), None);
+        assert_eq!(known_payload(ResolvedPayload::Unknown(Type::Unit), &storage, &mut obligations, &signatures), Some(Value::ReferenceFree));
+        assert_eq!(known_payload(ResolvedPayload::Unknown(Type::Generic(0)), &storage, &mut obligations, &signatures), None);
         let returned = known_payload(ResolvedPayload::Aggregate(vec![
             ResolvedPayload::Unknown(Type::Unit),
             ResolvedPayload::Inputs {
@@ -209,7 +213,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             returned,
-            Value::Aggregate(vec![Value::None, Value::Control(brand(0))])
+            Value::Aggregate(vec![Value::ReferenceFree, Value::Control(brand(0))])
         );
         assert!(!frame_independent_value(&returned));
         assert_eq!(value_controls(&returned), BTreeSet::from([brand(0)]));

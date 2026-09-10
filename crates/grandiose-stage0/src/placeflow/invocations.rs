@@ -128,10 +128,12 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
 
 impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
     fn reference_known(&self, value: &Value) -> bool {
-        let (regions, loans) = self.invocation_origins(value);
-        !regions.is_empty() || !loans.is_empty()
+        let (regions, origins) = self.invocation_reference_origins(value);
+        !origins.is_known_empty() && (!regions.is_empty() || !origins.loans.is_empty()
             || value.core.is_some_and(|core| self.external_reference_path(core))
+        )
     }
+    fn reference_empty(&self, value: &Value) -> bool { self.invocation_reference_origins(value).1.is_known_empty() }
 }
 
 impl Analyzer<'_> {
@@ -168,6 +170,7 @@ impl Analyzer<'_> {
                 if let Some(targets) = destination.targets {
                     for target in targets.into_iter().filter(|target| !target.indirect && !target.external) {
                         let key = target.resident_key(&fields.value);
+                        self.invalidate_reference_empty_ancestors(&key);
                         for mut loan in source.loans.iter().cloned() {
                             // Copying a shared handle stores its referent,
                             // not a new borrow of the source handle's slot.
@@ -177,7 +180,9 @@ impl Analyzer<'_> {
                         self.logical.origins.entry(key.clone()).or_default().extend(regions.iter().cloned());
                         // This declaration permits a store; it neither says
                         // which value was stored nor excludes other targets.
-                        self.reference_origins.entry(key).or_default().targets = None;
+                        let stored = self.reference_origins.entry(key).or_default();
+                        stored.targets = None;
+                        stored.reference_free = false;
                     }
                 } else if destination.loans.is_empty() || destination.loans.iter().any(|loan| !loan.indirect && !loan.external) {
                     self.error(self.body.expression(call).span, "G5023",
@@ -270,7 +275,8 @@ impl Analyzer<'_> {
     ) {
         use crate::callable_control::ResolvedPayload;
         match payload {
-            ResolvedPayload::Aggregate(fields) => {
+            ResolvedPayload::Aggregate(fields) | ResolvedPayload::Variant(fields) => {
+                if fields.is_empty() { self.merge_reference_snapshot(owner.to_owned(), ReferenceOrigins::empty()); }
                 for (index, field) in fields.into_iter().enumerate() {
                     let path = result_path.map(|path| path.iter().copied().chain([index as u32]).collect::<Vec<_>>());
                     self.record_payload_origins_at(
@@ -332,9 +338,10 @@ impl Analyzer<'_> {
                 }
             }
             ResolvedPayload::Unknown(ty) => {
-                if result_path.is_none() && self.signatures.is_some_and(|signatures| {
-                    !crate::core::tail::tail_owned_type(signatures, &ty, &mut vec![])
-                }) {
+                let empty = ElaboratedInterface::default();
+                if crate::core::tail::tail_owned_type(self.signatures.unwrap_or(&empty), &ty, &mut vec![]) {
+                    self.merge_reference_snapshot(owner.to_owned(), ReferenceOrigins::empty());
+                } else if result_path.is_none() {
                     self.error(
                         self.body.expression(source).span,
                         "G5023",

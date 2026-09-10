@@ -5,6 +5,79 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 121: absent variant references and evaluated initializer results
+
+The full-library traversal failure at line 229 supplied a concrete composition
+bug: the generic standard-library `None` initializer reaches a declaration whose
+other enum variant can contain a reference. Both resource consumers treated its
+inactive payload as missing provenance, and evaluated initializers were omitted
+from the shared body-control batch. The repair extends those authoritative
+products instead of bypassing the declaration's reference check.
+
+Normal-result payloads now retain evaluated variant constructors separately from
+ordinary aggregates. The shared reference coverage rule distinguishes a present
+authenticated path, a path absent on every normal alternative, and unknown
+coverage. Mixed present/empty results retain their present references. Missing
+tuple fields, logical arguments, input values or control alternatives cannot
+prove absence; projection no longer silently drops an unrepresented alternative.
+PlaceFlow transports positive absence in its existing reference-origin snapshot,
+independently of retained loans and targets. EscapeFlow distinguishes a
+reference-free value from unknown provenance and generic frame-independent
+storage. An empty external target query is not proof of an empty aggregate.
+
+Aliases, aggregate storage, constructor projections and normal calls consume
+these facts. Nested replacements revoke old empty ancestor snapshots, and
+physical invocation may-stores revoke absence while retaining incoming backing
+loans. All-absent result paths preserve declared lifetime debts. Positive and
+negative regressions cover mixed branches, direct and nested replacement,
+helper stores, backing mutation and escaping local initializer payloads.
+
+Evaluated value initializers now supply their frozen pure zero-input body
+contract to the existing sealed control batch, with declaration kind checks and
+ordinary selected-body substitution. Their source value is not given a callable
+type. Existing constant invocation events and conditional selection produce
+their normal results; ownership and escape consume those through the same
+invocation-result boundary as ordinary calls. Static versus unresolved result
+coverage comes from the existing interface-aware reference contract producer.
+The old constant omission and duplicate escape call-result assembly are removed.
+
+Final verification records **467 distinct passing checks and one active
+source acceptance failure**:
+
+- All 386 compiler unit tests pass
+  (`target/absent-reference-final-units-v22.log`).
+- All 20 reference-result-contract tests and 22 request/cache tests pass
+  (`target/absent-reference-final-contracts-v23.log`,
+  `target/absent-reference-final-request-v24.log`). The source positives execute
+  fresh and decoded VM O0/O2; generated native O0/O2 includes the new generic
+  absent-initializer case as well as prior reference-destination cases.
+- The expected-reborrow target has 26 passing tests and one failing test,
+  none ignored (`target/absent-reference-final-reborrows-v25.log`). The new
+  evaluated-static-view test executes fresh/decoded O0/O2. The deliberately
+  active acceptance regression `helper_created_static_views_replace_an_empty_payload`
+  fails closed with G5021/G5023: a helper constructs a static view and replaces
+  an empty enum payload, but the existing may-store consumer lacks the new
+  variant's resident projection. Source-to-destination lifetime edges are not
+  complete mutation outcomes. Repairing that shared storage boundary remains
+  next work; neither an absent source nor a missing destination can supply
+  reference authority. The test still requires successful execution, not the
+  present rejection, and has not been ignored or weakened.
+- All thirteen capture-focused borrowed-callable tests pass
+  (`target/absent-reference-final-captures-v27.log`).
+
+The full-library root **still fails with 59 diagnostic records**, no suppression
+marker, in 50.48 seconds (`target/absent-reference-final-library-v26.log`). Both
+line-229 traversal provenance diagnostics are gone compared with cache 120's
+61 records. API/array mismatches, graph typing, custom-Drop extraction, unsafe
+UTF-8, mandatory-tail provenance and minimum-use failures remain. No full source
+matrix or native generic-label recheck was run; the historical cache-114 matrix
+remains 16 passing / 15 failing and native `MakeLabel` is not claimed fixed.
+All 11,455 GSC-2 contracts remain open. The library and self-hosted compiler are
+not complete.
+
+Cache generation is 121. Interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 are unchanged. Earlier checkpoints below are historical.
+
 ## Cache 120: actual referent destinations and retained carrier loans
 
 The preceding active carrier-destination regression is repaired through the

@@ -19,6 +19,46 @@ struct Fixture {
     interface: ElaboratedInterface,
 }
 
+#[test]
+fn variant_reference_coverage_distinguishes_absence_from_unknown_alternatives() {
+    use crate::resident_invocations::{CapturedInputs, Operand};
+    struct Domain;
+    impl PayloadInputs for Domain {
+        type Value = ();
+        fn project(&self, _: &(), _: &[u32]) -> Option<()> { Some(()) }
+        fn captures(&self, _: &Operand<()>) -> CapturedInputs<()> { CapturedInputs { operands: vec![], unresolved: true } }
+        fn reborrow(&self, _: &(), _: &[u32]) -> Option<()> { Some(()) }
+    }
+    impl ReferenceInputs for Domain { fn reference_known(&self, _: &()) -> bool { true } }
+    let fixture = Fixture::new("enum Choice<'a> { Empty(()), Present(&'a i64) } fn present<'a>(value: &'a i64) -> Choice<'a> { Choice::Present(value) }");
+    let signature = &fixture.signatures[&fixture.names["present"]];
+    let result = signature.result.clone();
+    let empty = InvocationPayload { ty: result.clone(), source: payloads::PayloadSource::Variant(vec![
+        InvocationPayload { ty: Type::Unit, source: payloads::PayloadSource::Aggregate(vec![]) },
+    ]) };
+    let mut control = InvocationControl { normal: true, returns: vec![empty], ..Default::default() };
+    let resolved = control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain);
+    assert!(resolved.references.is_complete());
+    assert_eq!(resolved.references.empty_paths().collect::<Vec<_>>(), vec![&[0][..]]);
+    assert_eq!(resolved.references.paths().count(), 0);
+    control.returns.push(InvocationPayload { ty: result.clone(), source: payloads::PayloadSource::Variant(vec![
+        InvocationPayload { ty: signature.parameters[0].clone(), source: payloads::PayloadSource::Argument { index: 0, path: vec![] } },
+    ]) });
+    let resolved = control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain);
+    assert!(resolved.references.is_complete());
+    assert_eq!(resolved.references.paths().collect::<Vec<_>>(), vec![&[0][..]]);
+    assert_eq!(resolved.references.empty_paths().count(), 0);
+    control.unknown = true;
+    assert!(!control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain).references.is_complete());
+    control.unknown = false;
+    control.returns.push(InvocationPayload::unknown(result.clone()));
+    assert!(!control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain).references.is_complete());
+    let tuple = Type::Tuple(vec![signature.parameters[0].clone()]);
+    control.returns = vec![InvocationPayload { ty: tuple.clone(), source: payloads::PayloadSource::Aggregate(vec![]) }];
+    assert!(!control.resolve_returns(&tuple, &fixture.interface, &(), &[()], &Domain).references.is_complete(),
+        "a missing ordinary aggregate field is not an inactive enum payload");
+}
+
 impl Fixture {
     fn new(source: &str) -> Self {
         Self::control_input(source, false)

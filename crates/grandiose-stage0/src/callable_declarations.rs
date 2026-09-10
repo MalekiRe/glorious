@@ -74,6 +74,16 @@ pub(crate) struct SelectedTemplate {
     pub arguments: Vec<GenericArgument>,
 }
 
+/// An evaluated top-level value has no caller inputs. Use the ordinary
+/// interface-aware result producer, including static and unknown coverage,
+/// rather than classifying every initializer as an opaque reference result.
+pub(crate) fn value_reference_contract(signatures: &ElaboratedInterface, result: &Type)
+    -> (crate::core::CallReferenceOrigin, crate::core::CallReferenceShape) {
+    let origin = crate::core::callable_reference_origin_from_contract(signatures, &[], result);
+    let shape = crate::core::call_reference_shape(signatures, result, &origin);
+    (origin, shape)
+}
+
 fn implementation_body_signature(
     implementation: &crate::signature::ElaboratedImplementation,
     method: &crate::CallableSignature,
@@ -108,14 +118,27 @@ fn implementation_body_signature(
     signature
 }
 
-/// The declaration contract for an independently checked body. Constants and
-/// value initializers do not acquire a fabricated function-body contract.
+/// The declaration contract for an independently checked body. Evaluated
+/// initializers contribute their frozen pure, zero-input body contract, but
+/// their source value does not acquire a function type or invocation authority.
 pub(crate) fn body_signature(
     signatures: &ElaboratedInterface,
     definition: DefKey,
 ) -> Option<crate::CallableSignature> {
     if let Some(ElaboratedHeader::Callable(signature)) = signatures.definitions.get(&definition) {
         return Some(signature.clone());
+    }
+    if let Some(ElaboratedHeader::ValueInitializer { generic_kinds, ty: Some(result) }) = signatures.definitions.get(&definition) {
+        // Evaluated values are frozen, pure zero-argument bodies. Their
+        // generalized result belongs to this declaration's binder namespace,
+        // just as a function's result does; it is not a source function value.
+        return Some(crate::CallableSignature {
+            safety: crate::Safety::Safe, generics: generic_kinds.len() as u32,
+            generic_kinds: generic_kinds.clone(), parameters: vec![], result: result.clone(),
+            effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE,
+            where_bounds: vec![], where_outlives: vec![], where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![], universal_bounds: vec![],
+        });
     }
     signatures.definitions.iter().find_map(|(key, header)| {
         let ElaboratedHeader::Implementation(implementation) = header else {
@@ -142,6 +165,11 @@ pub(crate) fn selected_template(
     signatures: &ElaboratedInterface,
     expression: &CoreExpr,
 ) -> Option<SelectedTemplate> {
+    if let CoreKind::Constant { definition, arguments } = &expression.kind {
+        let signature = body_signature(signatures, *definition)?;
+        signature.instantiate_generic(arguments).ok()?;
+        return Some(SelectedTemplate { signature, arguments: arguments.clone() });
+    }
     let (signature, _) = declared_invocation_contract(signatures, expression)?;
     match &expression.kind {
         CoreKind::Function { arguments, .. } => Some(SelectedTemplate {

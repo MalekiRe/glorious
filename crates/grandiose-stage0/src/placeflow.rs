@@ -129,18 +129,28 @@ impl ProjectionLoan {
 struct ReferenceOrigins {
     loans: BTreeSet<ProjectionLoan>,
     targets: Option<BTreeSet<ProjectionLoan>>,
+    /// Positive absence in a represented value/projection. An empty target
+    /// query alone (for example the root of an external aggregate) is not it.
+    reference_free: bool,
 }
 
 impl ReferenceOrigins {
     fn known(loans: BTreeSet<ProjectionLoan>) -> Self {
-        Self { targets: Some(loans.clone()), loans }
+        Self { targets: Some(loans.clone()), loans, reference_free: false }
     }
 
     fn unknown(loans: BTreeSet<ProjectionLoan>) -> Self {
-        Self { loans, targets: None }
+        Self { loans, targets: None, reference_free: false }
+    }
+
+    fn empty() -> Self { Self { loans: BTreeSet::new(), targets: Some(BTreeSet::new()), reference_free: true } }
+
+    fn is_known_empty(&self) -> bool {
+        self.reference_free
     }
 
     fn join(&mut self, incoming: Self) {
+        self.reference_free &= incoming.reference_free;
         self.loans.extend(incoming.loans);
         match (&mut self.targets, incoming.targets) {
             (Some(targets), Some(incoming)) => targets.extend(incoming),
@@ -150,6 +160,7 @@ impl ReferenceOrigins {
 
     fn map(self, mut transform: impl FnMut(ProjectionLoan) -> ProjectionLoan) -> Self {
         Self {
+            reference_free: self.reference_free,
             loans: self.loans.into_iter().map(&mut transform).collect(),
             targets: self.targets.map(|targets| targets.into_iter().map(transform).collect()),
         }
@@ -191,6 +202,21 @@ mod reference_origin_tests {
         target.project_referent(&[2]);
         assert_eq!(projected.targets, Some(BTreeSet::from([target.clone()])));
         assert_eq!(projected.loans, BTreeSet::from([carrier, target]));
+    }
+
+    #[test]
+    fn empty_target_queries_are_not_reference_absence_proofs() {
+        assert!(!ReferenceOrigins::known(BTreeSet::new()).is_known_empty());
+        assert!(!ReferenceOrigins::default().is_known_empty());
+        let mut empty = ReferenceOrigins::empty();
+        assert!(empty.is_known_empty());
+        empty.join(ReferenceOrigins::known(BTreeSet::from([loan("present")])));
+        assert!(!empty.is_known_empty());
+        assert_eq!(empty.loans.len(), 1);
+        let mut empty = ReferenceOrigins::empty();
+        empty.join(ReferenceOrigins::default());
+        assert!(!empty.is_known_empty());
+        assert!(empty.targets.is_none());
     }
 
     #[test]
@@ -1103,6 +1129,16 @@ impl Analyzer<'_> {
             origins.loans = active;
             return origins;
         }
+        if origins.is_none() {
+            let mut ancestor = owner;
+            while let Some((parent, _)) = ancestor.rsplit_once('.') {
+                if let Some(empty) = self.reference_origins.get(parent).filter(|origins| origins.is_known_empty()) {
+                    origins = Some(empty.clone());
+                    break;
+                }
+                ancestor = parent;
+            }
+        }
         let Some((root, _)) = owner.split_once('.') else { return origins.unwrap_or_default(); };
         let prefix = format!("{root}.");
         let selected = owner.split('.').collect::<Vec<_>>();
@@ -1385,7 +1421,7 @@ impl Analyzer<'_> {
             if origins.targets.as_ref().is_some_and(|targets| targets.iter().any(|target| !keep(target))) {
                 origins.targets = None;
             }
-            !belongs_to_scope(&locals, name) && !origins.loans.is_empty()
+            !belongs_to_scope(&locals, name) && (!origins.loans.is_empty() || origins.is_known_empty())
         });
         self.logical.origins.retain(|name, _| !belongs_to_scope(&locals, name));
     }
@@ -1494,8 +1530,8 @@ impl Analyzer<'_> {
             | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant { .. }
             | CoreKind::Error => {}
+            CoreKind::Constant { .. } => self.apply_invocation_control(id, None, e.span),
             CoreKind::Closure { environment, .. } => {
                 let owner = self.nonretaining_call_owner.clone();
                 self.visit_closure_environment(&environment, e.span, owner.as_deref());
@@ -3224,6 +3260,11 @@ impl Analyzer<'_> {
     }
 
     fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
+        let origins = self.reference_origins_from_value(id);
+        if origins.is_known_empty() {
+            self.install_reference_snapshot(name, origins, id);
+            return;
+        }
         self.record_logical_value_origins(name, id);
         if self.pending_results.contains(&id) {
             let source = Self::result_owner(id);
@@ -3237,6 +3278,12 @@ impl Analyzer<'_> {
             return;
         }
         match self.body.expression(id).kind.clone() {
+            CoreKind::Constant { .. } => {
+                let empty = ElaboratedInterface::default();
+                let (origin, _) = crate::callable_declarations::value_reference_contract(
+                    self.signatures.unwrap_or(&empty), &self.body.expression(id).ty);
+                self.record_call_reference_origin(name, id, &[], origin);
+            }
             CoreKind::Move(value) => self.record_aggregate_reference_origins(name, value),
             CoreKind::Block(values) => {
                 if let Some(tail) = values.last() { self.record_aggregate_reference_origins(name, *tail); }
@@ -3295,6 +3342,14 @@ impl Analyzer<'_> {
                     // `&*slot` creates the child reborrow that owns an NLL
                     // region.
                     self.record_aggregate_reference_origins(&key, field);
+                }
+                let empty = ElaboratedInterface::default();
+                let mut leaves = vec![];
+                let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
+                    &self.body.expression(id).ty, &mut vec![], &mut leaves);
+                for (path, _) in leaves {
+                    let origins = self.reference_origins_from_value_path(id, &path);
+                    if origins.is_known_empty() { self.install_reference_snapshot(&projection_key(name, &path), origins, id); }
                 }
             }
             CoreKind::Call {
@@ -3362,8 +3417,11 @@ impl Analyzer<'_> {
                 );
                 continue;
             };
-            let parents = self.reference_loans_from_value_path(argument, &path.argument_fields);
+            let origins = self.reference_origins_from_value_path(argument, &path.argument_fields);
+            let known_empty = origins.is_known_empty();
+            let parents = origins.loans;
             if parents.is_empty() {
+                if known_empty { continue; }
                 // A logical generic resident may be empty. Forwarding that
                 // empty set creates no checked reference authority; unlike
                 // a missing physical reference it is not a malformed call.
@@ -3414,7 +3472,18 @@ impl Analyzer<'_> {
         if self.pending_results.contains(&id) {
             return self.origin_snapshot(&Self::result_owner(id));
         }
+        let empty = ElaboratedInterface::default();
+        if crate::core::tail::tail_owned_type(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty, &mut vec![]) {
+            return ReferenceOrigins::empty();
+        }
         match &self.body.expression(id).kind {
+            CoreKind::Constant { .. } => {
+                let (origin, _) = crate::callable_declarations::value_reference_contract(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty);
+                if matches!(origin, CallReferenceOrigin::External) { ReferenceOrigins::known(self.external_reference_loans(id, &[])) }
+                else { ReferenceOrigins::default() }
+            }
+            CoreKind::Enum { fields, .. } | CoreKind::Record { fields, .. } | CoreKind::Tuple(fields) | CoreKind::Array(fields)
+                if fields.iter().all(|field| self.reference_origins_from_value(*field).is_known_empty()) => ReferenceOrigins::empty(),
             CoreKind::Closure { environment, .. } => ReferenceOrigins::unknown(environment.captures.iter().flat_map(|capture| {
                 let name = self.resolve_name(&capture.name);
                 let mut loans = self.captured_origin_loans(&name);
@@ -3476,6 +3545,8 @@ impl Analyzer<'_> {
     }
 
     fn reference_origins_from_value_path(&self, id: CoreId, fields: &[u32]) -> ReferenceOrigins {
+        let origins = self.reference_origins_from_value(id);
+        if origins.is_known_empty() { return origins; }
         if let Some(deref) = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) {
             let parents = self.reference_origins_from_value_path(id, &fields[..deref]);
             let empty = ElaboratedInterface::default();
@@ -3502,6 +3573,12 @@ impl Analyzer<'_> {
         // call expression as an anonymous aggregate. This makes provenance
         // compose through wrappers that have not been let-bound.
         match &self.body.expression(id).kind {
+            CoreKind::Constant { .. } => {
+                let empty = ElaboratedInterface::default();
+                let (origin, _) = crate::callable_declarations::value_reference_contract(self.signatures.unwrap_or(&empty), &self.body.expression(id).ty);
+                return if matches!(origin, CallReferenceOrigin::External) { ReferenceOrigins::known(self.external_reference_loans(id, fields)) }
+                    else { ReferenceOrigins::default() };
+            }
             CoreKind::Call { reference_origin: CallReferenceOrigin::External | CallReferenceOrigin::Unsafe, .. }
             | CoreKind::Perform { reference_origin: CallReferenceOrigin::External, .. } =>
                 return ReferenceOrigins::known(self.external_reference_loans(id, fields)),
@@ -3551,11 +3628,16 @@ impl Analyzer<'_> {
                 }
             };
             if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
-                let mut origins = ReferenceOrigins::known(BTreeSet::new());
+                let mut origins = ReferenceOrigins::empty();
                 for value in fields { origins.join(self.reference_origins_from_value_path(*value, tail)); }
                 return origins;
             }
-            let Some(next) = fields.get(*field as usize).copied() else { return ReferenceOrigins::default(); };
+            let Some(next) = fields.get(*field as usize).copied() else {
+                return if matches!(self.body.expression(value).kind, CoreKind::Enum { .. })
+                    && !crate::core::reference_path_is_logical(remaining) {
+                    ReferenceOrigins::empty()
+                } else { ReferenceOrigins::default() };
+            };
             value = next;
             remaining = tail;
         }
@@ -3568,7 +3650,8 @@ impl Analyzer<'_> {
         let Some(targets) = parents.targets else {
             return ReferenceOrigins::unknown(parents.loans);
         };
-        let mut residents = ReferenceOrigins::known(BTreeSet::new());
+        if targets.is_empty() && !parents.reference_free { return ReferenceOrigins::unknown(parents.loans); }
+        let mut residents = ReferenceOrigins::empty();
         for mut parent in targets {
             let known = self.origin_snapshot(&parent.resident_key(projection));
             parent.project_referent(projection);
@@ -3917,16 +4000,35 @@ impl Analyzer<'_> {
     /// lifetime debt already attached to this result. Logical-region refresh
     /// calls `install_reference_alias`, which cannot replace this target proof.
     fn install_reference_snapshot(&mut self, result: &str, origins: ReferenceOrigins, source: CoreId) {
+        let reference_free = origins.reference_free;
+        if !reference_free { self.invalidate_reference_empty_ancestors(result); }
         let targets = origins.targets.map(|targets| targets.into_iter().map(|loan|
             ProjectionLoan { owner: Some(result.to_owned()), ..loan }).collect());
         for parent in origins.loans { self.install_reference_alias(result, parent, source); }
-        self.reference_origins.entry(result.to_owned()).or_default().targets = targets;
+        let result = self.reference_origins.entry(result.to_owned()).or_default();
+        result.targets = targets;
+        result.reference_free = reference_free;
     }
 
     fn merge_reference_snapshot(&mut self, result: String, origins: ReferenceOrigins) {
+        if !origins.reference_free { self.invalidate_reference_empty_ancestors(&result); }
         match self.reference_origins.entry(result) {
             std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(origins); }
             std::collections::btree_map::Entry::Occupied(mut entry) => entry.get_mut().join(origins),
+        }
+    }
+
+    /// A child replacement invalidates a previously reference-free aggregate
+    /// snapshot, but does not replace the target of an enclosing reference
+    /// handle. This runs at resident installation, not at lifetime refresh.
+    fn invalidate_reference_empty_ancestors(&mut self, result: &str) {
+        let mut key = result;
+        while let Some((parent, _)) = key.rsplit_once('.') {
+            if let Some(origins) = self.reference_origins.get_mut(parent).filter(|origins| origins.reference_free) {
+                origins.reference_free = false;
+                origins.targets = None;
+            }
+            key = parent;
         }
     }
 
@@ -4403,6 +4505,7 @@ impl Analyzer<'_> {
         for (name, origins) in &mut self.reference_origins {
             if exits.iter().any(|exit| !exit.origins.contains_key(name)) {
                 origins.targets = None;
+                origins.reference_free = false;
             }
         }
     }

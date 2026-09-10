@@ -21,6 +21,9 @@ pub(crate) enum PayloadSource {
         path: Vec<u32>,
     },
     Aggregate(Vec<InvocationPayload>),
+    /// An evaluated enum constructor, whose other variants' payload slots
+    /// are absent rather than unknown aggregate projections.
+    Variant(Vec<InvocationPayload>),
     /// A returned constructor retains typed capture inputs, not addressable
     /// aggregate fields. Its code authority is sealed to the defining body.
     Callable { constructor: ClosureControl, captures: Vec<InvocationPayload> },
@@ -50,7 +53,7 @@ impl InvocationPayload {
                 result.insert(constructor.brand());
                 for capture in captures { capture.constructors(result); }
             }
-            PayloadSource::Aggregate(fields) => {
+            PayloadSource::Aggregate(fields) | PayloadSource::Variant(fields) => {
                 for field in fields { field.constructors(result); }
             }
             PayloadSource::Reborrow { input, .. } => input.constructors(result),
@@ -72,7 +75,8 @@ impl InvocationPayload {
             unreachable!("payload type substitution");
         };
         self.ty = ty;
-        if let PayloadSource::Aggregate(fields) | PayloadSource::Callable { captures: fields, .. } = &mut self.source {
+        if let PayloadSource::Aggregate(fields) | PayloadSource::Variant(fields)
+            | PayloadSource::Callable { captures: fields, .. } = &mut self.source {
             for field in fields {
                 field.instantiate_types(arguments);
             }
@@ -94,6 +98,7 @@ impl InvocationPayload {
 pub(crate) enum ResolvedPayload<V> {
     Inputs { ty: Type, values: Vec<V> },
     Aggregate(Vec<ResolvedPayload<V>>),
+    Variant(Vec<ResolvedPayload<V>>),
     Callable { ty: Type, constructor: ClosureControl, captures: Vec<(Type, ResolvedPayload<V>)> },
     Unknown(Type),
 }
@@ -115,6 +120,9 @@ pub(crate) trait PayloadInputs {
 /// their existing loan/storage snapshot before it can settle a result gap.
 pub(crate) trait ReferenceInputs: PayloadInputs {
     fn reference_known(&self, value: &Self::Value) -> bool;
+    /// Positive absence in the projected value, not an empty observed loan
+    /// set. Unknown inputs must return false.
+    fn reference_empty(&self, _value: &Self::Value) -> bool { false }
 }
 
 pub(crate) struct ResolvedReturns<V> {
@@ -122,11 +130,13 @@ pub(crate) struct ResolvedReturns<V> {
     pub references: ReferenceCoverage,
 }
 
-/// Authenticated reference leaves of every represented normal result. Known
-/// paths survive an unrelated open field, but no path is certified when
-/// invocation coverage or one of its returning alternatives is unknown.
+/// Authenticated reference leaves wherever present in the represented normal
+/// results, with all-absent paths recorded separately. Known paths survive an
+/// unrelated open field, but no path is certified when invocation coverage or
+/// one of its returning alternatives is unknown.
 pub(crate) struct ReferenceCoverage {
     paths: std::collections::BTreeSet<Vec<u32>>,
+    empty_paths: std::collections::BTreeSet<Vec<u32>>,
     complete: bool,
 }
 
@@ -136,6 +146,10 @@ impl ReferenceCoverage {
     }
 
     pub(crate) fn is_complete(&self) -> bool { self.complete }
+
+    pub(crate) fn empty_paths(&self) -> impl Iterator<Item = &[u32]> {
+        self.empty_paths.iter().map(Vec::as_slice)
+    }
 }
 
 impl InvocationControl {
@@ -153,8 +167,20 @@ impl InvocationControl {
             .collect::<Vec<_>>();
         let mut leaves = vec![];
         let shape_known = crate::core::reference_leaf_paths(signatures, result, &mut vec![], &mut leaves).is_ok();
+        // Some(true) is an authenticated present reference; Some(false) is
+        // a proved absent payload. None is a coverage gap. Joins retain any
+        // present alternative but require every alternative to be covered.
         fn known<D: ReferenceInputs>(payload: &ResolvedPayload<D::Value>, path: &[u32],
-            signatures: &ElaboratedInterface, domain: &D) -> bool {
+            signatures: &ElaboratedInterface, domain: &D, variant: bool) -> Option<bool> {
+            fn empty<D: ReferenceInputs>(payload: &ResolvedPayload<D::Value>, signatures: &ElaboratedInterface, domain: &D) -> bool {
+                match payload {
+                    ResolvedPayload::Inputs { values, .. } => !values.is_empty() && values.iter().all(|value| domain.reference_empty(value)),
+                    ResolvedPayload::Aggregate(fields) | ResolvedPayload::Variant(fields) => fields.iter().all(|field| empty(field, signatures, domain)),
+                    ResolvedPayload::Unknown(ty) => crate::core::tail::tail_owned_type(signatures, ty, &mut vec![]),
+                    ResolvedPayload::Callable { .. } => false,
+                }
+            }
+            if variant && empty(payload, signatures, domain) { return Some(false); }
             match payload {
                 ResolvedPayload::Inputs { ty, values } => {
                     let mut input_leaves = vec![];
@@ -162,22 +188,47 @@ impl InvocationControl {
                     // Result coverage is checked independently below. A
                     // positively represented input leaf can authenticate
                     // this projection even when another input field is open.
-                    input_leaves.iter().any(|(fields, _)| fields == path)
-                        && !values.is_empty() && values.iter().all(|value|
-                            domain.project(value, path).is_some_and(|value| domain.reference_known(&value)))
+                    if !input_leaves.iter().any(|(fields, _)| fields == path) || values.is_empty() { return None; }
+                    values.iter().try_fold(false, |present, value| {
+                        let value = domain.project(value, path)?;
+                        if domain.reference_empty(&value) { Some(present) }
+                        else { domain.reference_known(&value).then_some(true) }
+                    })
                 }
-                ResolvedPayload::Aggregate(fields) => path.split_first().is_some_and(|(index, rest)|
-                    fields.get(*index as usize).is_some_and(|field| known(field, rest, signatures, domain))),
-                ResolvedPayload::Callable { .. } | ResolvedPayload::Unknown(_) => false,
+                ResolvedPayload::Aggregate(fields) => {
+                    let (index, rest) = path.split_first()?;
+                    known(fields.get(*index as usize)?, rest, signatures, domain, variant)
+                }
+                ResolvedPayload::Variant(fields) => {
+                    if crate::core::reference_path_is_logical(path) {
+                        return empty(payload, signatures, domain).then_some(false);
+                    }
+                    let (index, rest) = path.split_first()?;
+                    match fields.get(*index as usize) {
+                        Some(field) => known(field, rest, signatures, domain, true),
+                        None => Some(false),
+                    }
+                }
+                ResolvedPayload::Unknown(ty) if variant && crate::core::tail::tail_owned_type(signatures, ty, &mut vec![]) => Some(false),
+                ResolvedPayload::Callable { .. } | ResolvedPayload::Unknown(_) => None,
             }
         }
         let invocation_covered = !self.unknown && self.normal && !payloads.is_empty();
-        let paths = leaves.iter().filter(|(path, _)| invocation_covered
-            && payloads.iter().all(|payload| known(payload, path, signatures, domain)))
-            .map(|(path, _)| path.clone()).collect::<std::collections::BTreeSet<_>>();
+        let mut paths = std::collections::BTreeSet::new();
+        let mut empty_paths = std::collections::BTreeSet::new();
+        if invocation_covered {
+            for (path, _) in &leaves {
+                match payloads.iter().try_fold(false, |present, payload|
+                    known(payload, path, signatures, domain, false).map(|incoming| present || incoming)) {
+                    Some(true) => { paths.insert(path.clone()); }
+                    Some(false) => { empty_paths.insert(path.clone()); }
+                    None => {},
+                }
+            }
+        }
         let complete = invocation_covered && shape_known && leaves.iter().all(|(path, ty)|
-            matches!(ty, Type::Reference { lifetime: crate::Lifetime::Static, .. }) || paths.contains(path));
-        ResolvedReturns { payloads, references: ReferenceCoverage { paths, complete } }
+            matches!(ty, Type::Reference { lifetime: crate::Lifetime::Static, .. }) || paths.contains(path) || empty_paths.contains(path));
+        ResolvedReturns { payloads, references: ReferenceCoverage { paths, empty_paths, complete } }
     }
 }
 
@@ -226,6 +277,8 @@ pub(crate) fn resolve_payload<D: PayloadInputs>(
                     .collect(),
             );
         }
+        PayloadSource::Variant(fields) => return ResolvedPayload::Variant(
+            fields.iter().map(|field| resolve_payload(field, callable, arguments, domain)).collect()),
         PayloadSource::Reborrow { input, fields } => {
             match resolve_payload(input, callable, arguments, domain) {
                 ResolvedPayload::Inputs { values, .. } => values.iter()
@@ -362,8 +415,10 @@ impl BoundControlSummaries<'_> {
 fn construct_payload(&self, value: &ControlValue,
     derive: &impl Fn(&ControlValue) -> InvocationPayload) -> InvocationPayload {
     let source = match &value.shape {
-        ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields) =>
+        ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
+        | ControlValueShape::Record { fields, .. } =>
             PayloadSource::Aggregate(fields.iter().map(derive).collect()),
+        ControlValueShape::Enum { fields, .. } => PayloadSource::Variant(fields.iter().map(derive).collect()),
         ControlValueShape::Callable { brand: CallableBrand::Closure(brand), .. } => {
             let selected = self.staged_body(brand.owner).and_then(|body|
                 body.expressions.iter().enumerate().find(|(_, expression)|

@@ -447,7 +447,7 @@ pub enum CallReferenceShape {
 /// A generic contract is necessarily opaque before instantiation, but a VM
 /// specialization such as `identity<i64>` is conclusively non-reference and
 /// must not inherit that conservative declaration opacity.
-fn call_reference_shape(
+pub(crate) fn call_reference_shape(
     signatures: &ElaboratedInterface,
     result: &Type,
     origin: &CallReferenceOrigin,

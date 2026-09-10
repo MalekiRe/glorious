@@ -34,6 +34,122 @@ const PREFIX: &str = r#"#![no_std]
 "#;
 
 #[test]
+fn an_absent_variant_payload_is_not_missing_reference_provenance() {
+    accepts(r#"#![no_std]
+        enum Maybe<T> { Some(T), None }
+        fn select<'a>(fallback: &'a i64, previous: Maybe<&'a i64>) -> &'a i64 {
+            handle previous { Maybe::Some(value) => value, Maybe::None => fallback }
+        }
+        pub fn main() -> i64 { let backing = 42; *select(&backing, Maybe::None) }
+    "#);
+}
+
+#[test]
+fn absent_variant_payloads_survive_aliases_and_aggregate_storage() {
+    accepts(r#"#![no_std]
+        enum Maybe<T> { Some(T), None }
+        struct State<'a> { previous: Maybe<&'a i64> }
+        fn select<'a>(fallback: &'a i64, state: State<'a>) -> &'a i64 {
+            handle state.previous { Maybe::Some(value) => value, Maybe::None => fallback }
+        }
+        pub fn main() -> i64 { let backing = 42; let previous: Maybe<&i64> = Maybe::None; let state = State { previous: previous }; *select(&backing, state) }
+    "#);
+}
+
+#[test]
+fn initializer_results_preserve_absent_variant_reference_paths() {
+    accepts(r#"#![no_std]
+        enum Maybe<T> { Some(T), None(()) }
+        pub let absent = Maybe::None(());
+        fn select<'a>(fallback: &'a i64, previous: Maybe<&'a i64>) -> &'a i64 {
+            handle previous { Maybe::Some(value) => value, Maybe::None(_) => fallback }
+        }
+        pub fn main() -> i64 { let backing = 42; *select(&backing, absent) }
+    "#);
+}
+
+#[test]
+fn returned_variant_alternatives_keep_present_references_and_empty_payloads() {
+    accepts(r#"#![no_std]
+        enum Maybe<T> { Some(T), None(()) }
+        fn optional<'a>(backing: &'a i64, pick: i64) -> Maybe<&'a i64> {
+            handle pick { 0 => Maybe::None(()), _ => Maybe::Some(backing) }
+        }
+        fn select<'a>(fallback: &'a i64, previous: Maybe<&'a i64>) -> &'a i64 {
+            handle previous { Maybe::Some(value) => value, Maybe::None(_) => fallback }
+        }
+        pub fn main() -> i64 { let backing = 42; let mut pick = 0; pick = 1; *select(&backing, optional(&backing, pick)) }
+    "#);
+}
+
+#[test]
+fn an_empty_variant_cannot_hide_a_present_or_replaced_local_loan() {
+    let prefix = r#"#![no_std]
+        enum Maybe<T> { Some(T), None(()) }
+        struct State<'a> { previous: Maybe<&'a i64> }
+        fn select<'a>(fallback: &'a i64, previous: Maybe<&'a i64>) -> &'a i64 {
+            handle previous { Maybe::Some(value) => value, Maybe::None(_) => fallback }
+        }
+        fn state_select<'a>(fallback: &'a i64, state: State<'a>) -> &'a i64 { select(fallback, state.previous) }
+    "#;
+    for body in [
+        "let local = 1; let previous = handle pick { 0 => Maybe::Some(&local), _ => Maybe::None(()) }; select(fallback, previous)",
+        "let local = 1; let mut previous: Maybe<&i64> = Maybe::None(()); previous = Maybe::Some(&local); select(fallback, previous)",
+        "let local = 1; let mut state: State<'_> = State { previous: Maybe::None(()) }; state.previous = Maybe::Some(&local); state_select(fallback, state)",
+    ] {
+        let source = format!("{prefix} fn bad<'a>(fallback: &'a i64, pick: i64) -> &'a i64 {{ {body} }} pub fn main() -> i64 {{ let backing = 42; *bad(&backing, 1) }}");
+        for optimization in ["0", "2"] {
+            let error = StageZeroCompiler::new().compile(request(&source, optimization)).expect_err("present variant loans must not disappear");
+            assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5013" | "G5017")), "{:#?}", error.diagnostics());
+        }
+    }
+}
+
+#[test]
+fn initializer_results_cannot_publish_local_reference_payloads() {
+    let source = r#"#![no_std]
+        enum Maybe<T> { Some(T), None(()) }
+        pub let invalid = { let local = 42; Maybe::Some(&local) };
+        pub fn main() -> i64 { handle invalid { Maybe::Some(value) => *value, Maybe::None(_) => 0 } }
+    "#;
+    for optimization in ["0", "2"] {
+        let error = StageZeroCompiler::new().compile(request(source, optimization)).expect_err("an initializer cannot publish its stack loan");
+        assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5013" | "G5017")), "{:#?}", error.diagnostics());
+    }
+}
+
+#[test]
+fn helper_stores_revoke_absence_and_retain_the_new_backing_loan() {
+    let prefix = r#"#![no_std]
+        enum Maybe<T> { Some(T), None(()) }
+        struct State<'a> { previous: Maybe<&'a i64> }
+        fn set<'a>(state: &mut State<'a>, value: &'a i64) { state.previous = Maybe::Some(value); }
+        fn select<'a>(fallback: &'a i64, state: State<'a>) -> &'a i64 {
+            handle state.previous { Maybe::Some(value) => value, Maybe::None(_) => fallback }
+        }
+    "#;
+    accepts(&format!("{prefix} pub fn main() -> i64 {{ let first = 0; let second = 42; let mut state: State<'_> = State {{ previous: Maybe::None(()) }}; set(&mut state, &second); *select(&first, state) }}"));
+    let source = format!("{prefix} pub fn main() -> i64 {{ let first = 0; let mut second = 42; let mut state: State<'_> = State {{ previous: Maybe::None(()) }}; set(&mut state, &second); second = 43; *select(&first, state) }}");
+    for optimization in ["0", "2"] {
+        let error = StageZeroCompiler::new().compile(request(&source, optimization)).expect_err("a helper store revokes an old absence proof");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5007"), "{:#?}", error.diagnostics());
+    }
+}
+
+#[test]
+fn absent_initializer_payloads_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "#![no_std] enum Maybe<T> { Some(T), None(()) } pub let absent = Maybe::None(()); fn select<'a>(fallback: &'a i64, previous: Maybe<&'a i64>) -> &'a i64 { handle previous { Maybe::Some(value) => value, Maybe::None(_) => fallback } } pub fn main() -> i64 { let backing = 42; *select(&backing, absent) }";
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: execute only this locally compiled and checked source.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
+}
+
+#[test]
 fn generic_result_keeps_known_reference_fields_beside_open_logical_arguments() {
     accepts(&format!(r#"{PREFIX}
         fn select<'a,T>(value: &'a i64) -> &'a i64 {{

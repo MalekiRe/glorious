@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 120 verification below,
+Updated from the current source and cache 121 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,31 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 121 repairs absent variant payloads and evaluated initializer provenance
+through the shared body-control and normal-result products. Positive reference
+absence is distinct from unknown provenance, empty target queries and generic
+frame independence; aliases, aggregates, mixed alternatives and stores retain
+that distinction without deleting loan debt. Evaluated generic `None` values
+now use the same sealed invocation-result pipeline as ordinary calls.
+
+Final verification records 467 distinct passes and one active source acceptance
+failure across compiler unit, reference-result, request/cache, reborrow and
+capture-focused targets. The new regression
+`helper_created_static_views_replace_an_empty_payload` remains failing, not
+ignored: a helper-created static view reaches an absent variant's unrepresented
+may-store projection and rejects with G5021/G5023. Shared invocation mutation
+outcomes, including replacement payload shape and references created without an
+incoming source loan, are the next storage-contract obligation.
+
+The full-library root **still fails with 59 diagnostic records**, no suppression
+marker (`target/absent-reference-final-library-v26.log`), down from 61. Both
+traversal line-229 provenance diagnostics are gone. API/array, graph typing,
+custom-Drop, unsafe, mandatory-tail and minimum-use blockers remain. The full
+source matrix and native generic-label failure were not rerun or claimed fixed.
+Full compiler/library/self-hosted acceptance remains open.
+
+The following cache 120 and earlier entries are historical.
 
 Cache 120 repairs the active carrier-reborrow destination failure by separating
 actual referent targets from retained carrier loans in the existing resource

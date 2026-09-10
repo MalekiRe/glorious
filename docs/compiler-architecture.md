@@ -1027,3 +1027,46 @@ This repairs the carrier/referent destination boundary and physical invocation
 may-stores, not complete guard-correlated storage. Unknown local access, arbitrary
 captured writes, operation-result coverage, native labels/handlers and full
 compiler/library/self-hosted acceptance remain separate open obligations.
+
+## Present references, absent variant payloads and evaluated initializers
+
+The existing normal-return payload product distinguishes evaluated enum
+constructors from ordinary aggregate products. Reference coverage classifies
+each declared result path as authenticated wherever present, positively absent
+on every returning alternative, or unresolved. A choice must cover every
+alternative; an unknown value, missing ordinary tuple field or missing logical
+argument cannot become an inactive variant payload. Whole-result coverage still
+requires a known invocation and complete declared result shape. Positive
+observations under incomplete execution coverage retain debt without proving
+absence.
+
+PlaceFlow's existing origin snapshot carries positive reference absence
+independently of its loan union and target relation. An empty target query at
+an external aggregate root does not establish absence in its fields. EscapeFlow
+distinguishes a reference-free resident from both unknown provenance and generic
+frame-independent storage. Aliases, constructors, aggregate projections, calls
+and joins transport these facts through the existing products. Present or
+unknown alternatives revoke complete absence. Replacing a nested resident
+invalidates reference-free ancestor snapshots; the existing physical may-store
+consumers also revoke absence while retaining possible incoming backing loans.
+Absence cannot erase declared lifetime or control dependencies.
+
+Evaluated top-level value initializers now participate in the same body-sealed
+control batch as callable bodies, using their frozen pure zero-input declaration
+contract and checked kinded substitution. Their source values do not acquire a
+function type or callable authority. Existing constant invocation observations
+and conditional declaration selection supply their return payloads. Ownership
+and escape consume that bound result through the ordinary invocation pipeline,
+and the interface-aware reference contract producer supplies static versus
+unresolved result coverage. Neither consumer reconstructs the initializer body.
+The old constant omission and duplicated escape call-result assembly are removed.
+
+This repairs inactive enum payload and initializer-result provenance, including
+the standard library's generic `None` value. It is not a complete invocation
+mutation contract. A helper that constructs a static view and replaces an empty
+variant still fails closed: the current source-to-destination may-store relation
+does not supply a replacement variant's resident shape. The active regression
+must be addressed through shared storage outcomes, not by treating an absent
+source as new reference authority or dropping an unresolved write. General
+guard-correlated stores, native labels/handlers and full compiler/library/
+self-hosted acceptance remain open.

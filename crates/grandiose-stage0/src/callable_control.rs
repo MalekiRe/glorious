@@ -736,15 +736,19 @@ impl BoundControlSummaries<'_> {
 
     fn declared_call_control(&self, body: &TypedBody, expression: &crate::CoreExpr,
         labels: &crate::core::label_dependencies::LabelDependencies) -> Option<InvocationControl> {
-        let CoreKind::Call { callee, arguments, .. } = &expression.kind else { return None; };
+        let (operand, arguments) = match &expression.kind {
+            CoreKind::Call { callee, arguments, .. } => (body.expression(*callee), arguments.as_slice()),
+            CoreKind::Constant { .. } => (expression, &[][..]),
+            _ => return None,
+        };
         // A nominal label's invariant identity is declaration authority,
         // even when an enclosing handler leaves execution coverage unknown.
         // Match it against the shared lexical binder product; an arbitrary
         // bottom-returning callable supplies no such identity.
-        if let Some(payload) = crate::types::label::payload(&body.expression(*callee).ty)
+        if let Some(payload) = crate::types::label::payload(&operand.ty)
             && arguments.len() == 1
             && let Some(target) = labels.binders().find(|brand|
-                crate::types::label::matches_brand(&body.expression(*callee).ty, *brand)) {
+                crate::types::label::matches_brand(&operand.ty, *brand)) {
             return Some(InvocationControl {
                 labels: [target].into(), direct_labels: [target].into(),
                 transfers: vec![InvocationTransfer { target: Some(target), payload: InvocationPayload {
@@ -752,9 +756,9 @@ impl BoundControlSummaries<'_> {
                 } }], ..InvocationControl::default()
             });
         }
-        let operand = body.expression(*callee);
         let definition = match &operand.kind {
             CoreKind::Function { definition, host_import: None, .. } => Some(*definition),
+            CoreKind::Constant { definition, .. } => Some(*definition),
             CoreKind::TraitMethod { method, deferred: None, .. } => Some(*method),
             _ => None,
         };
@@ -1024,7 +1028,8 @@ fn derive_control_phase<E>(
             || !input.body.validate_projection_obligations_in_environment(input.interface, &input.signature.where_bounds,
                 &input.signature.where_outlives, solver).is_empty() {
             Err(ControlUnknown::InvalidCore(*key))
-        } else if matches!(input.interface.definitions.get(key), Some(crate::ElaboratedHeader::Callable(declared)) if declared != input.signature)
+        } else if crate::callable_declarations::body_signature(input.interface, *key)
+                .is_some_and(|declared| &declared != input.signature)
             || input.body.parameters.iter().map(|(_, ty)| ty).ne(input.signature.parameters.iter())
             || input.body.safety != input.signature.safety
             || !result_valid {

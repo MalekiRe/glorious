@@ -105,7 +105,7 @@ impl<'a> Analyzer<'a> {
     fn payload_binding(&mut self, payload: ResolvedPayload<Binding>, span: Span) -> Binding {
         match payload {
             ResolvedPayload::Inputs { values, .. } => Binding::choice(values),
-            ResolvedPayload::Aggregate(fields) => Binding::Aggregate(
+            ResolvedPayload::Aggregate(fields) | ResolvedPayload::Variant(fields) => Binding::Aggregate(
                 fields
                     .into_iter()
                     .enumerate()
