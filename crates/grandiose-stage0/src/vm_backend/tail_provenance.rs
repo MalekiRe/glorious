@@ -6,6 +6,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct TransferProofs {
+    pub(super) effect_calls: Option<effect_calls::Proofs>,
     pub(super) resumption_calls: BTreeMap<DefKey, resumption_calls::Contract>,
     pub(super) symbolic_resumption_inputs: bool,
     pub(super) label_dispatches: BTreeMap<DefKey, label_dispatch::Shim>,
@@ -150,6 +151,8 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
         // this proof. Avoid re-verifying unrelated programs for an unused fact.
         let mut proofs = TransferProofs { label_dispatches, ..TransferProofs::default() };
         resumption_calls::publish(functions, &mut proofs);
+        effect_calls::publish(functions, &mut proofs)?;
+        effect_calls::seal(&mut proofs);
         resumption_calls::validate(functions, &mut proofs)?;
         return Ok(proofs);
     }
@@ -165,6 +168,7 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
         entry_behaviors: BTreeMap::new(),
         resumption_calls: BTreeMap::new(),
         symbolic_resumption_inputs: false,
+        effect_calls: None,
     };
     resumption_calls::publish(functions, &mut proofs);
     let mut callers = BTreeMap::<DefKey, BTreeSet<DefKey>>::new();
@@ -185,52 +189,62 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
     }
     // Coinduction admits recursive forwarding SCCs, but a local or unknown
     // producer in any member revokes that member and rechecks every caller.
-    let mut pending = functions.keys().copied().collect::<Vec<_>>();
-    let mut queued = proofs.independent_results.clone();
-    while let Some(definition) = pending.pop() {
-        queued.remove(&definition);
-        let control = verify_function_control(&functions[&definition], false, true, &proofs)?;
-        let mut changed = false;
-        if !control.result_independent { changed |= proofs.independent_results.remove(&definition); }
-        if !control.result_destruction_preserving { changed |= proofs.preserving_result_destruction.remove(&definition); }
-        if !control.preserves_frame_memory { changed |= proofs.conditional_preserving_calls.remove(&definition); }
-        if !control.preserves_independent_frame_memory {
-            changed |= proofs.input_preserving_calls.remove(&definition).is_some();
-        } else if let Some(current) = proofs.input_preserving_calls.get(&definition).cloned()
-            && !current.referent_inputs.is_empty()
-            && !control.preserves_frame_memory
-            && !verify_function_control_with_reference_inputs(&functions[&definition], false, true,
-                &current.referent_inputs, false, &proofs)?.preserves_independent_frame_memory {
-            // Strengthen the failed contract using this same machine
-            // verifier. Each accepted weakening is checked together with
-            // every earlier one: independently successful one-bit probes
-            // must not be combined into an unverified conjunction.
-            let mut proven = InputPreservation { referent_inputs: BTreeSet::new() };
-            for input in &current.referent_inputs {
-                proven.referent_inputs.insert(*input);
-                if !verify_function_control_with_reference_inputs(&functions[&definition], false, true,
-                    &proven.referent_inputs, false, &proofs)?.preserves_independent_frame_memory {
-                    proven.referent_inputs.remove(input);
+    loop {
+        // New callee performances expose real local handler code. Close those
+        // edges before strengthening frame contracts, then revisit them after
+        // any hypothesis changes. Both domains are finite and monotone.
+        effect_calls::publish(functions, &mut proofs)?;
+        let mut strengthened = false;
+        let mut pending = functions.keys().copied().collect::<Vec<_>>();
+        let mut queued = functions.keys().copied().collect::<BTreeSet<_>>();
+        while let Some(definition) = pending.pop() {
+            queued.remove(&definition);
+            let control = verify_function_control(&functions[&definition], false, true, &proofs)?;
+            let mut changed = false;
+            if !control.result_independent { changed |= proofs.independent_results.remove(&definition); }
+            if !control.result_destruction_preserving { changed |= proofs.preserving_result_destruction.remove(&definition); }
+            if !control.preserves_frame_memory { changed |= proofs.conditional_preserving_calls.remove(&definition); }
+            if !control.preserves_independent_frame_memory {
+                changed |= proofs.input_preserving_calls.remove(&definition).is_some();
+            } else if let Some(current) = proofs.input_preserving_calls.get(&definition).cloned()
+                && !current.referent_inputs.is_empty()
+                && !control.preserves_frame_memory
+                && !verify_function_control_with_reference_inputs(&functions[&definition], false, true,
+                    &current.referent_inputs, false, &proofs)?.preserves_independent_frame_memory {
+                // Strengthen the failed contract using this same machine
+                // verifier. Each accepted weakening is checked together with
+                // every earlier one: independently successful one-bit probes
+                // must not be combined into an unverified conjunction.
+                let mut proven = InputPreservation { referent_inputs: BTreeSet::new() };
+                for input in &current.referent_inputs {
+                    proven.referent_inputs.insert(*input);
+                    if !verify_function_control_with_reference_inputs(&functions[&definition], false, true,
+                        &proven.referent_inputs, false, &proofs)?.preserves_independent_frame_memory {
+                        proven.referent_inputs.remove(input);
+                    }
                 }
+                // Contracts only strengthen, so recursive propagation terminates
+                // after finitely many removed hypotheses. Recheck every caller,
+                // including recursive edges, under the strengthened requirement.
+                changed |= proven != current;
+                proofs.input_preserving_calls.insert(definition, proven);
             }
-            // Contracts only strengthen, so recursive propagation terminates
-            // after finitely many removed hypotheses. Recheck every caller,
-            // including recursive edges, under the strengthened requirement.
-            changed |= proven != current;
-            proofs.input_preserving_calls.insert(definition, proven);
+            // This separate contract assumes invocation-preserving input
+            // callables, never merely harmless destruction or an empty capture
+            // graph. A real call must discharge both hypotheses for every input.
+            if !control.preserves_frame_memory && proofs.invocation_conditional_preserving_calls.contains(&definition)
+                && !verify_function_control_with_reference_inputs(&functions[&definition], false, true, &BTreeSet::new(), true, &proofs)?.preserves_frame_memory {
+                changed |= proofs.invocation_conditional_preserving_calls.remove(&definition);
+            }
+            if !changed { continue; }
+            strengthened = true;
+            for caller in callers.get(&definition).into_iter().flatten() {
+                if queued.insert(*caller) { pending.push(*caller); }
+            }
         }
-        // This separate contract assumes invocation-preserving input
-        // callables, never merely harmless destruction or an empty capture
-        // graph. A real call must discharge both hypotheses for every input.
-        if !control.preserves_frame_memory && proofs.invocation_conditional_preserving_calls.contains(&definition)
-            && !verify_function_control_with_reference_inputs(&functions[&definition], false, true, &BTreeSet::new(), true, &proofs)?.preserves_frame_memory {
-            changed |= proofs.invocation_conditional_preserving_calls.remove(&definition);
-        }
-        if !changed { continue; }
-        for caller in callers.get(&definition).into_iter().flatten() {
-            if queued.insert(*caller) { pending.push(*caller); }
-        }
+        if !strengthened { break; }
     }
+    effect_calls::seal(&mut proofs);
     resumption_calls::validate(functions, &mut proofs)?;
     Ok(proofs)
 }

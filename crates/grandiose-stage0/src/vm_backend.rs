@@ -33,6 +33,7 @@ use crate::MemoryPrimitive;
 mod codec;
 mod execution;
 mod resumption_calls;
+mod effect_calls;
 pub(crate) mod float_env;
 pub use codec::{
     STAGE0_ARTIFACT_MAGIC, STAGE0_MAX_DECODE_FUNCTIONS, STAGE0_MAX_DECODE_INSTRUCTIONS,
@@ -4083,7 +4084,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                     None => {}
                 }
                 let VmType::Callable {
-                    shared_receiver, unique_receiver, safety, parameters, result, ..
+                    shared_receiver, unique_receiver, safety, parameters, result, effects
                 } = register_type(function, *dst)?
                 else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
@@ -4095,6 +4096,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                 }
                 callable_access::verify_claim(&semantics.functions[callee], shared_receiver, unique_receiver,
                     intact_captures.get(callee) == Some(&true))?;
+                effect_calls::check_callable(*callee, &effects, &transfer_proofs)?;
                 if target.parameters != target.captures + parameters.len() as u32 {
                     return Err(VmArtifactError::CallArity {
                         expected: target.parameters.saturating_sub(target.captures),
@@ -4323,8 +4325,9 @@ fn verify_effect_operation_specialization(
 /// payloads) after crossing a call frame.
 fn verify_program_effect_operation_abis(
     functions: &BTreeMap<DefKey, VmFunction>,
-) -> Result<(), VmArtifactError> {
+) -> Result<effect_calls::Footprint, VmArtifactError> {
     let mut operations = Vec::<(DefKey, Vec<VmGenericArgument>, u32, Vec<VmType>, VmType, bool, bool)>::new();
+    let mut universe = effect_calls::Footprint::default();
     for function in functions.values() {
         for instruction in &function.instructions {
             let (effect, effect_arguments, operation, payloads, resume_type) = match instruction {
@@ -4411,11 +4414,12 @@ fn verify_program_effect_operation_abis(
                     });
                 }
             }
+            universe.insert(effect_calls::Operation { effect, arguments: effect_arguments.clone(), operation });
             let contract = (effect, effect_arguments, operation, payloads, resume_type, owned_payloads, producer);
             if !operations.contains(&contract) { operations.push(contract); }
         }
     }
-    Ok(())
+    Ok(universe)
 }
 
 /// Derive the only executable identity a sealed closure environment may
@@ -6191,8 +6195,18 @@ impl VerifierHandlerFrame {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum VerifierContinuationOrigin {
+    /// The operation's resume argument initializes the local perform result.
+    Performance,
+    /// The operation resumes a deeper activation. This activation receives
+    /// the ordinary callee result, with its separately checked value facts.
+    CallReturn,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierContinuation {
     address_exposed: Vec<bool>,
+    origin: VerifierContinuationOrigin,
     target: u32,
     dst: u32,
     registers: Vec<Option<bool>>,
@@ -6229,6 +6243,65 @@ struct VerifierPerformed {
     effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
     arguments: Vec<u32>,
+    /// The packet exists separately from the suspended activation. In
+    /// particular a cross-frame call has no local argument registers holding
+    /// its callee's operation payloads, and its future normal result is not
+    /// available while the packet is forwarded.
+    values: Vec<VerifierValue>,
+}
+
+impl VerifierContinuation {
+    fn capture(origin: VerifierContinuationOrigin, target: u32, dst: u32, saved: &VerifierState,
+        performed: VerifierPerformed, above: Vec<VerifierHandlerFrame>) -> Self {
+        Self {
+            origin, target, dst, performed, above,
+            address_exposed: saved.address_exposed.clone(),
+            registers: saved.registers.clone(),
+            may_initialized: saved.may_initialized.clone(),
+            storage_live: saved.storage_live.clone(),
+            reference_origins: saved.reference_origins.clone(),
+            frame_independent: saved.frame_independent.clone(),
+            referent_independent: saved.referent_independent.clone(),
+            local_labels: saved.local_labels.clone(),
+            destruction_preserves_frames: saved.destruction_preserves_frames.clone(),
+            invocation_preserves_frames: saved.invocation_preserves_frames.clone(),
+            labels: saved.labels.clone(),
+            resumptions: saved.resumptions.clone(),
+            pending_leave: saved.pending_leave.clone(),
+        }
+    }
+
+    fn saved_state(&self, context: &VerifierState, handlers: Vec<VerifierHandlerFrame>) -> VerifierState {
+        VerifierState {
+            resumption_paths: context.resumption_paths.clone(),
+            last_instruction: context.last_instruction,
+            registers: self.registers.clone(),
+            may_initialized: self.may_initialized.clone(),
+            storage_live: self.storage_live.clone(),
+            source_storage: context.source_storage.clone(),
+            reference_origins: self.reference_origins.clone(),
+            frame_independent: self.frame_independent.clone(),
+            referent_independent: self.referent_independent.clone(),
+            local_labels: self.local_labels.clone(),
+            destruction_preserves_frames: self.destruction_preserves_frames.clone(),
+            invocation_preserves_frames: self.invocation_preserves_frames.clone(),
+            address_exposed: self.address_exposed.clone(),
+            labels: self.labels.clone(),
+            resumptions: self.resumptions.clone(),
+            handlers,
+            pending_leave: self.pending_leave.clone(),
+            resuming: context.resuming,
+            resumption_return_handler_ids: context.resumption_return_handler_ids.clone(),
+            resumption_return_result: context.resumption_return_result.clone(),
+        }
+    }
+
+    fn restore(&self, context: &VerifierState, handlers: Vec<VerifierHandlerFrame>)
+        -> Result<VerifierState, VmArtifactError> {
+        let mut resumed = self.saved_state(context, handlers);
+        if self.origin == VerifierContinuationOrigin::Performance { write(&mut resumed, self.dst)?; }
+        Ok(resumed)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6295,6 +6368,7 @@ struct VerifierState {
 /// Facts owned by a resident value, as distinct from its register's storage
 /// lifetime. Parallel ownership edges snapshot these before retiring any
 /// source or overwriting a destination.
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierValue {
     references: ReferenceOriginSet,
     independent: bool,
@@ -6499,6 +6573,7 @@ pub(crate) fn infer_program_returns(functions: &BTreeMap<DefKey, VmFunction>) ->
 
 struct VerifiedFunctionControl {
     resumption_contract: resumption_calls::Contract,
+    outward_operations: effect_calls::Footprint,
     call_input_behaviors: BTreeMap<DefKey, Vec<tail_provenance::CallableBehavior>>,
     returns: bool,
     result_independent: bool,
@@ -6524,6 +6599,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
 ) -> Result<VerifiedFunctionControl, VmArtifactError> {
     let mut call_input_behaviors = BTreeMap::new();
     let mut resumption_contract = resumption_calls::Contract::default();
+    let mut outward_operations = effect_calls::Footprint::default();
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -6741,13 +6817,17 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
         if captured_call.is_some() && let Some(callee) = prepared_receiver { states.retire_value(callee); }
         let resumption_consumes = instruction.consumed_arguments().is_some();
         let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
+        let called_operations = effect_calls::invocation(function, instruction, transfer_proofs)?;
+        effect_calls::outward(&called_operations, &states, &mut outward_operations);
+        let call_suspension = if called_operations.operations().iter().any(|operation|
+            states.handlers.iter().any(|frame| operation.matches(frame)))
+            && matches!(instruction, VmInstruction::Call { .. } | VmInstruction::CallOwned { .. }
+                | VmInstruction::CallIndirect { .. } | VmInstruction::CallIndirectOwned { .. }
+                | VmInstruction::CallPrepared { .. }) {
+            Some(states.clone())
+        } else { None };
         if function.captures != 0 && callable_access::is_execution_boundary(instruction) {
             captures_intact_at_boundaries &= states.registers.iter().take(function.captures as usize).all(|state| *state == Some(true));
-        }
-        if let VmInstruction::Call { dst, arguments, .. } | VmInstruction::CallOwned { dst, arguments, .. }
-            | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. }
-            | VmInstruction::CallPrepared { dst, arguments, .. } = instruction {
-            seed_terminal_call_handlers(function, pc, *dst, arguments, resumption_consumes, &states, &mut incoming, &mut worklist)?;
         }
         // The non-consuming constructor opcodes copy their input carriers.
         // They must not provide a second spelling of Copy that bypasses its
@@ -7789,13 +7869,11 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     read(&states, *argument)?;
                     if owned_payloads && !seen.insert(*argument) { return Err(VmArtifactError::UseAfterMove { register: *argument }); }
                 }
+                let payload_values = arguments.iter().map(|argument|
+                    VerifierValue::snapshot(function, &states, *argument)).collect::<Vec<_>>();
                 if owned_payloads {
-                    for argument in arguments { states.registers[*argument as usize] = Some(false); }
+                    for argument in arguments { states.retire_value(*argument); }
                 }
-                let payload_metadata = arguments.iter().map(|argument| {
-                    let index = *argument as usize;
-                    (states.reference_origins[index].clone(), states.labels[index], states.resumptions[index].clone())
-                }).collect::<Vec<_>>();
                 if let Some(index) = states.handlers.iter().rposition(|frame| {
                     frame.active()
                         && frame.effect == *effect
@@ -7818,55 +7896,41 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                             found: register_type(function, *dst)?,
                         });
                     }
-                    let saved = states.registers.clone();
-                    for ((destination, argument), metadata) in frame.payload_destinations.iter().zip(arguments).zip(&payload_metadata)
+                    let saved = states.clone();
+                    for ((destination, argument), value) in frame.payload_destinations.iter().zip(arguments).zip(&payload_values)
                     {
                         same_type(function, *destination, *argument)?;
-                        write(&mut states, *destination)?;
+                        value.clone().install(function, &mut states, *destination)?;
                         if owned_payloads {
-                            let index = *destination as usize;
-                            states.registers[index] = Some(false);
-                            states.reference_origins[index] = metadata.0.clone();
-                            states.labels[index] = metadata.1;
-                            states.resumptions[index] = metadata.2.clone();
+                            states.registers[*destination as usize] = Some(false);
                         }
                     }
                     states.handlers[index].payload_claim = owned_payloads.then_some(false);
                     states.handlers[index].payload_domain = if owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
                     states.handlers[index].payload_probe = None;
                     states.handlers[index].invocations = Some(resumption_calls::Budget::captured(frame.continuation));
-                    states.handlers[index].continuations = vec![VerifierContinuation {
-                        may_initialized: states.may_initialized.clone(),
-                        target: (pc + 1) as u32,
-                        dst: *dst,
-                        registers: saved,
-                        storage_live: states.storage_live.clone(),
-                        reference_origins: states.reference_origins.clone(),
-                        frame_independent: states.frame_independent.clone(),
-                        referent_independent: states.referent_independent.clone(),
-                        local_labels: states.local_labels.clone(),
-                        destruction_preserves_frames: states.destruction_preserves_frames.clone(),
-                        invocation_preserves_frames: states.invocation_preserves_frames.clone(),
-                        address_exposed: states.address_exposed.clone(),
-                        labels: states.labels.clone(),
-                        resumptions: states.resumptions.clone(),
-                        performed: VerifierPerformed {
+                    states.handlers[index].continuations = vec![VerifierContinuation::capture(
+                        VerifierContinuationOrigin::Performance, (pc + 1) as u32, *dst, &saved,
+                        VerifierPerformed {
                             effect: *effect,
                             effect_arguments: effect_arguments.clone(),
                             operation: *operation,
                             arguments: arguments.clone(),
-                        },
-                        above,
-                        pending_leave: states.pending_leave.clone(),
-                    }];
+                            values: payload_values,
+                        }, above)];
                     propagate_state(&mut incoming, &mut worklist, frame.target, &states)?;
                     advances = false;
                 } else {
+                    outward_operations.insert(effect_calls::Operation {
+                        effect: *effect, arguments: effect_arguments.clone(), operation: *operation,
+                    });
                     // The verifier validates register initialization and keeps
                     // the result type declared by the compiler. Protocol
                     // signature checking and handler evidence are source-level
                     // facts, deliberately not duplicated by the artifact layer.
-                    for argument in arguments { verify_call_frame_resumption_transfer(&states, *argument)?; }
+                    if payload_values.iter().any(|value| value.resumptions.contains()) {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                     write(&mut states, *dst)?;
                 }
             }
@@ -8050,30 +8114,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                             .continuations
                             .clear();
                     }
-                    resumed_handlers.extend(continuation.above);
-                    let mut resumed = VerifierState {
-                        resumption_paths: states.resumption_paths.clone(),
-                        last_instruction: Some(pc),
-                        may_initialized: continuation.may_initialized,
-                        registers: continuation.registers,
-                        storage_live: continuation.storage_live,
-                        source_storage: states.source_storage.clone(),
-                        reference_origins: continuation.reference_origins,
-                        frame_independent: continuation.frame_independent,
-                        referent_independent: continuation.referent_independent,
-                        local_labels: continuation.local_labels,
-                        destruction_preserves_frames: continuation.destruction_preserves_frames,
-                        invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        address_exposed: continuation.address_exposed,
-                        labels: continuation.labels,
-                        resumptions: continuation.resumptions,
-                        handlers: resumed_handlers,
-                        pending_leave: continuation.pending_leave,
-                        resuming: states.resuming,
-                        resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
-                        resumption_return_result: states.resumption_return_result.clone(),
-                    };
-                    write(&mut resumed, continuation.dst)?;
+                    resumed_handlers.extend(continuation.above.clone());
+                    let resumed = continuation.restore(&states, resumed_handlers)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
                 }
                 advances = false;
@@ -8210,30 +8252,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                             .continuations
                             .clear();
                     }
-                    resumed_handlers.extend(continuation.above);
-                    let mut resumed = VerifierState {
-                        resumption_paths: states.resumption_paths.clone(),
-                        last_instruction: Some(pc),
-                        may_initialized: continuation.may_initialized,
-                        registers: continuation.registers,
-                        storage_live: continuation.storage_live,
-                        source_storage: states.source_storage.clone(),
-                        reference_origins: continuation.reference_origins,
-                        frame_independent: continuation.frame_independent,
-                        referent_independent: continuation.referent_independent,
-                        local_labels: continuation.local_labels,
-                        destruction_preserves_frames: continuation.destruction_preserves_frames,
-                        invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        address_exposed: continuation.address_exposed,
-                        labels: continuation.labels,
-                        resumptions: continuation.resumptions,
-                        handlers: resumed_handlers,
-                        pending_leave: continuation.pending_leave,
-                        resuming: states.resuming,
-                        resumption_return_handler_ids: states.resumption_return_handler_ids.clone(),
-                        resumption_return_result: states.resumption_return_result.clone(),
-                    };
-                    write(&mut resumed, continuation.dst)?;
+                    resumed_handlers.extend(continuation.above.clone());
+                    let resumed = continuation.restore(&states, resumed_handlers)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
                 }
                 advances = false;
@@ -8261,13 +8281,28 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                             && frame.effect_arguments == continuation.performed.effect_arguments
                             && frame.operation == continuation.performed.operation
                     }) else {
-                        return Err(VmArtifactError::UnhandledEffect {
+                        // Forwarding may cross this ordinary activation just
+                        // like an unhandled local Perform. Publish that edge;
+                        // an arbitrary resumptive caller can later restore
+                        // the declined deep delimiter and this exact suffix.
+                        outward_operations.insert(effect_calls::Operation {
                             effect: continuation.performed.effect,
-                            effect_arguments: continuation.performed.effect_arguments,
+                            arguments: continuation.performed.effect_arguments.clone(),
                             operation: continuation.performed.operation,
                         });
+                        if continuation.performed.values.iter().any(|value| value.resumptions.contains()) {
+                            return Err(VmArtifactError::HandlerResumeUnavailable);
+                        }
+                        if declined.continuation != VmContinuationPolicy::Terminal {
+                            let mut handlers = states.handlers.clone();
+                            handlers.push(declined.clone());
+                            handlers.extend(continuation.above.clone());
+                            let resumed = continuation.restore(&states, handlers)?;
+                            propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                        } else { trapped = true; }
+                        continue;
                     };
-                    let mut forwarded = states.clone();
+                    let mut forwarded = continuation.saved_state(&states, states.handlers.clone());
                     let mut crossed = forwarded.handlers.split_off(index + 1);
                     let outer = forwarded.handlers[index].clone();
                     if outer.owned_payloads != declined.owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
@@ -8277,31 +8312,19 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                             found: continuation.performed.arguments.len() as u32,
                         });
                     }
-                    forwarded.registers = continuation.registers.clone();
-                    forwarded.storage_live = continuation.storage_live.clone();
-                    forwarded.reference_origins = continuation.reference_origins.clone();
-                    forwarded.frame_independent = continuation.frame_independent.clone();
-                    forwarded.referent_independent = continuation.referent_independent.clone();
-                    forwarded.local_labels = continuation.local_labels.clone();
-                    forwarded.destruction_preserves_frames = continuation.destruction_preserves_frames.clone();
-                    forwarded.invocation_preserves_frames = continuation.invocation_preserves_frames.clone();
-                    forwarded.address_exposed = continuation.address_exposed.clone();
-                    forwarded.labels = continuation.labels.clone();
-                    forwarded.resumptions = continuation.resumptions.clone();
-                    for (destination, argument) in outer
+                    if continuation.origin == VerifierContinuationOrigin::CallReturn {
+                        forwarded.retire_value(continuation.dst);
+                    }
+                    for ((destination, argument), value) in outer
                         .payload_destinations
                         .iter()
                         .zip(&continuation.performed.arguments)
+                        .zip(&continuation.performed.values)
                     {
                         same_type(function, *destination, *argument)?;
-                        write(&mut forwarded, *destination)?;
+                        value.clone().install(function, &mut forwarded, *destination)?;
                         if outer.owned_payloads {
-                            let index = *destination as usize;
-                            let source = *argument as usize;
-                            forwarded.registers[index] = Some(false);
-                            forwarded.reference_origins[index] = continuation.reference_origins[source].clone();
-                            forwarded.labels[index] = continuation.labels[source];
-                            forwarded.resumptions[index] = continuation.resumptions[source].clone();
+                            forwarded.registers[*destination as usize] = Some(false);
                         }
                     }
                     forwarded.handlers[index].payload_claim = outer.owned_payloads.then_some(false);
@@ -8312,7 +8335,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     crossed.extend(continuation.above.clone());
                     forwarded.handlers[index].invocations = Some(resumption_calls::Budget::captured(outer.continuation));
                     forwarded.handlers[index].continuations = vec![VerifierContinuation {
-                        may_initialized: states.may_initialized.clone(),
+                        origin: continuation.origin,
+                        may_initialized: continuation.may_initialized,
                         target: continuation.target,
                         dst: continuation.dst,
                         registers: continuation.registers,
@@ -9260,13 +9284,26 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
             }
         }
         if let Some(callee) = prepared_receiver { states.retire_value(callee); }
+        if let Some(suspended) = call_suspension
+            && let VmInstruction::Call { dst, arguments, .. } | VmInstruction::CallOwned { dst, arguments, .. }
+                | VmInstruction::CallIndirect { dst, arguments, .. } | VmInstruction::CallIndirectOwned { dst, arguments, .. }
+                | VmInstruction::CallPrepared { dst, arguments, .. } = instruction {
+            let receiver = match instruction {
+                VmInstruction::CallIndirect { callee, .. } | VmInstruction::CallIndirectOwned { callee, .. }
+                | VmInstruction::CallPrepared { callee, .. } => Some(*callee),
+                _ => None,
+            };
+            seed_call_handlers(function, pc, *dst, arguments, resumption_consumes, receiver, prepared_receiver,
+                &called_operations, &suspended, &states, &mut incoming, &mut worklist)?;
+        }
         if advances {
             propagate_state(&mut incoming, &mut worklist, (pc + 1) as u32, &states)?;
         }
     }
     if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
+    effect_calls::check(function, &outward_operations, transfer_proofs)?;
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
-        Ok(VerifiedFunctionControl { resumption_contract, call_input_behaviors, returns: returned.is_some(), result_independent,
+        Ok(VerifiedFunctionControl { resumption_contract, outward_operations, call_input_behaviors, returns: returned.is_some(), result_independent,
             result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
             captures_intact_at_boundaries })
     } else {
@@ -9668,55 +9705,79 @@ fn propagate_state(
         }
     }
 }
-/// A callee can perform terminal effects. Seed first-match dispatch at the
-/// call boundary, after all currently active handlers have been installed.
-fn seed_terminal_call_handlers(
+/// A checked may-performance in a callee enters the first matching active
+/// clause in this activation. The clause sees the suspended call boundary;
+/// resumption separately audits the ordinary call-return state and ABI.
+fn seed_call_handlers(
     function: &VmFunction, pc: usize, dst: u32, arguments: &[u32], consumes: bool,
-    states: &VerifierState, incoming: &mut [BTreeMap<VerifierContext, VerifierState>], worklist: &mut VerifierWorklist,
+    receiver: Option<u32>, prepared_receiver: Option<u32>, operations: &effect_calls::Footprint,
+    suspended: &VerifierState, returned: &VerifierState,
+    incoming: &mut VerifierIncoming, worklist: &mut VerifierWorklist,
 ) -> Result<(), VmArtifactError> {
-    let mut seen = Vec::new();
-    for (index, frame) in states.handlers.iter().enumerate().rev() {
-        if !frame.active() { continue; }
-        let key = (frame.effect, frame.effect_arguments.clone(), frame.operation);
-        if seen.contains(&key) { continue; }
-        seen.push(key);
-        if frame.continuation != VmContinuationPolicy::Terminal { continue; }
-        let mut terminal = states.clone();
-        for argument in arguments {
-            read(&terminal, *argument)?;
-            if consumes {
-                let slot = *argument as usize;
-                terminal.registers[slot] = Some(false);
-                terminal.reference_origins[slot].clear();
-                terminal.labels[slot] = false;
-                terminal.resumptions[slot] = ResumptionValue::None;
-            }
+    for operation in operations.operations() {
+        let Some(index) = suspended.handlers.iter().rposition(|frame| operation.matches(frame)) else { continue; };
+        let frame = &suspended.handlers[index];
+        // A may-operation set does not order performances relative to helper
+        // events which spend another local capability. Until those events
+        // share a guarded history, neither pre- nor post-call budgets can
+        // stand in for all possible performance points.
+        if suspended.handlers.len() != returned.handlers.len()
+            || suspended.handlers.iter().zip(&returned.handlers).any(|(before, after)|
+                before.id != after.id || before.invocations != after.invocations) {
+            return Err(VmArtifactError::HandlerResumeUnavailable);
         }
-        let above = terminal.handlers.split_off(index + 1);
-        for payload in &frame.payload_destinations {
-            write(&mut terminal, *payload)?;
-            if frame.owned_payloads { terminal.registers[*payload as usize] = Some(false); }
+        let mut clause = suspended.clone();
+        let mut references = ReferenceOriginSet::Empty;
+        let mut labels = false;
+        let mut control = false;
+        for argument in arguments.iter().copied().chain(receiver) {
+            read(&clause, argument)?;
+            references.union_with(&clause.reference_origins[argument as usize]);
+            labels |= clause.labels[argument as usize];
+            control |= clause.resumptions[argument as usize].contains();
         }
-        terminal.handlers[index].payload_claim = frame.owned_payloads.then_some(false);
-        terminal.handlers[index].payload_domain = if frame.owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
-        terminal.handlers[index].payload_probe = None;
-        terminal.handlers[index].invocations = Some(resumption_calls::Budget::captured(frame.continuation));
-        terminal.handlers[index].continuations = vec![VerifierContinuation {
-            may_initialized: terminal.may_initialized.clone(),
-            target: (pc + 1) as u32, dst, registers: terminal.registers.clone(),
-            storage_live: terminal.storage_live.clone(), reference_origins: terminal.reference_origins.clone(),
-            frame_independent: terminal.frame_independent.clone(),
-            referent_independent: terminal.referent_independent.clone(),
-            local_labels: terminal.local_labels.clone(),
-            destruction_preserves_frames: terminal.destruction_preserves_frames.clone(),
-            invocation_preserves_frames: terminal.invocation_preserves_frames.clone(),
-            address_exposed: terminal.address_exposed.clone(),
-            labels: terminal.labels.clone(), resumptions: terminal.resumptions.clone(),
-            performed: VerifierPerformed { effect: frame.effect, effect_arguments: frame.effect_arguments.clone(),
-                operation: frame.operation, arguments: frame.payload_destinations.clone() },
-            above, pending_leave: terminal.pending_leave.clone(),
-        }];
-        propagate_state(incoming, worklist, frame.target, &terminal)?;
+        if consumes {
+            for argument in arguments { clause.retire_value(*argument); }
+        }
+        if let Some(receiver) = prepared_receiver { clause.retire_value(receiver); }
+        // In particular, decoded clause code must not consume a result that
+        // exists only after the suspended callee completes.
+        clause.retire_value(dst);
+        clause.handlers.truncate(index + 1);
+        let mut payloads = vec![];
+        for destination in &frame.payload_destinations {
+            let ty = register_type(function, *destination)?;
+            let owned = vm_tail_owned_type(&ty, &function.nominal_copy_descriptors, &mut vec![]);
+            let value = VerifierValue {
+                references: if owned { ReferenceOriginSet::Empty } else { references.clone() },
+                independent: owned,
+                referent_independent: false,
+                label: None,
+                destruction_preserves: false,
+                invocation_preserves: false,
+                labels,
+                resumptions: if control && resumption_calls::may_contain(&ty, &function.nominal_copy_descriptors) {
+                    ResumptionValue::Unknown
+                } else { ResumptionValue::None },
+            };
+            value.clone().install(function, &mut clause, *destination)?;
+            if frame.owned_payloads { clause.registers[*destination as usize] = Some(false); }
+            payloads.push(value);
+        }
+        let performed = VerifierPerformed {
+            effect: operation.effect, effect_arguments: operation.arguments.clone(), operation: operation.operation,
+            arguments: frame.payload_destinations.clone(), values: payloads,
+        };
+        clause.handlers[index].payload_claim = frame.owned_payloads.then_some(false);
+        clause.handlers[index].payload_domain = if frame.owned_payloads {
+            coverage::packet(function, &frame.payload_destinations)
+        } else { None };
+        clause.handlers[index].payload_probe = None;
+        clause.handlers[index].invocations = Some(resumption_calls::Budget::captured(frame.continuation));
+        clause.handlers[index].continuations = vec![VerifierContinuation::capture(
+            VerifierContinuationOrigin::CallReturn, (pc + 1) as u32, dst, returned, performed,
+            returned.handlers[index + 1..].to_vec())];
+        propagate_state(incoming, worklist, frame.target, &clause)?;
     }
     Ok(())
 }

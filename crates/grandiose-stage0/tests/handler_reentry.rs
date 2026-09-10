@@ -194,11 +194,80 @@ fn decoded_replay_counts_are_checked_for_performances_in_an_ordinary_callee() {
     let source = "effect Ask { [3,3] ask() -> i64; }
         fn leaf() -> i64 / Ask { Ask::ask() }
         pub fn main() -> i64 { handle leaf() { Ask::ask() with k => k(12) + k(14) + k(16) } }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
-    let artifact = outcome.artifact.unwrap();
-    assert_eq!(artifact.run_i64().unwrap(), 42);
-    reject_changed_replay_counts(&decode_program(&artifact.canonical_bytes()).unwrap(), &[2, 4]);
+    let original = candidate(source);
+    reject_changed_replay_counts(&original, &[2, 4]);
+    let mut unavailable_result = original;
+    let entry = unavailable_result.functions.get_mut(&unavailable_result.entry).unwrap();
+    let call_result = entry.instructions.iter().find_map(|instruction| match instruction {
+        VmInstruction::CallOwned { dst, .. } => Some(*dst), _ => None,
+    }).unwrap();
+    let clause = entry.instructions.iter().find_map(|instruction| match instruction {
+        VmInstruction::InstallHandlerOwned { target, .. } => Some(*target as usize), _ => None,
+    }).unwrap();
+    let instruction = entry.instructions[clause..].iter_mut().find(|instruction|
+        matches!(instruction, VmInstruction::ConstI64 { .. })).unwrap();
+    let VmInstruction::ConstI64 { dst, .. } = instruction else { unreachable!() };
+    *instruction = VmInstruction::Copy { dst: *dst, src: call_result };
+    unavailable_result.fingerprint = unavailable_result.computed_fingerprint();
+    let error = verify_vm_program(unavailable_result.clone()).unwrap_err();
+    assert!(matches!(error, VmArtifactError::UseAfterMove { .. } | VmArtifactError::ReadBeforeWrite { .. }),
+        "a clause cannot read the future normal call result: {error:?}");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&unavailable_result)).is_err());
+}
+
+#[test]
+fn cross_frame_replay_preserves_the_ordinary_callee_result_abi() {
+    let original = candidate("effect Ask { [3,3] ask() -> Bool; }
+        fn leaf() -> (i64,) / Ask { handle Ask::ask() { true => (14,), false => (0,) } }
+        fn relay() -> (i64,) / Ask { leaf() }
+        pub fn main() -> i64 { handle relay().0 { Ask::ask() with k => k(true) + k(true) + k(true) } }");
+    reject_changed_replay_counts(&original, &[2, 4]);
+}
+
+#[test]
+fn indirect_callee_effect_rows_cannot_hide_replay_clause_audits() {
+    let original = candidate("effect Ask { [3,3] ask() -> i64; }
+        fn leaf() -> i64 / Ask { Ask::ask() }
+        fn invoke<F>(task:F) -> i64 / Ask where F:Fn<(),Output=i64,Effects={Ask}> { task() }
+        pub fn main() -> i64 { handle invoke(leaf) { Ask::ask() with k => k(12) + k(14) + k(16) } }");
+    reject_changed_replay_counts(&original, &[2, 4]);
+    reject_concealed_callee_effect_rows(original);
+}
+
+#[test]
+fn indirect_callee_effect_rows_cannot_hide_one_shot_clause_audits() {
+    let original = candidate("effect Ask { [1,1] ask() -> i64; }
+        fn leaf() -> i64 / Ask { Ask::ask() }
+        fn invoke<F>(task:F) -> i64 / Ask where F:Fn<(),Output=i64,Effects={Ask}> { task() }
+        pub fn main() -> i64 { handle invoke(leaf) { Ask::ask() with k => k(42) } }");
+    reject_concealed_callee_effect_rows(original);
+}
+
+fn reject_concealed_callee_effect_rows(mut concealed: CandidateVmProgram) {
+    let mut changed = false;
+    for function in concealed.functions.values_mut() {
+        for ty in &mut function.registers {
+            if let VmType::Callable { effects, .. } = ty && !effects.effects.is_empty() {
+                **effects = Default::default();
+                changed = true;
+            }
+        }
+    }
+    assert!(changed);
+    concealed.fingerprint = concealed.computed_fingerprint();
+    let error = verify_vm_program(concealed.clone()).unwrap_err();
+    assert!(matches!(error, VmArtifactError::MalformedEncoding {
+        message: "callable effect row conceals an executable performance",
+    }), "{error:?}");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&concealed)).is_err());
+}
+
+#[test]
+fn partial_callee_handler_forwards_to_its_callers_delimiter() {
+    candidate("effect Ask { [1,1] ask(value:i64) -> i64; }
+        fn leaf() -> i64 / Ask { Ask::ask(40) }
+        fn relay() -> i64 / Ask { handle leaf() { Ask::ask(0) with k => k(100) } }
+        pub fn main() -> i64 { handle relay() { Ask::ask(value) with k => k(value + 2) } }");
 }
 
 #[test]

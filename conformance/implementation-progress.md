@@ -5,6 +5,46 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 148: outward operations and cross-frame clause audits
+
+The existing executable control verifier now publishes reachable outward
+operations through direct calls, local performances and forwarding. Its finite
+operation universe comes from the program-wide dynamic ABI check. Indirect
+callee rows conservatively select that universe, and every first-class target
+is checked against its producer's row. A forged pure callable cannot conceal
+its target's performance. Recursive may edges close before publication; failed
+or missing bodies are not empty contracts. Helper histories and frame-preserving
+hypotheses are rechecked around those same control edges.
+
+The shared call-handler transition replaces terminal-only seeding. A clause
+sees the suspended call boundary, not its future normal result. Its continuation
+retains a distinct ordinary-call-return origin and audits the checked caller
+suffix with that result's actual ABI. Local performances still receive operation
+resume arguments. Packet provenance is independent of saved register state,
+including across forwarding. Partial handlers in ordinary callees can forward
+outward and restore their declined deep delimiter when resumed.
+
+All four effect-product tests and all 15 helper-proof tests pass. The handler
+integration checkpoint passes 46 cases across fresh/decoded VM, all-native and
+both mixed partitions at O0/O2. New gates cover direct and transitive replay-count
+mutation, different operation/callee-result types, unavailable future results,
+indirect callable-row forgery and partial-callee forwarding. The previously
+accepted forged cross-frame replay counts are now rejected before execution.
+
+Two preserved source regressions are explicitly excluded from that checkpoint:
+receiver replacement during argument evaluation still fails native lifetime
+validation, and indirect replay through a generic helper exposes stale resident
+quantity on its specialized callable parameter. The latter has a known Copy
+environment, but cleanup retains its template quantity and rejects G7040. Neither
+test is ignored or converted to an expected failure. Unrepresented interleavings
+between named performances and spending other local capabilities still reject;
+a may-operation set is not an ordered execution contract for those events.
+
+Cache 148 and verifier 49 change; bytecode 75/schema 119 and native ABI 18 do not.
+Borrowed resumption invocation, helper-local symbolic delimiters, foreign-control
+admission, mandatory-tail fusion and full zero-marshalling/performance acceptance
+remain open, as do full compiler/library and self-hosted acceptance.
+
 ## Cache 147: executable delimiter invocation budgets
 
 The executable control state now retains a captured operation's remaining

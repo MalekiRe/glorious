@@ -270,41 +270,22 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
     active.continuations.clear();
     for continuation in continuations {
         let mut handlers = resumed_handlers.clone();
-        handlers.extend(continuation.above);
+        handlers.extend(continuation.above.clone());
         let resumption_return_handler_ids = handlers.iter().map(|frame| frame.id).collect::<Vec<_>>();
         if resumption_return_handler_ids.iter().copied().collect::<BTreeSet<_>>().len() != resumption_return_handler_ids.len() {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
-        let mut resumed = VerifierState {
-            resumption_paths: states.resumption_paths.clone(),
-            last_instruction: Some(pc),
-            may_initialized: continuation.may_initialized,
-            registers: continuation.registers,
-            storage_live: continuation.storage_live,
-            source_storage: states.source_storage.clone(),
-            reference_origins: continuation.reference_origins,
-            frame_independent: continuation.frame_independent,
-            referent_independent: continuation.referent_independent,
-            local_labels: continuation.local_labels,
-            destruction_preserves_frames: continuation.destruction_preserves_frames,
-            invocation_preserves_frames: continuation.invocation_preserves_frames,
-            address_exposed: continuation.address_exposed,
-            labels: continuation.labels,
-            resumptions: continuation.resumptions,
-            handlers,
-            pending_leave: continuation.pending_leave,
-            resuming: true,
-            resumption_return_handler_ids,
-            resumption_return_result: resumption_return_result.clone(),
-        };
-        write(&mut resumed, continuation.dst)?;
+        let mut resumed = continuation.restore(states, handlers)?;
+        resumed.resuming = true;
+        resumed.resumption_return_handler_ids = resumption_return_handler_ids;
+        resumed.resumption_return_result = resumption_return_result.clone();
         propagate_state(incoming, worklist, continuation.target, &resumed)?;
     }
     states.handlers[index].invocations.as_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?.consume()?;
     if matches!(states.handlers[index].continuation, VmContinuationPolicy::Optional | VmContinuationPolicy::Consume) {
         states.handlers[index].continuations.clear();
     }
-    let _ = function;
+    let _ = (function, pc);
     Ok(())
 }
 

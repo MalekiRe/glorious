@@ -1942,3 +1942,46 @@ Cross-frame performance audit coverage is still incomplete: an ordinary callee's
 resumptive performance does not yet seed its caller's clause, and the preserved
 decoded mutation exposes that missing edge. This is not full executable replay
 admission or completion of the remaining native-handler obligations.
+
+## Outward executable operations and ordinary-call continuations
+
+The executable control verifier publishes reachable outward operation identities
+through direct calls, local performances and forwarding. The operation universe
+comes from the existing checked program-wide payload/resumption ABI. Indirect
+invocation uses its callable row over that universe; unresolved rows conservatively
+admit every represented operation. Every first-class target must fit the row its
+producer publishes, so editing a callable to appear pure cannot hide its body's
+performance. Source effects are not reconstructed by a second Core walker.
+
+The whole-program transfer product closes these may edges to a finite least fixed
+point. Previously unreachable caller clauses can expose further operations.
+Missing bodies, failed verification and unresolved final coverage cannot publish
+absence. Helper capability contracts are rebuilt when the effect graph grows;
+frame-preservation hypotheses strengthen around the same closed control edges.
+Receiving body checks require their actual observations to remain covered by the
+published product. No provisional empty set crosses that boundary.
+
+A saved continuation distinguishes a local performance result from an ordinary
+callee's normal return. Resuming the former initializes its operation result;
+resuming the latter restores the separately checked normal call-result state and
+audits the caller suffix under the pending completion ABI. The clause itself sees
+consumed argument carriers and no future normal call result. The prior terminal-
+only call seeder is removed. All continuation consumers share restoration rules.
+
+Operation packets retain value provenance independently of suspended registers.
+Forwarding transfers that packet, not the contents of future call-result slots.
+An unmatched local forwarding edge can leave the ordinary activation; a returning
+outer handler reinstates the declined deep delimiter and its saved suffix. Both
+local and cross-frame dispatch retain first-active matching and delimiter-wide
+budgets. A may-operation set cannot order performances relative to spending other
+local capabilities in the same helper: unrepresented interleavings still reject.
+
+Cache 148 and verifier 49 record this executable proof boundary. Bytecode
+75/schema 119 and native ABI 18 are unchanged. The former ordinary-callee replay
+count regression now rejects forged counts. General borrowed invocation,
+helper-local symbolic delimiters, foreign-control admission, mandatory-tail fusion
+and full zero-marshalling/performance acceptance remain open. Receiver replacement
+still lacks its complete lifetime contract. An indirect replay fixture also
+exposes stale resident quantity on a specialized callable parameter; its known
+environment is Copy, but cleanup still receives the template's narrower quantity.
+Neither remaining source regression is waived by the executable audit.
