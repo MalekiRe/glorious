@@ -332,55 +332,40 @@ fn native_float_conversion_matrix_matches_vm_bits_and_checked_errors() {
         }
         .unwrap();
         let mut unbound = NativeContext::new(Default::default());
-        let mut untouched = Slot([0xa5; 16]);
-        let rejected = unsafe { native.invoke_native(0, &mut unbound, std::ptr::null(), untouched.0.as_mut_ptr()) };
+        let mut untouched = 0xa5a5a5a5;
+        let rejected = unsafe { native.invoke_segment(0, &mut unbound, std::ptr::null(), &mut untouched) };
         assert!(matches!(unbound.result(rejected), Err(LlvmError::Runtime(VmArtifactError::NativeAbi { message }))
             if message.contains("bound execution-domain")));
-        assert_eq!(untouched.0, [0xa5; 16]);
+        assert_eq!(untouched, 0xa5a5a5a5);
         for (rounding, denormals) in [0, 0x2000, 0x4000, 0x6000]
             .into_iter()
             .flat_map(|rounding| [0, 0x8040].map(|denormals| (rounding, denormals)))
         {
             for ((label, function), expected) in cases.iter().zip(&expected) {
-                let index = ir
-                    .function_keys()
-                    .iter()
-                    .position(|key| *key == function.definition)
-                    .unwrap();
-                let mut context = NativeContext::new(Default::default());
                 let mut execution = budget();
-                let mut allocation = super::memory::AllocationContext::new(&mut execution.native_memory, execution.limits.max_native_bytes);
-                let callables = super::callables::CallableContext::new(&native, &mut execution);
-                unsafe { allocation.install(&mut context); callables.install(&mut context); }
-                let mut actual = Slot([0; 16]);
-                let status = {
+                execution.native_memory.generated = Some(std::sync::Arc::new(native.clone()));
+                let actual = {
                     #[cfg(target_arch = "x86_64")]
                     let _ambient = AmbientFloatMode::install(rounding, denormals);
-                    let status = unsafe {
-                        native.invoke_native(
-                            index,
-                            &mut context,
-                            std::ptr::null(),
-                            actual.0.as_mut_ptr(),
-                        )
-                    };
+                    let result = crate::vm_backend::execute_program_profiled(
+                        &native.plan().program.program, function.definition, &[], 0,
+                        &mut execution, &mut None, None, false, None, None,
+                    );
                     #[cfg(target_arch = "x86_64")]
                     AmbientFloatMode::assert_restored(rounding, denormals);
-                    status
+                    result
                 };
                 match expected {
                     Err(VmArtifactError::Trap) => assert!(
                         matches!(
-                            context.result(status),
-                            Err(LlvmError::Runtime(VmArtifactError::Trap))
+                            actual,
+                            Err(VmArtifactError::Trap)
                         ),
-                        "{label}: {context:?}"
+                        "{label}: {actual:?}"
                     ),
                     Err(error) => panic!("unexpected VM result {label}: {error:?}"),
                     Ok(expected) => {
-                        context
-                            .result(status)
-                            .unwrap_or_else(|error| panic!("{label}: {error:?}"));
+                        let actual = actual.unwrap_or_else(|error| panic!("{label}: {error:?}"));
                         let layout = native_layout(
                             &function.registers[1],
                             &std::sync::Arc::from([]),
@@ -388,15 +373,16 @@ fn native_float_conversion_matrix_matches_vm_bits_and_checked_errors() {
                         )
                         .unwrap();
                         let mut bytes = Slot([0; 16]);
+                        let mut actual_bytes = Slot([0; 16]);
+                        unsafe { layout.write(actual_bytes.0.as_mut_ptr(), actual, &mut execution) }.unwrap();
                         unsafe { layout.write(bytes.0.as_mut_ptr(), expected.clone(), &mut budget()) }.unwrap();
                         assert_eq!(
-                            &actual.0[..layout.memory.size()],
+                            &actual_bytes.0[..layout.memory.size()],
                             &bytes.0[..layout.memory.size()],
                             "{label}, LLVM O{optimization}"
                         );
                     }
                 }
-                assert_eq!((context.depth, context.live_bytes), (0, 0), "{label}");
             }
         }
     }

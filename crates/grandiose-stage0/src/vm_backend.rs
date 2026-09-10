@@ -31,6 +31,7 @@ use crate::{
 use crate::MemoryPrimitive;
 
 mod codec;
+mod execution;
 pub(crate) mod float_env;
 pub use codec::{
     STAGE0_ARTIFACT_MAGIC, STAGE0_MAX_DECODE_FUNCTIONS, STAGE0_MAX_DECODE_INSTRUCTIONS,
@@ -10231,6 +10232,9 @@ struct RuntimeRegisters {
     source_storage: BTreeMap<u32, u64>,
     native_plan: Option<Arc<native_storage::NativeFramePlan>>,
     native_homes: BTreeMap<u32, Arc<native_storage::NativeHome>>,
+    /// Private scalar register spill space. Values, not these unobservable
+    /// bytes, are snapshotted; a generated segment reloads them on entry.
+    machine_scalars: BTreeMap<u32, Arc<native_storage::NativeHome>>,
     pending_native: Vec<u32>,
     capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
     /// A replay of an active callback can own copied capture slots without
@@ -10315,7 +10319,25 @@ impl RuntimeRegisters {
     }
 
     fn native_home(&mut self, local: u32, budget: &mut ExecutionBudget) -> Result<Arc<native_storage::NativeHome>, VmArtifactError> {
-        if let Some(home) = self.native_homes.get(&local) { return Ok(home.clone()); }
+        if let Some(home) = self.native_homes.get(&local) {
+            let local_owners = 1 + usize::from(matches!(&self.values[local as usize],
+                Some(VmValue::Resident(value)) if Arc::ptr_eq(value, home)));
+            if self.private_native_home(local, home) && Arc::strong_count(home) > local_owners {
+                // A continuation owns a value snapshot, not a second writable
+                // SSA slot. Detach before either engine writes the carrier.
+                // An empty slot has only its table owner: it must detach too.
+                let fresh = native_storage::NativeHome::new(home.layout.clone(), budget)?;
+                if home.is_initialized(&[]) {
+                    fresh.store(&[], &VmValue::Resident(home.clone()), budget)?;
+                }
+                if matches!(&self.values[local as usize], Some(VmValue::Resident(value)) if Arc::ptr_eq(value, home)) {
+                    self.values[local as usize] = Some(VmValue::Resident(fresh.clone()));
+                }
+                self.native_homes.insert(local, fresh.clone());
+                return Ok(fresh);
+            }
+            return Ok(home.clone());
+        }
         let layout = self.native_plan.as_ref().and_then(|plan| plan.layouts[local as usize].clone())
             .ok_or(VmArtifactError::InvalidRegister { register: local })?;
         let home = if let Some(home) = self.native_homes.get(&local) { home.clone() }
@@ -10326,6 +10348,26 @@ impl RuntimeRegisters {
         Ok(home)
     }
 
+    fn private_native_home(&self, local: u32, home: &native_storage::NativeHome) -> bool {
+        !self.source_storage.contains_key(&local)
+            && !self.capture_environment.as_ref().is_some_and(|environment| (local as usize) < environment.len())
+            && !home.address_was_exposed()
+            && !home.is_external()
+    }
+
+    fn prepare_native_execution(&mut self, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        // VM resident projections and generated instructions can both mutate
+        // homes directly. Establish exclusive temporary carriers at their
+        // common execution boundary, not just at native machine entry.
+        let mut next = self.native_homes.first_key_value().map(|(local, _)| *local);
+        while let Some(local) = next {
+            self.native_home(local, budget)?;
+            next = self.native_homes.range((std::ops::Bound::Excluded(local), std::ops::Bound::Unbounded))
+                .next().map(|(local, _)| *local);
+        }
+        Ok(())
+    }
+
     fn materialize_native(&mut self, local: u32, value: &VmValue, budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
         let home = self.native_home(local, budget)?;
         home.store(&[], value, budget)?;
@@ -10333,7 +10375,12 @@ impl RuntimeRegisters {
     }
 
     fn finish_native_writes(&mut self, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        self.prepare_native_execution(budget)?;
         while let Some(local) = self.pending_native.pop() {
+            if matches!(&self.values[local as usize], Some(VmValue::Resident(home))
+                if self.native_homes.get(&local).is_some_and(|owner| Arc::ptr_eq(owner, home))) {
+                continue;
+            }
             if let Some(value) = self.values[local as usize].take() {
                 self.values[local as usize] = Some(self.materialize_native(local, &value, budget)?);
             }
@@ -10379,7 +10426,7 @@ impl RuntimeRegisters {
             // its bytes. The two strong owners are this value and the source
             // home table; references, captures, or continuation snapshots
             // conservatively keep the ordinary copy/retirement path.
-            if !home.address_was_exposed()
+            if self.private_native_home(src, home)
                 && Arc::strong_count(home) == 2
                 && self.native_homes.get(&src).is_some_and(|owner| Arc::ptr_eq(owner, home))
                 && !self.native_homes.contains_key(&dst)
@@ -10393,23 +10440,27 @@ impl RuntimeRegisters {
             }
             let moved = if self.native_plan.as_ref().is_some_and(|plan| plan.layouts[dst as usize].is_some()) {
                 let moved = self.materialize_native(dst, &value, budget)?;
-                home.clear(&[]); moved
-            } else { home.take(&[], budget)? };
-            // A checked whole-owner move cannot retain a live source loan.
-            // Reclaim its vacant backing when no raw/native observer has seen
-            // the address. Exposed slots retain their stable storage until the
-            // lexical lifetime ends, including across later reinitialization.
-            if !home.address_was_exposed() {
-                home.retire();
+                moved
+            } else { home.load(&[], budget)? };
+            if self.private_native_home(src, home) {
+                // Release this carrier, not a snapshot's allocation. The last
+                // strong owner retires the backing through NativeHome::drop.
                 self.native_homes.remove(&src);
-            }
+            } else { home.clear(&[]); }
             moved
         } else { value };
         self.values[dst as usize] = Some(value); Ok(())
     }
 
     fn clear_value(&mut self, local: u32) {
-        if let Some(VmValue::Resident(home)) = self.values[local as usize].take() { home.clear(&[]); }
+        if let Some(home) = self.native_homes.get(&local)
+            && self.private_native_home(local, home)
+        {
+            self.native_homes.remove(&local);
+            self.values[local as usize] = None;
+        } else if let Some(VmValue::Resident(home)) = self.values[local as usize].take() {
+            home.clear(&[]);
+        }
     }
 
     /// The callee's carriers must be installed before retiring these homes.
@@ -10417,12 +10468,6 @@ impl RuntimeRegisters {
     fn retire_call_arguments(&mut self, arguments: &[u32]) {
         for &argument in arguments {
             self.clear_value(argument);
-            if let Some(home) = self.native_homes.get(&argument)
-                && !home.address_was_exposed()
-            {
-                home.retire();
-                self.native_homes.remove(&argument);
-            }
         }
     }
 
@@ -10430,6 +10475,9 @@ impl RuntimeRegisters {
         for (local, brand) in &self.source_storage {
             if current.source_storage.get(local) == Some(brand) {
                 self.values[*local as usize] = current.values[*local as usize].clone();
+                if let Some(home) = current.native_homes.get(local) {
+                    self.native_homes.insert(*local, home.clone());
+                } else { self.native_homes.remove(local); }
             }
         }
     }
@@ -10783,6 +10831,7 @@ fn borrow_value(
         if !reference_view_matches(declared_referent, &layout.ty, unique) {
             return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: layout.ty.clone() });
         }
+        home.expose_address();
         return Ok(VmValue::Reference { target: ReferenceTarget::Home(home.clone()), fields: fields.to_vec().into(), unique, referent: declared_referent.clone() });
     }
     Ok(VmValue::Reference {
@@ -12375,15 +12424,16 @@ fn expect_bool(value: impl Borrow<VmValue>) -> Result<bool, VmArtifactError> {
 fn returning_resumption_call(
     instruction: &VmInstruction,
     registers: &RuntimeRegisters,
+    budget: &mut ExecutionBudget,
 ) -> Result<Option<(VmInstruction, u64)>, VmArtifactError> {
     let (dst, callee, arguments) = match instruction {
         VmInstruction::CallIndirect { dst, callee, arguments }
         | VmInstruction::CallIndirectOwned { dst, callee, arguments } => (*dst, *callee, arguments),
         _ => return Ok(None),
     };
-    let Some(Some(VmValue::Resumption { frame, .. })) = registers.values.get(callee as usize) else { return Ok(None); };
+    let VmValue::Resumption { frame, .. } = registers.copy_value(callee, budget)? else { return Ok(None); };
     let [value] = arguments.as_slice() else { return Err(VmArtifactError::CallArity { expected: 1, found: arguments.len() as u32 }); };
-    Ok(Some((VmInstruction::ResumeReturn { dst, value: *value }, *frame)))
+    Ok(Some((VmInstruction::ResumeReturn { dst, value: *value }, frame)))
 }
 fn expect_char(value: impl Borrow<VmValue>) -> Result<char, VmArtifactError> {
     match value.borrow() {
@@ -12406,8 +12456,10 @@ fn expect_text(value: impl Borrow<VmValue>) -> Result<Arc<str>, VmArtifactError>
 }
 fn expect_static_utf8(
     value: impl Borrow<VmValue>,
+    budget: &mut ExecutionBudget,
 ) -> Result<(native_memory::StaticBytes, usize, usize), VmArtifactError> {
     match value.borrow() {
+        VmValue::Resident(home) => expect_static_utf8(home.load(&[], budget)?, budget),
         VmValue::StaticData {
             tag: crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG,
             alignment: 1,
@@ -12964,7 +13016,7 @@ fn execute_in_float_profile(
             && !allowed_before_payload_claim(&instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
-        let captured_call = returning_resumption_call(&instruction, &registers)?;
+        let captured_call = returning_resumption_call(&instruction, &registers, budget)?;
         let resumption_index = captured_call.as_ref().map(|(_, id)| handlers.iter().rposition(|frame| frame.id == *id)
             .ok_or(VmArtifactError::HandlerResumeUnavailable)).transpose()?;
         let instruction = captured_call.map_or(instruction, |(instruction, _)| instruction);
@@ -13064,6 +13116,7 @@ fn execute_in_float_profile(
             VmInstruction::StaticLen { dst, value } => {
                 let (_, _, length) = expect_static_utf8(
                     registers[value as usize].as_ref().expect("verified register"),
+                    budget,
                 )?;
                 registers[dst as usize] = Some(VmValue::Usize(length as u64));
             }
@@ -14039,14 +14092,11 @@ fn execute_in_float_profile(
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
                 let resumed = registers.copy_value(value, budget)?;
-                let VmValue::Resumption { frame: id, .. } =
-                    registers[snapshot as usize]
-                        .as_ref()
-                        .ok_or(VmArtifactError::ReadBeforeWrite { register: snapshot })?
+                let VmValue::Resumption { frame: id, .. } = registers.copy_value(snapshot, budget)?
                 else {
                     return Err(VmArtifactError::NotCallable { register: snapshot });
                 };
-                let Some(index) = handlers.iter().rposition(|frame| frame.id == *id) else {
+                let Some(index) = handlers.iter().rposition(|frame| frame.id == id) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = match handlers[index].continuation {
@@ -14161,6 +14211,9 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::ReadBeforeWrite { register: local });
                 }
                 next_storage_id = next_storage_id.checked_add(1).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                // This is a new lexical allocation, not a reinitialization of
+                // a provisional SSA home retained by an older continuation.
+                registers.native_homes.remove(&local);
                 registers.source_storage.insert(local, next_storage_id);
             }
             VmInstruction::StorageDead { local, .. } => {
@@ -15425,41 +15478,8 @@ fn execute_program_profiled(
     capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
     borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
 ) -> Result<VmValue, VmArtifactError> {
-    match execute_program_with_tail_boundary(program, definition, arguments, depth, budget, host,
-        profile, native_return, capture_environment, borrowed_callers, None)? {
-        RuntimeExecutionOutcome::Returned(value) => Ok(value),
-        RuntimeExecutionOutcome::TailTransferred => Err(VmArtifactError::HandlerStateMismatch),
-    }
-}
-
-/// Private, synchronous engine handoff. The recipient must move the verified
-/// arguments into storage that survives this activation before accepting it.
-/// No public import, serialized instruction, or ordinary call can install this.
-trait RuntimeTailBoundary {
-    fn transfer(&mut self, callee: DefKey, registers: &mut RuntimeRegisters,
-        arguments: &[u32], budget: &mut ExecutionBudget) -> Result<bool, VmArtifactError>;
-}
-
-enum RuntimeExecutionOutcome {
-    Returned(VmValue),
-    TailTransferred,
-}
-
-fn execute_program_with_tail_boundary(
-    program: &CandidateVmProgram,
-    definition: DefKey,
-    arguments: &[VmValue],
-    depth: u32,
-    budget: &mut ExecutionBudget,
-    host: &mut Option<&mut dyn VmHost>,
-    profile: Option<&mut VmAuthoringProfile>,
-    native_return: bool,
-    capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
-    borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
-    tail_boundary: Option<&mut dyn RuntimeTailBoundary>,
-) -> Result<RuntimeExecutionOutcome, VmArtifactError> {
     float_env::with_profile(|| execute_program_in_float_profile(program, definition, arguments, depth,
-        budget, host, profile, native_return, capture_environment, borrowed_callers, tail_boundary))
+        budget, host, profile, native_return, capture_environment, borrowed_callers))
 }
 
 fn execute_program_in_float_profile(
@@ -15473,8 +15493,7 @@ fn execute_program_in_float_profile(
     native_return: bool,
     capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
     mut borrowed_callers: Option<&mut Vec<RuntimeProgramCaller>>,
-    mut tail_boundary: Option<&mut dyn RuntimeTailBoundary>,
-) -> Result<RuntimeExecutionOutcome, VmArtifactError> {
+) -> Result<VmValue, VmArtifactError> {
     let return_floor = borrowed_callers.as_ref().map_or(0, |callers| callers.len());
     if depth.saturating_add(return_floor as u32) >= budget.limits.max_call_depth {
         return Err(VmArtifactError::CallDepthLimit {
@@ -15527,6 +15546,11 @@ fn execute_program_in_float_profile(
             .get(&definition)
             .ok_or(VmArtifactError::MissingFunction { definition })?;
         require_execution_contract(function, budget)?;
+        if let Some(module) = budget.native_memory.generated.clone()
+            && module.is_native(definition)
+        {
+            pc = module.execute_segment(function, pc, &mut registers, budget)?;
+        }
         let Some(instruction) = function.instructions.get(pc) else {
             return Err(VmArtifactError::NoReturn);
         };
@@ -15542,7 +15566,7 @@ fn execute_program_in_float_profile(
             && !allowed_before_payload_claim(instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
-        let captured_call = returning_resumption_call(instruction, &registers)?;
+        let captured_call = returning_resumption_call(instruction, &registers, budget)?;
         let resumption_index = captured_call.as_ref().map(|(_, id)| handlers.iter().rposition(|frame| frame.id == *id)
             .ok_or(VmArtifactError::HandlerResumeUnavailable)).transpose()?;
         let instruction = captured_call.as_ref().map_or(instruction, |(instruction, _)| instruction);
@@ -15644,6 +15668,7 @@ fn execute_program_in_float_profile(
             VmInstruction::StaticLen { dst, value } => {
                 let (_, _, length) = expect_static_utf8(
                     registers[*value as usize].as_ref().expect("verified register"),
+                    budget,
                 )?;
                 registers[*dst as usize] = Some(VmValue::Usize(length as u64));
             }
@@ -16671,17 +16696,13 @@ fn execute_program_in_float_profile(
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
                 let resumed = registers.copy_value(*value, budget)?;
-                let VmValue::Resumption { frame: id, .. } = registers[*snapshot as usize]
-                    .as_ref()
-                    .ok_or(VmArtifactError::ReadBeforeWrite {
-                        register: *snapshot,
-                    })?
+                let VmValue::Resumption { frame: id, .. } = registers.copy_value(*snapshot, budget)?
                 else {
                     return Err(VmArtifactError::NotCallable {
                         register: *snapshot,
                     });
                 };
-                let Some(index) = handlers.iter().rposition(|frame| frame.id == *id) else {
+                let Some(index) = handlers.iter().rposition(|frame| frame.id == id) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = match handlers[index].continuation {
@@ -16833,6 +16854,9 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
                 next_storage_id = next_storage_id.checked_add(1).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                // An inactive slot can occur in a saved continuation. Its
+                // home must not become this new allocation's retirement owner.
+                registers.native_homes.remove(local);
                 registers.source_storage.insert(*local, next_storage_id);
             }
             VmInstruction::StorageDead { local, .. } => {
@@ -17546,15 +17570,6 @@ fn execute_program_in_float_profile(
                 let target = program.functions.get(callee)
                     .ok_or(VmArtifactError::MissingFunction { definition: *callee })?;
                 require_execution_contract(target, budget)?;
-                // Only the boundary activation can be handed back. Surviving
-                // ordinary VM callers keep their frames and result destinations.
-                // The normal verified tail checks above remain authoritative.
-                if callers.is_empty() && return_floor == 0
-                    && let Some(boundary) = tail_boundary.as_deref_mut()
-                    && boundary.transfer(*callee, &mut registers, arguments, budget)? {
-                    registers.retire_call_arguments(arguments);
-                    return Ok(RuntimeExecutionOutcome::TailTransferred);
-                }
                 budget.reserve_value("mandatory tail arguments", arguments.len())?;
                 let values = arguments.iter().map(|argument| registers.copy_value(*argument, budget))
                     .collect::<Result<Vec<_>, _>>()?;
@@ -17737,8 +17752,14 @@ fn execute_program_in_float_profile(
                     .enumerate()
                     .map(|(index, capture)| {
                         let value = if ownership[index] {
-                            registers.values[*capture as usize].take()
-                                .ok_or(VmArtifactError::UseAfterMove { register: *capture })?
+                            let value = registers.values[*capture as usize].take()
+                                .ok_or(VmArtifactError::UseAfterMove { register: *capture })?;
+                            // Capture formation transfers this owner, including
+                            // its resident home. The old carrier must not keep
+                            // a vacant-slot view that can clear the environment
+                            // at the next native entry or source initialization.
+                            registers.native_homes.remove(capture);
+                            value
                         } else {
                             registers.values[*capture as usize].clone()
                                 .ok_or(VmArtifactError::UseAfterMove { register: *capture })?
@@ -18050,7 +18071,7 @@ fn execute_program_in_float_profile(
                 if let Some(borrowed) = borrowed_callers.as_deref_mut() {
                     *borrowed = callers;
                 }
-                return Ok(RuntimeExecutionOutcome::Returned(value));
+                return Ok(value);
             }
             VmInstruction::Trap => return Err(VmArtifactError::Trap),
         }
@@ -18283,6 +18304,58 @@ mod tests {
 
     fn cow_budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false, limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn native_continuation_snapshots_detach_empty_and_initialized_temporary_homes() {
+        for initialized in [false, true] {
+            let mut budget = cow_budget();
+            let ty = VmType::Tuple(vec![VmType::I64, VmType::I64]);
+            let layout = native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap();
+            let home = native_storage::NativeHome::new(Arc::new(layout), &mut budget).unwrap();
+            if initialized {
+                home.store(&[], &VmValue::Tuple(vec![VmValue::I64(7), VmValue::Uninitialized(VmType::I64)].into()), &mut budget).unwrap();
+            }
+            let mut current = RuntimeRegisters {
+                values: vec![initialized.then(|| VmValue::Resident(home.clone()))],
+                native_homes: BTreeMap::from([(0, home)]), ..Default::default()
+            };
+            let mut saved = current.clone();
+            current.prepare_native_execution(&mut budget).unwrap();
+            assert!(!Arc::ptr_eq(&current.native_homes[&0], &saved.native_homes[&0]));
+            current[0] = Some(current.materialize_native(0,
+                &VmValue::Tuple(vec![VmValue::I64(42), VmValue::I64(99)].into()), &mut budget).unwrap());
+            current.retire_call_arguments(&[0]);
+            if initialized {
+                let home = &saved.native_homes[&0];
+                assert!(matches!(home.load(&[0], &mut budget).unwrap(), VmValue::I64(7)));
+                assert!(!home.is_initialized(&[1]), "snapshot transport must preserve moved-out fields");
+            }
+            saved.materialize_native(0, &VmValue::Tuple(vec![VmValue::I64(20), VmValue::I64(22)].into()), &mut budget).unwrap();
+        }
+    }
+
+    #[test]
+    fn native_continuation_source_storage_remains_shared_and_expires_with_its_owner() {
+        let mut budget = cow_budget();
+        let layout = native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap();
+        let home = native_storage::NativeHome::new(Arc::new(layout), &mut budget).unwrap();
+        home.store(&[], &VmValue::I64(7), &mut budget).unwrap();
+        let mut current = RuntimeRegisters {
+            values: vec![Some(VmValue::Resident(home.clone()))],
+            source_storage: BTreeMap::from([(0, 10)]),
+            native_homes: BTreeMap::from([(0, home)]), ..Default::default()
+        };
+        let mut saved = current.clone();
+        current.prepare_native_execution(&mut budget).unwrap();
+        assert!(Arc::ptr_eq(&current.native_homes[&0], &saved.native_homes[&0]));
+        current.native_homes[&0].store(&[], &VmValue::I64(42), &mut budget).unwrap();
+        assert!(matches!(saved.copy_value(0, &mut budget).unwrap(), VmValue::I64(42)));
+        current.clear_value(0);
+        saved.synchronize_source_storage(&current);
+        assert!(saved[0].is_none());
+        current.native_homes[&0].retire();
+        assert!(saved.native_homes[&0].load(&[], &mut budget).is_err(), "a snapshot cannot revive expired source storage");
     }
 
     #[test]

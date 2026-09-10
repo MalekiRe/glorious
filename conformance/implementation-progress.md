@@ -5,6 +5,78 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 138: native resumable frames in the ordinary control runtime
+
+The owned-handler fusion regression previously stopped at native
+`InstallHandlerOwned` admission. Native emission now produces resumable LLVM
+segments over the original verified graph. At a frame/control transition the
+machine body yields to the same activation, handler, resumption and cleanup
+runtime used by VM bodies. Arithmetic, resident payload manipulation, patterns,
+branches and memory operations remain generated machine code. The old generated
+HostCall adapter graph, synchronous callable invocation and mixed tail-packet
+bridge are removed; no suspended Glorious call retains a generated C activation.
+
+The native layout producer extends the ordinary frame storage plan. VM-selected
+producers and generated producers establish the same native homes and lend their
+actual initialization flags during a segment. Branded label/resumption values
+use authenticated leases in the existing resident transport domain. Byte transport
+does not supply dynamic liveness, source Copy or destruction authority. The old
+borrowed generated-stack reference/home representation is removed in favor of
+the actual stable homes already owned by the control runtime.
+
+The expanded borrowed-payload regression exposed two real integration bugs.
+Fusion compared instantiated physical operands with pre-substitution template
+regions and incorrectly required a target for an ordinary resumption call; it
+now consumes the operand's own checked value contract. At runtime, a clause could
+retire an empty temporary home still held by a saved continuation. Temporary
+carriers now detach before mutation in either engine, while source allocations
+and capture loans preserve identity. Argument retirement releases only its own
+carrier. Source-storage synchronization transports homes with the same allocation
+brand, and real storage expiry remains irreversible. Both engines now use the
+same borrow producer, including address exposure needed to prevent relocation
+of borrowed temporary storage.
+
+Verification at this integration checkpoint:
+
+- All **21 handler_reentry** groups pass. Positive cases compare fresh and
+  decoded VM with all-native, VM-entry and VM-nonentry partitions at O0/O2.
+  Coverage includes repeated deep re-entry, completion-result transformation,
+  effectful completion, optional cancellation, exact partial forwarding,
+  three-shot aggregate replay, mutable outer storage and captured borrowed
+  payloads. Existing malformed continuation/control checks remain negative.
+- The **39 llvm_native** sweep passed 34 groups and exposed five mixed borrowed
+  storage failures. After unifying borrow formation, all five original failures
+  pass in focused reruns. The sweep includes actual O0 mutual tail execution,
+  cross-engine mandatory tails, source Drop, zero-sized owners, capture loans,
+  reference addresses, raw memory and float source policy. This is combined
+  sweep-and-repair evidence, not a claim of a second clean 39-test sweep.
+- All **42 native memory/storage/resident unit tests** pass, including new
+  control-token domain/type/partial-overwrite rejection and the migrated
+  lifetime/initialization tests. Two additional continuation-storage unit tests
+  pass for empty/live temporary snapshots, retained holes, shared source storage
+  and irreversible expiry.
+- All **8 unused_resumptions** groups pass, including source rejection of an
+  unused required token and exactly-once cancellation Drop across a helper.
+  The original owned-handler `control_fusion` native/mixed O0/O2 regression
+  passes. The raw native float matrix also passes after migrating its execution
+  harness to the shared frame entry, retaining its bit/error comparisons and
+  hostile host floating-point modes at O0/O2.
+
+Native ABI generation is **14**, cache generation **138**; portable bytecode,
+interface and verifier generations are unchanged. The uncommitted nominal-layout
+ownership repair is separate from this native checkpoint. Debug source compilation
+of the large float fixture requires `RUST_MIN_STACK=16777216`; the previously
+observed small-test-thread-stack overflow was in source callable analysis, not
+generated execution. This does not change the native tail-stack acceptance test.
+
+Native handlers are **not declared fully complete** here. General borrowed and
+cross-frame resumption proof transport, mandatory-tail handler activation fusion,
+complete zero-marshalling/resource accounting and foreign-control admission still
+need integration. Existing unrelated control-fusion fixtures also retain missing
+Fn Effects constraints from the earlier source contract migration. Full compiler,
+library, guarded interfaces and self-hosted acceptance remain open. Work continues
+on native handlers rather than treating this verified checkpoint as the goal.
+
 ## Cache 137: constrained pattern subjects and dependent numeric defaulting
 
 The original float-conversion failure reduces to a nested enum pattern on an

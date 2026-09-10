@@ -22,9 +22,6 @@ use std::{
     sync::Arc,
 };
 
-#[path = "llvm/bridge.rs"]
-pub(super) mod generated;
-
 fn error(message: &'static str) -> VmArtifactError {
     VmArtifactError::NativeAbi { message }
 }
@@ -427,8 +424,6 @@ type NativeFunction = dyn for<'a> Fn(&mut VmNativeCall<'a>) -> Result<(), VmArti
 struct Binding {
     contract: VmNativeImport,
     function: Arc<NativeFunction>,
-    /// Private compiler-owned slot extension. Public registration cannot opt in.
-    generated: Option<Arc<generated::SlotContract>>,
 }
 
 /// Explicit native authority. Registration does not grant execution to any
@@ -466,7 +461,6 @@ impl VmNativeImports {
             Binding {
                 contract,
                 function: Arc::new(function),
-                generated: None,
             },
         );
         Ok(())
@@ -495,24 +489,12 @@ impl VmNativeImports {
                 ));
             }
             let descriptors: Arc<[VmNominalCopyDescriptor]> = contract.nominals.clone().into();
-            let parameters = if let Some(slots) = &binding.generated {
-                if slots.parameters.iter().map(|layout| &layout.ty).ne(contract.parameters.iter())
-                    || slots.result.ty != contract.result || slots.captures > contract.parameters.len() {
-                    return Err(error("generated slot contract differs from its bound source ABI"));
-                }
-                slots.parameters.iter().enumerate().map(|(index, layout)| {
-                    if index < slots.captures { ArgumentPlan::Capture(layout.clone()) }
-                    else if generated::resident(&layout.ty) {
-                        ArgumentPlan::Owned(layout.clone())
-                    } else { ArgumentPlan::Value(layout.clone()) }
-                }).collect()
-            } else { contract
+            let parameters = contract
                 .parameters
                 .iter()
                 .map(|ty| argument_plan(ty, &descriptors))
-                .collect::<Result<Vec<_>, _>>()? };
-            let result = if let Some(slots) = &binding.generated { slots.result.clone() }
-                else { value_plan(&contract.result, &descriptors)? };
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = value_plan(&contract.result, &descriptors)?;
             let destructors = contract
                 .residents
                 .iter()
@@ -542,7 +524,6 @@ impl VmNativeImports {
                     parameters,
                     result,
                     destructors,
-                    generated: binding.generated.clone(),
                 }),
             );
         }
@@ -553,7 +534,6 @@ impl VmNativeImports {
 enum ArgumentPlan {
     Value(Arc<NativeLayout>),
     Owned(Arc<NativeLayout>),
-    Capture(Arc<NativeLayout>),
     Callback(Arc<CallbackPlan>),
 }
 struct CallbackPlan {
@@ -565,26 +545,9 @@ struct BoundImport {
     parameters: Vec<ArgumentPlan>,
     result: Arc<NativeLayout>,
     destructors: Vec<Option<(DefKey, Arc<CallbackPlan>)>>,
-    generated: Option<Arc<generated::SlotContract>>,
 }
 pub(super) struct BoundNativeImports {
     imports: BTreeMap<String, BTreeMap<String, Arc<BoundImport>>>,
-}
-
-impl BoundNativeImports {
-    /// Published generated binding requirements, never inferred from a host
-    /// symbol or from a Callable type used by the public callback ABI.
-    pub(super) fn generated_resident_slot(&self, capability: &str, symbol: &str, parameter: Option<usize>) -> Option<Arc<NativeLayout>> {
-        let binding = self.imports.get(capability)?.get(symbol)?;
-        binding.generated.as_ref()?;
-        match parameter {
-            Some(index) => match binding.parameters.get(index)? {
-                ArgumentPlan::Owned(layout) | ArgumentPlan::Capture(layout) => Some(layout.clone()),
-                _ => None,
-            },
-            None => generated::resident(&binding.result.ty).then(|| binding.result.clone()),
-        }
-    }
 }
 
 fn value_plan(
@@ -789,11 +752,7 @@ impl VmNativeCall<'_> {
             .clone();
         home.expose_address();
         unsafe {
-            if self.binding.generated.is_some() {
-                home.initialize_native_with_holes(self.budget, None)?;
-            } else {
-                home.initialize_native(self.budget)?;
-            }
+            home.initialize_native(self.budget)?;
         }
         self.result = Some(VmValue::Resident(home));
         Ok(())
@@ -834,7 +793,7 @@ impl VmNativeCall<'_> {
         }
         check_slot(&self.binding.result, source)?;
         self.result = Some(unsafe { self.binding.result.read_with_reference_admission(source, self.budget,
-            if self.binding.generated.is_some() { super::native_memory::ReferenceRead::Resident } else { super::native_memory::ReferenceRead::External })? });
+            super::native_memory::ReferenceRead::External)? });
         Ok(())
     }
 
@@ -900,8 +859,6 @@ impl VmNativeCall<'_> {
             callee,
             captures,
             plan,
-            additional_depth: 0,
-            argument_holes: None,
         };
         let result = native(VmNativeCallback {
             context: (&mut context as *mut CallbackContext<'_, '_>).cast(),
@@ -919,10 +876,6 @@ struct CallbackContext<'call, 'vm> {
     callee: DefKey,
     captures: Arc<RuntimeCaptureEnvironment>,
     plan: Arc<CallbackPlan>,
-    /// Generated LLVM frames between the invoking VM and this callback.
-    additional_depth: u32,
-    /// Only compiler-sealed generated callbacks may carry partial owners.
-    argument_holes: Option<&'call [BTreeSet<Vec<u32>>]>,
 }
 
 impl CallbackContext<'_, '_> {
@@ -932,21 +885,6 @@ impl CallbackContext<'_, '_> {
         count: usize,
         result: *mut u8,
     ) -> Result<(), VmArtifactError> {
-        if unsafe { self.invoke_with_tail_boundary(slots, count, result, None)? } {
-            return Err(error("ordinary native callback unexpectedly transferred a tail"));
-        }
-        Ok(())
-    }
-
-    /// A true result means a private generated boundary accepted a mandatory
-    /// tail packet. No result resident has been initialized in that case.
-    unsafe fn invoke_with_tail_boundary(
-        &mut self,
-        slots: *const *const u8,
-        count: usize,
-        result: *mut u8,
-        tail_boundary: Option<&mut dyn super::RuntimeTailBoundary>,
-    ) -> Result<bool, VmArtifactError> {
         if let Some(failure) = &self.call.callback_failure {
             return Err(failure.clone());
         }
@@ -967,8 +905,6 @@ impl CallbackContext<'_, '_> {
         let depth = self
             .call
             .depth
-            .checked_add(self.additional_depth)
-            .ok_or_else(|| error("native callback depth overflow"))?
             .checked_add(1)
             .ok_or_else(|| error("native callback depth overflow"))?;
         if depth >= self.call.budget.limits.max_call_depth {
@@ -991,24 +927,18 @@ impl CallbackContext<'_, '_> {
         arguments.extend(self.captures.lend_to_invocation());
         for (index, layout) in self.plan.parameters.iter().enumerate() {
             let slot = unsafe { slots.add(index).read() };
-            arguments.push(if owned_resident(&layout.ty)
-                || (self.argument_holes.is_some() && generated::resident(&layout.ty)) {
+            arguments.push(if owned_resident(&layout.ty) {
                 VmValue::Resident(unsafe {
-                    if let Some(holes) = self.argument_holes {
-                        super::native_storage::NativeHome::external_argument_with_holes(
-                            layout.clone(), slot.cast_mut(), self.call.budget, Some(&holes[index]))?
-                    } else {
-                        super::native_storage::NativeHome::external_argument(
-                            layout.clone(), slot.cast_mut(), self.call.budget)?
-                    }
+                    super::native_storage::NativeHome::external_argument(
+                        layout.clone(), slot.cast_mut(), self.call.budget)?
                 })
             } else {
                 unsafe { layout.read_with_reference_admission(slot, self.call.budget,
-                    if self.argument_holes.is_some() { super::native_memory::ReferenceRead::Resident } else { super::native_memory::ReferenceRead::External })? }
+                    super::native_memory::ReferenceRead::External)? }
             });
         }
         self.call.budget.native_memory.callback_depth += 1;
-        let value = super::execute_program_with_tail_boundary(
+        let value = super::execute_program_profiled(
             self.call.program,
             self.callee,
             &arguments,
@@ -1016,26 +946,20 @@ impl CallbackContext<'_, '_> {
             self.call.budget,
             &mut None,
             None,
-            owned_resident(&self.plan.result.ty)
-                || (self.argument_holes.is_some() && generated::resident(&self.plan.result.ty)),
+            owned_resident(&self.plan.result.ty),
             (self.captures.len() != 0).then(|| self.captures.clone()),
             None,
-            tail_boundary,
         );
         self.call.budget.native_memory.callback_depth -= 1;
-        let value = match value? {
-            super::RuntimeExecutionOutcome::Returned(value) => value,
-            super::RuntimeExecutionOutcome::TailTransferred => return Ok(true),
-        };
-        if (owned_resident(&self.plan.result.ty)
-            || (self.argument_holes.is_some() && generated::resident(&self.plan.result.ty)))
+        let value = value?;
+        if owned_resident(&self.plan.result.ty)
             && !matches!(&value, VmValue::Resident(_)) {
             return Err(error(
                 "owned callback result lacks its native producer storage",
             ));
         }
         unsafe { self.plan.result.write(result, value, self.call.budget)?; }
-        Ok(false)
+        Ok(())
     }
 }
 
@@ -1095,10 +1019,8 @@ pub(super) fn execute(
             .as_ref()
             .ok_or_else(|| error("native argument is not initialized"))?;
         match (plan, value) {
-            (ArgumentPlan::Owned(layout) | ArgumentPlan::Capture(layout), VmValue::Resident(home)) => {
-                let initialized = if matches!(plan, ArgumentPlan::Capture(_)) { true }
-                    else if binding.generated.is_some() { home.is_initialized(&[]) }
-                    else { home.is_fully_initialized(&[]) };
+            (ArgumentPlan::Owned(layout), VmValue::Resident(home)) => {
+                let initialized = home.is_fully_initialized(&[]);
                 if home.ty() != &layout.ty || !initialized {
                     return Err(error(
                         "owned native argument has an invalid resident layout or initialization",
@@ -1110,7 +1032,7 @@ pub(super) fn execute(
                     ));
                 }
             }
-            (ArgumentPlan::Owned(_) | ArgumentPlan::Capture(_), _) => {
+            (ArgumentPlan::Owned(_), _) => {
                 return Err(error(
                     "owned native argument requires an existing native home",
                 ));
@@ -1138,8 +1060,7 @@ pub(super) fn execute(
             _ => {}
         }
     }
-    let result_home = if owned_resident(&binding.result.ty)
-        || (binding.generated.is_some() && generated::resident(&binding.result.ty)) {
+    let result_home = if owned_resident(&binding.result.ty) {
         let home = registers
             .native_homes
             .get(&destination)
@@ -1184,11 +1105,7 @@ pub(super) fn execute(
         }
     }
     if consumes_arguments {
-        for (register, plan) in arguments.iter().zip(&binding.parameters) {
-            if !matches!(plan, ArgumentPlan::Capture(_)) {
-                call.registers.retire_call_arguments(&[*register]);
-            }
-        }
+        call.registers.retire_call_arguments(arguments);
     }
     match call.result {
         Some(value) => Ok(value),

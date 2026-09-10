@@ -529,11 +529,15 @@ impl Fusion<'_> {
                     for payload in &control.returns { payload.constructors(&mut returned_constructors); }
                 }
                 let needed = returned_constructors.into_iter().any(|brand| self.control_captures.contains(brand))
-                    || self.physical_expression(value).ty != self.semantic_type(frame, source.expression(callee).ty.clone())
-                    || contains_label(&self.semantic_type(frame, source.expression(callee).ty.clone()))
-                    || arguments.iter().any(|id| contains_label(&self.semantic_type(frame, source.expression(*id).ty.clone())))
+                    || self.physical_expression(value).ty != self.contract(value).ty
+                    || contains_label(&self.contract(value).ty)
+                    || values.iter().any(|id| contains_label(&self.contract(*id).ty))
                     || ty != self.semantic_type(frame, expression.ty.clone())
-                    || values.iter().zip(&arguments).any(|(value, id)| self.physical_expression(*value).ty != self.semantic_type(frame, source.expression(*id).ty.clone()));
+                    // Expanded inputs already carry the caller's checked
+                    // semantic contract. Comparing with the template's local
+                    // reference regions mistakes ordinary substitution for a
+                    // changed representation and demands a fictitious target.
+                    || values.iter().any(|value| self.physical_expression(*value).ty != self.contract(*value).ty);
                 if needed {
                     if mandatory_tail { return Err(diagnostic(span,
                         "label-bearing mandatory tail invocation requires a fused activation-cleanup contract")); }

@@ -19,8 +19,7 @@ const THREE_PERFORMANCES: &str = r#"
 
 fn candidate(source: &str) -> CandidateVmProgram {
     let package = PackageKey("handler-reentry@0.1.0".into());
-    let outcome = StageZeroCompiler::new()
-        .compile(CompilationRequest {
+    let request = CompilationRequest {
             build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"handler-reentry")),
             mode: CompilationMode::Build,
             root_package: package.clone(),
@@ -34,8 +33,8 @@ fn candidate(source: &str) -> CandidateVmProgram {
             codegen_options: Default::default(),
             capability_manifest: vec![],
             runtime_manifest: None,
-        })
-        .unwrap();
+        };
+    let outcome = StageZeroCompiler::new().compile(request.clone()).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     assert_eq!(artifact.run_i64().unwrap(), 42);
@@ -47,6 +46,23 @@ fn candidate(source: &str) -> CandidateVmProgram {
             .unwrap(),
         42
     );
+    // Exercise the same verified graph across both engine directions. The
+    // entry installs handlers while helpers may perform in another engine.
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let decoded = decode_program(&bytes).unwrap();
+    let all_native = StageZeroCompiler::new().compile_llvm(request, LlvmTarget::host().unwrap()).unwrap();
+    for selected in [
+        std::collections::BTreeSet::new(),
+        std::collections::BTreeSet::from([decoded.entry]),
+        decoded.functions.keys().copied().filter(|key| *key != decoded.entry).collect(),
+    ] {
+        let ir = all_native.with_vm_functions(selected).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap_or_else(|error|
+                panic!("O{optimization}: {source}\n{error:#?}")), 42);
+        }
+    }
     decode_program(&bytes).unwrap()
 }
 
@@ -112,6 +128,50 @@ fn optional_cancellation_exits_before_a_later_performance() {
     candidate(
         "effect Ask { [0,1] ask(i64) -> i64; } pub fn main() -> i64 { handle { let a = Ask::ask(1); let b = Ask::ask(2); a + b } { Ask::ask(1, _) => 42, Ask::ask(value, k) => k(value) } }",
     );
+}
+
+#[test]
+fn shared_payloads_keep_their_original_owner_across_resumed_helpers() {
+    candidate("effect Ask { [1,1] ask(value:&i64) -> &i64; }
+        fn leaf(value:&i64) -> i64 / Ask { let returned = Ask::ask(value); *returned + 2 }
+        fn relay(value:&i64) -> i64 / Ask { leaf(value) }
+        pub fn main() -> i64 { let value = 40; handle relay(&value) {
+            Ask::ask(payload) with k => { let resume = (value:&i64) -> i64 { k(value) }; resume(payload) }
+        } }");
+}
+
+#[test]
+fn returning_resumptions_use_the_clauses_current_outer_handlers() {
+    candidate("effect Ask { [1,1] ask() -> i64; } effect Log { [1,1] log(value:i64) -> i64; }
+        fn leaf() -> i64 / Log { handle { let answer = Ask::ask(); Log::log(answer) } {
+            Ask::ask() with k => { let saved = k; handle saved(41) { Log::log(value) => 42 } }
+        } } pub fn main() -> i64 { handle leaf() { Log::log(value) => 99 } }");
+}
+
+#[test]
+fn resumed_writes_reach_enclosing_source_storage() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        fn relay(target:&mut i64) -> i64 / Ask { let value = Ask::ask(); *target = *target + 10; value }
+        pub fn main() -> i64 { let mut count = 30;
+            let answer = handle relay(&mut count) { Ask::ask() with k => k(1) * 2 }; count + answer }");
+}
+
+#[test]
+fn three_shot_replay_restores_each_suspended_aggregate() {
+    candidate("effect Ask { [3,3] ask() -> i64; }
+        fn relay(value:(i64,i64)) -> i64 / Ask { let selected = Ask::ask(); value.0 + value.1 + selected }
+        pub fn main() -> i64 { handle relay((5,6)) { Ask::ask(k) => k(2) + k(3) + k(4) } }");
+}
+
+#[test]
+fn partial_inner_patterns_forward_to_the_exact_outer_instance() {
+    candidate("effect Ask<T> { [1,1] ask(value:T) -> T; }
+        fn leaf() -> i64 / {Ask<i64>,Ask<u64>} {
+            let ignored = Ask<u64>::ask(1); Ask<i64>::ask(40)
+        }
+        pub fn main() -> i64 { handle { handle leaf() {
+            Ask<i64>::ask(0) with k => k(100)
+        } } { Ask<u64>::ask(value) with k => k(value), Ask<i64>::ask(value) with k => k(value + 2) } }");
 }
 
 #[test]

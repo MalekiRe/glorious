@@ -628,11 +628,10 @@ pub(super) struct NativeFramePlan {
 }
 
 impl NativeFramePlan {
-    pub(super) fn with_native_bindings(
+    pub(super) fn new(
         function: &VmFunction,
         descriptors: &Arc<[VmNominalCopyDescriptor]>,
         native_return: bool,
-        imports: Option<&super::native_bridge::BoundNativeImports>,
     ) -> Self {
         let mut layouts = vec![None; function.registers.len()];
         fn owns_callable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor], active: &mut Vec<VmType>) -> bool {
@@ -684,18 +683,8 @@ impl NativeFramePlan {
                     layouts[*src as usize] = Some(Arc::new(layout));
                 }
             }
-            if let VmInstruction::HostCall { dst, arguments, capability, symbol, .. }
-                | VmInstruction::HostCallOwned { dst, arguments, capability, symbol, .. } = instruction {
-                if let Some(imports) = imports {
-                    for (index, local) in arguments.iter().enumerate().map(|(index, local)| (Some(index), *local))
-                        .chain(std::iter::once((None, *dst))) {
-                        if let Some(layout) = imports.generated_resident_slot(capability, symbol, index) {
-                            layouts[local as usize] = Some(layout);
-                            resident_demands.push(local);
-                            if index.is_none() { native_results.push(local); }
-                        }
-                    }
-                }
+            if let VmInstruction::HostCall { dst, arguments, .. }
+                | VmInstruction::HostCallOwned { dst, arguments, .. } = instruction {
                 for &local in arguments.iter().chain(std::iter::once(dst)) {
                     if matches!(
                         function.registers[local as usize],
@@ -984,9 +973,6 @@ impl Drop for NativeHomeLoan {
 enum StorageAuthority {
     Owned,
     ExternalArgument,
-    /// A generated frame owns these bytes and their original mask. Releasing
-    /// this view must neither clear the resident nor revoke its handle leases.
-    BorrowedFrame(Rc<Cell<bool>>),
 }
 
 #[derive(Debug)]
@@ -1074,17 +1060,6 @@ impl NativeHome {
         unsafe { Self::argument_with_reference_admission(layout, pointer, budget, None, ReferenceRead::External) }
     }
 
-    /// Bind compiler-sealed partial initialization without ever reading a
-    /// moved-out leaf. The ordinary external ABI always passes `None`.
-    pub(super) unsafe fn external_argument_with_holes(
-        layout: Arc<NativeLayout>,
-        pointer: *mut u8,
-        budget: &mut ExecutionBudget,
-        holes: Option<&BTreeSet<Vec<u32>>>,
-    ) -> Result<Arc<Self>, VmArtifactError> {
-        unsafe { Self::argument_with_reference_admission(layout, pointer, budget, holes, ReferenceRead::Resident) }
-    }
-
     unsafe fn argument_with_reference_admission(layout: Arc<NativeLayout>, pointer: *mut u8,
         budget: &mut ExecutionBudget, holes: Option<&BTreeSet<Vec<u32>>>, admission: ReferenceRead,
     ) -> Result<Arc<Self>, VmArtifactError> {
@@ -1117,38 +1092,8 @@ impl NativeHome {
         matches!(self.authority, StorageAuthority::ExternalArgument)
     }
 
-    pub(super) fn is_borrowed_frame(&self) -> bool {
-        matches!(self.authority, StorageAuthority::BorrowedFrame(_))
-    }
-
     fn is_live(&self) -> bool {
-        self.live.get() && match &self.authority {
-            StorageAuthority::BorrowedFrame(frame) => frame.get(),
-            StorageAuthority::Owned | StorageAuthority::ExternalArgument => true,
-        }
-    }
-
-    /// Retain a borrowed capture of a generated local without copying its
-    /// payload or initialization. The frame's scope revokes the view before
-    /// its storage expires; nested invocations lend the ordinary same home.
-    pub(super) unsafe fn borrowed_generated(
-        layout: Arc<NativeLayout>, pointer: *mut u8, flags: *mut u8,
-        paths: Arc<[Vec<u32>]>, live: Rc<Cell<bool>>, budget: &mut ExecutionBudget,
-    ) -> Result<Arc<Self>, VmArtifactError> {
-        let view = unsafe { GeneratedInitialization::new(flags, paths, live.clone())? };
-        budget.reserve_value("borrowed generated capture storage", 1)?;
-        Ok(Arc::new(Self {
-            allocation: RefCell::new(None), pointer, live: Cell::new(true),
-            authority: StorageAuthority::BorrowedFrame(live), layout,
-            state: InitializationCell(RefCell::new(InitializationStorage::Generated {
-                view, previous: Box::default(),
-            })),
-            address_exposed: Cell::new(true),
-            live_bytes: budget.native_memory.home_bytes.clone(),
-            measurements: budget.native_memory.measurements.clone(),
-            registry: budget.native_memory.homes.clone(),
-            residents: Rc::downgrade(&budget.native_memory.residents),
-        }))
+        self.live.get()
     }
 
     /// Transfer initialization to a generated capture input. The sidecar is the
@@ -1197,14 +1142,6 @@ impl NativeHome {
         budget: &mut ExecutionBudget,
     ) -> Result<(), VmArtifactError> {
         unsafe { self.initialize_with_reference_admission(budget, None, ReferenceRead::External) }
-    }
-
-    pub(super) unsafe fn initialize_native_with_holes(
-        &self,
-        budget: &mut ExecutionBudget,
-        holes: Option<&BTreeSet<Vec<u32>>>,
-    ) -> Result<(), VmArtifactError> {
-        unsafe { self.initialize_with_reference_admission(budget, holes, ReferenceRead::Resident) }
     }
 
     unsafe fn initialize_with_reference_admission(&self, budget: &mut ExecutionBudget,
@@ -1280,9 +1217,7 @@ impl NativeHome {
     /// the owner: its initialization is cleared before its allocation goes.
     pub(super) fn retire(&self) {
         if !self.live.get() { return; }
-        if !matches!(self.authority, StorageAuthority::BorrowedFrame(_)) {
-            self.clear(&[]);
-        }
+        self.clear(&[]);
         self.live.set(false);
         let allocation = self.allocation.borrow_mut().take();
         if let Some(allocation) = allocation {
@@ -1700,7 +1635,11 @@ impl NativeHome {
         }
         if path.is_empty() {
             if let VmValue::Resident(source) = value {
-                if self.ty() != source.ty() {
+                // The directional resident type relation above admits weaker
+                // callable receiver views. Their authenticated bytes retain
+                // the supplied contract; moving to that view does not change
+                // layout or upgrade invocation authority.
+                if self.layout.memory != source.layout.memory {
                     return Err(error("native storage move has a different layout"));
                 }
                 if !std::ptr::eq(self, source.as_ref()) {
@@ -1851,10 +1790,17 @@ impl NativeHome {
             PatternRead::Value if !self.is_fully_initialized(path) => return Ok(false),
             _ => {}
         }
+        let (pointer, layout) = self.project(path)?;
+        if matches!(layout.shape, NativeShape::Reference { .. }) {
+            // A resident reference is still a handle, not the pattern's
+            // structural subject. Resolve its authenticated backing through
+            // the same auto-dereference rule as an ordinary VM handle; only
+            // the handle is loaded, never a reconstructed aggregate payload.
+            return super::matches_runtime_pattern(&self.load(path, budget)?, pattern, &[], &[], budget);
+        }
         if matches!(pattern, VmPattern::Literal(_)) {
             return Ok(super::matches_pattern(&self.load(path, budget)?, pattern));
         }
-        let (pointer, layout) = self.project(path)?;
         let fields = match (&layout.shape, pattern) {
             (NativeShape::Product(fields), VmPattern::Array { elements: patterns, rest, .. })
                 if crate::pattern::ArrayPatternRest::length(*rest, patterns.len()) == Some(fields.len()) =>
@@ -1961,40 +1907,41 @@ mod tests {
         let mut budget = budget(1024);
         let ty = VmType::Tuple(vec![VmType::I64, VmType::I64]);
         let layout = Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
-        let mut values = [20i64,22];
+        let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        home.store(&[], &VmValue::Tuple(Arc::from([VmValue::I64(20), VmValue::I64(22)])), &mut budget).unwrap();
         let mut flags = [1,1,1];
         let paths: Arc<[Vec<u32>]> = Arc::from([vec![],vec![0],vec![1]]);
-        let live = Rc::new(Cell::new(true));
-        let home = unsafe { NativeHome::borrowed_generated(layout.clone(), values.as_mut_ptr().cast(), flags.as_mut_ptr(), paths.clone(), live.clone(), &mut budget) }.unwrap();
+        let outer = unsafe { home.lend_native(flags.as_mut_ptr(), paths.clone(), &mut budget) }.unwrap();
         home.store(&[0], &VmValue::I64(21), &mut budget).unwrap();
-        assert_eq!(values, [21,22]);
+        assert_eq!(unsafe { *home.pointer().cast::<[i64;2]>() }, [21,22]);
         flags[2] = 0;
         assert!(!home.is_initialized(&[1]));
         let mut inner_flags = [1,1,0];
         let loan = unsafe { home.lend_native(inner_flags.as_mut_ptr(), paths, &mut budget) }.unwrap();
-        let nested = NativeHome::capture_loan(layout, values.as_mut_ptr().cast(), inner_flags.as_ptr(), &budget).unwrap();
+        let nested = NativeHome::capture_loan(layout, home.pointer(), inner_flags.as_ptr(), &budget).unwrap();
         assert!(Arc::ptr_eq(&home, &nested));
         nested.store(&[1], &VmValue::I64(23), &mut budget).unwrap();
         assert_eq!(inner_flags, [1,1,1]);
         loan.finish().unwrap();
         assert_eq!(flags, [1,1,1]);
-        assert_eq!(values, [21,23]);
+        assert_eq!(unsafe { *home.pointer().cast::<[i64;2]>() }, [21,23]);
         drop(nested);
+        outer.finish().unwrap();
+        assert!(home.is_fully_initialized(&[]), "returning a segment loan leaves the source owner live");
         drop(home);
-        assert_eq!(flags, [1,1,1], "releasing a borrowed view is not retiring its owner");
-        assert!(live.get(), "the caller frame owns its lifetime");
+        assert_eq!(flags, [1,1,1], "retiring the source cannot touch a returned segment's mask");
     }
 
     #[test]
     fn borrowed_generated_capture_expiration_precedes_every_payload_access() {
         let mut budget = budget(1024);
         let layout = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
-        let mut value = Box::new(42i64);
+        let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        home.store(&[], &VmValue::I64(42), &mut budget).unwrap();
         let mut flags = [1];
-        let live = Rc::new(Cell::new(true));
-        let home = unsafe { NativeHome::borrowed_generated(layout.clone(), (&mut *value as *mut i64).cast(), flags.as_mut_ptr(), Arc::from([vec![]]), live.clone(), &mut budget) }.unwrap();
-        live.set(false);
-        drop(value);
+        let loan = unsafe { home.lend_native(flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.unwrap();
+        loan.finish().unwrap();
+        home.retire();
         assert!(home.project(&[]).is_err());
         assert!(home.load(&[], &mut budget).is_err());
         assert!(home.store(&[], &VmValue::I64(0), &mut budget).is_err());
@@ -2181,21 +2128,25 @@ mod tests {
 
     #[test]
     fn partial_external_owner_never_reads_a_moved_reference_leaf() {
-        #[repr(C)]
-        struct Partial { moved: *mut i64, live: i64 }
-        let mut storage = Partial { moved: std::ptr::null_mut(), live: 42 };
         let ty = VmType::Tuple(vec![VmType::Reference { unique: true, referent: Box::new(VmType::I64) }, VmType::I64]);
         let layout = Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
         let mut budget = budget(1024);
-        let pointer = (&mut storage as *mut Partial).cast();
-        let holes = BTreeSet::from([vec![0]]);
-        let home = unsafe { NativeHome::external_argument_with_holes(layout.clone(), pointer, &mut budget, Some(&holes)) }.unwrap();
+        let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        home.store(&[], &VmValue::Tuple(Arc::from([
+            VmValue::Uninitialized(VmType::Reference { unique: true, referent: Box::new(VmType::I64) }),
+            VmValue::I64(42),
+        ])), &mut budget).unwrap();
+        let pointer = home.pointer();
+        unsafe { pointer.cast::<*mut i64>().write(std::ptr::null_mut()); }
+        let mut flags = [1,0,1];
+        let loan = unsafe { home.lend_native(flags.as_mut_ptr(), Arc::from([vec![],vec![0],vec![1]]), &mut budget) }.unwrap();
         assert_eq!(home.pointer(), pointer);
         assert!(home.is_initialized(&[]));
         assert!(!home.is_initialized(&[0]));
         assert!(!home.is_fully_initialized(&[]));
         assert!(matches!(home.load(&[0], &mut budget).unwrap(), VmValue::Uninitialized(_)));
         assert!(matches!(home.load(&[1], &mut budget).unwrap(), VmValue::I64(42)));
+        loan.finish().unwrap();
         // The ordinary complete-value ABI still refuses these bytes: the
         // null moved field is not a resident reference without its sidecar.
         assert!(unsafe { NativeHome::external_argument(layout, pointer, &mut budget) }.is_err());
@@ -2437,7 +2388,7 @@ mod tests {
         };
         let descriptors = Arc::from([]);
         assert_eq!(
-            NativeFramePlan::with_native_bindings(&function, &descriptors, false, None).read_projections[0],
+            NativeFramePlan::new(&function, &descriptors, false).read_projections[0],
             Some((2, 0))
         );
         // Delimited completion is an additional consumer even though it does
@@ -2446,7 +2397,7 @@ mod tests {
             .instructions
             .insert(2, VmInstruction::CompleteHandler { value: 1 });
         assert_eq!(
-            NativeFramePlan::with_native_bindings(&function, &descriptors, false, None).read_projections[0],
+            NativeFramePlan::new(&function, &descriptors, false).read_projections[0],
             None
         );
     }

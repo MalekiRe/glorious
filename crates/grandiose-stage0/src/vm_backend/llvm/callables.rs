@@ -1,12 +1,12 @@
-//! Authenticated callable residents for generated code. Construction, source
-//! Copy and capture loans use the VM's existing resident/environment domain;
-//! invocation and destruction dispatch to the selected generated machine code.
-//! No bytecode interpreter or process code pointer is stored in a callable.
+//! Authenticated resident operations within generated segments. Source Copy,
+//! borrowing and byte transport use the shared resident/environment domain.
+//! Construction, invocation and destruction are common runtime transitions.
+//! No process code pointer is stored in a callable.
 
 use super::{LlvmNativeModule, NativeContext};
 use crate::vm_backend::{
-    ExecutionBudget, RuntimeCaptureEnvironment, VmArtifactError, VmCaptureMode, VmInstruction as I,
-    VmType, VmValue, ReferenceTarget, copy_owned_value, native_memory::{NativeLayout, NativeReference}, native_storage::NativeHome,
+    ExecutionBudget, VmArtifactError, VmInstruction as I,
+    VmType, VmValue, copy_owned_value, native_memory::NativeLayout, native_storage::NativeHome,
     native_residents::ResidentScope,
 };
 use std::{
@@ -37,12 +37,12 @@ impl<'a> CallableContext<'a> {
             module,
             budget,
             failure: RefCell::new(None),
-            scopes: RefCell::new(vec![]),
+            scopes: RefCell::new(vec![budget.native_memory.residents.scope()]),
         }
     }
 
     /// The domain, module and budget remain live at stable addresses for the
-    /// complete synchronous invocation, including recursive generated calls.
+    /// complete generated segment. No Glorious call retains this native scope.
     pub(in crate::vm_backend) unsafe fn install(&self, context: &mut NativeContext) {
         context.callable_context = (self as *const Self).cast_mut().cast();
         context.callable = Some(action);
@@ -136,29 +136,21 @@ impl<'a> CallableContext<'a> {
                 let VmType::Reference { referent, unique, .. } = &body.registers[*dst as usize] else {
                     return Err(invalid("generated borrow has a non-reference result"));
                 };
-                let (target, path) = if *reborrow {
-                    let VmValue::Reference { target, fields: parent, unique: parent_unique, .. } =
-                        (unsafe { self.reference(function, *src, slots)? }) else { unreachable!() };
-                    if *unique && !parent_unique { return Err(invalid("generated reborrow upgrades reference authority")); }
-                    (target, parent.iter().chain(fields).copied().collect::<Vec<_>>())
+                let carrier = if *reborrow {
+                    unsafe { self.reference(function, *src, slots)? }
                 } else {
                     let (pointer, flags) = unsafe { self.slots(slots, 0) };
                     let layout = self.layout(function, *src)?;
-                    let target = if *src < body.captures {
-                        ReferenceTarget::Home(NativeHome::capture_loan(layout, pointer, flags, unsafe { &*self.budget })?)
-                    } else {
-                        let paths = plan.frame_layouts[function as usize].paths[*src as usize].clone().into();
-                        let live = self.scopes.borrow_mut().last_mut().ok_or_else(|| invalid("generated borrow has no live frame"))?.lifetime();
-                        ReferenceTarget::Native(unsafe { NativeReference::generated(pointer, layout, flags.cast_mut(), paths, live)? })
-                    };
-                    (target, fields.clone())
+                    let home = NativeHome::capture_loan(layout, pointer, flags, unsafe { &*self.budget })?;
+                    VmValue::Resident(home)
                 };
                 // Formation is not a value read. Unique handles can restore an
                 // absent resident; shared handles require its shell, not every
                 // descendant. The shared origin producer checks this view
                 // against the actual backing layout and initialization; a
                 // reborrow can retain a previously weakened shared view.
-                let value = VmValue::Reference { target, fields: path.into(), unique: *unique, referent: (**referent).clone() };
+                let value = crate::vm_backend::borrow_value(&[], &[], *src, &carrier,
+                    fields, *unique, *reborrow, referent)?;
                 unsafe { (&*self.budget).native_memory.residents.write_reference(result, &value, false, false)?; }
                 Ok(())
             }
@@ -201,233 +193,6 @@ impl<'a> CallableContext<'a> {
         }
     }
 
-    unsafe fn construct(
-        &self,
-        context: &mut NativeContext,
-        function: u32,
-        pc: u32,
-        slots: *const *const u8,
-        result: *mut u8,
-    ) -> Result<(), VmArtifactError> {
-        let plan = self.module.plan();
-        let key = plan
-            .functions
-            .get(function as usize)
-            .ok_or_else(|| invalid("unknown callable constructor body"))?;
-        let body = &plan.program.program.functions[key];
-        let Some(I::MakeCallable {
-            dst,
-            callee,
-            captures,
-            environment,
-        }) = body.instructions.get(pc as usize)
-        else {
-            return Err(invalid(
-                "native callable constructor is not a checked construction",
-            ));
-        };
-        let _accounting = unsafe { self.budget_scope(context)? };
-        let budget = unsafe { &mut *self.budget };
-        budget.reserve_value("native callable captures", captures.len())?;
-        let mut values = Vec::with_capacity(captures.len());
-        let mut owned = Vec::with_capacity(captures.len());
-        for (index, register) in captures.iter().enumerate() {
-            let layout = self.layout(function, *register)?;
-            let (pointer, flags) = unsafe { self.slots(slots, index) };
-            let capture_owned = environment.as_ref().is_some_and(|environment| {
-                matches!(environment.captures[index].mode, VmCaptureMode::Copy | VmCaptureMode::Move)
-            });
-            if !capture_owned {
-                let home = if *register < body.captures {
-                    NativeHome::capture_loan(layout, pointer, flags, budget)?
-                } else {
-                    let paths = plan.frame_layouts[function as usize].paths[*register as usize].clone().into();
-                    let live = self.scopes.borrow_mut().last_mut()
-                        .ok_or_else(|| invalid("generated capture has no live frame"))?.lifetime();
-                    unsafe { NativeHome::borrowed_generated(layout, pointer, flags.cast_mut(), paths, live, budget)? }
-                };
-                values.push(VmValue::Resident(home));
-                owned.push(false);
-                continue;
-            }
-            let holes = unsafe {
-                self.holes(
-                    &plan.frame_layouts[function as usize].paths[*register as usize],
-                    flags,
-                )?
-            };
-            let source = unsafe {
-                NativeHome::external_argument_with_holes(
-                    layout.clone(),
-                    pointer,
-                    budget,
-                    Some(&holes),
-                )?
-            };
-            let destination = NativeHome::new(layout, budget)?;
-            destination.store(&[], &VmValue::Resident(source), budget)?;
-            values.push(VmValue::Resident(destination));
-            owned.push(true);
-        }
-        let value = VmValue::Callable {
-            callee: *callee,
-            captures: RuntimeCaptureEnvironment::with_ownership(values, owned),
-            signature: body.registers[*dst as usize].clone(),
-        };
-        unsafe {
-            budget.native_memory.residents.write(result, value)?;
-        }
-        Ok(())
-    }
-
-    unsafe fn invoke(
-        &self,
-        context: &mut NativeContext,
-        function: u32,
-        pc: u32,
-        slots: *const *const u8,
-        result: *mut u8,
-        destroy: bool,
-    ) -> Result<(), VmArtifactError> {
-        let plan = self.module.plan();
-        let key = plan
-            .functions
-            .get(function as usize)
-            .ok_or_else(|| invalid("unknown callable invocation body"))?;
-        let body = &plan.program.program.functions[key];
-        let (register, arguments) = match body.instructions.get(pc as usize) {
-            Some(
-                I::CallIndirect {
-                    callee, arguments, ..
-                }
-                | I::CallIndirectOwned {
-                    callee, arguments, ..
-                },
-            ) if !destroy => (*callee, arguments.len()),
-            Some(I::DestroyCallable { value, .. }) if destroy => (*value, 0),
-            _ => {
-                return Err(invalid(
-                    "native callable operation is not a checked invocation",
-                ));
-            }
-        };
-        let (mut pointer, flags) = unsafe { self.slots(slots, 0) };
-        if !flags.is_null() && unsafe { *flags } != 1 {
-            return Err(invalid("native callable receiver was moved out"));
-        }
-        let mut ty = &body.registers[register as usize];
-        if let VmType::Reference { referent, .. } = ty {
-            let VmValue::Reference { target, fields, .. } = (unsafe { self.reference(function, register, slots)? }) else { unreachable!() };
-            if !target.native_initialized(&fields, true) { return Err(invalid("generated callable referent was moved out")); }
-            pointer = target.native_project(&fields)?.0;
-            ty = referent;
-        }
-        if pointer.is_null() {
-            return Err(invalid("null native callable receiver"));
-        }
-        let callable = unsafe { (&*self.budget).native_memory.residents.read(pointer, ty)? };
-        let VmValue::Callable {
-            callee, captures, ..
-        } = callable
-        else {
-            unreachable!()
-        };
-        let target = if destroy {
-            captures.live.set(false);
-            plan.program
-                .program
-                .callable_environments
-                .get(&callee)
-                .and_then(|environment| environment.destructor)
-        } else {
-            Some(callee)
-        };
-        let Some(target) = target else {
-            captures.take();
-            return Ok(());
-        };
-        let target_index = plan
-            .functions
-            .binary_search(&target)
-            .ok()
-            .ok_or_else(|| invalid("native callable target is outside its sealed graph"))?;
-        let callee_body = &plan.program.program.functions[&target];
-        if callee_body.parameters as usize != captures.len() + arguments {
-            return Err(invalid(
-                "native callable environment does not match its target ABI",
-            ));
-        }
-        let sidecars = plan.frame_layouts[target_index]
-            .paths
-            .iter()
-            .take(captures.len())
-            .map(Vec::len)
-            .sum::<usize>();
-        // Re-entry has real Rust/native stack frames as well as slot vectors.
-        // Charge their finite bridge ceiling to the same activation budget.
-        let transport_bytes = 16 * 1024
-            + sidecars as u64
-            + captures.len() as u64
-                * (std::mem::size_of::<VmValue>() + std::mem::size_of::<Vec<u8>>()) as u64
-            + callee_body.parameters as u64 * 2 * std::mem::size_of::<*const u8>() as u64;
-        let activation =
-            unsafe { NativeActivation::enter(context, self.budget, transport_bytes)? };
-        let context = &mut *activation.context;
-        let mut loan = CaptureLoan {
-            environment: captures.clone(),
-            values: captures.lend_to_invocation(),
-            restore: !destroy,
-        };
-        let mut flags = Vec::with_capacity(loan.values.len());
-        let mut incoming = Vec::with_capacity(2 * callee_body.parameters as usize);
-        let mut native_loans = Vec::with_capacity(loan.values.len());
-        // Native and VM-created callables share the same homes. A scalar VM
-        // capture is materialized once into that domain before lending it.
-        {
-            let _accounting = unsafe { self.budget_scope(context)? };
-            let budget = unsafe { &mut *self.budget };
-            budget.reserve_value("native capture loan", callee_body.parameters as usize)?;
-            for (index, value) in loan.values.iter_mut().enumerate() {
-                let layout = self.layout(target_index as u32, index as u32)?;
-                if !matches!(value, VmValue::Resident(_)) {
-                    let home = NativeHome::new(layout.clone(), budget)?;
-                    home.store(&[], value, budget)?;
-                    *value = VmValue::Resident(home);
-                }
-                let VmValue::Resident(home) = value else {
-                    unreachable!()
-                };
-                let paths = &plan.frame_layouts[target_index].paths[index];
-                budget.reserve_value("native capture initialization", paths.len())?;
-                flags.push(
-                    paths
-                        .iter()
-                        .map(|path| u8::from(home.is_initialized(path)))
-                        .collect::<Vec<_>>(),
-                );
-                incoming.push(home.pointer().cast_const());
-                incoming.push(flags.last().unwrap().as_ptr());
-                native_loans.push(unsafe {
-                    home.lend_native(flags.last_mut().unwrap().as_mut_ptr(), paths.clone().into(), budget)?
-                });
-            }
-            for index in 0..arguments {
-                let (pointer, flags) = unsafe { self.slots(slots, index + 1) };
-                incoming.extend([pointer.cast_const(), flags]);
-            }
-        }
-        // No mutable Rust reference to the shared budget crosses re-entry.
-        // Source instructions, including the destructor, execute in LLVM.
-        let status = unsafe {
-            self.module
-                .invoke_native(target_index, context, incoming.as_ptr(), result)
-        };
-        for native_loan in native_loans.into_iter().rev() { native_loan.finish()?; }
-        if status != 0 {
-            return Err(invalid("generated callable invocation failed"));
-        }
-        Ok(())
-    }
 }
 
 /// Temporarily reserve the still-live generated stack against the same heap
@@ -450,57 +215,6 @@ impl Drop for NativeBudget<'_> {
     }
 }
 
-struct NativeActivation<'a> {
-    context: &'a mut NativeContext,
-    budget: *mut ExecutionBudget,
-    bytes: u64,
-}
-impl<'a> NativeActivation<'a> {
-    unsafe fn enter(
-        context: &'a mut NativeContext,
-        budget: *mut ExecutionBudget,
-        bytes: u64,
-    ) -> Result<Self, VmArtifactError> {
-        let total = context
-            .live_bytes
-            .checked_add(bytes)
-            .filter(|total| *total <= context.byte_limit)
-            .ok_or_else(|| {
-                invalid("native callable activation exceeds the shared stack/byte budget")
-            })?;
-        context.live_bytes = total;
-        Ok(Self {
-            context,
-            budget,
-            bytes,
-        })
-    }
-}
-impl Drop for NativeActivation<'_> {
-    fn drop(&mut self) {
-        let context = &mut *self.context;
-        let budget = unsafe { &*self.budget };
-        context.live_bytes -= self.bytes;
-        context.byte_limit = budget
-            .limits
-            .max_native_bytes
-            .saturating_sub(budget.native_memory.live_native_bytes() as u64)
-            .min(super::LLVM_NATIVE_STACK_BYTES);
-    }
-}
-
-struct CaptureLoan {
-    environment: Arc<RuntimeCaptureEnvironment>,
-    values: Vec<VmValue>,
-    restore: bool,
-}
-impl Drop for CaptureLoan {
-    fn drop(&mut self) {
-        if self.restore {
-            *self.environment.values.borrow_mut() = std::mem::take(&mut self.values);
-        }
-    }
-}
 
 unsafe extern "C" fn action(
     context: *mut NativeContext,
@@ -519,8 +233,6 @@ unsafe extern "C" fn action(
     let outcome = crate::vm_backend::float_env::with_profile(|| {
         catch_unwind(AssertUnwindSafe(|| unsafe {
             match operation {
-                0 => domain.construct(context, function, pc, slots, result),
-                1 | 2 => domain.invoke(context, function, pc, slots, result, operation == 2),
                 3 => {
                     let layout = domain.layout(function, register)?;
                     let (source, flags) = domain.slots(slots, 0);

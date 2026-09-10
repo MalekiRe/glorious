@@ -1,5 +1,5 @@
 use super::{
-    LlvmError, LlvmExecutionProfile, LlvmIrProgram, NativeContext, VmExecutionLimits, VmType,
+    LlvmError, LlvmExecutionProfile, LlvmIrProgram, NativeContext, VmExecutionLimits,
 };
 use std::sync::Arc;
 use std::{
@@ -147,14 +147,14 @@ fn loader_error() -> LlvmError {
     })
 }
 
-type Entry = unsafe extern "C" fn(*mut NativeContext, *const *const u8, *mut u8) -> u32;
+type Entry = unsafe extern "C" fn(*mut NativeContext, *const *const u8, *mut u32) -> u32;
 
 /// Actual CPU code generated from Glorious. Its owning library, immutable
 /// code/ABI descriptor, and typed entry addresses have one shared lifetime.
 #[derive(Clone)]
 pub struct LlvmNativeModule {
     plan: LlvmIrProgram,
-    entries: Vec<Entry>,
+    entries: Vec<Option<Entry>>,
     _library: Arc<Library>,
 }
 
@@ -198,13 +198,14 @@ impl LlvmIrProgram {
             .functions
             .iter()
             .enumerate()
-            .map(|(index, _)| {
+            .map(|(index, key)| {
+                if self.vm_functions.contains(key) { return Ok(None); }
                 let name =
                     CString::new(format!("g1_export_{index}")).expect("numeric generated symbol");
                 let pointer = library.symbol(&name)?;
                 // SAFETY: the compiler generates only this exact C ABI for named
                 // entry symbols, and the complete object ABI was checked above.
-                Ok(unsafe { std::mem::transmute::<*mut c_void, Entry>(pointer) })
+                Ok(Some(unsafe { std::mem::transmute::<*mut c_void, Entry>(pointer) }))
             })
             .collect::<Result<Vec<_>, LlvmError>>()?;
         Ok(LlvmNativeModule {
@@ -262,21 +263,19 @@ impl LlvmNativeModule {
         &self.plan
     }
 
-    pub(in crate::vm_backend) unsafe fn invoke_native(
+    pub(in crate::vm_backend) unsafe fn invoke_segment(
         &self,
         index: usize,
         context: &mut NativeContext,
         arguments: *const *const u8,
-        result: *mut u8,
+        pc: *mut u32,
     ) -> u32 {
         // Every generated body uses the resident scope protocol, including
         // scalar-only leaves. Reject an unbound internal context before any
         // machine instruction can call a missing runtime entry.
-        if index >= self.entries.len() || context.callable_context.is_null()
+        if self.entries.get(index).is_none_or(Option::is_none) || context.callable_context.is_null()
             || context.callable.is_none() || context.residents.is_none()
-            || context.allocation_context.is_null() || context.allocate.is_none()
-            || (!self.plan.vm_functions.is_empty()
-                && (context.mixed_context.is_null() || context.invoke_vm.is_none())) {
+            || context.allocation_context.is_null() || context.allocate.is_none() {
             context.fault = 17;
             return 1;
         }
@@ -286,7 +285,7 @@ impl LlvmNativeModule {
         };
         // SAFETY: only the closed generated-code bridge calls this with the
         // exact compiler-owned slot plans and owning library kept alive.
-        let status = unsafe { (self.entries[index])(context, arguments, result) };
+        let status = unsafe { (self.entries[index].expect("checked native entry"))(context, arguments, pc) };
         if environment.restore().is_err() {
             context.fault = 16;
             return 1;
@@ -339,11 +338,12 @@ impl LlvmNativeModule {
         &self,
         limits: VmExecutionLimits,
     ) -> Result<i64, LlvmError> {
-        unsafe { crate::vm_backend::native_bridge::generated::run(self.clone(), limits) }
+        self.run_shared(limits).map(|(value, _)| value)
     }
 
-    /// Execute actual generated machine code and report the bounded dispatcher
-    /// depth/tail count; no VM execution is used to obtain the answer.
+    /// Execute generated computation and report shared activation depth/tails.
+    /// Frame transitions use the common control runtime; no bytecode body is
+    /// selected by this all-native entry point.
     ///
     /// # Safety
     /// The same source-memory obligations as `run_i64_with_unsafe` apply.
@@ -357,67 +357,6 @@ impl LlvmNativeModule {
                 "mixed partition requires the shared VM/native runner",
             ));
         }
-        let entry = self.plan.program.program.entry;
-        let function = &self.plan.program.program.functions[&entry];
-        if function.parameters != 0
-            || !matches!(
-                function.instructions.first(),
-                Some(crate::VmInstruction::DeclareResult {
-                    result: VmType::I64,
-                    ..
-                })
-            )
-        {
-            return Err(LlvmError::AbiMismatch(
-                "native i64 runner requires a zero-argument i64 entry",
-            ));
-        }
-        let index = self
-            .plan
-            .functions
-            .iter()
-            .position(|key| *key == entry)
-            .expect("planned entry");
-        let mut context = NativeContext::new(limits);
-        let mut budget = crate::vm_backend::ExecutionBudget {
-            native_memory: Default::default(), unsafe_execution: true, limits,
-            instructions: 0, allocated_elements: 0,
-        };
-        let mut allocation =
-            super::memory::AllocationContext::new(&mut budget.native_memory, limits.max_native_bytes);
-        let callables = super::callables::CallableContext::new(self, &mut budget);
-        // SAFETY: these local domain/context addresses outlive this synchronous
-        // native invocation, including all nested native calls.
-        unsafe {
-            allocation.install(&mut context);
-            callables.install(&mut context);
-        }
-        let mut result = std::mem::MaybeUninit::<i64>::uninit();
-        // SAFETY: the module owns its entry, no arguments are expected, and
-        // the result points at correctly aligned uninitialized i64 storage.
-        let status = unsafe {
-            self.invoke_native(index, &mut context, std::ptr::null(), result.as_mut_ptr().cast())
-        };
-        if let Some(error) = allocation.failure {
-            return Err(LlvmError::Runtime(error));
-        }
-        if let Some(error) = callables.failure.borrow_mut().take() {
-            if context.fault != 0 { context.result(status)?; }
-            return Err(LlvmError::Runtime(error));
-        }
-        context.result(status)?;
-        if context.depth != 0 || context.live_bytes != 0 {
-            return Err(LlvmError::InvalidNativeGraph(
-                "native dispatcher did not discharge its activation accounting".into(),
-            ));
-        }
-        Ok((
-            unsafe { result.assume_init() },
-            LlvmExecutionProfile {
-                instructions: context.instructions,
-                peak_call_depth: context.peak_depth,
-                recycled_tail_calls: context.tail_calls,
-            },
-        ))
+        self.run_shared(limits)
     }
 }

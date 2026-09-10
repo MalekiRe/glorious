@@ -165,7 +165,7 @@ fn ordinary_native_callable_environments_execute_and_return_through_products() {
         "pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; reader() }",
         "fn make(value:i64) -> () -> i64 { move (value) { value } } pub fn main() -> i64 { let reader = make(42); reader() }",
         "fn keep<T>(value:T) -> T { value } pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; let (reader,) = keep((reader,)); reader() }",
-        "fn invoke<F>(task:F) -> i64 where F:Fn<(),Output=i64> { task() } fn relay<F>(task:F) -> i64 where F:Fn<(),Output=i64> { tail invoke(task) } pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; relay(reader) }",
+        "fn invoke<F>(task:F) -> i64 where F:Fn<(),Output=i64,Effects={}> { task() } fn relay<F>(task:F) -> i64 where F:Fn<(),Output=i64,Effects={}> { tail invoke(task) } pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; relay(reader) }",
         "enum Flag { Yes, No } fn make(flag:Flag) -> () -> i64 { let value = 42; let pair = (20,22); handle flag { Flag::Yes => move (value) { value }, Flag::No => move (pair) { pair.0 + pair.1 } } } pub fn main() -> i64 { make(Flag::Yes)() + make(Flag::No)() - 42 }",
     ] {
         for optimization in [0, 2] {
@@ -274,8 +274,8 @@ fn ordinary_native_callable_faults_and_activation_limits_remain_explicit() {
         let limits = VmExecutionLimits { max_native_allocation_bytes: 1, ..Default::default() };
         let failure = unsafe { native.run_i64_profiled(limits) };
         assert!(matches!(failure,
-            Err(LlvmError::Runtime(VmArtifactError::NativeAbi { message }))
-                if message.contains("native activation")), "{failure:#?}");
+            Err(LlvmError::Runtime(VmArtifactError::NativeMemory { message }))
+                if message.contains("shared byte budget")), "{failure:#?}");
     }
 }
 
@@ -371,7 +371,7 @@ fn actual_llvm_native_scalar_control_matches_vm_at_o0_and_o2() {
     ] {
         let ir = compile(source);
         assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
-        assert!(ir.ir().contains("define internal i32 @g1_body_"));
+        assert!(ir.ir().contains("define i32 @g1_export_"));
         for optimization in [0, 2] {
             let module = unsafe {
                 ir.compile(&LlvmCompileOptions {
@@ -706,12 +706,15 @@ fn native_abi_rejects_every_independent_contract_mismatch() {
 }
 
 #[test]
-fn unsupported_native_effects_reject_before_execution() {
+fn native_effects_resume_across_an_ordinary_generated_call() {
     let source = "effect Ask { ask() -> i64; } fn ask() -> i64 / {Ask} { Ask::ask() } pub fn main() -> i64 { handle ask() { Ask::ask() with k => k(42) } }";
-    let error = StageZeroCompiler::new()
+    let ir = StageZeroCompiler::new()
         .compile_llvm(request(source), LlvmTarget::host().unwrap())
-        .unwrap_err();
-    assert!(matches!(error, LlvmError::Unsupported { .. }), "{error:?}");
+        .unwrap();
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
 }
 
 const MEMORY_HELPERS: &str = r#"
@@ -1324,11 +1327,14 @@ fn mixed_engines_share_instruction_memory_and_call_depth_limits() {
 }
 
 #[test]
-fn explicit_vm_selection_does_not_hide_unsupported_mixed_control() {
+fn explicit_vm_selection_uses_the_same_handler_control_runtime() {
     let source = "effect Ask { ask() -> i64; } fn ask() -> i64 / {Ask} { Ask::ask() }
         pub fn main() -> i64 { handle ask() { Ask::ask() with k => k(42) } }";
-    let error = StageZeroCompiler::new()
+    let ir = StageZeroCompiler::new()
         .compile_llvm_partitioned(request(source), LlvmTarget::host().unwrap(), |_| true)
-        .unwrap_err();
-    assert!(matches!(error, LlvmError::Unsupported { .. }), "{error:?}");
+        .unwrap();
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
 }

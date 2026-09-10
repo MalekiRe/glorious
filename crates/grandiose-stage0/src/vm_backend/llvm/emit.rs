@@ -6,7 +6,6 @@ use crate::vm_backend::{
     PatternRead, VmCompare, VmFunction, VmInstruction as I, VmPattern,
     native_memory::{NativeFields, NativeLayout, NativeShape},
 };
-use grandiose_runtime::memory::MemoryLayout;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt::Write,
@@ -25,7 +24,7 @@ const MAX_INIT_PATHS: usize = 16 * 1024;
 pub(in crate::vm_backend) struct FunctionPlan {
     pub(in crate::vm_backend) layouts: Vec<Arc<NativeLayout>>,
     pub(in crate::vm_backend) paths: Vec<Vec<Vec<u32>>>,
-    pub(in crate::vm_backend) result: Arc<NativeLayout>,
+    pub(in crate::vm_backend) scratch_bytes: usize,
     pub(in crate::vm_backend) pattern_references: Vec<PatternReferencePlan>,
     pattern_reference_width: usize,
     pattern_reference_depth: usize,
@@ -51,10 +50,6 @@ pub(super) struct Plan<'a> {
     pub(super) layouts: BTreeMap<Vec<u8>, NativeTypeLayout>,
     pub(super) functions: Vec<DefKey>,
     pub(super) plans: Vec<FunctionPlan>,
-    packet_offsets: Vec<Vec<u64>>,
-    packet_init_offsets: Vec<Vec<u64>>,
-    packet_bytes: u64,
-    packet_alignment: u64,
     max_arguments: usize,
     pub(super) frame_bytes: u64,
 }
@@ -73,10 +68,6 @@ impl<'a> Plan<'a> {
             layouts: BTreeMap::new(),
             functions,
             plans: vec![],
-            packet_offsets: vec![],
-            packet_init_offsets: vec![],
-            packet_bytes: 1,
-            packet_alignment: 1,
             max_arguments: 0,
             frame_bytes: 0,
         };
@@ -135,22 +126,6 @@ impl<'a> Plan<'a> {
                     "native function requires a declared result ABI",
                 ));
             };
-            for instruction in &function.instructions {
-                if let I::Leave { arguments, .. } = instruction {
-                    for argument in arguments {
-                        let layout = &layouts[*argument as usize];
-                        frame_bytes = frame_bytes
-                            .checked_add(
-                                layout.memory.size() as u64 + layout.memory.alignment() as u64
-                                    + paths[*argument as usize].len() as u64
-                                    + if layout.has_resident_metadata() { 4 * std::mem::size_of::<usize>() as u64 } else { 0 },
-                            )
-                            .ok_or_else(|| {
-                                unsupported(0, "native parallel-transfer storage overflow")
-                            })?;
-                    }
-                }
-            }
             let result_layout = layout::concrete_layout(result_type, &descriptors)
                 .map_err(|_| unsupported(0, "native result has an unsupported shared layout"))?;
             if !result_layout.supports_resident(&descriptors) {
@@ -160,32 +135,7 @@ impl<'a> Plan<'a> {
                 layout::type_key(result_type),
                 NativeTypeLayout::from_native(&result_layout),
             );
-            let mut packet = MemoryLayout::of::<()>();
-            let mut offsets = vec![];
-            for layout in layouts.iter().take(function.parameters as usize) {
-                let (next, offset) = packet.extend(layout.memory).map_err(|error| {
-                    LlvmError::InvalidNativeGraph(format!("tail packet: {error:?}"))
-                })?;
-                packet = next;
-                offsets.push(offset as u64);
-            }
-            let mut init_offsets = vec![];
-            for paths in paths.iter().take(function.parameters as usize) {
-                let flags = MemoryLayout::new(paths.len(), 1)
-                    .map_err(|_| unsupported(0, "invalid tail initialization sidecar"))?;
-                let (next, offset) = packet
-                    .extend(flags)
-                    .map_err(|_| unsupported(0, "tail initialization sidecar overflow"))?;
-                packet = next;
-                init_offsets.push(offset as u64);
-            }
             result.max_arguments = result.max_arguments.max(function.parameters as usize);
-            result.packet_bytes = result
-                .packet_bytes
-                .max(packet.pad_to_alignment().size() as u64);
-            result.packet_alignment = result.packet_alignment.max(packet.alignment() as u64);
-            result.packet_offsets.push(offsets);
-            result.packet_init_offsets.push(init_offsets);
             let mut pattern_references = BTreeMap::new();
             let mut pattern_reference_depth = 0;
             for instruction in &function.instructions {
@@ -209,40 +159,27 @@ impl<'a> Plan<'a> {
             result.plans.push(FunctionPlan {
                 layouts,
                 paths,
-                result: result_layout,
+                scratch_bytes: pattern_bytes + path_count + function.registers.len()
+                    * (std::mem::size_of::<Arc<crate::vm_backend::native_storage::NativeHome>>()
+                        + std::mem::size_of::<Vec<u8>>()
+                        + 2 * std::mem::size_of::<*const u8>()
+                        + std::mem::size_of::<crate::vm_backend::native_storage::NativeHomeLoan>()),
                 pattern_references,
                 pattern_reference_width,
                 pattern_reference_depth,
             });
         }
+        // Machine leaf argument scratch uses the same program-wide width as
+        // the emitter. Charge it together with each segment's resident views.
+        let argument_bytes = 2 * (result.max_arguments + 1).max(2) * std::mem::size_of::<*const u8>();
+        for frame in &mut result.plans { frame.scratch_bytes += argument_bytes; }
         // Validate every instruction before publishing any executable IR.
         for (index, key) in result.functions.iter().enumerate() {
             let mut body = Body::new(&result, index);
             for (pc, instruction) in program.functions[key].instructions.iter().enumerate() {
                 if vm_functions.contains(key) {
-                    // The user explicitly chose this bytecode body. Do not
-                    // require a second native implementation of its local
-                    // operations; continue to reject control whose dynamic
-                    // destination could escape a synchronous engine boundary.
-                    if matches!(
-                        instruction,
-                        I::Perform { .. }
-                            | I::PerformOwned { .. }
-                            | I::InstallHandler { .. }
-                            | I::InstallHandlerOwned { .. }
-                            | I::UninstallHandler
-                            | I::CompleteHandler { .. }
-                            | I::Resume { .. }
-                            | I::ResumeReturn { .. }
-                            | I::ResumeSnapshot { .. }
-                            | I::MakeLabel { .. }
-                            | I::HostCall { .. }
-                            | I::HostCallOwned { .. }
-                    )
-                    {
-                        return Err(LlvmError::Unsupported { function: *key, instruction: pc,
-                            reason: "VM partition contains unsupported mixed control or external authority".into() });
-                    }
+                    // VM-selected bodies still cross the same runtime frame
+                    // transitions; no synchronous host-call adapter is involved.
                     continue;
                 }
                 body.pc = pc;
@@ -265,16 +202,6 @@ impl<'a> Plan<'a> {
         Digest::of_bytes(&bytes)
     }
 
-    pub(super) fn tail_packets(&self) -> Vec<super::TailPacketLayout> {
-        self.packet_offsets
-            .iter()
-            .zip(&self.packet_init_offsets)
-            .map(|(data, flags)| super::TailPacketLayout {
-                data_offsets: data.iter().map(|offset| *offset as usize).collect(),
-                initialization_offsets: flags.iter().map(|offset| *offset as usize).collect(),
-            })
-            .collect()
-    }
 
     pub(super) fn emit(&self, descriptor: &LlvmAbiDescriptor) -> Result<String, LlvmError> {
         let mut ir = format!(
@@ -308,10 +235,7 @@ impl<'a> Plan<'a> {
         ir.push_str(include_str!("runtime.ll"));
         let mut declarations = BTreeSet::new();
         for index in 0..self.functions.len() {
-            if self.vm_functions.contains(&self.functions[index]) {
-                writeln!(ir, "define internal i32 @g1_body_{index}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:\n  %callback_at = getelementptr %G1Context, ptr %ctx, i32 0, i32 10\n  %callback = load ptr, ptr %callback_at, align 8\n  %present = icmp ne ptr %callback, null\n  br i1 %present, label %invoke, label %reject\ninvoke:\n  %status = call i32 %callback(ptr %ctx, i32 {index}, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next)\n  ret i32 %status\nreject:\n  %failed = call i32 @g1_fault(ptr %ctx, i32 7)\n  ret i32 %failed\n}}").unwrap();
-                continue;
-            }
+            if self.vm_functions.contains(&self.functions[index]) { continue; }
             let mut body = Body::new(self, index);
             body.emit()?;
             ir.push_str(&body.output);
@@ -321,59 +245,7 @@ impl<'a> Plan<'a> {
             ir.push_str(&declaration);
             ir.push('\n');
         }
-        self.dispatch(&mut ir);
         Ok(ir)
-    }
-
-    fn dispatch(&self, ir: &mut String) {
-        let packet_bytes = self.packet_bytes.max(1);
-        // Every argument is one data pointer plus one logical-initialization
-        // sidecar pointer. Null sidecars mean completely initialized.
-        let argc = 2 * self.max_arguments.max(1);
-        let charge = 2 * packet_bytes + 3 * argc as u64 * 8 + self.frame_bytes + 160;
-        let alignment = self.packet_alignment;
-        writeln!(ir, r#"define internal i32 @g1_dispatch(ptr %ctx, i32 %function, ptr %args, ptr %result) {{
-entry:
-  %admitted = call i1 @g1_enter(ptr %ctx, i64 {charge})
-  br i1 %admitted, label %allocate, label %rejected
-rejected:
-  ret i32 1
-allocate:
-  %packet0 = alloca [{packet_bytes} x i8], align {alignment}
-  %packet1 = alloca [{packet_bytes} x i8], align {alignment}
-  %args0 = alloca [{argc} x ptr], align 8
-  %args1 = alloca [{argc} x ptr], align 8
-  %next = alloca i32, align 4
-  call void @g1_residents(ptr %ctx, i32 2, ptr null, ptr null, i64 0)
-  call void @g1_residents(ptr %ctx, i32 4, ptr %packet0, ptr null, i64 {packet_bytes})
-  call void @g1_residents(ptr %ctx, i32 4, ptr %packet1, ptr null, i64 {packet_bytes})
-  br label %dispatch
-dispatch:
-  %selected = phi i32 [ %function, %allocate ], [ %next_function, %tail ]
-  %incoming = phi ptr [ %args, %allocate ], [ %outgoing, %tail ]
-  %outgoing = phi ptr [ %args0, %allocate ], [ %following_args, %tail ]
-  %storage = phi ptr [ %packet0, %allocate ], [ %following_storage, %tail ]
-  %second = phi i1 [ false, %allocate ], [ %next_second, %tail ]
-  switch i32 %selected, label %invalid ["#).unwrap();
-        for (index, _) in self.functions.iter().enumerate() {
-            writeln!(ir, "    i32 {index}, label %function{index}").unwrap();
-        }
-        ir.push_str("  ]\n");
-        for index in 0..self.functions.len() {
-            writeln!(ir, "function{index}:\n  %status{index} = call i32 @g1_body_{index}(ptr %ctx, ptr %incoming, ptr %result, ptr %outgoing, ptr %storage, ptr %next)\n  br label %completed").unwrap();
-        }
-        ir.push_str("completed:\n  %status = phi i32 ");
-        ir.push_str(
-            &(0..self.functions.len())
-                .map(|index| format!("[ %status{index}, %function{index} ]"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
-        ir.push_str("\n  %is_tail = icmp eq i32 %status, 2\n  br i1 %is_tail, label %tail, label %return\ntail:\n  %next_function = load i32, ptr %next, align 4\n  %following_args = select i1 %second, ptr %args0, ptr %args1\n  %following_storage = select i1 %second, ptr %packet0, ptr %packet1\n  %next_second = xor i1 %second, true\n  call void @g1_tail_count(ptr %ctx)\n  br label %dispatch\nreturn:\n");
-        writeln!(ir, "  call void @g1_residents(ptr %ctx, i32 3, ptr null, ptr null, i64 0)\n  call void @g1_exit(ptr %ctx, i64 {charge})\n  ret i32 %status\ninvalid:\n  %invalid_status = call i32 @g1_fault(ptr %ctx, i32 6)\n  call void @g1_residents(ptr %ctx, i32 3, ptr null, ptr null, i64 0)\n  call void @g1_exit(ptr %ctx, i64 {charge})\n  ret i32 %invalid_status\n}}").unwrap();
-        for index in 0..self.functions.len() {
-            writeln!(ir, "define i32 @g1_export_{index}(ptr %ctx, ptr %args, ptr %result) {{\nentry:\n  %status = call i32 @g1_dispatch(ptr %ctx, i32 {index}, ptr %args, ptr %result)\n  ret i32 %status\n}}").unwrap();
-        }
     }
 }
 
@@ -546,9 +418,6 @@ impl<'a, 'p> Body<'a, 'p> {
     fn clear_bytes(&mut self, pointer: &str, bytes: usize) {
         self.line(format!("call void @g1_residents(ptr %ctx, i32 1, ptr {pointer}, ptr null, i64 {bytes})"));
     }
-    fn track_bytes(&mut self, pointer: &str, bytes: usize) {
-        self.line(format!("call void @g1_residents(ptr %ctx, i32 4, ptr {pointer}, ptr null, i64 {bytes})"));
-    }
     fn checked_status(&mut self, status: &str) {
         let ok = self.value(format!("icmp eq i32 {status}, 0"));
         let next = self.label();
@@ -700,90 +569,39 @@ impl<'a, 'p> Body<'a, 'p> {
     }
 
     fn emit(&mut self) -> Result<(), LlvmError> {
-        writeln!(self.output, "define internal i32 @g1_body_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:\n  call void @g1_residents(ptr %ctx, i32 2, ptr null, ptr null, i64 0)\n  %status = call i32 @g1_frame_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next)\n  call void @g1_residents(ptr %ctx, i32 3, ptr null, ptr null, i64 0)\n  ret i32 %status\n}}\ndefine internal i32 @g1_frame_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:", self.index, self.index, self.index).unwrap();
+        writeln!(self.output, "define i32 @g1_export_{}(ptr %ctx, ptr %registers, ptr %resume_pc) {{\nentry:", self.index).unwrap();
         let maxargs = 2 * (self.plan.max_arguments + 1).max(2);
         self.line(format!("%callargs = alloca [{maxargs} x ptr], align 8"));
         let pattern_bytes = self.data.pattern_reference_width * self.data.pattern_reference_depth;
         if pattern_bytes != 0 {
             self.line(format!("%pattern_flags = alloca [{pattern_bytes} x i8], align 1"));
         }
-        for (pc, instruction) in self.function.instructions.iter().enumerate() {
-            if let I::Leave { arguments, .. } = instruction {
-                for (index, argument) in arguments.iter().enumerate() {
-                    let layout = &self.data.layouts[*argument as usize];
-                    self.line(format!(
-                        "%leave_{pc}_{index} = alloca [{} x i8], align {}",
-                        layout.memory.size().max(1),
-                        layout.memory.alignment()
-                    ));
-                    self.line(format!("%leave_init_{pc}_{index} = alloca [{} x i8], align 1",
-                        self.data.paths[*argument as usize].len()));
-                    if layout.has_resident_metadata() {
-                        self.track_bytes(&format!("%leave_{pc}_{index}"), layout.memory.size());
-                    }
-                }
-            }
+        // Addressable bytes and initialization belong to the runtime frame.
+        // Only synchronous scratch lives on the generated machine stack.
+        for register in 0..self.data.layouts.len() {
+            let slot = self.value(format!("getelementptr ptr, ptr %registers, i64 {}", 2 * register));
+            self.line(format!("%r{register} = load ptr, ptr {slot}, align 8"));
+            let slot = self.value(format!("getelementptr ptr, ptr %registers, i64 {}", 2 * register + 1));
+            self.line(format!("%init{register} = load ptr, ptr {slot}, align 8"));
         }
-        for (register, layout) in self.data.layouts.iter().enumerate() {
-            let capture = register < self.function.captures as usize;
-            let alias_argument = capture || (register < self.function.parameters as usize
-                && matches!(
-                    self.function.registers[register],
-                    VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. } | VmType::Callable { .. }
-                ));
-            if alias_argument {
-                let slot = self.value(format!(
-                    "getelementptr ptr, ptr %args, i64 {}",
-                    2 * register
-                ));
-                self.line(format!("%r{register} = load ptr, ptr {slot}, align 8"));
-            } else {
-                self.line(format!(
-                    "%r{register} = alloca [{} x i8], align {}",
-                    layout.memory.size().max(1),
-                    layout.memory.alignment()
-                ));
-            }
-            if !capture && layout.has_resident_metadata() {
-                self.track_bytes(&format!("%r{register}"), layout.memory.size());
-            }
-            if capture {
-                let slot = self.value(format!("getelementptr ptr, ptr %args, i64 {}", 2 * register + 1));
-                self.line(format!("%init{register} = load ptr, ptr {slot}, align 8"));
-            } else {
-                self.line(format!("%init{register} = alloca [{} x i8], align 1", self.data.paths[register].len()));
-                self.mark(register as u32, &[], register < self.function.parameters as usize);
-            }
-            if register < self.function.parameters as usize && !alias_argument {
-                let slot = self.value(format!(
-                    "getelementptr ptr, ptr %args, i64 {}",
-                    2 * register
-                ));
-                let pointer = self.value(format!("load ptr, ptr {slot}, align 8"));
-                self.copy_bytes(&format!("%r{register}"), &pointer, layout);
-            }
-            if register < self.function.parameters as usize && !capture {
-                let slot = self.value(format!(
-                    "getelementptr ptr, ptr %args, i64 {}",
-                    2 * register + 1
-                ));
-                let flags = self.value(format!("load ptr, ptr {slot}, align 8"));
-                let supplied = self.value(format!("icmp ne ptr {flags}, null"));
-                let copy = self.label();
-                let ready = self.label();
-                self.line(format!("br i1 {supplied}, label %{copy}, label %{ready}"));
-                self.block(&copy);
-                self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr %init{register}, ptr {flags}, i64 {}, i1 false)", self.data.paths[register].len()));
-                self.line(format!("br label %{ready}"));
-                self.block(&ready);
-            }
+        let resume = self.value("load i32, ptr %resume_pc, align 4");
+        self.line(format!("switch i32 {resume}, label %invalid_entry ["));
+        for pc in 0..self.function.instructions.len() {
+            self.line(format!("  i32 {pc}, label %pc{pc}"));
         }
-        self.line("br label %pc0");
+        self.line("]");
+        self.block("invalid_entry");
+        let failure = self.value("call i32 @g1_fault(ptr %ctx, i32 6)");
+        self.line(format!("ret i32 {failure}"));
         for (pc, instruction) in self.function.instructions.iter().enumerate() {
             self.pc = pc;
             self.block(&format!("pc{pc}"));
-            let allowed = self.value("call i1 @g1_step(ptr %ctx)");
-            self.guard(&allowed, 3);
+            // The shared runtime, not this segment, charges and executes the
+            // transition. Ordinary native computation is charged here.
+            if !crate::vm_backend::execution::is_frame_transition(instruction) {
+                let allowed = self.value("call i1 @g1_step(ptr %ctx)");
+                self.guard(&allowed, 3);
+            }
             let terminal = self.instruction(instruction)?;
             if !terminal {
                 if pc + 1 >= self.function.instructions.len() {
@@ -797,6 +615,11 @@ impl<'a, 'p> Body<'a, 'p> {
     }
 
     fn instruction(&mut self, instruction: &I) -> Result<bool, LlvmError> {
+        if crate::vm_backend::execution::is_frame_transition(instruction) {
+            self.line(format!("store i32 {}, ptr %resume_pc, align 4", self.pc));
+            self.line("ret i32 0");
+            return Ok(true);
+        }
         if self.scalar(instruction)? {
             return Ok(false);
         }
@@ -820,39 +643,6 @@ impl<'a, 'p> Body<'a, 'p> {
             I::StaticLen { dst, value } => {
                 let length = self.static_data_word(*value, true);
                 self.store_scalar(*dst, &length)?;
-            }
-            I::MakeCallable { dst, captures, environment, .. } => {
-                for (index, capture) in captures.iter().enumerate() {
-                    self.argument_slot(index, &self.pointer(*capture), &format!("%init{capture}"));
-                }
-                self.callable_action(0, *dst, &self.pointer(*dst));
-                for (index, capture) in captures.iter().enumerate() {
-                    if environment.as_ref().is_some_and(|environment| matches!(environment.captures[index].mode,
-                        crate::vm_backend::VmCaptureMode::Copy | crate::vm_backend::VmCaptureMode::Move)) {
-                        self.mark(*capture, &[], false);
-                    }
-                }
-                self.mark(*dst, &[], true);
-            }
-            I::DestroyCallable { dst, value } => {
-                self.argument_slot(0, &self.pointer(*value), &format!("%init{value}"));
-                self.callable_action(2, *value, &self.pointer(*dst));
-                self.mark(*value, &[], false);
-                self.mark(*dst, &[], true);
-            }
-            I::CallIndirect { dst, callee, arguments } | I::CallIndirectOwned { dst, callee, arguments } => {
-                self.argument_slot(0, &self.pointer(*callee), &format!("%init{callee}"));
-                for (index, argument) in arguments.iter().enumerate() {
-                    self.argument_slot(index + 1, &self.pointer(*argument), &format!("%init{argument}"));
-                }
-                self.callable_action(1, *callee, &self.pointer(*dst));
-                if matches!(instruction, I::CallIndirectOwned { .. }) {
-                    for argument in arguments { self.mark(*argument, &[], false); }
-                }
-                self.mark(*dst, &[], true);
-            }
-            I::StorageLive { local, .. } | I::StorageDead { local, .. } => {
-                self.mark(*local, &[], false)
             }
             I::SetDropFlag { flag, value } => {
                 self.store_scalar(*flag, if *value { "1" } else { "0" })?
@@ -1067,128 +857,6 @@ impl<'a, 'p> Body<'a, 'p> {
                 let value = self.value(format!("zext i1 {matched} to i8"));
                 self.store_scalar(*dst, &value)?;
             }
-            I::CallOwned {
-                dst,
-                callee,
-                arguments,
-            }
-            | I::Call {
-                dst,
-                callee,
-                arguments,
-            } => {
-                if matches!(instruction, I::Call { .. })
-                    && arguments.iter().any(|argument| {
-                        matches!(
-                            self.function.registers[*argument as usize],
-                            VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. }
-                        )
-                    })
-                {
-                    return Err(self.unsupported(
-                        "native aggregate parameters require an explicit owned call",
-                    ));
-                }
-                let index = self
-                    .plan
-                    .functions
-                    .iter()
-                    .position(|key| key == callee)
-                    .ok_or_else(|| self.unsupported("native direct callee is absent"))?;
-                for (index, argument) in arguments.iter().enumerate() {
-                    let slot = self.value(format!(
-                        "getelementptr ptr, ptr %callargs, i64 {}",
-                        2 * index
-                    ));
-                    self.line(format!("store ptr %r{argument}, ptr {slot}, align 8"));
-                    let slot = self.value(format!(
-                        "getelementptr ptr, ptr %callargs, i64 {}",
-                        2 * index + 1
-                    ));
-                    self.line(format!("store ptr %init{argument}, ptr {slot}, align 8"));
-                }
-                let status = self.value(format!(
-                    "call i32 @g1_dispatch(ptr %ctx, i32 {index}, ptr %callargs, ptr %r{dst})"
-                ));
-                let ok = self.value(format!("icmp eq i32 {status}, 0"));
-                let next = self.label();
-                let failed = self.label();
-                self.line(format!("br i1 {ok}, label %{next}, label %{failed}"));
-                self.block(&failed);
-                self.line(format!("ret i32 {status}"));
-                self.block(&next);
-                self.mark(*dst, &[], true);
-                if matches!(instruction, I::CallOwned { .. }) {
-                    for argument in arguments {
-                        self.mark(*argument, &[], false);
-                    }
-                }
-            }
-            I::TailCallOwned { callee, arguments } => {
-                let target = self
-                    .plan
-                    .functions
-                    .iter()
-                    .position(|key| key == callee)
-                    .ok_or_else(|| self.unsupported("native tail callee is absent"))?;
-                for (index, argument) in arguments.iter().enumerate() {
-                    let pointer = self.value(format!(
-                        "getelementptr i8, ptr %tail_storage, i64 {}",
-                        self.plan.packet_offsets[target][index]
-                    ));
-                    self.copy_bytes(
-                        &pointer,
-                        &self.pointer(*argument),
-                        &self.data.layouts[*argument as usize].clone(),
-                    );
-                    let slot = self.value(format!(
-                        "getelementptr ptr, ptr %tail_args, i64 {}",
-                        2 * index
-                    ));
-                    self.line(format!("store ptr {pointer}, ptr {slot}, align 8"));
-                    let flags = self.value(format!(
-                        "getelementptr i8, ptr %tail_storage, i64 {}",
-                        self.plan.packet_init_offsets[target][index]
-                    ));
-                    self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr {flags}, ptr %init{argument}, i64 {}, i1 false)", self.data.paths[*argument as usize].len()));
-                    let slot = self.value(format!(
-                        "getelementptr ptr, ptr %tail_args, i64 {}",
-                        2 * index + 1
-                    ));
-                    self.line(format!("store ptr {flags}, ptr {slot}, align 8"));
-                }
-                self.line(format!("store i32 {target}, ptr %tail_next, align 4"));
-                self.line("ret i32 2");
-                return Ok(true);
-            }
-            I::Leave {
-                handler_depth: 0,
-                target,
-                arguments,
-                destinations,
-                ..
-            } => {
-                // Prepare every carrier before writing block parameters.
-                for (index, argument) in arguments.iter().enumerate() {
-                    let layout = self.data.layouts[*argument as usize].clone();
-                    let temporary = format!("%leave_{}_{}", self.pc, index);
-                    self.copy_bytes(&temporary, &self.pointer(*argument), &layout);
-                    self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr %leave_init_{}_{index}, ptr %init{argument}, i64 {}, i1 false)",
-                        self.pc, self.data.paths[*argument as usize].len()));
-                }
-                for argument in arguments { self.mark(*argument, &[], false); }
-                for (index, destination) in destinations.iter().enumerate() {
-                    self.copy_bytes(
-                        &self.pointer(*destination),
-                        &format!("%leave_{}_{}", self.pc, index),
-                        &self.data.layouts[*destination as usize].clone(),
-                    );
-                    self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr %init{destination}, ptr %leave_init_{}_{index}, i64 {}, i1 false)",
-                        self.pc, self.data.paths[*destination as usize].len()));
-                }
-                self.line(format!("br label %pc{target}"));
-                return Ok(true);
-            }
             I::Jump { target } => {
                 self.line(format!("br label %pc{target}"));
                 return Ok(true);
@@ -1203,23 +871,6 @@ impl<'a, 'p> Body<'a, 'p> {
                 self.line(format!(
                     "br i1 {condition}, label %pc{then_target}, label %pc{else_target}"
                 ));
-                return Ok(true);
-            }
-            I::Return { value } => {
-                // The ordinary result slot is a complete source value. A
-                // partial owner belongs only to compiler cleanup arguments;
-                // never silently relabel its holes as an initialized result.
-                let mut initialized = "true".to_owned();
-                for index in 0..self.data.paths[*value as usize].len() {
-                    let flag =
-                        self.value(format!("getelementptr i8, ptr %init{value}, i64 {index}"));
-                    let flag = self.value(format!("load i8, ptr {flag}, align 1"));
-                    let present = self.value(format!("icmp eq i8 {flag}, 1"));
-                    initialized = self.value(format!("and i1 {initialized}, {present}"));
-                }
-                self.guard(&initialized, 13);
-                self.copy_bytes("%result", &self.pointer(*value), &self.data.result.clone());
-                self.line("ret i32 0");
                 return Ok(true);
             }
             I::Trap => {

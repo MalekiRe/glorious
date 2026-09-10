@@ -35,6 +35,17 @@ fn runs(source: &str) {
             .unwrap(),
         42
     );
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let native = StageZeroCompiler::new().compile_llvm(request(source), LlvmTarget::host().unwrap()).unwrap();
+    for plan in [native.clone(), native.with_vm_functions([native.entry_key()]).unwrap(),
+        native.with_vm_functions(native.function_keys().iter().copied().filter(|key| *key != native.entry_key())).unwrap()]
+    {
+        for optimization in [0, 2] {
+            let module = unsafe { plan.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(module.run_i64_with_limits(Default::default()).unwrap_or_else(|error|
+                panic!("O{optimization}: {source}\n{error:#?}")), 42);
+        }
+    }
 }
 
 #[test]
@@ -86,7 +97,8 @@ fn an_unused_required_resumption_remains_a_source_error() {
         error
             .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "G4178"),
+            .any(|diagnostic| diagnostic.code == "G5012"
+                && diagnostic.message.contains("declared quantity is [1, 1]")),
         "{error:?}"
     );
 }

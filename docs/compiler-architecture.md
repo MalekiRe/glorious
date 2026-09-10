@@ -1591,3 +1591,69 @@ Cache 137 records this source boundary; executable formats and runtime ABIs are
 unchanged. Float-conversion execution now passes, while the iterator source
 progresses to remaining ownership/provenance obligations. This is not complete
 pattern, library, guarded-interface, native-handler or self-hosted acceptance.
+
+## Resumable generated segments and shared resident control frames
+
+The verified executable graph now supplies the same activation, handler,
+continuation, resumption-return and cleanup state to VM and LLVM execution.
+`vm_backend/execution.rs` defines the frame-transition boundary consumed by
+both native emission and machine-entry validation. A generated function runs
+LLVM computation until that boundary and returns its next verified location.
+The common program runtime performs the original transition. Ordinary calls,
+deep resumption and mandatory tails do not retain recursive generated C frames.
+Local scalar, aggregate, branch, pattern and memory operations remain generated
+instructions; unsupported native instructions still reject during graph admission.
+
+There is no synthesized HostCall body or second adapted executable graph.
+The old generated mixed-import bridge, synchronous callable dispatcher and
+tail-packet bridge are removed. Source/code identities, layouts and the exact
+engine partition remain sealed into the native module witness. Explicitly
+VM-selected bodies share that graph and control state, not an independently
+trusted replacement. Public foreign imports retain their separate authority
+and callback ABI; selecting a VM body grants no external-call authority.
+
+Native frame planning extends the ordinary runtime storage plan with each
+non-scalar resident's checked native layout. Both engines establish its home
+before an engine crossing. Machine entry lends those homes' actual logical
+initialization masks and returns every loan before resuming runtime control.
+Private scalar spill bytes are reconstructed from scalar value snapshots.
+Temporary resident homes detach before either engine mutates a saved snapshot,
+including an empty provisional slot. Disarming an argument releases its carrier,
+not another continuation's allocation. Source-storage brands and lent captures
+retain identity; synchronization transports their home as well as their value.
+An actual storage death still expires the allocation and cannot be undone by
+restoring a snapshot. New lexical activation cannot reuse an older provisional
+home as its storage owner.
+
+Both engines use the same checked borrow producer and persistent address-exposure
+fact. A borrow of a temporary prevents later carrier relocation from replacing
+its backing storage. Native reference bytes retain the existing weak home origin;
+they neither own the referent nor recreate an expired home. The former separately
+borrowed generated-stack home/reference representation is removed. Generated
+initialization loans remain the live view of actual resident homes, not a shadow
+reference authority.
+
+Label and resumption residents use the existing byte-transport lease domain.
+A compiler control identity and fresh token authenticate the retained typed
+value; arbitrary bytes, another domain, a changed type or a partial overwrite
+cannot reconstruct it. Invocation separately checks the live destination or
+handler. A transported token is not proof that its dynamic control owner remains
+active. Callable environments keep their existing source Copy and destruction
+rules; carrier release alone is not source cleanup.
+
+Structural fusion compares physical invocation operands with their own checked,
+instantiated value contracts. Comparing them with the template's pre-substitution
+regions had incorrectly demanded code expansion for an ordinary borrowed
+resumption call. The existing invocation representation is the authority; no
+new callable-target guessing is introduced.
+
+Cache 138 and native ABI 14 record this integrated runtime boundary; portable
+bytecode and verifier generations are unchanged. Tested native/mixed paths now
+include owned installation, returning/deep resumptions, completion transforms,
+partial forwarding, exact replay, cancellation and captured borrowed payloads.
+This is not yet full native-handler acceptance. General borrowed/cross-frame
+resumption proof transport, mandatory-tail handler activation fusion, complete
+zero-marshalling/performance accounting and foreign-control admission remain
+separate obligations. Full source/library and self-hosted acceptance also remain
+open. The earlier generated-stack descriptions document superseded checkpoints,
+not a second active representation alongside these shared resident frames.

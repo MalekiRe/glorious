@@ -13,9 +13,13 @@ use std::{cell::{Cell, RefCell}, collections::{BTreeMap, BTreeSet}, ptr, rc::Rc,
 
 #[derive(Default)]
 pub(super) struct NativeMemory {
+    /// Exact compiler-owned machine implementations for this execution graph.
+    /// VM and native segments use the same frame/control runtime and domain.
+    pub(super) generated: Option<Arc<super::llvm::LlvmNativeModule>>,
     allocations: BTreeMap<usize, NativeAllocation>,
     live_bytes: usize,
     pub(super) home_bytes: Rc<Cell<usize>>,
+    control_bytes: Rc<Cell<usize>>,
     pub(super) measurements: Option<Rc<NativeMemoryMeasurements>>,
     pub(super) homes: super::native_storage::HomeRegistry,
     pub(super) residents: Rc<super::native_residents::ResidentMetadata>,
@@ -32,6 +36,17 @@ pub(super) struct NativeMemory {
     /// It is never obtained from an artifact or an ambient process registry.
     pub(super) imports: Option<Arc<super::native_bridge::BoundNativeImports>>,
     pub(super) callback_depth: u32,
+}
+
+/// Scoped generated scratch is charged to the same execution ledger as raw
+/// memory and resident homes, including every error/unwind exit.
+pub(super) struct NativeControlLease {
+    bytes: usize,
+    live: Rc<Cell<usize>>,
+}
+
+impl Drop for NativeControlLease {
+    fn drop(&mut self) { self.live.set(self.live.get() - self.bytes); }
 }
 
 pub(super) fn memory_error(error: MemoryError) -> VmArtifactError {
@@ -62,7 +77,19 @@ impl NativeMemory {
         Self { measurements: Some(Rc::default()), ..Self::default() }
     }
 
-    pub(super) fn live_native_bytes(&self) -> usize { self.live_bytes + self.home_bytes.get() }
+    pub(super) fn live_native_bytes(&self) -> usize { self.live_bytes + self.home_bytes.get() + self.control_bytes.get() }
+
+    pub(super) fn reserve_control(&self, bytes: usize, limits: super::VmExecutionLimits)
+        -> Result<NativeControlLease, VmArtifactError>
+    {
+        let total = self.live_native_bytes().checked_add(bytes)
+            .ok_or_else(|| error("native control storage size overflow"))?;
+        if bytes as u64 > limits.max_native_allocation_bytes || total as u64 > limits.max_native_bytes {
+            return Err(error("native control storage exceeds the shared byte budget"));
+        }
+        self.control_bytes.set(self.control_bytes.get() + bytes);
+        Ok(NativeControlLease { bytes, live: self.control_bytes.clone() })
+    }
 
     pub(super) fn install_program_layouts(&mut self, program: &super::CandidateVmProgram) -> Result<(), VmArtifactError> {
         if self.program_descriptors.is_some() { return Ok(()); }
@@ -78,14 +105,18 @@ impl NativeMemory {
     pub(super) fn storage_plan(&mut self, function: &VmFunction) -> Arc<super::native_storage::NativeFramePlan> {
         if let Some(plan) = self.storage_plans.get(&function.definition) { return plan.clone(); }
         let descriptors = self.layout_descriptors(function);
-        let plan = Arc::new(super::native_storage::NativeFramePlan::with_native_bindings(function, &descriptors, false, self.imports.as_deref()));
+        let mut plan = super::native_storage::NativeFramePlan::new(function, &descriptors, false);
+        if let Some(module) = &self.generated { module.extend_resident_plan(function, &mut plan); }
+        let plan = Arc::new(plan);
         self.storage_plans.insert(function.definition, plan.clone()); plan
     }
 
     pub(super) fn native_return_plan(&mut self, function: &VmFunction) -> Arc<super::native_storage::NativeFramePlan> {
         if let Some(plan) = self.native_return_plans.get(&function.definition) { return plan.clone(); }
         let descriptors = self.layout_descriptors(function);
-        let plan = Arc::new(super::native_storage::NativeFramePlan::with_native_bindings(function, &descriptors, true, self.imports.as_deref()));
+        let mut plan = super::native_storage::NativeFramePlan::new(function, &descriptors, true);
+        if let Some(module) = &self.generated { module.extend_resident_plan(function, &mut plan); }
+        let plan = Arc::new(plan);
         self.native_return_plans.insert(function.definition, plan.clone()); plan
     }
 
@@ -386,14 +417,10 @@ pub(super) struct NativeReference {
 }
 
 #[derive(Clone, Debug)]
-enum ReferenceInitialization {
-    Raw(Rc<RefCell<BTreeSet<Vec<u32>>>>),
-    Generated(GeneratedInitialization),
-}
+struct ReferenceInitialization(Rc<RefCell<BTreeSet<Vec<u32>>>>);
 
-/// The exact writable logical mask lent to generated code. Stack referents
-/// retain this view directly; resident homes select it only while their native
-/// loan is active. Neither consumer keeps a competing initialization snapshot.
+/// The exact writable logical mask lent to a generated segment. A resident
+/// home selects this view only while its synchronous native loan is active.
 #[derive(Clone, Debug)]
 pub(super) struct GeneratedInitialization {
     flags: *mut u8,
@@ -505,43 +532,21 @@ impl super::ReferenceTarget {
 }
 
 impl ReferenceInitialization {
-    fn check_live(&self) -> Result<(), VmArtifactError> {
-        match self { Self::Generated(view) => view.check_live(), Self::Raw(_) => Ok(()) }
-    }
-
     fn any_hole(&self, selected: impl Fn(&[u32]) -> bool) -> Result<bool, VmArtifactError> {
-        self.check_live()?;
-        match self {
-            Self::Raw(holes) => Ok(holes.borrow().iter().any(|hole| selected(hole))),
-            Self::Generated(view) => view.any_hole(selected),
-        }
+        Ok(self.0.borrow().iter().any(|hole| selected(hole)))
     }
 
     fn replace(&self, path: &[u32], holes: &BTreeSet<Vec<u32>>) -> Result<(), VmArtifactError> {
-        match self {
-            Self::Raw(state) => {
-                let mut state = state.borrow_mut();
-                state.retain(|hole| !hole.starts_with(path));
-                state.extend(holes.iter().cloned());
-            }
-            Self::Generated(view) => view.replace(path, holes)?,
-        }
+        let mut state = self.0.borrow_mut();
+        state.retain(|hole| !hole.starts_with(path));
+        state.extend(holes.iter().cloned());
         Ok(())
     }
 }
 
 impl NativeReference {
     fn new(pointer: *mut u8, layout: Arc<NativeLayout>) -> Self {
-        Self { pointer, layout, path: vec![], initialization: ReferenceInitialization::Raw(Rc::default()) }
-    }
-
-    /// The generated frame publishes these exact logical paths. The lease is
-    /// revoked synchronously before its flag or payload stack storage expires.
-    pub(super) unsafe fn generated(pointer: *mut u8, layout: Arc<NativeLayout>, flags: *mut u8,
-        paths: Arc<[Vec<u32>]>, live: Rc<Cell<bool>>,
-    ) -> Result<Self, VmArtifactError> {
-        let initialization = ReferenceInitialization::Generated(unsafe { GeneratedInitialization::new(flags, paths, live)? });
-        Ok(Self { pointer, layout, path: vec![], initialization })
+        Self { pointer, layout, path: vec![], initialization: ReferenceInitialization(Rc::default()) }
     }
 
     pub(super) fn ty(&self) -> &VmType {
@@ -551,7 +556,6 @@ impl NativeReference {
     pub(super) fn pointer(&self) -> *mut u8 { self.pointer }
 
     pub(super) fn project(&self, path: &[u32]) -> Result<Self, VmArtifactError> {
-        self.initialization.check_live()?;
         let mut pointer = self.pointer;
         let mut layout = self.layout.clone();
         let mut logical_path = self.path.clone();
@@ -656,7 +660,7 @@ impl NativeReference {
         // SAFETY: native reference creation and the source borrow/use contract
         // establish validity. DerefCopy/Move separately retain resident uses.
         unsafe { field.layout.read_with_reference_admission(field.pointer, budget,
-            match field.initialization { ReferenceInitialization::Raw(_) => ReferenceRead::External, _ => ReferenceRead::Resident }) }
+            ReferenceRead::External) }
     }
 
     pub(super) fn take(&self, path: &[u32], budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
@@ -1150,7 +1154,7 @@ pub(super) fn execute_memory_intrinsic(
             VmValue::Unit
         }
         StaticBytesLen => {
-            let (_, _, length) = super::expect_static_utf8(arg(0)?)?;
+            let (_, _, length) = super::expect_static_utf8(arg(0)?, budget)?;
             VmValue::Usize(length as u64)
         }
         Null => result_pointer(ptr::null_mut()),
@@ -1222,7 +1226,7 @@ pub(super) fn execute_memory_intrinsic(
             result_pointer(pointer)
         }
         StaticUtf8Address | StaticBytesAddress => {
-            let (bytes, offset, length) = super::expect_static_utf8(arg(0)?)?;
+            let (bytes, offset, length) = super::expect_static_utf8(arg(0)?, budget)?;
             let end = offset.checked_add(length).ok_or_else(|| error("static byte window overflow"))?;
             if bytes.get(offset..end).is_none() {
                 return Err(error("static byte window exceeds its backing storage"));
@@ -1303,30 +1307,29 @@ mod tests {
     fn generated_reference_views_share_actual_flags_and_expire_before_stack_access() {
         let mut budget = budget();
         let layout = Arc::new(native_layout(&VmType::Tuple(vec![VmType::Unit, VmType::Unit]), &Arc::from([]), &mut vec![]).unwrap());
-        let pointer = std::ptr::NonNull::<u8>::dangling().as_ptr();
+        let home = super::super::native_storage::NativeHome::new(layout, &mut budget).unwrap();
+        home.store(&[], &VmValue::Tuple(Arc::from([VmValue::Unit, VmValue::Unit])), &mut budget).unwrap();
         let mut flags = [1u8; 3];
-        let live = Rc::new(Cell::new(true));
-        let reference = unsafe { NativeReference::generated(pointer, layout, flags.as_mut_ptr(),
-            Arc::from([vec![], vec![0], vec![1]]), live.clone()).unwrap() };
-        let first = reference.project(&[0]).unwrap();
-        let second = reference.project(&[1]).unwrap();
-        assert_eq!(first.pointer(), second.pointer());
-        assert!(matches!(first.take(&[], &mut budget).unwrap(), VmValue::Unit));
+        let loan = unsafe { home.lend_native(flags.as_mut_ptr(),
+            Arc::from([vec![], vec![0], vec![1]]), &mut budget).unwrap() };
+        assert_eq!(home.project(&[0]).unwrap().0, home.project(&[1]).unwrap().0);
+        assert!(matches!(home.take(&[0], &mut budget).unwrap(), VmValue::Unit));
         assert_eq!(flags, [1, 0, 1]);
-        assert!(!reference.is_fully_initialized());
-        assert!(second.is_fully_initialized());
+        assert!(!home.is_fully_initialized(&[]));
+        assert!(home.is_fully_initialized(&[1]));
         flags[1] = 1;
-        assert!(first.is_fully_initialized(), "a generated store must be visible without a shadow mask refresh");
-        first.take(&[], &mut budget).unwrap();
-        first.write(&[], VmValue::Unit, &mut budget).unwrap();
+        assert!(home.is_fully_initialized(&[0]), "a generated store must be visible without a shadow mask refresh");
+        home.take(&[0], &mut budget).unwrap();
+        home.store(&[0], &VmValue::Unit, &mut budget).unwrap();
         assert_eq!(flags, [1, 1, 1]);
         flags[0] = 0;
         assert_eq!(flags[0], 0);
-        assert!(first.write(&[], VmValue::Unit, &mut budget).is_err(), "a child cannot restore an absent parent");
-        live.set(false);
-        assert!(reference.project(&[]).is_err());
-        assert!(reference.read(&[], &mut budget).is_err());
-        assert!(second.write(&[], VmValue::Unit, &mut budget).is_err());
+        assert!(home.store(&[0], &VmValue::Unit, &mut budget).is_err(), "a child cannot restore an absent parent");
+        loan.finish().unwrap();
+        home.retire();
+        assert!(home.project(&[]).is_err());
+        assert!(home.load(&[], &mut budget).is_err());
+        assert!(home.store(&[1], &VmValue::Unit, &mut budget).is_err());
     }
 
     #[test]

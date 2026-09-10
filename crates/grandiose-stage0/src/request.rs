@@ -351,7 +351,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // retains symbolic callable projections and owned generic capture authority.
 // Cache 137 retains pattern shape constraints through projection inference,
 // schedules dependent numeric defaults, and validates frozen pattern subjects.
-pub const STAGE0_CACHE_GENERATION: u32 = 137;
+// Cache 138 shares resumable resident frames across generated and VM execution;
+// fusion compares physical invocation inputs with their instantiated contracts.
+pub const STAGE0_CACHE_GENERATION: u32 = 138;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

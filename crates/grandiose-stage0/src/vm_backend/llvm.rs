@@ -8,6 +8,7 @@ mod emit;
 pub(super) mod callables;
 mod layout;
 mod load;
+mod execution;
 pub(super) mod memory;
 
 use super::{
@@ -21,8 +22,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 13;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:borrowed-frame-captures-v10";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 14;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:shared-resumable-frames-v1";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
@@ -118,14 +119,7 @@ pub struct LlvmIrProgram {
     layouts: BTreeMap<Vec<u8>, NativeTypeLayout>,
     pub(super) functions: Vec<DefKey>,
     pub(super) vm_functions: BTreeSet<DefKey>,
-    pub(super) tail_packets: Vec<TailPacketLayout>,
     pub(super) frame_layouts: std::sync::Arc<[emit::FunctionPlan]>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) struct TailPacketLayout {
-    pub(super) data_offsets: Vec<usize>,
-    pub(super) initialization_offsets: Vec<usize>,
 }
 
 impl LlvmIrProgram {
@@ -217,7 +211,6 @@ impl LlvmIrProgram {
             ir,
             layouts: plan.layouts.clone(),
             functions: plan.functions.clone(),
-            tail_packets: plan.tail_packets(),
             frame_layouts: plan.plans.clone().into(),
             program,
             vm_functions,
