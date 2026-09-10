@@ -236,6 +236,22 @@ impl<'a> CallableContext<'a> {
         for (index, register) in captures.iter().enumerate() {
             let layout = self.layout(function, *register)?;
             let (pointer, flags) = unsafe { self.slots(slots, index) };
+            let capture_owned = environment.as_ref().is_some_and(|environment| {
+                matches!(environment.captures[index].mode, VmCaptureMode::Copy | VmCaptureMode::Move)
+            });
+            if !capture_owned {
+                let home = if *register < body.captures {
+                    NativeHome::capture_loan(layout, pointer, flags, budget)?
+                } else {
+                    let paths = plan.frame_layouts[function as usize].paths[*register as usize].clone().into();
+                    let live = self.scopes.borrow_mut().last_mut()
+                        .ok_or_else(|| invalid("generated capture has no live frame"))?.lifetime();
+                    unsafe { NativeHome::borrowed_generated(layout, pointer, flags.cast_mut(), paths, live, budget)? }
+                };
+                values.push(VmValue::Resident(home));
+                owned.push(false);
+                continue;
+            }
             let holes = unsafe {
                 self.holes(
                     &plan.frame_layouts[function as usize].paths[*register as usize],
@@ -253,12 +269,7 @@ impl<'a> CallableContext<'a> {
             let destination = NativeHome::new(layout, budget)?;
             destination.store(&[], &VmValue::Resident(source), budget)?;
             values.push(VmValue::Resident(destination));
-            owned.push(environment.as_ref().is_some_and(|environment| {
-                matches!(
-                    environment.captures[index].mode,
-                    VmCaptureMode::Copy | VmCaptureMode::Move
-                )
-            }));
+            owned.push(true);
         }
         let value = VmValue::Callable {
             callee: *callee,

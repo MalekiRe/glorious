@@ -27,6 +27,9 @@ struct Lease {
 #[derive(Clone, Debug)]
 enum ReferenceOrigin {
     Home(Weak<super::native_storage::NativeHome>),
+    /// Keep the non-owning storage view, not the source frame. Its independent
+    /// frame lease still expires before either bytes or flags disappear.
+    BorrowedHome(Arc<super::native_storage::NativeHome>),
     Native(super::native_memory::NativeReference),
 }
 
@@ -146,8 +149,16 @@ impl ResidentMetadata {
         let end = source.saturating_add(bytes);
         for (slot, lease) in self.state.borrow().leases.range(source..end) {
             if slot.saturating_add(lease.bytes()) > end { continue; }
-            if let ResidentLease::Reference(ReferenceLease { origin: ReferenceOrigin::Home(home), .. }) = lease {
-                home.upgrade().ok_or_else(|| error("stored reference outlived its native home"))?.expose_address();
+            if let ResidentLease::Reference(reference) = lease {
+                match &reference.origin {
+                    ReferenceOrigin::Home(home) => home.upgrade()
+                        .ok_or_else(|| error("stored reference outlived its native home"))?.expose_address(),
+                    ReferenceOrigin::BorrowedHome(home) => {
+                        home.project(&reference.fields)?;
+                        home.expose_address();
+                    }
+                    ReferenceOrigin::Native(_) => {}
+                }
             }
         }
         Ok(())
@@ -224,7 +235,12 @@ impl ResidentMetadata {
                     return Err(error("native storage reference has an invalid checked origin"));
                 }
                 if expose { home.expose_address(); }
-                (pointer, ReferenceOrigin::Home(Arc::downgrade(home)))
+                let origin = if home.is_borrowed_frame() {
+                    ReferenceOrigin::BorrowedHome(home.clone())
+                } else {
+                    ReferenceOrigin::Home(Arc::downgrade(home))
+                };
+                (pointer, origin)
             }
             super::ReferenceTarget::Native(native) => {
                 let projected = native.project(fields)?;
@@ -268,6 +284,13 @@ impl ResidentMetadata {
                 }
                 super::ReferenceTarget::Home(home)
             }
+            ReferenceOrigin::BorrowedHome(home) => {
+                let (pointer, layout) = home.project(&stored.fields)?;
+                if pointer != stored.pointer || &layout.ty != referent {
+                    return Err(error("stored borrowed reference no longer names its checked projection"));
+                }
+                super::ReferenceTarget::Home(home)
+            }
             ReferenceOrigin::Native(native) => {
                 let projected = native.project(&stored.fields)?;
                 if projected.pointer() != stored.pointer || projected.ty() != referent {
@@ -303,6 +326,36 @@ mod tests {
     fn captures(value: VmValue) -> Arc<RuntimeCaptureEnvironment> {
         let VmValue::Callable { captures, .. } = value else { panic!("callable expected") };
         captures
+    }
+
+    #[test]
+    fn borrowed_capture_reference_keeps_its_view_but_not_its_backing_frame() {
+        use crate::vm_backend::ReferenceTarget;
+        let mut budget = budget();
+        let layout = Arc::new(native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let mut value = Box::new(42i64);
+        let mut flags = [1];
+        let live = Rc::new(Cell::new(true));
+        let home = unsafe { NativeHome::borrowed_generated(layout, (&mut *value as *mut i64).cast(), flags.as_mut_ptr(), Arc::from([vec![]]), live.clone(), &mut budget) }.unwrap();
+        let weak = Arc::downgrade(&home);
+        let mut slot = 0usize;
+        let reference = VmValue::Reference { target: ReferenceTarget::Home(home.clone()),
+            fields: Arc::from([]), unique: false, referent: VmType::I64 };
+        unsafe { budget.native_memory.residents.write_reference((&mut slot as *mut usize).cast(), &reference, false, true) }.unwrap();
+        drop(reference);
+        drop(home);
+        assert!(weak.upgrade().is_some(), "the returned handle retains its non-owning view");
+        let returned = unsafe { budget.native_memory.residents.read_reference((&slot as *const usize).cast(), &VmType::I64, false) }.unwrap().unwrap();
+        let VmValue::Reference { target, fields, .. } = returned else { panic!("reference"); };
+        assert!(target.native_initialized(&fields, true));
+        drop(target);
+        live.set(false);
+        drop(value);
+        assert!(unsafe { budget.native_memory.residents.read_reference((&slot as *const usize).cast(), &VmType::I64, false) }.is_err(),
+            "retaining a view cannot extend the original frame's lifetime");
+        budget.native_memory.residents.clear((&slot as *const usize).addr(), std::mem::size_of::<usize>());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(flags, [1]);
     }
 
     #[test]

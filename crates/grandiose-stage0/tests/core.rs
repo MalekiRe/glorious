@@ -17,6 +17,32 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn trailing_statements_discard_results_before_contextual_block_typechecking() {
+    for source in [
+        "fn value() -> i64 { 42 } pub fn main() { value(); }",
+        "fn value() -> i64 { 42 } pub fn main() { handle 0 { 0 => { value(); }, _ => () } }",
+        "pub fn main() { let (value,) = (42,); value; }",
+    ] {
+        let core = core_for("statement-result-context@0.1.0", source);
+        assert!(core.diagnostics.is_empty(), "{source}\n{:?}", core.diagnostics);
+        assert_eq!(core.expression(core.root).ty, Type::Unit);
+        assert!(core.validate().is_empty(), "{:?}", core.validate());
+    }
+    let core = core_for("statement-not-returned@0.1.0", "pub fn main() -> i64 { 42; }");
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4110"), "{:?}", core.diagnostics);
+}
+
+#[test]
+fn trailing_statement_discard_retains_the_returned_linear_owner_obligation() {
+    let (core, signatures) = core_and_signatures_for("linear-statement-result@0.1.0",
+        "struct Ticket {} impl Use<[1,1]> for Ticket {} fn make() -> Ticket { Ticket {} } pub fn main() { make(); }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5024"), "{:?}", flow.diagnostics);
+}
+
+#[test]
 fn escape_and_quantity_consumers_require_matching_shared_continuation_facts() {
     let (mut core, signatures) = core_and_signatures_for("shared-continuation-consumers@0.1.0",
         "pub fn main() -> i64 { @done: i64 { @done(42) } }");

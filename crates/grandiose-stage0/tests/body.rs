@@ -21,6 +21,36 @@ fn parse(source: &str) -> BodySyntax {
 }
 
 #[test]
+fn trailing_semicolons_preserve_statement_discard_in_the_block_sequence() {
+    let source = "{ value(); }";
+    let body = parse(source);
+    assert!(body.diagnostics.is_empty(), "{:?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else { panic!("block"); };
+    assert_eq!(values.len(), 2);
+    assert!(matches!(body.expression(values[0]).kind, ExprKind::Call { .. }));
+    let discarded_tail = body.expression(values[1]);
+    assert!(matches!(&discarded_tail.kind, ExprKind::Tuple(values) if values.is_empty()));
+    assert_eq!(&source[discarded_tail.span.start as usize..discarded_tail.span.end as usize], ";");
+
+    let body = parse("{ value() }");
+    let ExprKind::Block(values) = &body.expression(body.root).kind else { panic!("block"); };
+    assert_eq!(values.len(), 1);
+    assert!(matches!(body.expression(values[0]).kind, ExprKind::Call { .. }));
+
+    for source in ["{ unsafe { value(); } }", "{ run() { value(); } }", "{ let (value,) = (42,); value; }"] {
+        let body = parse(source);
+        assert!(body.diagnostics.is_empty(), "{source}: {:?}", body.diagnostics);
+        assert!(body.expressions.iter().any(|expression| {
+            let values = match &expression.kind {
+                ExprKind::Block(values) | ExprKind::UnsafeBlock(values) | ExprKind::ContextualBlock(values) => values,
+                _ => return false,
+            };
+            values.len() == 2 && matches!(&body.expression(values[1]).kind, ExprKind::Tuple(values) if values.is_empty())
+        }), "missing terminated inner sequence: {source}");
+    }
+}
+
+#[test]
 fn label_value_span_uses_the_lossless_token_index_after_trivia() {
     let source = "{ label done { let ignored = 0; /* gap */ @done } }";
     let body = parse(source);

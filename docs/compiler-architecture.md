@@ -1229,3 +1229,36 @@ remain required at persistence and execution boundaries.
 
 This repairs these contextual literal producers, not all bootstrap literal
 extensions, library ownership contracts or full compiler/self-hosted acceptance.
+
+## Terminated statements and borrowed generated captures
+
+The body parser preserves a trailing statement terminator as an explicit unit
+tail in the ordinary strict block sequence, before destructuring continuations
+are formed. Core contextualizes that unit result, not the discarded expression.
+Existing resource rules retain the discarded value's ownership obligation and
+cleanup; shared continuation facts still prevent an unreachable unit suffix
+from turning a transfer into normal completion. No downstream pass reconstructs
+semicolon syntax or gains independent disposal authority.
+
+Generated callable construction consumes the verified capture formation mode.
+Copy and move establish owned homes; borrowed captures retain the original slot
+and its actual writable initialization flags. Capturing an already lent input
+reuses its exact registered home. A local frame capture uses a non-owning home
+view guarded by that frame's live lease. Nested invocation lends and restores
+this same initialization product, not a separately populated shadow mask.
+
+Native storage distinguishes owned, external-argument and borrowed-frame
+retirement authority. Releasing a borrowed view neither clears the source flags
+nor revokes resident handles still owned by that frame. Reference-byte metadata
+retains such a view strongly, but never retains its backing frame: returned
+references may outlive the closure while the frame is live, and every checked
+payload access fails after frame expiry. References to owning homes retain the
+existing weak-owner contract. Resident copies check source lifetime and mask
+before touching source bytes. Native ABI generation 13 records this changed
+capture-storage contract; portable bytecode and reference representation do not
+change.
+
+This repairs statement-result loss and generated borrowed-capture copying,
+including nested and mixed invocation. It does not discharge the full library's
+remaining quantity and mandatory-tail obligations, complete guarded storage,
+native handlers or self-hosted acceptance.

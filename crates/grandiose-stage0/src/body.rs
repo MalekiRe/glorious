@@ -332,14 +332,17 @@ impl Parser<'_> {
     fn parse_block(&mut self, contextual: bool) -> Option<ExprId> {
         let open = self.expect_punctuation('{')?;
         let mut expressions = vec![];
+        let mut trailing_statement = None;
         while !self.at_punctuation('}') && self.current().is_some() {
+            trailing_statement = None;
             let expression = self
                 .parse_statement()
                 .unwrap_or_else(|| self.recover_expression());
             let assignment = matches!(self.expression(expression).kind, ExprKind::Assign { .. });
             expressions.push(expression);
             if self.at_punctuation(';') {
-                self.position += 1;
+                let semicolon = self.advance().expect("statement terminator");
+                trailing_statement = Some(self.lexed.tokens[semicolon].span);
             } else if assignment {
                 self.error_current("G4015", "assignment statements require a trailing `;`");
                 self.synchronize();
@@ -354,6 +357,15 @@ impl Parser<'_> {
             start: self.lexed.tokens[open].span.start,
             end: self.lexed.tokens[close].span.end,
         };
+        if let Some(semicolon) = trailing_statement {
+            // A terminated tail is a statement, not the block's value.
+            // Express its discard through the ordinary strict sequence so
+            // Core's existing non-tail ownership and effect rules apply.
+            // Install this before binding-suffix formation: destructuring
+            // continuations retain the same final unit result.
+            let unit = self.alloc(ExprKind::Tuple(vec![]), semicolon);
+            expressions.push(unit);
+        }
         // A destructuring binding introduces names in the rest of this block,
         // not in its initializer or in a sibling/outer block. Freeze the
         // lexical continuation explicitly so Core can reuse checked pattern

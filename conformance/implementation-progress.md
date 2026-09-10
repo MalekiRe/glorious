@@ -5,6 +5,58 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 127: statement results and generated borrowed-capture storage
+
+Trailing semicolons now preserve statement discard through an explicit unit
+tail in the ordinary block sequence. This applies before destructuring suffix
+formation and contextual typing. Existing resource and continuation products
+therefore check discarded linear owners, execute cleanup and preserve terminal
+transfers without a separate disposal analysis.
+
+The new contextual-block execution regression exposed native capture construction
+copying a borrowed scalar into a new home: VM returned 42, native O0 returned 41
+(`target/statement-execution-v1.log`). Generated construction now uses verified
+capture modes, retaining the actual caller slot and writable initialization
+flags for borrowed captures. Nested captures of existing inputs reuse the same
+home. Frame lifetime guards every access; destroying a borrowed view does not
+clear the backing owner. Stored references retain the non-owning view, not the
+frame, so valid returned borrows survive closure destruction without extending
+source storage lifetime. Owned capture formation remains separate.
+
+Verification:
+
+- Parser suite: 31 pass; focused Core statement groups: 2 pass. The original
+  parser and typing regressions failed before the producer fix
+  (`target/statement-parser-baseline.log`, `target/statement-core-baseline.log`,
+  `target/statement-parser-v1.log`, `target/statement-core-v1.log`).
+- Statement effects, exactly-once custom Drop, terminal label cleanup and
+  invalid value/linear discard: all 3 groups pass, including fresh/decoded VM
+  and generated native O0/O2 (`target/statement-final-execution-v1.log`).
+- Borrowed-capture execution and permission rejection: 2 groups pass. Six
+  positive sources cover direct/nested mutation, aggregate fields, owned outer
+  captures, implicit copied captures and a borrow surviving its reader closure;
+  each runs fresh/decoded VM, plus native and three mixed partitions at O0/O2
+  (`target/statement-native-captures-v2.log`).
+- All 44 native-runtime unit tests pass, including shared masks, nested loans,
+  expired storage rejected before payload access and retained-view lifetime
+  (`target/statement-native-units-final-v1.log`). All 22 revision/cache tests
+  pass (`target/statement-revision-final-v1.log`).
+- The existing returned-capture-reference and ordinary callable loan/copy/Drop
+  execution groups pass (`target/statement-existing-reference-v1.log`,
+  `target/statement-existing-capture-v1.log`).
+- Full Core integration: 276 pass and the same 9 known regressions fail
+  (`target/statement-core-integration-v1.log`); no existing sources or assertions
+  were weakened to accommodate statement discard.
+
+The unchanged full-library root now passes typing but fails resource analysis
+with **16 diagnostic records**: G4403 mandatory-tail provenance in traversal and
+G5024 quantity obligations in array, iterator, iterator callbacks, traversal,
+parse and io (`target/statement-library-root-v1.log`). This is not a passing
+library gate. The prior Box returned-reference G5023 regression also remains
+open. Complete compiler/library acceptance, native handlers and self-hosting
+are unfinished. Cache generation is 127 and native ABI 13; interface 22,
+bytecode 72, verifier 38 and VM schema 116 are unchanged.
+
 ## Cache 126 library-source follow-up: clause safety and Box ownership transfer
 
 `char::encode_utf8` now acknowledges raw writes inside each clause's explicit

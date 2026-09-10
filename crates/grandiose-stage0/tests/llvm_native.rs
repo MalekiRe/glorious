@@ -35,6 +35,35 @@ fn compile(source: &str) -> LlvmIrProgram {
 }
 
 #[test]
+fn generated_borrowed_captures_share_original_and_nested_storage() {
+    for source in [
+        "pub fn main() -> i64 { let mut value = 40; let task = () -> () { value = value + 1; }; task(); task(); value }",
+        "pub fn main() -> i64 { let mut value = 40; let outer = () -> () { let inner = () -> () { value = value + 1; }; inner(); value = value + 1; }; outer(); value }",
+        "struct Counter { value: i64 } pub fn main() -> i64 { let mut counter = Counter { value: 40 }; let task = () -> () { counter.value = counter.value + 2; }; task(); counter.value }",
+        "pub fn main() -> i64 { let mut seed = 41; let outer = move (seed) { let inner = () -> () { seed = seed + 1; }; inner(); seed }; outer() }",
+        "fn bad() -> () -> i64 { let value = 42; () -> i64 { value } } pub fn main() -> i64 { bad()() }",
+        "pub fn main() -> i64 { let value = 42; let result = { let reader = () -> &i64 { &value }; reader() }; *result }",
+    ] {
+        check_mixed_capture_source(source);
+    }
+}
+
+#[test]
+fn generated_borrowed_capture_storage_does_not_extend_source_permission() {
+    for (source, codes) in [
+        ("fn bad() -> () -> i64 { let value = 42; () -> i64 { let observed = &value; *observed } } pub fn main() -> i64 { bad()() }", &["G5014"][..]),
+        ("pub fn main() -> i64 { let mut value = 41; let task = () -> () { value = 42; }; let observed = &value; task(); *observed }", &["G5004", "G5006", "G5007"][..]),
+    ] {
+        let error = match StageZeroCompiler::new().compile_llvm(request(source), LlvmTarget::host().unwrap()) {
+            Err(error) => error,
+            Ok(_) => panic!("source unexpectedly admitted: {source}"),
+        };
+        let grandiose_stage0::vm_backend::llvm::LlvmError::Source(error) = error else { panic!("expected source rejection: {error:#?}"); };
+        assert!(error.diagnostics().iter().any(|diagnostic| codes.contains(&diagnostic.code)), "{source}\n{error:#?}");
+    }
+}
+
+#[test]
 fn mixed_callable_capture_loans_preserve_storage_and_partial_cleanup() {
     for source in [
         "pub fn main() -> i64 { let empty = (); let task = move (empty) { let observed = empty; 42 }; task() }",
