@@ -24,6 +24,40 @@ fn accepts(source: &str) {
 }
 
 #[test]
+fn erased_view_storage_requires_an_element_type_from_context() {
+    let source = r#"#![no_std]
+        struct View<'a,T> { storage: &'a mut (), length: i64 }
+        fn length<T>(view: View<T>) -> i64 { view.length }
+        fn reborrow<T>(items: &mut View<T>) -> i64 {
+            VIEW_BINDING
+            length(view)
+        }
+        pub fn main() -> i64 {
+            let mut storage = ();
+            let mut items = View<'_,i64> { storage: &mut storage, length: 42 };
+            reborrow(&mut items)
+        }
+    "#;
+    for binding in [
+        "let view: View<'_,T> = View { storage: &mut *items.storage, length: items.length };",
+        "let view = View<'_,T> { storage: &mut *items.storage, length: items.length };",
+    ] {
+        accepts(&source.replace("VIEW_BINDING", binding));
+    }
+    // Neither erased reference provenance nor a same-spelled enclosing T is
+    // evidence for the fresh constructor argument. A scalar result cannot
+    // constrain it either. This is the original sorting_swap source mistake.
+    let unconstrained = source.replace("VIEW_BINDING",
+        "let view = View { storage: &mut *items.storage, length: items.length };");
+    for level in ["0", "2"] {
+        let failure = StageZeroCompiler::new().compile(request(&unconstrained, level))
+            .expect_err("erased storage cannot infer a phantom element type");
+        assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4116"),
+            "O{level}: {:#?}", failure.diagnostics());
+    }
+}
+
+#[test]
 fn nominal_field_projections_use_only_their_declaration_contract() {
     accepts(r#"#![no_std]
         trait Source { type Item; }

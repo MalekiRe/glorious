@@ -15,6 +15,17 @@ The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
 
+The subsequent source-only sorting correction supplies the erased temporary
+view's missing `T` as `SliceMut<'_,T>`. Positive annotation/constructor and negative
+unconstrained-type regressions pass at O0/O2, including fresh/decoded positive
+execution. The existing sorting root still fails with 54 diagnostic records;
+its library helper no longer has inference errors, but nominal result provenance
+and dependent loan/lifetime checks remain. Its application retains independent
+callback lifetime, private API, borrow and quantity failures. This is not a
+callback-inference bug in `sorting_swap`, which contains no callback.
+See `implementation-progress.md` for the exact source-only gate. The full-root
+count below predates this correction; no new matrix is claimed.
+
 Cache 116 consolidates lexical, kinded projection normalization in the shared
 trait solver and migrates signature comparison/validation, Core and executable
 materialization to that authority. Partial substitution reads the existing
@@ -28,8 +39,8 @@ label-shape fixture also fails in the pre-change baseline and is not counted as
 passing. See `implementation-progress.md` for exact gate scope and logs.
 The full-library composition root still fails with 94 diagnostic records and no
 diagnostic-limit suppression marker (`target/projection-normalization-library-final-v17.log`).
-Remaining errors include Bytes/Slice and array-kind API mismatches, sorting
-callback inference, graph result/provenance checks, custom-Drop extraction,
+Remaining errors included Bytes/Slice and array-kind API mismatches, sorting
+view inference, graph result/provenance checks, custom-Drop extraction,
 unsafe UTF-8 operations, tail provenance and minimum-use obligations. No new
 31-test source matrix or self-hosting acceptance result is claimed.
 

@@ -5,6 +5,30 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Source correction: sorting's erased element type
+
+The `sorting_swap` temporary `SliceMut` lacked an element-type argument. Its
+private storage is `&mut ()`, so neither field constrains the phantom `T`, and
+the eventual unit result supplies no context. The source now explicitly retains
+`SliceMut<'_,T>`. The other direct view constructors were audited: their declared
+return or enclosing field types supply the element argument. No compiler rule
+was changed to infer a type from erased pointer provenance or binder spelling.
+
+The new nominal-contract regression passes both explicit annotation and explicit
+constructor forms through fresh and decoded VM execution at O0/O2. Its otherwise
+identical unconstrained form still rejects with `G4116` at both levels
+(`target/sorting-phantom-view-v3.log`).
+
+The existing sorting source root **still fails**, with 54 diagnostic records
+(`target/sorting-typed-view-v3.log`). Its library `sorting_swap` inference errors
+are gone, but reference provenance at `SliceMut::get` and the resulting swap
+loan/lifetime errors remain. The application also retains callback lifetime,
+private API, borrow and minimum-use failures. This corrects the previous diagnosis
+of the library helper as callback inference: the helper has no callback.
+The full composition and 31-test matrix were not rerun for this source-only fix;
+their recorded results below remain historical. Compiler/cache formats are
+unchanged, and no library or self-hosting acceptance is claimed.
+
 ## Cache 116: shared lexical and kinded projection normalization
 
 Ordinary generic functions could not reduce structural associated projections

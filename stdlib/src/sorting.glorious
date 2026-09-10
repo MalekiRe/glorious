@@ -5,7 +5,8 @@ fn sorting_swap<T>(items: &mut SliceMut<T>, a: usize, b: usize) {
     handle a == b { true => return((), @sorting_swap), false => () };
     let low = min(a, b);
     let high = max(a, b);
-    let view = SliceMut { storage: &mut *items.storage, length: items.length };
+    // The erased storage field cannot infer the view's element type.
+    let view: SliceMut<'_,T> = SliceMut { storage: &mut *items.storage, length: items.length };
     let (left, right) = handle SliceMut::split_at(view, high) { Result::Ok(parts) => parts, Result::Err(_) => __g1_abort() };
     let left = handle SliceMut::get(left, low) { Result::Ok(place) => place, Result::Err(_) => __g1_abort() };
     let right = handle SliceMut::get(right, 0) { Result::Ok(place) => place, Result::Err(_) => __g1_abort() };
