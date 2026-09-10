@@ -20,6 +20,39 @@ struct Fixture {
 }
 
 #[test]
+fn read_only_storage_contract_requires_complete_sealed_execution() {
+    let fixture = Fixture::new("#![no_std] struct Slot<'a> { value: &'a i64 } fn get<'a>(slot: &mut Slot<'a>) -> &'a i64 { slot.value } fn set<'a>(slot: &mut Slot<'a>, value: &'a i64) { slot.value = value; } fn main<'a>(slot: &mut Slot<'a>, value: &'a i64) -> &'a i64 { set(slot, value); get(slot) }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, ControlSummaryLimits::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let owner = fixture.names["main"];
+    let body = bound.body(owner).unwrap();
+    assert!(!body.get(fixture.call_to(owner, fixture.names["set"])).unwrap().storage_read_only());
+    assert!(body.get(fixture.call_to(owner, fixture.names["get"])).unwrap().storage_read_only(),
+        "a preceding unknown mutation does not invalidate the independently sealed getter contract");
+    assert!(!InvocationControl::default().storage_read_only());
+    assert!(!ControlCallCoverage::Unknown(ControlUnknown::Limit).storage_read_only(None));
+    assert!(!ControlCallCoverage::Alternatives(&[]).storage_read_only(None));
+}
+
+#[test]
+fn an_empty_body_does_not_prove_absent_cleanup_writes() {
+    let fixture = Fixture::new("#![no_std] struct Probe { value: i64 } impl Use<[0,1]> for Probe {} impl Drop for Probe { drop(&mut self) -> {} } fn consume(value: Probe) {} fn forward<T>(value:T) -> T { value } fn main(value: Probe) { consume(value); }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let consume = summaries.get(CallableBrand::Named(fixture.names["consume"])).unwrap();
+    assert!(ControlCallCoverage::Alternatives(consume.alternatives()).is_complete());
+    assert!(!ControlCallCoverage::Alternatives(consume.alternatives()).storage_read_only(None),
+        "an implicit destructor is not an empty storage effect");
+    let forward = summaries.get(CallableBrand::Named(fixture.names["forward"])).unwrap();
+    assert!(!ControlCallCoverage::Alternatives(forward.alternatives()).storage_read_only(None),
+        "open cleanup behavior requires separate proof");
+    let bound = summaries.bind(&inputs).unwrap();
+    let owner = fixture.names["main"];
+    assert!(!bound.body(owner).unwrap().get(fixture.call_to(owner, fixture.names["consume"])).unwrap().storage_read_only());
+}
+
+#[test]
 fn variant_reference_coverage_distinguishes_absence_from_unknown_alternatives() {
     use crate::resident_invocations::{CapturedInputs, Operand};
     struct Domain;

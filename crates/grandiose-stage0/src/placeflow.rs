@@ -101,6 +101,16 @@ struct ProjectionLoan {
 }
 
 impl ProjectionLoan {
+    /// A checked result or writable-slot contract can introduce storage
+    /// outside this frame. This is a coarse class, never a local address.
+    fn external(call: CoreId, fields: &[u32], mutability: crate::Mutability) -> Self {
+        Self {
+            place: Projection { root: format!("<external-reference-result-{}>", call.0), fields: fields.to_vec() },
+            unique: matches!(mutability, crate::Mutability::Unique), owner: None,
+            capture_path: vec![], partitions: BTreeMap::new(), indirect: true, external: true,
+        }
+    }
+
     fn project_referent(&mut self, fields: &[u32]) {
         if let Some(capture) = self.capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
         else { self.place.fields.extend_from_slice(fields); }
@@ -3655,7 +3665,7 @@ impl Analyzer<'_> {
         for mut parent in targets {
             let known = self.origin_snapshot(&parent.resident_key(projection));
             parent.project_referent(projection);
-            if !known.loans.is_empty() && (!parent.indirect || !projection.is_empty()) {
+            if known.is_known_empty() || (!known.loans.is_empty() && (!parent.indirect || !projection.is_empty())) {
                 residents.join(known.map(|mut resident| {
                     // Copying a shared stored handle preserves its backing
                     // loan but does not borrow the replaceable handle slot.
@@ -3731,11 +3741,7 @@ impl Analyzer<'_> {
         let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
             return BTreeSet::new();
         };
-        BTreeSet::from([ProjectionLoan {
-            place: Projection { root: format!("<external-reference-result-{}>", call.0), fields: fields.to_vec() },
-            unique: matches!(mutability, crate::Mutability::Unique), owner: None,
-            capture_path: vec![], partitions: BTreeMap::new(), indirect: true, external: true,
-        }])
+        BTreeSet::from([ProjectionLoan::external(call, fields, mutability)])
     }
 
     fn external_reference_path(&self, id: CoreId) -> bool {

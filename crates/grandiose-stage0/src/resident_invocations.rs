@@ -76,13 +76,26 @@ pub(crate) trait Inputs {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct Store<V> {
     pub destination: V,
-    pub destination_fields: Option<Operand<Vec<u32>>>,
     pub source: V,
     pub source_is_callable: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct ReferenceWrite<V> {
+    pub destination: V,
+    pub unresolved_destination: bool,
+    /// A declared writable handle path, not a projection asserted present
+    /// in the caller's current variant. The callee may replace that variant.
+    pub fields: Operand<Vec<u32>>,
+    /// Possible incoming backing loans, in addition to a newly constructed
+    /// external reference. All sources are snapshotted before any writes.
+    pub sources: Vec<V>,
+    pub unresolved: bool,
+}
+
 pub(crate) struct Relations<V> {
     pub stores: Vec<Store<V>>,
+    pub reference_writes: Vec<ReferenceWrite<V>>,
     pub unresolved: Vec<Operand<V>>,
 }
 
@@ -98,16 +111,18 @@ pub(crate) fn derive<D: Inputs>(
     domain: &D,
 ) -> Relations<D::Value> {
     let mut stores = BTreeSet::new();
+    let mut reference_writes = BTreeSet::new();
     let mut unresolved = BTreeSet::new();
     let mut pending = vec![];
     // Declaration-local elision remains distinct from substituted residents.
     // This is the same relation for all domains, not a consumer-side recovery.
-    add_stores(
+    add_relations(
         signatures,
         arguments,
-        regions::expression_transfers(signatures, expression),
+        regions::expression_relations(signatures, expression),
         domain,
         &mut stores,
+        &mut reference_writes,
     );
     if !matches!(
         expression.kind,
@@ -173,13 +188,17 @@ pub(crate) fn derive<D: Inputs>(
             Type::Callable { contract, .. } => contract.residual.where_outlives.as_slice(),
             _ => &[],
         };
-        let transfers = regions::parameter_transfers_with_outlives(signatures, &types, outlives)
-            .into_iter()
-            .filter(|transfer| {
-                include_explicit || transfer.destination < count || transfer.source < count
-            })
-            .collect();
-        add_stores(signatures, &operands, transfers, domain, &mut stores);
+        let mut relations = regions::parameter_relations(signatures, &types, outlives);
+        relations.stores.retain(|transfer|
+            include_explicit || transfer.destination < count || transfer.source < count);
+        relations.reference_writes.retain_mut(|write| {
+            if include_explicit || write.destination < count { return true; }
+            // The selected declaration already supplied explicit permission
+            // with rigid binders. This expansion adds only captured sources.
+            write.sources.retain(|(source, _)| *source < count);
+            !write.sources.is_empty()
+        });
+        add_relations(signatures, &operands, relations, domain, &mut stores, &mut reference_writes);
         for operand in &operands[..count] {
             for (path, ty) in regions::callable_paths(signatures, &operand.ty, true) {
                 let Some(value) = domain.project(&operand.value, &path) else {
@@ -192,18 +211,29 @@ pub(crate) fn derive<D: Inputs>(
     }
     Relations {
         stores: stores.into_iter().collect(),
+        reference_writes: reference_writes.into_iter().map(|mut write| {
+            // An opaque invoked environment may supply additional backing
+            // loans. Retain its footprint and its coverage gap on writable
+            // reference slots; a fresh external alternative cannot hide it.
+            if !unresolved.is_empty() {
+                write.unresolved = true;
+                write.sources.extend(unresolved.iter().map(|operand| operand.value.clone()));
+            }
+            write
+        }).collect(),
         unresolved: unresolved.into_iter().collect(),
     }
 }
 
-fn add_stores<D: Inputs>(
+fn add_relations<D: Inputs>(
     signatures: &crate::ElaboratedInterface,
     operands: &[Operand<D::Value>],
-    transfers: Vec<regions::ResidentTransfer>,
+    relations: regions::ResidentRelations,
     domain: &D,
     stores: &mut BTreeSet<Store<D::Value>>,
+    reference_writes: &mut BTreeSet<ReferenceWrite<D::Value>>,
 ) {
-    for transfer in transfers {
+    for transfer in relations.stores {
         let (Some(destination), Some(source)) = (
             operands.get(transfer.destination),
             operands.get(transfer.source),
@@ -221,10 +251,26 @@ fn add_stores<D: Inputs>(
         };
         stores.insert(Store {
             destination,
-            destination_fields: transfer.destination_fields.map(|(value, ty)| Operand { ty, value }),
             source,
             source_is_callable,
         });
+    }
+    for write in relations.reference_writes {
+        let Some(operand) = operands.get(write.destination) else { continue; };
+        let projected = domain.project(&operand.value, &write.destination_path);
+        let unresolved_destination = projected.is_none();
+        let destination = projected.unwrap_or_else(|| operand.value.clone());
+        // Missing input projections remain explicit unknown operands in the
+        // domain adapter; they must not be interpreted as no possible source.
+        let Some(sources) = write.sources.iter().map(|(index, path)| operands.get(*index)
+            .and_then(|operand| domain.project(&operand.value, path))).collect::<Option<Vec<_>>>() else {
+            // An unresolved source cannot justify dropping a writable slot.
+            // Retain its whole typed input footprint instead of an empty set.
+            let sources = write.sources.iter().filter_map(|(index, _)| operands.get(*index).map(|operand| operand.value.clone())).collect();
+            reference_writes.insert(ReferenceWrite { destination, unresolved_destination, fields: Operand { ty: write.ty, value: write.fields }, sources, unresolved: true });
+            continue;
+        };
+        reference_writes.insert(ReferenceWrite { destination, unresolved_destination, fields: Operand { ty: write.ty, value: write.fields }, sources, unresolved: false });
     }
 }
 
@@ -390,11 +436,13 @@ mod tests {
     struct Domain {
         captured: BTreeMap<u32, Vec<Operand<Value>>>,
         reads: Cell<usize>,
+        missing: BTreeSet<Value>,
     }
     impl Inputs for Domain {
         type Value = Value;
         fn project(&self, value: &Value, path: &[u32]) -> Option<Value> {
-            Some((value.0, value.1.iter().chain(path).copied().collect()))
+            let projected = (value.0, value.1.iter().chain(path).copied().collect());
+            (!self.missing.contains(&projected)).then_some(projected)
         }
         fn captures(&self, callable: &Operand<Value>) -> CapturedInputs<Value> {
             self.reads.set(self.reads.get() + 1);
@@ -460,6 +508,44 @@ mod tests {
     }
 
     #[test]
+    fn reference_writes_exist_without_incoming_loans_and_retain_missing_inputs() {
+        let ty = reference(crate::Lifetime::Static);
+        let writable = Type::Reference { lifetime: crate::Lifetime::Elided,
+            mutability: crate::Mutability::Unique, referent: Box::new(Type::Tuple(vec![ty.clone()])) };
+        let signatures = crate::ElaboratedInterface::default();
+        let mut domain = Domain::default();
+        domain.captured.insert(0, vec![Operand { ty: writable.clone(), value: (1, vec![]) }]);
+        let expression = expression(callable(vec![]));
+        let captured = derive(&signatures, &expression, (0, vec![]), &[], &domain);
+        assert_eq!(captured.reference_writes.len(), 1);
+        let write = &captured.reference_writes[0];
+        assert_eq!(write.destination, (1, vec![]));
+        assert_eq!(write.fields.value, vec![0]);
+        assert_eq!(write.fields.ty, ty);
+        assert!(write.sources.is_empty() && !write.unresolved && !write.unresolved_destination);
+
+        let operands = vec![Operand { ty: writable, value: (1, vec![]) }, Operand { ty: ty.clone(), value: (2, vec![]) }];
+        domain.missing.insert((1, vec![]));
+        domain.missing.insert((2, vec![3]));
+        let relations = regions::ResidentRelations { stores: vec![], reference_writes: vec![regions::ReferenceWrite {
+            destination: 0, destination_path: vec![], fields: vec![0], ty,
+            sources: vec![(1, vec![3])],
+        }] };
+        let mut stores = BTreeSet::new();
+        let mut writes = BTreeSet::new();
+        add_relations(&signatures, &operands, relations, &domain, &mut stores, &mut writes);
+        let write = writes.first().unwrap();
+        assert!(write.unresolved && write.unresolved_destination);
+        assert_eq!(write.destination, (1, vec![]));
+        assert_eq!(write.sources, vec![(2, vec![])], "a missing source path retains the entire incoming footprint");
+
+        let fn_slot = Type::Reference { lifetime: crate::Lifetime::Elided,
+            mutability: crate::Mutability::Unique, referent: Box::new(callable(vec![])) };
+        let relations = regions::parameter_relations(&signatures, &[fn_slot], &[]);
+        assert!(relations.reference_writes.is_empty(), "a callable slot is not a reference handle");
+    }
+
+    #[test]
     fn explicit_and_captured_inputs_use_one_store_relation() {
         let reference = reference(crate::Lifetime::Elided);
         let (signatures, slot) = slot(reference.clone());
@@ -484,7 +570,6 @@ mod tests {
         assert_eq!(
             relations.stores,
             vec![Store {
-                destination_fields: None,
                 destination: (1, vec![crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT, 0]),
                 source: (2, vec![]),
                 source_is_callable: false

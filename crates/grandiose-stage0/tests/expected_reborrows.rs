@@ -212,12 +212,7 @@ fn evaluated_static_views_keep_their_declared_reference_contract() {
     }
 }
 
-#[test]
-fn helper_created_static_views_replace_an_empty_payload() {
-    // Active acceptance regression: invocation may-stores must represent
-    // replacement variant payloads, including references created by the
-    // helper rather than supplied by an incoming reference-bearing value.
-    let source = r#"use std::*;
+const STATIC_VIEW_REPLACEMENT: &str = r#"use std::*;
         enum Maybe<T> { Some(T), None(()) }
         struct State { previous: Maybe<Slice<'static,u8>> }
         fn set(state: &mut State) { let view: Slice<'static,u8> = b"*"; state.previous = Maybe::Some(view); }
@@ -226,6 +221,12 @@ fn helper_created_static_views_replace_an_empty_payload() {
         }
         pub fn main() -> i64 { let mut state = State { previous: Maybe::None(()) }; set(&mut state); as<i64>(*Slice::get_unchecked(select(state), 0)) }
     "#;
+
+#[test]
+fn helper_created_static_views_replace_an_empty_payload() {
+    // Replacement payloads include references created by the helper, not
+    // merely loans forwarded from its incoming values.
+    let source = STATIC_VIEW_REPLACEMENT;
     for optimization in ["0", "2"] {
         let artifact = StageZeroCompiler::new().compile(request(source, optimization)).unwrap().artifact.unwrap();
         let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
@@ -233,5 +234,51 @@ fn helper_created_static_views_replace_an_empty_payload() {
         // indexes only its first byte through the trusted Slice primitive.
         assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
         assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+fn check_generic_reference_replacement(action: &str) {
+    let prefix = r#"use std::*;
+        enum Maybe<T> { Some(T), None(()) }
+        struct State<'a> { previous: Maybe<Slice<'a,u8>> }
+        fn set<'a>(state: &mut State<'a>) { let view: Slice<'static,u8> = b"*"; state.previous = Maybe::Some(view); }
+        fn select<'a>(state: State<'a>) -> Slice<'a,u8> {
+            handle state.previous { Maybe::Some(value) => value, Maybe::None(_) => b"!" }
+        }
+    "#;
+    let source = format!("{prefix} pub fn main() -> i64 {{ let mut state: State<'_> = State {{ previous: Maybe::None(()) }}; {action} as<i64>(*Slice::get_unchecked(select(state), 0)) }}");
+    for optimization in ["0", "2"] {
+        let artifact = StageZeroCompiler::new().compile(request(&source, optimization))
+            .unwrap_or_else(|error| panic!("{action}: {error:?}")).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: each helper writes a one-byte static view; its first
+        // byte is read through the trusted, in-bounds Slice primitive.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
+fn helper_created_references_compose_with_generic_regions() {
+    check_generic_reference_replacement("set(&mut state);");
+}
+
+#[test]
+fn helper_created_references_compose_with_captured_targets() {
+    // Active acceptance regression: the captured-input resource handoff and
+    // region identities must agree with the invocation's storage relation.
+    check_generic_reference_replacement("let target = &mut state; let update = move (target) { set(target); }; update();");
+}
+
+#[test]
+fn helper_created_static_reference_payloads_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(STATIC_VIEW_REPLACEMENT, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: compile and execute only this locally checked source and
+        // its trusted static-memory/Slice operations.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
     }
 }

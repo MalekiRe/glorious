@@ -4,6 +4,47 @@
 
 use super::*;
 
+/// Positive absence of executable cleanup for a source resident. Open or
+/// unavailable layouts are not the concrete planner's "not demanded yet"
+/// result. This query uses the same custom-Drop selection and owned structural
+/// layout as destruction planning; references never own their referents.
+pub(crate) fn cleanup_is_trivial(
+    signatures: &ElaboratedInterface, solver: &mut TraitSolver, ty: &Type,
+    assumptions: &[TraitGoal], stateless_callable: bool,
+) -> bool {
+    fn visit(signatures: &ElaboratedInterface, solver: &mut TraitSolver, ty: &Type,
+        assumptions: &[TraitGoal], stateless_callable: bool, active: &mut BTreeSet<Vec<u8>>,
+    ) -> bool {
+        if active.len() >= 128 { return false; }
+        let Ok(ty) = solver.normalize_type(ty.clone()) else { return false; };
+        // Generative labels are proof values, not owners of their payload.
+        if crate::types::label::payload(&ty).is_some() { return true; }
+        let key = crate::types::canonical_type_encoding(&ty);
+        if !active.insert(key.clone()) { return false; }
+        let trivial = !custom_drop_may_apply(signatures, solver, &ty, assumptions) && match &ty {
+            Type::Tuple(fields) => fields.iter().all(|ty| visit(signatures, solver, ty, assumptions, false, active)),
+            Type::Nominal { definition, .. } if *definition == crate::refinement::bindings_definition() =>
+                crate::refinement::binding_pack_fields(&ty).is_some_and(|fields| fields.iter()
+                    .all(|ty| visit(signatures, solver, ty, assumptions, false, active))),
+            Type::Nominal { definition, arguments } => match signatures.definitions.get(definition) {
+                Some(ElaboratedHeader::Nominal { layout, .. }) => crate::mir::instantiate_nominal_copy_layout(layout, arguments)
+                    .is_some_and(|variants| variants.iter().flatten().all(|ty| visit(signatures, solver, ty, assumptions, false, active))),
+                _ => false,
+            },
+            Type::FixedArray { .. } if ty.fixed_array_length() == Some(0) => true,
+            Type::Array(element) | Type::FixedArray { element, .. } => visit(signatures, solver, element, assumptions, false, active),
+            Type::Callable { contract, .. } => stateless_callable || (contract.environment.is_some()
+                && contract.captures.iter().all(|ty| visit(signatures, solver, ty, assumptions, false, active))),
+            Type::Unit | Type::Never | Type::Scalar(_) | Type::Reference { .. }
+            | Type::RawPointer { .. } | Type::StaticData { .. } => true,
+            _ => false,
+        };
+        active.remove(&key);
+        trivial
+    }
+    visit(signatures, solver, ty, assumptions, stateless_callable, &mut BTreeSet::new())
+}
+
 pub(crate) fn custom_drop_may_apply(
     signatures: &ElaboratedInterface,
     solver: &mut TraitSolver,

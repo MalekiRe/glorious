@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 121 verification below,
+Updated from the current source and cache 122 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,33 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 122 repairs the active helper-created static-view replacement through
+the shared invocation storage relation. Writable physical reference slots are
+independent of incoming loan sources; both resource consumers retain every
+possible debt and invalidate stale absence/targets. Opaque aggregate updates
+preserve untouched-field provenance. Complete read-only invocation evidence
+comes from the existing control product and includes implicit cleanup selected
+through the destruction authority.
+
+Verification records 475 distinct passing checks and one active source
+acceptance failure. Direct static and generic-region replacement execute fresh
+and decoded VM O0/O2, and generated static replacement executes native O0/O2.
+The captured-target variant remains actively failing with G5016/G5008. Its
+actual captured roots do not align with the isolated callable's formal loan
+product, while conservative captured-region matching retains an outer handle
+as possible stored debt. The next repair must align captured-input identity
+and storage permission through the authoritative invocation/resource products.
+The fixture's success requirement and both safety checks remain unchanged.
+
+The full-library root **still fails with 59 diagnostic records**, no suppression
+marker (`target/invocation-writes-final-library-v21.log`). The temporary extra
+I/O write-projection failure is removed; API/array, graph, custom-Drop, unsafe,
+mandatory-tail and minimum-use blockers remain. The full source matrix and
+native generic-label gate were not rerun. Full compiler/library/self-hosted
+acceptance remains open. Exact gate evidence is in `implementation-progress.md`.
+
+The following cache 121 and earlier entries are historical.
 
 Cache 121 repairs absent variant payloads and evaluated initializer provenance
 through the shared body-control and normal-result products. Positive reference

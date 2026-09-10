@@ -1070,3 +1070,42 @@ must be addressed through shared storage outcomes, not by treating an absent
 source as new reference authority or dropping an unresolved write. General
 guard-correlated stores, native labels/handlers and full compiler/library/
 self-hosted acceptance remain open.
+
+## Writable reference slots and proved read-only invocations
+
+The shared resident-invocation relation distinguishes a writable physical
+reference slot from the incoming loans it might receive. The declaration's
+checked path and unique access authorize the slot; directional outlives rules
+select possible input dependencies. A slot can receive a newly constructed
+reference backed outside the current frame even when no incoming loan supplies
+it. Logical residents and whole callable stores remain separate products: a
+callable value is not a reference handle. Explicit, captured and higher-order
+inputs share this producer and its projection rules. Missing projections and
+opaque invoked environments retain their whole footprints and unresolved flags.
+
+Both resource consumers snapshot physical write inputs before applying them.
+They retain old and possible incoming loans, admit the coarse outside-frame
+alternative, revoke reference absence and invalidate exact local targets. The
+escape value snapshot supports declaration-authorized replacement of variant
+payloads separately from strict source assignment. Opaque aggregates retain
+projected updates with an untouched-field fallback, not a fabricated array or
+closed field count. All loan, region, control and escape queries traverse that
+same value. Source-proved arities and array extents permit precise subsequent
+replacement; unknown fallback provenance cannot become absence or validity.
+
+Only the existing sealed callable-control execution product can prove an
+invocation storage-read-only. It requires complete coverage, classifies every
+event, and includes possible implicit cleanup. The destruction authority supplies
+positive trivial-cleanup evidence using its existing custom-Drop selection and
+owned layout rules. Open or unavailable layouts, executable cleanup and unknown
+control prevent the proof. An independently checked declaration contract may
+prove a getter read-only after an unknown caller prefix without certifying that
+prefix. Both store consumers use this proof; empty loan sets never imply no write.
+
+This repairs the helper-created static-view replacement left open above,
+including generic regions and generated native execution. It is not a complete
+captured mutation contract: the active captured-target source exposes a mismatch
+between captured-input loan identities and isolated closure resource products,
+alongside conservative captured-region store permission. That regression remains
+an acceptance requirement, not a waived diagnostic. Complete guarded storage,
+native labels/handlers and compiler/library/self-hosted acceptance remain open.

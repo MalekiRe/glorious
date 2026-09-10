@@ -103,6 +103,7 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
                 element,
                 fields,
             } => pending.extend(array_values(*length, element, fields)),
+            Value::Projected { fallback, fields } => pending.extend(projected_values(fallback, fields)),
             Value::CallableResident { footprint, .. } => pending.push(footprint),
             Value::Region(_) => {
                 unreachable!("resolve storage snapshots before querying control dependencies")
@@ -124,6 +125,7 @@ pub(super) fn unrepresented_capture(value: &Value) -> bool {
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
             values.iter().any(unrepresented_capture),
         Value::Array { length, element, fields } => array_values(*length, element, fields).any(unrepresented_capture),
+        Value::Projected { fallback, fields } => projected_values(fallback, fields).any(unrepresented_capture),
         Value::Closure { resident_captures, .. } => resident_captures.iter().any(|capture| unrepresented_capture(&capture.value)),
         Value::CallableResident { footprint, resident_captures } => unrepresented_capture(footprint)
             || resident_captures.iter().any(|capture| unrepresented_capture(&capture.value)),

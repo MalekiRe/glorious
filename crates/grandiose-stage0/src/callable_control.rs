@@ -175,6 +175,10 @@ pub enum ControlGuard {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlEvent {
+    /// An evaluated resident may require source-selected or opaque cleanup.
+    /// This is a coverage gap for storage effects, not an observed Drop call
+    /// or a claim about whether the value is consumed on this path.
+    UnresolvedCleanup { site: ControlSite },
     Borrow {
         site: ControlSite,
         value: ControlValue,
@@ -255,6 +259,28 @@ impl ControlCallCoverage<'_> {
         self.is_complete()
             && matches!(self, Self::Alternatives(paths) if paths.iter()
             .all(|path| matches!(path.outcome, ControlOutcome::Return(_))))
+    }
+
+    /// Mutation coverage is produced here, not inferred by resource consumers
+    /// from an empty may-store source set. The event match is intentionally
+    /// exhaustive: adding a new execution event must classify its writes.
+    fn storage_read_only(&self, invocation: Option<&ControlSite>) -> bool {
+        self.is_complete() && matches!(self, Self::Alternatives(paths) if paths.iter().all(|path|
+            path.events.iter().filter(|event| {
+                let site = match event {
+                    ControlEvent::Borrow { site, .. } | ControlEvent::Invoke { site, .. }
+                    | ControlEvent::Transfer { site, .. } | ControlEvent::Perform { site, .. }
+                    | ControlEvent::UnresolvedCleanup { site } => site,
+                };
+                invocation.is_none_or(|call| {
+                    // Strict operands and earlier caller events are not part
+                    // of the callee's conditional storage contract.
+                    site.calls.starts_with(&call.calls) && site.calls.get(call.calls.len()) == Some(&call.location)
+                })
+            }).all(|event| match event {
+                ControlEvent::Borrow { .. } | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
+                ControlEvent::Perform { .. } | ControlEvent::UnresolvedCleanup { .. } => false,
+            })))
     }
 }
 
@@ -460,6 +486,9 @@ pub(crate) struct InvocationControl {
     pub unknown: bool,
     pub transfers: Vec<InvocationTransfer>,
     pub returns: Vec<InvocationPayload>,
+    /// Positively complete absence of storage writes in this invocation.
+    /// Unknown control/effects never acquire this permission.
+    storage_read_only: bool,
     /// Targets of the callee value itself, not exits executed inside a helper.
     direct_labels: std::collections::BTreeSet<LabelBrand>,
     other_callee: bool,
@@ -507,6 +536,7 @@ impl ClosureControl {
 }
 
 impl InvocationControl {
+    pub(crate) fn storage_read_only(&self) -> bool { self.storage_read_only }
     pub(crate) fn direct_label(&self) -> Option<LabelBrand> {
         (!self.unknown && !self.other_callee && self.direct_labels.len() == 1)
             .then(|| *self.direct_labels.first().unwrap())
@@ -689,7 +719,10 @@ impl BoundControlSummaries<'_> {
                 // Expanded helper/closure activations have their own frame.
                 // Only standalone observations belong to this arena's owners.
                 if !site.calls.is_empty() || site.location.callable != callable { continue; }
-                let control = calls.entry(site.location.expression).or_default();
+                let control = calls.entry(site.location.expression).or_insert_with(|| InvocationControl {
+                    storage_read_only: true, ..Default::default()
+                });
+                control.storage_read_only &= evidence.coverage.storage_read_only(Some(site));
                 // Keep the unconditional gap even while projecting positive
                 // payload dependencies from a represented guarded execution.
                 control.unknown |= !evidence.coverage.is_complete();
@@ -750,6 +783,7 @@ impl BoundControlSummaries<'_> {
             && let Some(target) = labels.binders().find(|brand|
                 crate::types::label::matches_brand(&operand.ty, *brand)) {
             return Some(InvocationControl {
+                storage_read_only: true,
                 labels: [target].into(), direct_labels: [target].into(),
                 transfers: vec![InvocationTransfer { target: Some(target), payload: InvocationPayload {
                     ty: payload.clone(), source: payloads::PayloadSource::Argument { index: 0, path: vec![] },
@@ -791,7 +825,9 @@ impl BoundControlSummaries<'_> {
             (self.summaries.get(CallableBrand::Closure(constructor.brand()))?, None)
         };
         let mut control = InvocationControl {
-            declared_function: definition, other_callee: true, ..Default::default()
+            declared_function: definition, other_callee: true,
+            storage_read_only: ControlCallCoverage::Alternatives(&summary.alternatives).storage_read_only(None),
+            ..Default::default()
         };
         if summary.alternatives.is_empty() { control.unknown = true; }
         for path in &summary.alternatives {
@@ -1044,6 +1080,9 @@ fn derive_control_phase<E>(
         }));
     }
     let mut output = ControlSummarySet::default();
+    let cleanup_solvers = bodies.iter().map(|(owner, input)| (*owner,
+        interfaces[&(input.interface as *const ElaboratedInterface as usize)].1.fresh_query())).collect();
+    let mut cleanup_cache = BTreeMap::new();
     for (owner, input) in bodies {
         let mut roots = vec![(
             CallableBrand::Named(*owner),
@@ -1108,7 +1147,7 @@ fn derive_control_phase<E>(
                 parameters: parameters.iter().map(|(name, _)| locals[name].clone()).collect(),
                 captures: captures.iter().map(|(name, _)| locals[name].clone()).collect(),
             };
-            let initial = State {
+            let mut initial = State {
                 locals,
                 guards: vec![],
                 events: vec![],
@@ -1124,7 +1163,10 @@ fn derive_control_phase<E>(
                 dependencies: BTreeMap::from([(*owner, seals[owner].clone())]),
                 calls: BTreeMap::new(),
                 call_gaps: BTreeMap::new(),
+                cleanup_solvers: &cleanup_solvers,
+                cleanup_cache: &mut cleanup_cache,
             };
+            analyzer.observe_cleanup_inputs(&frame, root, &mut initial);
             let states = match &seals[owner].valid {
                 Ok(()) => analyzer.eval(&frame, root, initial),
                 Err(reason) => vec![initial.stop(reason.clone())],
@@ -1237,8 +1279,39 @@ struct Analyzer<'a, 'b> {
     dependencies: BTreeMap<DefKey, Arc<Seal>>,
     calls: BTreeMap<ControlSite, Vec<ControlAlternative>>,
     call_gaps: BTreeMap<CallContext, ControlUnknown>,
+    cleanup_solvers: &'a BTreeMap<DefKey, crate::TraitSolver>,
+    cleanup_cache: &'a mut BTreeMap<(DefKey, Vec<u8>, Vec<u8>, bool), bool>,
 }
 impl Analyzer<'_, '_> {
+    fn cleanup_trivial(&mut self, frame: &Frame, ty: &Type, stateless_callable: bool) -> bool {
+        let arguments = crate::types::canonical_type_encoding(&Type::Nominal {
+            definition: frame.owner, arguments: frame.generic_arguments.clone().unwrap_or_default(),
+        });
+        let key = (frame.owner, arguments, crate::types::canonical_type_encoding(ty), stateless_callable);
+        if let Some(result) = self.cleanup_cache.get(&key) { return *result; }
+        let input = &self.bodies[&frame.owner];
+        let signature = match &frame.generic_arguments {
+            Some(arguments) => match input.signature.instantiate_generic(arguments) { Ok(signature) => signature, Err(_) => return false },
+            None => input.signature.clone(),
+        };
+        let mut solver = self.cleanup_solvers[&frame.owner].fresh_query();
+        solver.assume_callable_contract(&signature);
+        solver.set_associated_bindings(signature.where_associated_type_bindings.clone(), signature.where_associated_effect_bindings.clone());
+        let assumptions = signature.where_bounds.iter().map(|(subject, relation)| crate::TraitGoal {
+            subject: subject.clone(), relation: relation.clone(),
+        }).collect::<Vec<_>>();
+        let result = crate::destruction::cleanup_is_trivial(input.interface, &mut solver, ty, &assumptions, stateless_callable);
+        self.cleanup_cache.insert(key, result);
+        result
+    }
+
+    fn observe_cleanup_inputs(&mut self, frame: &Frame, id: CoreId, state: &mut State) {
+        if state.locals.values().any(|value| !self.cleanup_trivial(frame, &value.ty,
+            matches!(value.shape, ControlValueShape::Callable { ref captures, .. } if captures.is_empty()))) {
+            state.events.push(ControlEvent::UnresolvedCleanup { site: frame.site(id) });
+        }
+    }
+
     fn record_call(&mut self, site: ControlSite, states: &[State]) {
         let paths = self.calls.entry(site).or_default();
         paths.extend(states.iter().map(State::alternative));
@@ -1301,7 +1374,7 @@ impl Analyzer<'_, '_> {
         }
         states
     }
-    fn eval(&mut self, frame: &Frame, id: CoreId, state: State) -> Vec<State> {
+    fn eval(&mut self, frame: &Frame, id: CoreId, mut state: State) -> Vec<State> {
         if !state.running() {
             if let Some(reason) = state.coverage_gap() {
                 self.unvisited(frame, id, &reason);
@@ -1322,6 +1395,14 @@ impl Analyzer<'_, '_> {
         self.evaluating.push(site);
         let mut evaluation = frame.clone();
         evaluation.occurrence = self.steps as u64;
+        if let Some(expression) = self.bodies[&frame.owner].body.expressions.get(id.0 as usize) {
+            let stateless = matches!(expression.kind, CoreKind::Function { .. } | CoreKind::TraitMethod { .. });
+            if !self.cleanup_trivial(frame, &frame.ty(expression.ty.clone()), stateless)
+                && !state.events.iter().any(|event| matches!(event, ControlEvent::UnresolvedCleanup { site }
+                    if site.location.callable == frame.callable && site.calls == frame.calls)) {
+                state.events.push(ControlEvent::UnresolvedCleanup { site: evaluation.site(id) });
+            }
+        }
         let output = self.eval_inner(&evaluation, id, state);
         self.evaluating.pop();
         output
@@ -2030,6 +2111,7 @@ impl Analyzer<'_, '_> {
                         site: child.site(root), name: name.clone(),
                     }));
                 }
+                self.observe_cleanup_inputs(&child, root, &mut state);
                 self.stack.push(*brand);
                 let mut output = self.eval(&child, root, state);
                 self.stack.pop();

@@ -15,38 +15,39 @@ pub(super) fn capture_value_at_path(value: &Value, path: &[crate::resident_invoc
 }
 
 pub(super) fn replace_capture_value_at_path(value: &mut Value, fields: &[u32],
-    path: &[crate::resident_invocations::CaptureProjection], replacement: Value, strong: bool,
+    path: &[crate::resident_invocations::CaptureProjection], replacement: Value, strong: bool, reference_write: bool,
 ) -> bool {
     let Some((capture, tail)) = path.split_first() else {
+        if reference_write { return weak_reference_write_path(value, fields, replacement); }
         let Some(previous) = value_at_path(value, fields) else { return false; };
         return replace_resident_path(value, fields, if strong { replacement } else { join(vec![previous, replacement]) });
     };
     let Some(mut owner) = value_at_path(value, fields) else { return false; };
     fn replace(owner: &mut Value, capture: &crate::resident_invocations::CaptureProjection,
-        tail: &[crate::resident_invocations::CaptureProjection], value: &Value, strong: bool,
+        tail: &[crate::resident_invocations::CaptureProjection], value: &Value, strong: bool, reference_write: bool,
     ) -> bool {
         match owner {
-            Value::Logical { physical, .. } => replace(physical, capture, tail, value, strong),
+            Value::Logical { physical, .. } => replace(physical, capture, tail, value, strong, reference_write),
             Value::Joined(values) | Value::Alternatives(values) => {
                 let mut changed = false;
-                for owner in values { changed |= replace(owner, capture, tail, value, false); }
+                for owner in values { changed |= replace(owner, capture, tail, value, false, reference_write); }
                 changed
             }
             Value::Closure { resident_captures, .. } | Value::CallableResident { resident_captures, .. } => {
                 let count = resident_captures.iter().filter(|operand| capture.matches(&operand.ty)).count();
                 let mut changed = false;
                 for operand in resident_captures.iter_mut().filter(|operand| capture.matches(&operand.ty)) {
-                    changed |= replace_capture_value_at_path(&mut operand.value, &capture.fields, tail, value.clone(), strong && count == 1);
+                    changed |= replace_capture_value_at_path(&mut operand.value, &capture.fields, tail, value.clone(), strong && count == 1, reference_write);
                 }
                 if let Value::CallableResident { footprint, .. } = owner {
-                    changed |= replace(footprint, capture, tail, value, false);
+                    changed |= replace(footprint, capture, tail, value, false, reference_write);
                 }
                 changed
             }
             _ => false,
         }
     }
-    replace(&mut owner, capture, tail, &replacement, strong) && replace_resident_path(value, fields, owner)
+    replace(&mut owner, capture, tail, &replacement, strong, reference_write) && replace_resident_path(value, fields, owner)
 }
 
 fn collect(value: &Value, operands: &mut BTreeSet<Operand<Value>>, represented: &mut bool) {
@@ -167,7 +168,8 @@ pub(super) fn reference_is_known(value: &Value) -> bool {
         Value::Reference { dependencies, authenticated, .. } => *authenticated || reference_is_known(dependencies),
         Value::Borrowed { .. } | Value::ExternalBorrowed => true,
         Value::Joined(values) | Value::Alternatives(values) =>
-            !values.is_empty() && values.iter().all(reference_is_known),
+            values.iter().any(reference_is_known)
+                && values.iter().all(|value| reference_is_known(value) || reference_is_empty(value)),
         Value::Logical { physical, .. } => reference_is_known(physical),
         _ => false,
     }
@@ -308,12 +310,14 @@ impl Analyzer<'_> {
 
     pub(super) fn record_invocation_stores(
         &mut self,
+        call: CoreId,
         callee: CoreId,
         callable: Value,
         arguments: &[CoreId],
         values: &[Value],
         span: Span,
     ) {
+        if self.continuations.invocation(call).is_some_and(|control| control.storage_read_only()) { return; }
         let arguments = arguments
             .iter()
             .zip(values)
@@ -329,15 +333,27 @@ impl Analyzer<'_> {
             &arguments,
             self,
         );
-        for store in relations.stores {
-            if let Some(fields) = store.destination_fields {
-                let destination = self.resolved_value(&store.destination);
-                if value_contains_external_reference(&reference_targets(&destination).unwrap_or(destination)) {
-                    self.report_external_store_escape(&store.source, span);
-                }
-                self.update_reference_resident(store.destination, &fields.value, store.source, &fields.ty, span, false);
+        let writes = relations.reference_writes.into_iter().map(|write| {
+            let destination = self.resolved_value(&write.destination);
+            let mut sources = write.sources.iter().map(|value| self.resolved_value(value)).collect::<Vec<_>>();
+            if write.unresolved { sources.push(Value::None); }
+            // An absent incoming variant cannot prove that this writable
+            // handle stays absent: the callee can construct a new reference
+            // backed outside this frame, independently of its inputs.
+            sources.push(Value::ExternalBorrowed);
+            (write, destination, join(sources))
+        }).collect::<Vec<_>>();
+        for (write, destination, sources) in writes {
+            if write.unresolved_destination {
+                self.error(span, "G5021", "invocation write has an unresolved destination projection");
                 continue;
             }
+            if value_contains_external_reference(&reference_targets(&destination).unwrap_or_else(|| destination.clone())) {
+                self.report_external_store_escape(&sources, span);
+            }
+            self.update_reference_resident(destination, &write.fields.value, sources, &write.fields.ty, span, false);
+        }
+        for store in relations.stores {
             if value_contains_external_reference(&self.resolved_value(&store.destination)) {
                 self.report_external_store_escape(&store.source, span);
             }

@@ -144,6 +144,7 @@ impl Analyzer<'_> {
         arguments: &[CoreId],
         call: CoreId,
     ) {
+        if self.continuations.invocation(call).is_some_and(|control| control.storage_read_only()) { return; }
         let Some(signatures) = self.signatures else {
             return;
         };
@@ -162,34 +163,50 @@ impl Analyzer<'_> {
             &arguments,
             self,
         );
-        let mut changed = false;
-        for store in relations.stores {
-            if let Some(fields) = &store.destination_fields {
-                let (_, destination) = self.invocation_reference_origins(&store.destination);
-                let (regions, source) = self.invocation_reference_origins(&store.source);
-                if let Some(targets) = destination.targets {
-                    for target in targets.into_iter().filter(|target| !target.indirect && !target.external) {
-                        let key = target.resident_key(&fields.value);
-                        self.invalidate_reference_empty_ancestors(&key);
-                        for mut loan in source.loans.iter().cloned() {
-                            // Copying a shared handle stores its referent,
-                            // not a new borrow of the source handle's slot.
-                            if !loan.unique { loan.owner = None; }
-                            self.install_reference_alias(&key, loan, call);
-                        }
-                        self.logical.origins.entry(key.clone()).or_default().extend(regions.iter().cloned());
-                        // This declaration permits a store; it neither says
-                        // which value was stored nor excludes other targets.
-                        let stored = self.reference_origins.entry(key).or_default();
-                        stored.targets = None;
-                        stored.reference_free = false;
-                    }
-                } else if destination.loans.is_empty() || destination.loans.iter().any(|loan| !loan.indirect && !loan.external) {
-                    self.error(self.body.expression(call).span, "G5023",
-                        "invocation store has unresolved local referent storage".into());
-                }
+        // Resolve physical-write sources and destinations against the
+        // pre-invocation snapshot, before an earlier write can alter them.
+        let writes = relations.reference_writes.into_iter().map(|write| {
+            let (_, destination) = self.invocation_reference_origins(&write.destination);
+            let sources = write.sources.iter().map(|source| self.invocation_reference_origins(source)).collect::<Vec<_>>();
+            (write, destination, sources)
+        }).collect::<Vec<_>>();
+        for (write, destination, sources) in writes {
+            let span = self.body.expression(call).span;
+            if write.unresolved_destination {
+                self.error(span, "G5023", "invocation write has an unresolved destination projection".into());
                 continue;
             }
+            if write.unresolved || sources.iter().any(|(_, origins)| origins.loans.is_empty() && !origins.is_known_empty()) {
+                self.error(span, "G5023", "invocation write has unresolved source provenance".into());
+            }
+            let Type::Reference { mutability, .. } = &write.fields.ty else { unreachable!("a typed reference write"); };
+            let mut loans = BTreeSet::from([ProjectionLoan::external(call, &write.fields.value, *mutability)]);
+            let mut regions = BTreeSet::new();
+            for (incoming, source) in sources {
+                regions.extend(incoming);
+                loans.extend(source.loans.into_iter().map(|mut loan| {
+                    // A shared handle copy retains its backing storage,
+                    // without borrowing the replaceable source handle slot.
+                    if !loan.unique { loan.owner = None; }
+                    loan
+                }));
+            }
+            if let Some(targets) = destination.targets {
+                for target in targets.into_iter().filter(|target| !target.indirect && !target.external) {
+                    let key = target.resident_key(&write.fields.value);
+                    self.invalidate_reference_empty_ancestors(&key);
+                    for loan in &loans { self.install_reference_alias(&key, loan.clone(), call); }
+                    self.logical.origins.entry(key.clone()).or_default().extend(regions.iter().cloned());
+                    let stored = self.reference_origins.entry(key).or_default();
+                    stored.targets = None;
+                    stored.reference_free = false;
+                }
+            } else if destination.loans.is_empty() || destination.loans.iter().any(|loan| !loan.indirect && !loan.external) {
+                self.error(span, "G5023", "invocation write has unresolved local referent storage".into());
+            }
+        }
+        let mut changed = false;
+        for store in relations.stores {
             if store.source_is_callable {
                 let sources = self.invocation_owners(&store.source);
                 for destination in self.invocation_owners(&store.destination) {

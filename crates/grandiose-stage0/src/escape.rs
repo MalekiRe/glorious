@@ -166,6 +166,13 @@ enum Value {
         capture_path: Vec<crate::resident_invocations::CaptureProjection>,
     },
     Aggregate(Vec<Value>),
+    /// An opaque physical aggregate with explicit projected updates. The
+    /// fallback describes every untouched field, without inventing an arity,
+    /// array extent, or inactive variant. Paths still require typed authority.
+    Projected {
+        fallback: Box<Value>,
+        fields: BTreeMap<u32, Value>,
+    },
     /// Type/lifetime-argument residents are not physical fields. Keep their
     /// provenance beside the physical shape without fabricating an address
     /// or allocating a vector indexed by a reserved path component.
@@ -377,6 +384,9 @@ impl Analyzer<'_> {
                 },
                 Value::Array { length, element, fields } => Value::Array { length: *length,
                     element: Box::new(resolve(element, graph, active)),
+                    fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
+                Value::Projected { fallback, fields } => Value::Projected {
+                    fallback: Box::new(resolve(fallback, graph, active)),
                     fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
                 Value::Logical { physical, arguments } => Value::Logical { physical: Box::new(resolve(physical, graph, active)),
                     arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
@@ -651,7 +661,7 @@ impl Analyzer<'_> {
                 }
                 let values = self.strict_values(arguments.clone());
                 if values.len() == arguments.len() && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
-                    self.record_invocation_stores(callee, callable.clone(), &arguments, &values, expression.span);
+                    self.record_invocation_stores(id, callee, callable.clone(), &arguments, &values, expression.span);
                     self.record_invocation_exits(id, &callable, &values, expression.span);
                 }
                 if mandatory_tail {
@@ -1254,20 +1264,20 @@ impl Analyzer<'_> {
         for (storage, fields, capture_path) in destinations {
             let Some(resident) = self.values.residents.get_mut(&storage) else { continue; };
             if !capture_path.is_empty() {
-                let replacement = if assignment { value.clone() } else {
-                    declared_reference(value.clone())
-                };
-                if !invocations::replace_capture_value_at_path(resident, &fields, &capture_path, replacement, exact)
+                if !invocations::replace_capture_value_at_path(resident, &fields, &capture_path, value.clone(), exact, !assignment)
                     && !crate::core::tail::tail_owned_type(self.signatures, ty, &mut vec![]) {
                     self.error(span, "G5021", "capture storage assignment lacks its sealed resident projection");
                 }
                 continue;
             }
+            if !assignment {
+                if !weak_reference_write_path(resident, &fields, value.clone()) {
+                    self.error(span, "G5021", "invocation write contradicts its declared resident path");
+                }
+                continue;
+            }
             let replacement = if exact { value.clone() }
                 else { join(vec![value_at_path(resident, &fields).unwrap_or(Value::None), value.clone()]) };
-            let replacement = if assignment { replacement } else {
-                declared_reference(replacement)
-            };
             if !replace_resident_path(resident, &fields, replacement)
                 && !crate::core::tail::tail_owned_type(self.signatures, ty, &mut vec![]) {
                 self.error(span, "G5021", "reference projection assignment has no sealed resident provenance path");
@@ -1433,6 +1443,11 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         if matches!(current, Value::ExternalBorrowed) {
             *current = Value::Aggregate(vec![Value::ExternalBorrowed; *field_count as usize]);
         }
+        if let Value::Projected { fallback, fields } = current {
+            if fields.keys().any(|field| *field >= *field_count) { return false; }
+            *current = Value::Aggregate((0..*field_count)
+                .map(|field| fields.get(&field).unwrap_or(fallback).clone()).collect());
+        }
         if let Value::Array { length, element, fields } = current {
             if length.is_some_and(|length| length != u64::from(*field_count)) { return false; }
             *length = Some(u64::from(*field_count));
@@ -1483,6 +1498,7 @@ fn declared_reference(value: Value) -> Value {
     fn entirely_external(value: &Value) -> bool {
         match value {
             Value::ExternalBorrowed => true,
+            Value::ReferenceFree => true,
             Value::Reference { targets: Some(targets), .. } => entirely_external(targets),
             Value::Joined(values) | Value::Alternatives(values) =>
                 !values.is_empty() && values.iter().all(entirely_external),
@@ -1549,11 +1565,16 @@ fn map_reference_path(value: &mut Value, path: &[u32], transform: &mut impl FnMu
         return match value {
             Value::Array { element, fields, .. } => map_reference_path(element, tail, transform)
                 && fields.values_mut().all(|value| map_reference_path(value, tail, transform)),
+            Value::Projected { fallback, fields } => map_reference_path(fallback, tail, transform)
+                && fields.values_mut().all(|value| map_reference_path(value, tail, transform)),
             Value::Aggregate(values) => values.iter_mut().all(|value| map_reference_path(value, tail, transform)),
             _ => false,
         };
     }
     if *field == crate::core::REFERENCE_PATH_DEREF { return false; }
+    if let Value::Projected { fallback, fields } = value {
+        return map_reference_path(fields.entry(*field).or_insert_with(|| (**fallback).clone()), tail, transform);
+    }
     if matches!(value, Value::None) { *value = Value::Aggregate(vec![]); }
     let Value::Aggregate(fields) = value else {
         if let Value::Variant(fields) = value {
@@ -1590,6 +1611,10 @@ fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -
     if let Value::Logical { physical, .. } = target {
         return replace_resident_path(physical, path, replacement);
     }
+    if matches!(*field, crate::core::REFERENCE_PATH_ARRAY_ELEMENT | crate::core::REFERENCE_PATH_DEREF) { return false; }
+    if let Value::Projected { fallback, fields } = target {
+        return replace_resident_path(fields.entry(*field).or_insert_with(|| (**fallback).clone()), tail, replacement);
+    }
     if let Value::Array { length, element, fields } = target {
         if length.is_some_and(|length| u64::from(*field) >= length) { return false; }
         let target = fields.entry(*field).or_insert_with(|| (**element).clone());
@@ -1598,6 +1623,64 @@ fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -
     let (Value::Aggregate(fields) | Value::Variant(fields)) = target else { return false; };
     let Some(target) = fields.get_mut(*field as usize) else { return false; };
     replace_resident_path(target, tail, replacement)
+}
+
+/// Apply a declaration-authorized possible write, rather than asserting that
+/// this projection exists in the current runtime variant. Its callee may
+/// replace the enclosing variant, so the resident becomes a joined projection
+/// footprint. Ordinary source assignments still use strict replacement above.
+/// At the written leaf, preserve every debt and revoke exact target evidence.
+fn weak_reference_write_path(target: &mut Value, path: &[u32], source: Value) -> bool {
+    fn write(target: &mut Value, path: &[u32], source: Value, mut variant: bool) -> bool {
+        let Some((field, tail)) = path.split_first() else {
+            *target = declared_reference(join(vec![std::mem::replace(target, Value::None), source]));
+            return true;
+        };
+        if matches!(target, Value::ExternalBorrowed) {
+            *target = Value::Projected { fallback: Box::new(Value::ExternalBorrowed), fields: BTreeMap::new() };
+        }
+        match target {
+            Value::Logical { physical, .. } => return write(physical, path, source, variant),
+            Value::Joined(values) | Value::Alternatives(values) =>
+                return values.iter_mut().all(|value| write(value, path, source.clone(), variant)),
+            _ => {},
+        }
+        if matches!(*field, crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT | crate::core::REFERENCE_PATH_DEREF) { return false; }
+        if let Value::Variant(fields) = target {
+            // The old tag no longer proves an absent field. Existing payload
+            // debts survive in the same structural snapshot.
+            *target = Value::Aggregate(std::mem::take(fields));
+            variant = true;
+        }
+        if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+            if matches!(target, Value::None | Value::ReferenceFree) {
+                *target = Value::Array { length: None, element: Box::new(std::mem::replace(target, Value::None)), fields: BTreeMap::new() };
+            }
+            return match target {
+                Value::Array { element, fields, .. } => write(element, tail, source.clone(), variant)
+                    && fields.values_mut().all(|value| write(value, tail, source.clone(), variant)),
+                Value::Projected { fallback, fields } => write(fallback, tail, source.clone(), variant)
+                    && fields.values_mut().all(|value| write(value, tail, source.clone(), variant)),
+                Value::Aggregate(fields) => fields.iter_mut().all(|value| write(value, tail, source.clone(), variant)),
+                _ => false,
+            };
+        }
+        if let Value::Array { length, element, fields } = target {
+            if length.is_some_and(|length| u64::from(*field) >= length) { return false; }
+            return write(fields.entry(*field).or_insert_with(|| (**element).clone()), tail, source, variant);
+        }
+        if let Value::Projected { fallback, fields } = target {
+            return write(fields.entry(*field).or_insert_with(|| (**fallback).clone()), tail, source, variant);
+        }
+        if matches!(target, Value::None | Value::ReferenceFree) {
+            variant = matches!(target, Value::ReferenceFree);
+            *target = Value::Aggregate(vec![]);
+        }
+        let Value::Aggregate(fields) = target else { return false; };
+        fields.resize(fields.len().max(*field as usize + 1), if variant { Value::ReferenceFree } else { Value::None });
+        write(&mut fields[*field as usize], tail, source, variant)
+    }
+    write(target, path, source, false)
 }
 
 fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Option<Value> {
@@ -1637,6 +1720,15 @@ fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Op
         && (matches!(value, Value::None | Value::FrameIndependent)
             || *field == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT) {
         return Some(Value::None);
+    }
+    if let Value::Projected { fallback, fields } = value {
+        if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+            return projected_values(fallback, fields)
+                .map(|value| value_at_variant_path(value, tail, known_variant))
+                .collect::<Option<Vec<_>>>().map(join);
+        }
+        if *field == crate::core::REFERENCE_PATH_DEREF { return None; }
+        return value_at_variant_path(fields.get(field).unwrap_or(fallback), tail, known_variant);
     }
     if let Value::Array { length, element, fields } = value {
         if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
@@ -1682,6 +1774,14 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
         return put_value_at_path(arguments.entry(*argument).or_insert(Value::None), tail, replacement);
     }
     if let Value::Logical { physical, .. } = target { return put_value_at_path(physical, path, replacement); }
+    if let Value::Projected { fallback, fields } = target {
+        if path[0] == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+            return put_value_at_path(fallback, &path[1..], replacement.clone())
+                && fields.values_mut().all(|value| put_value_at_path(value, &path[1..], replacement.clone()));
+        }
+        if path[0] == crate::core::REFERENCE_PATH_DEREF { return false; }
+        return put_value_at_path(fields.entry(path[0]).or_insert_with(|| (**fallback).clone()), &path[1..], replacement);
+    }
     if path[0] == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
         if matches!(target, Value::None) {
             *target = Value::Array { length: None, element: Box::new(Value::None), fields: BTreeMap::new() };
@@ -1701,6 +1801,10 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
         fields.resize(required, Value::None);
     }
     put_value_at_path(&mut fields[path[0] as usize], &path[1..], replacement)
+}
+
+fn projected_values<'a>(fallback: &'a Value, fields: &'a BTreeMap<u32, Value>) -> impl Iterator<Item = &'a Value> {
+    std::iter::once(fallback).chain(fields.values())
 }
 
 fn array_values<'a>(length: Option<u64>, element: &'a Value, fields: &'a BTreeMap<u32, Value>)
@@ -1726,10 +1830,15 @@ fn seal_array_extents(signatures: &crate::ElaboratedInterface, ty: &Type, value:
         seal_array_extents(signatures, ty, physical);
         return;
     }
+    if let (Type::FixedArray { .. }, Value::Projected { fallback, fields }) = (ty, &mut *value) {
+        *value = Value::Array { length: ty.fixed_array_length(),
+            element: std::mem::replace(fallback, Box::new(Value::None)), fields: std::mem::take(fields) };
+    }
     match (ty, value) {
-        (Type::FixedArray { element: ty, length }, Value::Array { length: extent, element, .. }) => {
+        (Type::FixedArray { element: ty, length }, Value::Array { length: extent, element, fields }) => {
             *extent = Type::FixedArray { element: ty.clone(), length: length.clone() }.fixed_array_length();
             seal_array_extents(signatures, ty, element);
+            for value in fields.values_mut() { seal_array_extents(signatures, ty, value); }
         }
         (Type::Tuple(types), Value::Aggregate(fields)) => {
             for (ty, value) in types.iter().zip(fields) { seal_array_extents(signatures, ty, value); }
@@ -1802,6 +1911,7 @@ fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region>
         Value::Logical { physical, arguments } => logical_regions(physical).into_iter()
             .chain(arguments.values().flat_map(logical_regions)).collect(),
         Value::Array { length, element, fields } => array_values(*length, element, fields).flat_map(logical_regions).collect(),
+        Value::Projected { fallback, fields } => projected_values(fallback, fields).flat_map(logical_regions).collect(),
         _ => BTreeSet::new(),
     }
 }
@@ -1819,6 +1929,7 @@ fn contained_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Regio
         Value::Logical { physical, arguments } => contained_regions(physical).into_iter()
             .chain(arguments.values().flat_map(contained_regions)).collect(),
         Value::Array { length, element, fields } => array_values(*length, element, fields).flat_map(contained_regions).collect(),
+        Value::Projected { fallback, fields } => projected_values(fallback, fields).flat_map(contained_regions).collect(),
         _ => logical_regions(value),
     }
 }
@@ -1880,6 +1991,7 @@ fn frame_independent_value(value: &Value) -> bool {
         }
         Value::Array { length, element, fields } =>
             array_values(*length, element, fields).all(frame_independent_value),
+        Value::Projected { fallback, fields } => projected_values(fallback, fields).all(frame_independent_value),
         Value::Logical { physical, arguments } => frame_independent_value(physical)
             && arguments.values().all(frame_independent_value),
         Value::Closure { frame_independent, controls, .. } => *frame_independent && controls.is_empty(),
@@ -1918,6 +2030,9 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
         }
         Value::Array { length, element, fields } => {
             for value in array_values(*length, element, fields) { collect_borrowed_roots(value, roots); }
+        }
+        Value::Projected { fallback, fields } => {
+            for value in projected_values(fallback, fields) { collect_borrowed_roots(value, roots); }
         }
         Value::Logical { physical, arguments } => {
             collect_borrowed_roots(physical, roots);
@@ -2035,6 +2150,7 @@ fn value_contains_external_reference(value: &Value) -> bool {
         }
         Value::Array { length, element, fields } =>
             array_values(*length, element, fields).any(value_contains_external_reference),
+        Value::Projected { fallback, fields } => projected_values(fallback, fields).any(value_contains_external_reference),
         Value::Logical { physical, arguments } => value_contains_external_reference(physical)
             || arguments.values().any(value_contains_external_reference),
         Value::CallableResident { footprint, .. } => value_contains_external_reference(footprint),
@@ -2066,6 +2182,9 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
         Value::Array { length, element, fields } => {
             for value in array_values(*length, element, fields) { collect_closure_captures(value, captures); }
         }
+        Value::Projected { fallback, fields } => {
+            for value in projected_values(fallback, fields) { collect_closure_captures(value, captures); }
+        }
         Value::Logical { physical, arguments } => {
             collect_closure_captures(physical, captures);
             for value in arguments.values() { collect_closure_captures(value, captures); }
@@ -2076,6 +2195,64 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn declared_reference_writes_revoke_variant_absence_without_erasing_debt() {
+        use super::*;
+        let empty = Value::Variant(vec![Value::Aggregate(vec![])]);
+        let mut resident = Value::Aggregate(vec![empty.clone()]);
+        assert!(weak_reference_write_path(&mut resident, &[0, 0, 0], Value::ExternalBorrowed));
+        let value = value_at_path(&resident, &[0, 0, 0]).unwrap();
+        assert!(!invocations::reference_is_empty(&value));
+        assert!(invocations::reference_is_known(&value));
+        assert_eq!(reference_targets(&value), Some(Value::ExternalBorrowed));
+        let local = Value::Borrowed { root: "local".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        assert!(weak_reference_write_path(&mut resident, &[0, 0, 0], local));
+        let value = value_at_path(&resident, &[0, 0, 0]).unwrap();
+        assert_eq!(borrowed_roots(&value), BTreeSet::from(["local".into()]));
+        assert!(reference_targets(&value).is_none(), "a possible local replacement revokes the old external target");
+        assert!(weak_reference_write_path(&mut resident, &[0, 0, 0], Value::None));
+        let value = value_at_path(&resident, &[0, 0, 0]).unwrap();
+        assert!(!invocations::reference_is_known(&value), "unknown incoming provenance cannot authenticate the slot");
+        assert_eq!(borrowed_roots(&value), BTreeSet::from(["local".into()]));
+        let mut strict = empty;
+        assert!(!replace_resident_path(&mut strict, &[0, 0], Value::ExternalBorrowed),
+            "source assignment does not acquire declaration may-write permission");
+        let mut external = Value::ExternalBorrowed;
+        let local = Value::Borrowed { root: "replacement".into(), storage: Some(2), fields: vec![], capture_path: vec![] };
+        assert!(weak_reference_write_path(&mut external, &[1, 0], local));
+        let updated = value_at_path(&external, &[1, 0]).unwrap();
+        assert!(invocations::reference_is_known(&updated));
+        assert_eq!(borrowed_roots(&updated), BTreeSet::from(["replacement".into()]));
+        assert!(invocations::reference_is_known(&value_at_path(&external, &[0]).unwrap()));
+        assert!(borrowed_roots(&value_at_path(&external, &[0]).unwrap()).is_empty());
+        assert!(invocations::reference_is_known(&value_at_path(&external, &[2, 3]).unwrap()));
+        assert!(borrowed_roots(&value_at_path(&external, &[2, 3]).unwrap()).is_empty());
+        assert!(!frame_independent_value(&external));
+        assert!(assign_field_path(&mut external, &[(1, 3), (0, 1)], Value::ExternalBorrowed));
+        assert!(borrowed_roots(&external).is_empty(), "strong replacement retires the old projected debt");
+        assert!(frame_independent_value(&external));
+    }
+
+    #[test]
+    fn opaque_projected_writes_preserve_wildcards_and_typed_array_extent() {
+        use super::*;
+        let local = Value::Borrowed { root: "local".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let mut value = Value::ExternalBorrowed;
+        assert!(weak_reference_write_path(&mut value, &[1], local.clone()));
+        assert!(weak_reference_write_path(&mut value, &[crate::core::REFERENCE_PATH_ARRAY_ELEMENT], Value::ExternalBorrowed));
+        assert_eq!(borrowed_roots(&value_at_path(&value, &[1]).unwrap()), BTreeSet::from(["local".into()]));
+        assert!(borrowed_roots(&value_at_path(&value, &[3]).unwrap()).is_empty());
+        seal_array_extents(&crate::ElaboratedInterface::default(), &Type::fixed_array(Type::Unit, 4), &mut value);
+        assert!(value_at_path(&value, &[4]).is_none());
+        for index in 0..4 { assert!(replace_resident_path(&mut value, &[index], Value::ExternalBorrowed)); }
+        assert!(borrowed_roots(&value).is_empty());
+        assert!(frame_independent_value(&value));
+        let mut unknown = Value::Projected { fallback: Box::new(Value::None), fields: [(0, local)].into() };
+        assert!(weak_reference_write_path(&mut unknown, &[1], Value::ExternalBorrowed));
+        assert!(!invocations::reference_is_known(&value_at_path(&unknown, &[1]).unwrap()));
+        assert_eq!(borrowed_roots(&unknown), BTreeSet::from(["local".into()]));
+    }
+
     #[test]
     fn reference_absence_is_stronger_than_unknown_or_frame_independence() {
         use super::*;

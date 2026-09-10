@@ -318,7 +318,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 21;
 // including shared invocation may-stores and checked representation store edges.
 // Cache 121 preserves proved absent reference payloads independently of
 // missing targets, and binds evaluated initializer results to shared control.
-pub const STAGE0_CACHE_GENERATION: u32 = 121;
+// Cache 122 publishes writable reference slots independently of incoming loans
+// and consumes positively proved read-only invocation/cleanup coverage.
+pub const STAGE0_CACHE_GENERATION: u32 = 122;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

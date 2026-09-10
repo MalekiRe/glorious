@@ -5,6 +5,74 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 122: writable reference slots and read-only invocation coverage
+
+The active helper-created static-view regression from cache 121 now executes.
+The shared resident-invocation producer publishes writable physical reference
+slots independently of their incoming loan sources. Checked unique access and
+declared reference paths supply the slot; directional outlives entailment still
+selects incoming dependencies. Both resource consumers snapshot those inputs,
+retain old and possible incoming loans, admit a coarse outside-frame reference
+alternative and revoke absent-payload/exact-target evidence. Missing projections
+and unknown invoked captures retain unresolved footprints. Logical residents
+and whole callable values do not become physical reference handles.
+
+EscapeFlow's existing value snapshot now represents declaration-authorized
+variant replacement and projected updates to opaque external aggregates. An
+untouched-field fallback preserves all other fields without inventing an arity
+or array layout. Loan, region, capture and control queries consume the same
+snapshot. Strong source replacement can retire the replaced debt; unknown
+fallbacks still cannot prove a valid or absent reference. PlaceFlow also retains
+positively empty provenance when projecting borrowed inputs and captures.
+
+Both may-store consumers omit writes only when the existing sealed control
+product positively proves complete read-only invocation coverage. The proof
+includes implicit cleanup: destruction's existing custom-Drop selection and
+owned-layout authority provide trivial-cleanup evidence, while open layouts,
+unknown execution and potentially executable cleanup prevent the proof. An
+independent getter contract can settle the call after an unknown caller prefix,
+not certify that prefix. No new Core provenance walker or runtime ABI is added.
+
+Verification records **475 distinct passing checks and one active source
+acceptance failure**:
+
+- 391 distinct compiler unit checks pass: the full run has 390 passes and one
+  new test-coordinate assertion error, corrected and passed in the focused
+  rerun (`target/invocation-writes-final-units-v20.log`,
+  `target/invocation-writes-final-relation-v22.log`). Coverage includes unknown
+  inputs, absent variants, local loan retention, untouched external fields,
+  definite replacement, array wildcards/extents, callable slots and implicit
+  custom-Drop rejection. Frozen solver construction remains bounded.
+- All 20 reference-result-contract and 22 request/cache checks pass
+  (`target/invocation-writes-final-contracts-v24.log` for reference results;
+  `target/invocation-writes-final-request-v26.log` for updated cache checks).
+- The expected-reborrow target has 29 passes and one failure, none ignored
+  (`target/invocation-writes-final-reborrows-v23.log`). The formerly failing
+  static-view replacement and its generic-region composition run fresh and
+  decoded VM O0/O2. The new generated-code regression executes native O0/O2.
+  The direct and captured composition fixtures retain their exact source and
+  success assertions as separate tests. The captured-target fixture still
+  rejects with G5016/G5008: closure-body inspection retains the actual captured
+  root while its frozen loan product names the formal input, and conservative
+  captured-region matching retains an outer handle as possible stored debt.
+  Captured-input identities and declaration storage permission must be repaired
+  at their shared boundary; neither loan check is disabled.
+- All thirteen capture-focused borrowed-callable checks pass
+  (`target/invocation-writes-final-captures-v25.log`), including the stored
+  callable slot regression and generated captured-storage execution.
+
+The full-library root **still fails with 59 diagnostic records**, no suppression
+marker, in 30.93 seconds (`target/invocation-writes-final-library-v21.log`). The
+temporary extra I/O write-path failure is gone; the prior API/array, graph,
+custom-Drop, unsafe, mandatory-tail and minimum-use blockers remain. The complete
+source matrix and native generic-label gate were not rerun or claimed fixed.
+The historical cache-114 matrix remains 16 passing / 15 failing. All 11,455 GSC-2
+contracts remain open; compiler conformance, the library and self-hosting are
+not complete.
+
+Cache generation is 122. Interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 are unchanged. Earlier checkpoints below are historical.
+
 ## Cache 121: absent variant references and evaluated initializer results
 
 The full-library traversal failure at line 229 supplied a concrete composition

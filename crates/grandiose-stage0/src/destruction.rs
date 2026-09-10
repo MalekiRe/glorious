@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{DefKey, Digest, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
     ElaboratedTraitReference, GenericArgument, GenericKind, InstanceKey, TraitAnswer, TraitGoal, TraitSolver, Type};
 mod selection;
-pub(crate) use selection::custom_drop_may_apply;
+pub(crate) use selection::{cleanup_is_trivial, custom_drop_may_apply};
 #[cfg(test)]
 use crate::{CoreId, MirBlock, MirBlockId, MirControlTables, MirFunction, MirInstruction,
     MirLocal, MirLocalDecl, MirPattern, MirScopeId, MirTerminator, Mutability, Safety, ScalarType};
