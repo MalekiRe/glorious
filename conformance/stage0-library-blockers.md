@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 113 verification below,
+Updated from the current source and cache 114 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,36 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 114 / native ABI 12 supplies returned borrows of callable-owned capture
+storage through the shared invocation input relation and the existing runtime
+environment homes. Native initialization ownership is lent through exact sidecars,
+not copied into a second active mask; nested VM/native calls and equal-address
+zero-byte owners retain their logical identity. Generated imports share the checked
+program-wide layout table and native ABI closure producer.
+
+Field writes now share ordinary projection selection. Loan liveness follows live
+aliases into their referents, rejecting a discovered short-lived stored-reference
+escape in both ordinary and captured aggregates. Independent branded closure
+contracts reuse the actual symbolic inputs of their sealed summary; unknown
+enclosing mutation coverage is not converted to a fabricated observation.
+
+The integrated gate passes 30 borrowed-callable, 37 native, 15 mutable-binding,
+29 public native-bridge and 22 request tests. The twelve capture-storage sources
+pass fresh/decoded VM, all-native O0/O2 and all three mixed partitions at O0/O2.
+The previous G5023/expired-invocation-frame positive is now covered by that gate.
+The final full unit gate passes 365 tests, for 498 distinct passing checks across
+these targets. The intermediate adapter fixture correction is recorded separately
+in `implementation-progress.md`.
+
+Type-grouped capture updates remain conservative rather than exact storage joins.
+Guard-correlated storage, cross-owner generic contract selection, and explicit
+environment-death retirement across every runtime capture-home formation path
+remain open. The broad source-library matrix above has not been rerun after these
+changes. Native handlers, general resumption transfer, full fusion, library
+completion and self-hosted compiler acceptance are still outstanding.
+
+The following cache 113 and earlier checkpoints are historical.
 
 Cache 113 / native ABI 11 migrates reference identities into the existing resident
 byte-transport domain and removes the per-home reference cache. Generated borrows,

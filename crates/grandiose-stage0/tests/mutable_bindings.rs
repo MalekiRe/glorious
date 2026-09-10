@@ -34,6 +34,30 @@ fn immutable_reference_bindings_preserve_unique_referent_authority() {
 }
 
 #[test]
+fn field_assignment_shares_read_projection_and_unique_referent_rules() {
+    for source in [
+        "pub fn main() -> i64 { let mut pair = (1,2); let reference = &mut pair; reference.1 = 42; pair.1 }",
+        "struct Cell { value:i64 } pub fn main() -> i64 { let mut value = Cell { value:1 }; let reference = &mut value; reference.value = 42; value.value }",
+        "struct Pair(i64,i64); pub fn main() -> i64 { let mut pair = Pair(1,2); let reference = &mut pair; reference.1 = 42; pair.1 }",
+        "struct Slot<'a> { reference:&'a mut (i64,i64) } pub fn main() -> i64 { let mut pair = (1,2); let slot = Slot { reference:&mut pair }; slot.reference.1 = 42; pair.1 }",
+        "fn get<'a>(value:&'a mut (i64,i64)) -> &'a mut (i64,i64) { value } pub fn main() -> i64 { let mut pair = (1,2); get(&mut pair).1 = 42; pair.1 }",
+    ] { executes(source, 42); }
+    executes("fn rhs(log:&mut i64) -> i64 { *log = *log * 10 + 1; 42 } fn destination<'a>(log:&mut i64, value:&'a mut (i64,i64)) -> &'a mut (i64,i64) { *log = *log * 10 + 2; value } pub fn main() -> i64 { let mut log = 0; let mut pair = (1,2); destination(&mut log,&mut pair).1 = rhs(&mut log); log + pair.1 }", 54);
+}
+
+#[test]
+fn projected_assignment_cannot_upgrade_shared_access() {
+    for source in [
+        "pub fn main() -> i64 { let pair = (1,2); let reference = &pair; reference.1 = 42; pair.1 }",
+        "struct Cell { value:i64 } pub fn main() -> i64 { let value = Cell { value:1 }; let reference = &value; reference.value = 42; value.value }",
+        "struct Slot<'a> { reference:&'a mut (i64,i64) } pub fn main() -> i64 { let mut pair = (1,2); let slot = Slot { reference:&mut pair }; let shared = &slot; shared.reference.1 = 42; pair.1 }",
+    ] {
+        let diagnostics = compile(source).expect_err(source).diagnostics();
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4141"), "{source}: {diagnostics:#?}");
+    }
+}
+
+#[test]
 fn mutable_permission_follows_binding_identity_across_shadowing() {
     executes("pub fn main() -> i64 { let mut value = 1; { let value = 0; }; value = 42; value }", 42);
     executes("pub fn main() -> i64 { let value = 1; let mut value = value; value = 42; value }", 42);

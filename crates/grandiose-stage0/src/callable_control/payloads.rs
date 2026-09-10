@@ -27,6 +27,15 @@ pub(crate) enum PayloadSource {
     /// Address-preserving projection of an existing input loan, distinct
     /// from reading the reference's contents or borrowing an owned input.
     Reborrow { input: Box<InvocationPayload>, fields: Vec<u32> },
+    /// Borrow storage owned by an evaluated borrowed receiver. The receiver
+    /// retains its lifetime and permissions; the selected capture supplies the
+    /// referent's resident contents. Neither is a forwarded capture value.
+    BorrowCapture {
+        receiver_path: Vec<u32>,
+        callable_ty: Type,
+        resident_ty: Type,
+        fields: Vec<u32>,
+    },
     /// The value is not represented by an input relation. Consumers require
     /// an independent type/provenance proof; this is never an empty footprint.
     Unknown,
@@ -71,6 +80,14 @@ impl InvocationPayload {
         if let PayloadSource::Reborrow { input, .. } = &mut self.source {
             input.instantiate_types(arguments);
         }
+        if let PayloadSource::Capture { callable_ty, resident_ty, .. }
+            | PayloadSource::BorrowCapture { callable_ty, resident_ty, .. } = &mut self.source {
+            for ty in [callable_ty, resident_ty] {
+                let GenericArgument::Type(instantiated) = crate::signature::substitute_trait_generic_argument(
+                    GenericArgument::Type(ty.clone()), arguments) else { unreachable!("capture payload type substitution"); };
+                *ty = instantiated;
+            }
+        }
     }
 }
 
@@ -89,6 +106,8 @@ pub(crate) trait PayloadInputs {
     /// Project the referent of a frozen reference snapshot without reading
     /// that referent's contents or creating a new caller-owned storage slot.
     fn reborrow(&self, reference: &Self::Value, fields: &[u32]) -> Option<Self::Value>;
+    fn borrow_capture(&self, _receiver: &Self::Value,
+        _projection: crate::resident_invocations::CaptureProjection, _unique: bool) -> Option<Self::Value> { None }
 }
 
 /// A storage-domain projection is not itself evidence that a reference has
@@ -191,6 +210,19 @@ pub(crate) fn resolve_payload<D: PayloadInputs>(
                     .map(|value| domain.reborrow(value, fields)).collect::<Option<Vec<_>>>(),
                 _ => None,
             }
+        }
+        PayloadSource::BorrowCapture { receiver_path, callable_ty, resident_ty, fields } => {
+            let Type::Reference { mutability, .. } = &payload.ty else {
+                return ResolvedPayload::Unknown(payload.ty.clone());
+            };
+            let receiver = domain.project(callable, receiver_path);
+            receiver.and_then(|receiver| {
+                let resident = domain.project(&receiver, &[crate::core::REFERENCE_PATH_DEREF])?;
+                let captures = domain.captures(&Operand { ty: callable_ty.clone(), value: resident });
+                let projection = crate::resident_invocations::CaptureProjection::new(resident_ty, fields);
+                if captures.unresolved || !captures.operands.iter().any(|capture| projection.matches(&capture.ty)) { return None; }
+                domain.borrow_capture(&receiver, projection, *mutability == crate::Mutability::Unique).map(|value| vec![value])
+            })
         }
         PayloadSource::Callable { constructor, captures } => {
             return ResolvedPayload::Callable { ty: payload.ty.clone(), constructor: constructor.clone(),
@@ -318,22 +350,6 @@ fn construct_payload(&self, value: &ControlValue,
     InvocationPayload { ty: value.ty.clone(), source }
 }
 
-pub(super) fn declared_payload(&self, value: &ControlValue) -> InvocationPayload {
-    let mut root = &value.origin;
-    while let ControlOrigin::Field { base, .. } = root {
-        root = base;
-    }
-    if let ControlOrigin::Parameter(index) = root {
-        return InvocationPayload {
-            ty: value.ty.clone(),
-            source: PayloadSource::Argument {
-                index: *index,
-                path: origin_path(&value.origin, root).expect("origin prefix"),
-            },
-        };
-    }
-    self.construct_payload(value, &|value| self.declared_payload(value))
-}
 }
 
 struct CapturedInput {
@@ -353,6 +369,34 @@ impl BoundControlSummaries<'_> {
         // Missing receiver captures cannot establish a capture projection.
         // Explicit argument dependencies can still be retained positively.
         let captures = self.capture_inputs(callable).unwrap_or_default();
+        self.input_payload(value, arguments, &captures, &receiver_path, &callable.ty)
+    }
+
+    pub(super) fn contract_payload(
+        &self,
+        value: &ControlValue,
+        summary: &super::CallableControlSummary,
+        receiver_path: &[u32],
+        callable_ty: &Type,
+    ) -> InvocationPayload {
+        let captures = match summary.callable {
+            CallableBrand::Closure(brand) =>
+                self.capture_input_values(brand, &summary.inputs.captures, None).unwrap_or_default(),
+            CallableBrand::Named(_) => vec![],
+            CallableBrand::HandlerClause { .. } | CallableBrand::Continuation { .. } =>
+                return InvocationPayload::unknown(value.ty.clone()),
+        };
+        self.input_payload(value, &summary.inputs.parameters, &captures, receiver_path, callable_ty)
+    }
+
+    fn input_payload(
+        &self,
+        value: &ControlValue,
+        arguments: &[ControlValue],
+        captures: &[CapturedInput],
+        receiver_path: &[u32],
+        callable_ty: &Type,
+    ) -> InvocationPayload {
         fn derive(
             bound: &BoundControlSummaries<'_>,
             value: &ControlValue,
@@ -406,12 +450,22 @@ impl BoundControlSummaries<'_> {
                         } }), fields,
                     } };
                 }
+                if capture.contents.is_empty()
+                    && let ControlValueShape::Borrow(target) = &value.shape
+                    && let Some(fields) = storage_path(target, &capture.value)
+                    && let Some((_, receiver)) = receiver_path.split_last()
+                {
+                    return InvocationPayload { ty: value.ty.clone(), source: PayloadSource::BorrowCapture {
+                        receiver_path: receiver.to_vec(), callable_ty: callable_ty.clone(),
+                        resident_ty: capture.resident_ty.clone(), fields,
+                    } };
+                }
             }
             bound.construct_payload(value, &|value| {
                 derive(bound, value, arguments, captures, receiver_path, callable_ty)
             })
         }
-        derive(self, value, arguments, &captures, &receiver_path, &callable.ty)
+        derive(self, value, arguments, captures, receiver_path, callable_ty)
     }
 
     fn capture_inputs(&self, callable: &ControlValue) -> Option<Vec<CapturedInput>> {
@@ -424,6 +478,15 @@ impl BoundControlSummaries<'_> {
         else {
             return None;
         };
+        self.capture_input_values(*brand, captures, generic_arguments.as_deref())
+    }
+
+    fn capture_input_values(
+        &self,
+        brand: super::EnvironmentBrand,
+        captures: &[ControlValue],
+        generic_arguments: Option<&[GenericArgument]>,
+    ) -> Option<Vec<CapturedInput>> {
         let Some(summary) = self.summaries.get(CallableBrand::Named(brand.owner)) else {
             return None;
         };
@@ -435,7 +498,7 @@ impl BoundControlSummaries<'_> {
                 .expressions
                 .iter()
                 .find_map(|expression| match &expression.kind {
-                    CoreKind::Closure { environment, .. } if environment.brand == *brand => {
+                    CoreKind::Closure { environment, .. } if environment.brand == brand => {
                         Some(environment)
                     }
                     _ => None,

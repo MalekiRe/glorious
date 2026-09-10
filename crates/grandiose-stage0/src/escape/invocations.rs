@@ -2,6 +2,53 @@
 use super::*;
 use crate::resident_invocations::{CapturedInputs, Inputs, Operand};
 
+pub(super) fn capture_value_at_path(value: &Value, path: &[crate::resident_invocations::CaptureProjection]) -> Option<Value> {
+    let Some((capture, tail)) = path.split_first() else { return Some(value.clone()); };
+    let mut operands = BTreeSet::new();
+    let mut represented = false;
+    collect(value, &mut operands, &mut represented);
+    if !represented { return None; }
+    let values = operands.iter().filter(|operand| capture.matches(&operand.ty))
+        .map(|operand| capture_value_at_path(&value_at_path(&operand.value, &capture.fields)?, tail))
+        .collect::<Option<Vec<_>>>()?;
+    (!values.is_empty()).then(|| join(values))
+}
+
+pub(super) fn replace_capture_value_at_path(value: &mut Value, fields: &[u32],
+    path: &[crate::resident_invocations::CaptureProjection], replacement: Value, strong: bool,
+) -> bool {
+    let Some((capture, tail)) = path.split_first() else {
+        let Some(previous) = value_at_path(value, fields) else { return false; };
+        return replace_resident_path(value, fields, if strong { replacement } else { join(vec![previous, replacement]) });
+    };
+    let Some(mut owner) = value_at_path(value, fields) else { return false; };
+    fn replace(owner: &mut Value, capture: &crate::resident_invocations::CaptureProjection,
+        tail: &[crate::resident_invocations::CaptureProjection], value: &Value, strong: bool,
+    ) -> bool {
+        match owner {
+            Value::Logical { physical, .. } => replace(physical, capture, tail, value, strong),
+            Value::Joined(values) | Value::Alternatives(values) => {
+                let mut changed = false;
+                for owner in values { changed |= replace(owner, capture, tail, value, false); }
+                changed
+            }
+            Value::Closure { resident_captures, .. } | Value::CallableResident { resident_captures, .. } => {
+                let count = resident_captures.iter().filter(|operand| capture.matches(&operand.ty)).count();
+                let mut changed = false;
+                for operand in resident_captures.iter_mut().filter(|operand| capture.matches(&operand.ty)) {
+                    changed |= replace_capture_value_at_path(&mut operand.value, &capture.fields, tail, value.clone(), strong && count == 1);
+                }
+                if let Value::CallableResident { footprint, .. } = owner {
+                    changed |= replace(footprint, capture, tail, value, false);
+                }
+                changed
+            }
+            _ => false,
+        }
+    }
+    replace(&mut owner, capture, tail, &replacement, strong) && replace_resident_path(value, fields, owner)
+}
+
 fn collect(value: &Value, operands: &mut BTreeSet<Operand<Value>>, represented: &mut bool) {
     match value {
         Value::Closure {
@@ -62,9 +109,10 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         fn project(value: Value, fields: &[u32]) -> Value {
             match value {
-                Value::Borrowed { root, storage, fields: mut prefix } => {
-                    prefix.extend_from_slice(fields);
-                    Value::Borrowed { root, storage, fields: prefix }
+                Value::Borrowed { root, storage, fields: mut prefix, mut capture_path } => {
+                    if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
+                    else { prefix.extend_from_slice(fields); }
+                    Value::Borrowed { root, storage, fields: prefix, capture_path }
                 }
                 Value::Joined(values) => join(values.into_iter().map(|value| project(value, fields)).collect()),
                 Value::Alternatives(values) => Value::Alternatives(values.into_iter().map(|value| project(value, fields)).collect()),
@@ -73,6 +121,21 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
             }
         }
         Some(project(self.resolved_value(reference), fields))
+    }
+    fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, _: bool) -> Option<Value> {
+        fn borrow(value: Value, projection: &crate::resident_invocations::CaptureProjection) -> Option<Value> {
+            Some(match value {
+                Value::Borrowed { root, storage: Some(storage), fields, mut capture_path } => {
+                    capture_path.push(projection.clone());
+                    Value::Borrowed { root, storage: Some(storage), fields, capture_path }
+                }
+                Value::Joined(values) => join(values.into_iter().map(|value| borrow(value, projection)).collect::<Option<Vec<_>>>()?),
+                Value::Alternatives(values) => Value::Alternatives(values.into_iter().map(|value| borrow(value, projection)).collect::<Option<Vec<_>>>()?),
+                Value::Logical { physical, .. } => return borrow(*physical, projection),
+                _ => return None,
+            })
+        }
+        borrow(self.resolved_value(receiver), &projection)
     }
 }
 
@@ -107,6 +170,7 @@ mod tests {
                 root: root.into(),
                 storage: None,
                 fields: vec![],
+                capture_path: vec![],
             },
         };
         let existing = operand("existing");

@@ -13,6 +13,27 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+/// A logical captured resident selected by the same canonical type domain as
+/// invocation inputs. This is not a Core field index or physical environment
+/// ABI. The containing callable remains the storage lifetime/permission owner.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct CaptureProjection {
+    pub type_key: Vec<u8>,
+    pub fields: Vec<u32>,
+}
+
+impl CaptureProjection {
+    pub fn new(ty: &Type, fields: &[u32]) -> Self {
+        Self { type_key: crate::types::canonical_type_encoding(ty), fields: fields.to_vec() }
+    }
+    pub fn matches(&self, ty: &Type) -> bool {
+        self.type_key == crate::types::canonical_type_encoding(ty)
+    }
+    pub fn origin_suffix(&self) -> String {
+        format!("<capture-{:?}>", crate::Digest::of_bytes(&self.type_key))
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Operand<V> {
     pub ty: Type,

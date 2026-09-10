@@ -150,6 +150,7 @@ enum Value {
         root: String,
         storage: Option<u64>,
         fields: Vec<u32>,
+        capture_path: Vec<crate::resident_invocations::CaptureProjection>,
     },
     Aggregate(Vec<Value>),
     /// Type/lifetime-argument residents are not physical fields. Keep their
@@ -542,7 +543,7 @@ impl Analyzer<'_> {
                     let formation = CaptureFormation::new(capture);
                     let value = match formation.source() {
                         CaptureSource::Borrow(_) => Value::Borrowed { root: capture.name.clone(),
-                            storage: self.values.bindings.get(&capture.name).copied(), fields: vec![] },
+                            storage: self.values.bindings.get(&capture.name).copied(), fields: vec![], capture_path: vec![] },
                         CaptureSource::Copy | CaptureSource::Move => self.values.get(&capture.name).cloned().unwrap_or(Value::None),
                     };
                     crate::resident_invocations::Operand { ty: formation.resident_type(), value }
@@ -648,21 +649,21 @@ impl Analyzer<'_> {
                 let mut result = if matches!(reference_origin, CallReferenceOrigin::Opaque) && references_complete {
                     // The checked invocation relation supplies the complete
                     // result below. It is not an external/empty declaration.
-                    Value::None
-                } else { self.reference_result_value(
+                    None
+                } else { Some(self.reference_result_value(
                     &reference_origin,
                     reference_shape,
                     &expression.ty,
                     values,
                     expression.span,
                     "call",
-                ) };
+                )) };
                 for (path, (footprint, resident_captures)) in callable_values {
                     let value = if resident_captures.is_empty() { join(footprint) }
                         else { Value::CallableResident { footprint: Box::new(join(footprint)), resident_captures } };
-                    put_value_at_path(&mut result, &path, value);
+                    put_value_at_path(result.get_or_insert(Value::None), &path, value);
                 }
-                join(std::iter::once(result).chain(returned).collect())
+                join(result.into_iter().chain(returned).collect())
             }
             CoreKind::Perform { .. } => self
                 .performed_value(id)
@@ -877,7 +878,10 @@ impl Analyzer<'_> {
         let reference = self.resolved_value(&value_at_path(value, &path[..deref])?);
         let resident = match reference {
             Value::ExternalBorrowed => Value::ExternalBorrowed,
-            Value::Borrowed { storage, fields, .. } => value_at_path(self.values.residents.get(&storage?)?, &fields)?,
+            Value::Borrowed { storage, fields, capture_path, .. } => {
+                let owner = value_at_path(self.values.residents.get(&storage?)?, &fields)?;
+                invocations::capture_value_at_path(&owner, &capture_path)?
+            }
             Value::Joined(values) => return values.iter().map(|value|
                 self.reference_path_value(value, &path[deref..])).collect::<Option<Vec<_>>>().map(join),
             _ => return None,
@@ -1000,7 +1004,7 @@ impl Analyzer<'_> {
                 // Return, suspension and mandatory-tail checks still reject
                 // any value that carries this root across its boundary.
                 let storage = self.values.bindings.get(&root).copied();
-                return Value::Borrowed { root, storage, fields };
+                return Value::Borrowed { root, storage, fields, capture_path: vec![] };
             }
             self.error(
                 self.body.expression(id).span,
@@ -1020,7 +1024,7 @@ impl Analyzer<'_> {
             );
         }
         let storage = self.values.bindings.get(&root).copied();
-        Value::Borrowed { root, storage, fields }
+        Value::Borrowed { root, storage, fields, capture_path: vec![] }
     }
 
     fn has_frozen_loan_root(&self, spelling: &str) -> bool {
@@ -1053,7 +1057,11 @@ impl Analyzer<'_> {
             CoreKind::Field { base, index, .. } => self.reborrowed_value(base).map(|value| {
                 fn project(value: Value, index: u32) -> Value {
                     match value {
-                        Value::Borrowed { root, storage, mut fields } => { fields.push(index); Value::Borrowed { root, storage, fields } }
+                        Value::Borrowed { root, storage, mut fields, mut capture_path } => {
+                            if let Some(capture) = capture_path.last_mut() { capture.fields.push(index); }
+                            else { fields.push(index); }
+                            Value::Borrowed { root, storage, fields, capture_path }
+                        }
                         Value::Joined(values) => join(values.into_iter().map(|value| project(value, index)).collect()),
                         value => value,
                     }
@@ -1135,11 +1143,12 @@ impl Analyzer<'_> {
     }
 
     fn assign_reference_resident(&mut self, reference: Value, projected: &[u32], value: Value, span: Span) {
-        fn targets(reference: Value, projected: &[u32], result: &mut BTreeSet<(u64, Vec<u32>)>) {
+        fn targets(reference: Value, projected: &[u32], result: &mut BTreeSet<(u64, Vec<u32>, Vec<crate::resident_invocations::CaptureProjection>)>) {
             match reference {
-                Value::Borrowed { storage: Some(storage), mut fields, .. } => {
-                    fields.extend_from_slice(projected);
-                    result.insert((storage, fields));
+                Value::Borrowed { storage: Some(storage), mut fields, mut capture_path, .. } => {
+                    if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(projected); }
+                    else { fields.extend_from_slice(projected); }
+                    result.insert((storage, fields, capture_path));
                 }
                 Value::Joined(values) => for value in values { targets(value, projected, result); },
                 _ => {},
@@ -1148,8 +1157,14 @@ impl Analyzer<'_> {
         let mut destinations = BTreeSet::new();
         targets(self.resolved_value(&reference), projected, &mut destinations);
         let exact = destinations.len() == 1;
-        for (storage, fields) in destinations {
+        for (storage, fields, capture_path) in destinations {
             let Some(resident) = self.values.residents.get_mut(&storage) else { continue; };
+            if !capture_path.is_empty() {
+                if !invocations::replace_capture_value_at_path(resident, &fields, &capture_path, value.clone(), exact) {
+                    self.error(span, "G5021", "capture storage assignment lacks its sealed resident projection");
+                }
+                continue;
+            }
             let replacement = if exact { value.clone() }
                 else { join(vec![value_at_path(resident, &fields).unwrap_or(Value::None), value.clone()]) };
             if !replace_resident_path(resident, &fields, replacement) {
@@ -1854,7 +1869,7 @@ mod tests {
         assert!(logical_regions(&value).is_empty());
         assert_eq!(contained_regions(&value), BTreeSet::from([region]));
         let value = Value::CallableResident {
-            footprint: Box::new(Value::Borrowed { root: "a".into(), storage: Some(0), fields: vec![] }), resident_captures: vec![],
+            footprint: Box::new(Value::Borrowed { root: "a".into(), storage: Some(0), fields: vec![], capture_path: vec![] }), resident_captures: vec![],
         };
         assert_eq!(borrowed_roots(&value), BTreeSet::from(["a".into()]));
         assert!(!frame_independent_value(&value));
@@ -1864,8 +1879,8 @@ mod tests {
     #[test]
     fn symbolic_array_provenance_keeps_union_and_sparse_replacement_obligations() {
         use super::*;
-        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![] };
-        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![] };
+        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![], capture_path: vec![] };
+        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![], capture_path: vec![] };
         let wildcard = crate::core::REFERENCE_PATH_ARRAY_ELEMENT;
         let source = Value::Aggregate(vec![a.clone(), b.clone()]);
         let forwarded = value_at_path(&source, &[wildcard]).unwrap();
@@ -1892,8 +1907,8 @@ mod tests {
     #[test]
     fn provenance_joins_are_idempotent_and_keep_aggregate_choices_field_wise() {
         use super::*;
-        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![] };
-        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![] };
+        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![], capture_path: vec![] };
+        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![], capture_path: vec![] };
         let mut value = Value::Aggregate(vec![a.clone(), Value::ExternalBorrowed]);
         for _ in 0..100 {
             value = join(vec![value.clone(), value.clone()]);
@@ -1908,7 +1923,7 @@ mod tests {
 
     #[test]
     fn variant_provenance_keeps_present_loans_and_only_omits_absent_residents() {
-        let loan = Value::Borrowed { root: "owner".into(), storage: None, fields: vec![] };
+        let loan = Value::Borrowed { root: "owner".into(), storage: None, fields: vec![], capture_path: vec![] };
         let yes = Value::Variant(vec![Value::Aggregate(vec![loan.clone()])]);
         let no = Value::Variant(vec![Value::Aggregate(vec![])]);
         let selected = value_at_path(&join(vec![yes, no]), &[0, 0]).unwrap();

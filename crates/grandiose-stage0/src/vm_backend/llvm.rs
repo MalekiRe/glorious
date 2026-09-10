@@ -21,8 +21,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 11;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:resident-reference-origins-v8";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 12;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:capture-storage-loans-v9";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;

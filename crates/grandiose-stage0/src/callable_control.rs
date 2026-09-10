@@ -310,6 +310,16 @@ pub struct CallableControlSummary {
     alternatives: Vec<ControlAlternative>,
     calls: BTreeMap<ControlSite, Vec<ControlAlternative>>,
     call_gaps: BTreeMap<CallContext, ControlUnknown>,
+    /// The actual symbolic residents used to derive this contract. Payload
+    /// projection must compare storage against these same invocation inputs,
+    /// not reconstruct slots from a second interpretation of the body.
+    inputs: ControlInputs,
+}
+
+#[derive(Clone, Debug)]
+struct ControlInputs {
+    parameters: Vec<ControlValue>,
+    captures: Vec<ControlValue>,
 }
 impl CallableControlSummary {
     pub fn callable(&self) -> CallableBrand {
@@ -695,7 +705,7 @@ impl BoundControlSummaries<'_> {
         }
         // A gap in an enclosing execution does not invalidate a callee's
         // independently checked abstract contract. Compose that contract only
-        // at statically selected calls or nominally branded label operands.
+        // at statically selected calls or authenticated nominal operands.
         // This is conditional on *reaching the invocation*, not a
         // fabricated observation of the preceding computation or its guards.
         for (index, expression) in body.expressions.iter().enumerate() {
@@ -736,16 +746,43 @@ impl BoundControlSummaries<'_> {
                 } }], ..InvocationControl::default()
             });
         }
-        let definition = match &body.expression(*callee).kind {
-            CoreKind::Function { definition, host_import: None, .. } => *definition,
-            CoreKind::TraitMethod { method, deferred: None, .. } => *method,
-            _ => return None,
+        let operand = body.expression(*callee);
+        let definition = match &operand.kind {
+            CoreKind::Function { definition, host_import: None, .. } => Some(*definition),
+            CoreKind::TraitMethod { method, deferred: None, .. } => Some(*method),
+            _ => None,
         };
-        let summary = self.summaries.get(CallableBrand::Named(definition))?;
-        let substitutions = summary.dependencies.get(&definition).and_then(|seal|
-            crate::callable_declarations::selected_template(&seal.interface, body.expression(*callee)))
-            .map(|template| template.arguments);
-        let mut control = InvocationControl { declared_function: Some(definition), ..Default::default() };
+        let mut callable_ty = &operand.ty;
+        let mut receiver_path = vec![];
+        while let Type::Reference { referent, .. } = callable_ty {
+            callable_ty = referent;
+            receiver_path.push(crate::core::REFERENCE_PATH_DEREF);
+        }
+        let (summary, substitutions) = if let Some(definition) = definition {
+            let summary = self.summaries.get(CallableBrand::Named(definition))?;
+            let substitutions = summary.dependencies.get(&definition).and_then(|seal|
+                crate::callable_declarations::selected_template(&seal.interface, operand))
+                .map(|template| template.arguments);
+            (summary, substitutions)
+        } else {
+            // A compiler-owned environment brand selects code, not a physical
+            // storage snapshot. Require the complete sealed constructor type
+            // in this same body's generic namespace. An erased environment,
+            // a different specialization, or a foreign generic namespace
+            // cannot inherit its abstract contract by matching a brand alone.
+            let constructor = body.expressions.iter().enumerate().find_map(|(index, expression)| {
+                let CoreKind::Closure { environment, .. } = &expression.kind else { return None; };
+                if expression.ty != *callable_ty { return None; }
+                self.closure_constructor(environment.brand.owner, CoreId(index as u32))
+                    .filter(|constructor| constructor.nominal_type()
+                        && (self.staged_body(environment.brand.owner).is_some_and(|sealed|
+                            std::ptr::eq(sealed, body)) || constructor.matches_body(body)))
+            })?;
+            (self.summaries.get(CallableBrand::Closure(constructor.brand()))?, None)
+        };
+        let mut control = InvocationControl {
+            declared_function: definition, other_callee: true, ..Default::default()
+        };
         if summary.alternatives.is_empty() { control.unknown = true; }
         for path in &summary.alternatives {
             match &path.outcome {
@@ -753,7 +790,7 @@ impl BoundControlSummaries<'_> {
                     match arguments.get(*parameter as usize).map(|argument| &body.expression(*argument).kind) {
                         Some(CoreKind::LabelValue { brand }) => {
                             control.labels.insert(*brand);
-                            let mut payload = self.declared_payload(value);
+                            let mut payload = self.contract_payload(value, summary, &receiver_path, callable_ty);
                             if let Some(arguments) = &substitutions { payload.instantiate_types(arguments); }
                             control.transfers.push(InvocationTransfer {
                                 target: Some(*brand), payload,
@@ -766,11 +803,11 @@ impl BoundControlSummaries<'_> {
                 }
                 ControlOutcome::LabelExit { .. } => control.unknown = true,
                 ControlOutcome::Return(value) => {
-                    let mut payload = self.declared_payload(value);
+                    let mut payload = self.contract_payload(value, summary, &receiver_path, callable_ty);
                     if let Some(arguments) = &substitutions { payload.instantiate_types(arguments); }
-                    control.include(&path.outcome, CallableBrand::Named(definition), Some(payload));
+                    control.include(&path.outcome, summary.callable, Some(payload));
                 }
-                outcome => control.include(outcome, CallableBrand::Named(definition), None),
+                outcome => control.include(outcome, summary.callable, None),
             }
         }
         Some(control)
@@ -1056,6 +1093,10 @@ fn derive_control_phase<E>(
                     ), ControlStorage::Slot { site: frame.site(root), name: name.clone() }),
                 );
             }
+            let inputs = ControlInputs {
+                parameters: parameters.iter().map(|(name, _)| locals[name].clone()).collect(),
+                captures: captures.iter().map(|(name, _)| locals[name].clone()).collect(),
+            };
             let initial = State {
                 locals,
                 guards: vec![],
@@ -1095,6 +1136,7 @@ fn derive_control_phase<E>(
                     alternatives,
                     calls: analyzer.calls,
                     call_gaps: analyzer.call_gaps,
+                    inputs,
                 },
             );
         }

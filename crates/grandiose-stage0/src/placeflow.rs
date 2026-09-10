@@ -27,6 +27,11 @@ struct Projection {
     fields: Vec<u32>,
 }
 
+struct AssignmentOrigins {
+    keys: BTreeSet<String>,
+    exact: bool,
+}
+
 impl Projection {
     fn overlaps(&self, other: &Self) -> bool {
         self.root == other.root
@@ -71,6 +76,10 @@ fn belongs_to_scope(locals: &BTreeSet<String>, key: &str) -> bool {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ProjectionLoan {
     place: Projection,
+    /// Logical pointee inside callable-owned storage. `place` remains the
+    /// real receiver owner for lifetime and overlap checks, never a forged
+    /// Core capture-field projection.
+    capture_path: Vec<crate::resident_invocations::CaptureProjection>,
     unique: bool,
     /// The lexical reference binding that keeps this loan live. `None` is a
     /// conservative temporary/capture loan whose lifetime has not yet been
@@ -91,6 +100,19 @@ struct ProjectionLoan {
 }
 
 impl ProjectionLoan {
+    fn project_referent(&mut self, fields: &[u32]) {
+        if let Some(capture) = self.capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
+        else { self.place.fields.extend_from_slice(fields); }
+    }
+
+    fn resident_key(&self, fields: &[u32]) -> String {
+        let mut key = projection_key(&self.place.root, &self.place.fields);
+        for capture in &self.capture_path {
+            key = projection_key(&format!("{key}.{}", capture.origin_suffix()), &capture.fields);
+        }
+        projection_key(&key, fields)
+    }
+
     fn disjoint_from(&self, other: &Self) -> bool {
         self.partitions.iter().any(|(call, fields)| other.partitions.get(call)
             .is_some_and(|other| !crate::core::reference_path_is_prefix(fields, other)
@@ -1065,7 +1087,7 @@ impl Analyzer<'_> {
                     place: Projection { root: name.clone(), fields: fields.clone() },
                     unique: matches!(mutability, crate::types::Mutability::Unique),
                     owner: None,
-                    partitions: BTreeMap::new(),
+                    capture_path: vec![], partitions: BTreeMap::new(),
                     indirect: true,
                     external: false,
                 }])).clone();
@@ -1098,7 +1120,7 @@ impl Analyzer<'_> {
                     place,
                     unique: matches!(mutability, crate::types::Mutability::Unique),
                     owner: None,
-                    partitions: BTreeMap::new(),
+                    capture_path: vec![], partitions: BTreeMap::new(),
                     indirect: true,
                     external: false,
                 }]));
@@ -2095,6 +2117,28 @@ impl Analyzer<'_> {
     }
 
     fn release_dead_loans(&mut self, live_after: &BTreeSet<String>, span: Span) {
+        let under = |owner: &str, root: &str| owner == root
+            || owner.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('.'));
+        // A live reference keeps the resident it can read live, including
+        // references subsequently stored into that resident. Loan ownership
+        // lives at storage coordinates, not necessarily at the spelling used
+        // by a future read. Close liveness through the existing loan graph
+        // before ending any owners; otherwise `alias.field = &local` can lose
+        // the new loan merely because only `alias`, not its owner, is used.
+        let mut live = live_after.iter().flat_map(|name|
+            [name.clone(), self.resolve_name(name)]).collect::<BTreeSet<_>>();
+        live.extend(self.pending_results.iter().map(|id| Self::result_owner(*id)));
+        live.extend(self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
+            .filter(|owner| self.loan_is_used_by_destruction(owner)).cloned());
+        let mut pending = live.iter().cloned().collect::<Vec<_>>();
+        while let Some(owner) = pending.pop() {
+            for loan in &self.projection_loans {
+                if loan.owner.as_ref().is_some_and(|resident| under(resident, &owner)) {
+                    let referent = loan.resident_key(&[]);
+                    if live.insert(referent.clone()) { pending.push(referent); }
+                }
+            }
+        }
         let dead = self
             .projection_loans
             .iter()
@@ -2106,16 +2150,7 @@ impl Analyzer<'_> {
                 // preserve the active branch identity when a branch-local
                 // spelling is used later in the same arm. The arm scope
                 // itself releases the latter before the dynamic join.
-                !self.loan_is_used_by_destruction(owner)
-                    && !self.pending_results.iter().any(|id| {
-                        let root = Self::result_owner(*id);
-                        **owner == root || owner.starts_with(&(root + "."))
-                    })
-                    && !live_after.iter().any(|name| {
-                        let resolved = self.resolve_name(name);
-                        **owner == *name || owner.starts_with(&(name.clone() + "."))
-                            || **owner == resolved || owner.starts_with(&(resolved + "."))
-                    })
+                !live.iter().any(|root| under(owner, root))
             })
             .cloned()
             .collect::<BTreeSet<_>>();
@@ -2295,7 +2330,7 @@ impl Analyzer<'_> {
         if let crate::capture_formation::CaptureSource::Borrow(mutability) = formation.source() {
             self.reference_origins.entry(root).or_default().insert(ProjectionLoan {
                 place: Projection { root: source, fields: vec![] }, unique: mutability == crate::Mutability::Unique,
-                owner: None, partitions: BTreeMap::new(), indirect: false, external: false,
+                owner: None, capture_path: vec![], partitions: BTreeMap::new(), indirect: false, external: false,
             });
         }
     }
@@ -2335,7 +2370,7 @@ impl Analyzer<'_> {
             place,
             unique,
             owner: owner.map(str::to_owned),
-            partitions: BTreeMap::new(),
+            capture_path: vec![], partitions: BTreeMap::new(),
             indirect: false,
             external: false,
         });
@@ -2779,7 +2814,7 @@ impl Analyzer<'_> {
                     place,
                     unique,
                     owner,
-                    partitions: BTreeMap::new(),
+                    capture_path: vec![], partitions: BTreeMap::new(),
                     indirect: false,
                     external: false,
                 };
@@ -2821,7 +2856,7 @@ impl Analyzer<'_> {
             place: place.clone(),
             unique,
             owner,
-            partitions: BTreeMap::new(),
+            capture_path: vec![], partitions: BTreeMap::new(),
             indirect: false,
             external: false,
         };
@@ -2876,7 +2911,7 @@ impl Analyzer<'_> {
             if let Some(owner) = &parent.owner { allowed.extend(self.reference_ancestors(owner)); }
         }
         let projected = parents.iter().cloned().map(|mut parent| {
-            parent.place.fields.extend_from_slice(&fields);
+            parent.project_referent(&fields);
             parent
         }).collect::<Vec<_>>();
         if self.projection_loans.iter().any(|loan|
@@ -2954,6 +2989,9 @@ impl Analyzer<'_> {
         if let Some(deref) = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) {
             let parents = self.reference_loans_from_value_path(id, &fields[..deref]);
             return parents.into_iter().flat_map(|parent| {
+                if !parent.capture_path.is_empty() {
+                    return self.logical_origin_regions(&parent.resident_key(&fields[deref + 1..]));
+                }
                 let mut path = parent.place.fields;
                 path.extend_from_slice(&fields[deref + 1..]);
                 let known = self.logical_origin_regions(&projection_key(&parent.place.root, &path));
@@ -2977,6 +3015,9 @@ impl Analyzer<'_> {
                 self.logical_regions_from_value_path(*value, fields)).unwrap_or_default(),
             CoreKind::Deref(reference) => {
                 return self.reference_loans_from_value(*reference).into_iter().flat_map(|parent| {
+                    if !parent.capture_path.is_empty() {
+                        return self.logical_origin_regions(&parent.resident_key(fields));
+                    }
                     let mut path = parent.place.fields;
                     path.extend_from_slice(fields);
                     let known = self.logical_origin_regions(&projection_key(&parent.place.root, &path));
@@ -3277,7 +3318,7 @@ impl Analyzer<'_> {
                 if matches!(capture.mode, CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow) {
                     loans.insert(ProjectionLoan { place: Projection { root: name, fields: vec![] },
                         unique: matches!(capture.mode, CaptureMode::UniqueBorrow), owner: None,
-                        partitions: BTreeMap::new(), indirect: false, external: false });
+                        capture_path: vec![], partitions: BTreeMap::new(), indirect: false, external: false });
                 }
                 loans
             }).collect(),
@@ -3288,13 +3329,13 @@ impl Analyzer<'_> {
                         .filter(|loan| loan.place == place && loan.unique == *unique)
                         .cloned().collect::<BTreeSet<_>>();
                     if loans.is_empty() {
-                        BTreeSet::from([ProjectionLoan { place, unique: *unique, owner: None, partitions: BTreeMap::new(), indirect: false, external: false }])
+                        BTreeSet::from([ProjectionLoan { place, unique: *unique, owner: None, capture_path: vec![], partitions: BTreeMap::new(), indirect: false, external: false }])
                     } else { loans }
                 } else if let Some((reference, fields)) = self.projected_dereference(*value) {
                     // A projected reborrow retains every possible backing
                     // region of its incoming reference, not a selected one.
                     self.reference_loans_from_value(reference).into_iter().map(|mut parent| {
-                        parent.place.fields.extend_from_slice(&fields);
+                        parent.project_referent(&fields);
                         parent.unique = *unique;
                         parent
                     }).collect()
@@ -3417,10 +3458,9 @@ impl Analyzer<'_> {
         let next = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF);
         let projection = &fields[..next.unwrap_or(fields.len())];
         let mut residents = BTreeSet::new();
-        for parent in parents {
-            let mut place = parent.place.clone();
-            place.fields.extend_from_slice(projection);
-            let known = self.origin_loans(&projection_key(&place.root, &place.fields));
+        for mut parent in parents {
+            let known = self.origin_loans(&parent.resident_key(projection));
+            parent.project_referent(projection);
             if !known.is_empty() && (!parent.indirect || !projection.is_empty()) {
                 residents.extend(known.into_iter().map(|mut resident| {
                     // Copying a shared stored handle preserves its backing
@@ -3429,12 +3469,12 @@ impl Analyzer<'_> {
                     if !resident.unique { resident.owner = None; }
                     resident
                 }));
-            } else if parent.external || self.bindings.get(&parent.place.root).is_some_and(|binding|
-                matches!(self.bindings.entries[binding.0 as usize].origin, PlaceBindingOrigin::Parameter { .. })) {
+            } else if parent.capture_path.is_empty() && (parent.external || self.bindings.get(&parent.place.root).is_some_and(|binding|
+                matches!(self.bindings.entries[binding.0 as usize].origin, PlaceBindingOrigin::Parameter { .. }))) {
                 // The reference stored in caller storage has a distinct
                 // region from the outer handle. Do not retain the outer
                 // reborrow owner merely because it was used to read it.
-                residents.insert(ProjectionLoan { place, unique, owner: None, ..parent });
+                residents.insert(ProjectionLoan { unique, owner: None, ..parent });
             }
         }
         match next {
@@ -3507,7 +3547,7 @@ impl Analyzer<'_> {
         BTreeSet::from([ProjectionLoan {
             place: Projection { root: format!("<external-reference-result-{}>", call.0), fields: fields.to_vec() },
             unique: matches!(mutability, crate::Mutability::Unique), owner: None,
-            partitions: BTreeMap::new(), indirect: true, external: true,
+            capture_path: vec![], partitions: BTreeMap::new(), indirect: true, external: true,
         }])
     }
 
@@ -3693,7 +3733,7 @@ impl Analyzer<'_> {
                 if let CoreKind::Deref(reference) = self.body.expression(subject).kind {
                     self.use_deref_reference(reference, self.body.expression(subject).span, false);
                     for mut parent in self.reference_loans_from_value(reference) {
-                        parent.place.fields.extend_from_slice(&projection);
+                        parent.project_referent(&projection);
                         parent.unique = false;
                         self.install_reference_alias(&owner, parent, refinement.subject);
                     }
@@ -3742,6 +3782,7 @@ impl Analyzer<'_> {
     fn install_reference_alias(&mut self, result: &str, parent: ProjectionLoan, source: CoreId) {
         let alias = ProjectionLoan {
             place: parent.place.clone(),
+            capture_path: parent.capture_path.clone(),
             unique: parent.unique,
             owner: Some(result.to_owned()),
             partitions: parent.partitions.clone(),
@@ -3772,7 +3813,7 @@ impl Analyzer<'_> {
     }
 
     fn record_assigned_reference_origin(&mut self, place: &CorePlace, value: CoreId) {
-        let Some(key) = self.place_origin_key(place) else {
+        let Some(destinations) = self.place_origin_keys(place) else {
             return;
         };
         // Evaluate provenance before ending the old resident: self-assignment
@@ -3786,30 +3827,41 @@ impl Analyzer<'_> {
         let replacement = self.reference_origins.iter()
             .filter(|(origin, _)| under(origin, &temporary))
             .map(|(origin, _)| (
-                format!("{key}{}", &origin[temporary.len()..]),
+                origin[temporary.len()..].to_owned(),
                 self.origin_loans(origin),
                 self.reborrow_parents.get(origin).cloned().unwrap_or_default(),
             )).collect::<Vec<_>>();
         let logical_replacement = self.logical.origins.iter()
             .filter(|(origin, _)| under(origin, &temporary))
-            .map(|(origin, regions)| (format!("{key}{}", &origin[temporary.len()..]), regions.clone()))
+            .map(|(origin, regions)| (origin[temporary.len()..].to_owned(), regions.clone()))
             .collect::<Vec<_>>();
-        let old_owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
-            .filter(|owner| under(owner, &key)).cloned().collect::<BTreeSet<_>>();
-        for owner in old_owners { self.release_owner_loans(&owner, self.body.expression(value).span); }
-        self.reference_origins.retain(|origin, _| !under(origin, &key));
-        self.reborrow_parents.retain(|origin, _| !under(origin, &key));
-        self.logical.origins.retain(|origin, _| !under(origin, &key));
-        for (destination, regions) in logical_replacement { self.logical.origins.insert(destination, regions); }
-        for (destination, loans, parents) in replacement {
-            for mut loan in loans {
-                loan.owner = Some(destination.clone());
-                self.reference_origins.entry(destination.clone()).or_default().insert(loan.clone());
-                if !self.projection_loans.contains(&loan) { self.projection_loans.push(loan); }
+        for key in destinations.keys {
+            // A type-selected capture can represent several resident slots,
+            // just as a branch-selected reference can name several locals.
+            // A possible write retains old alternatives; only one proven
+            // storage destination permits ending their prior obligations.
+            if destinations.exact {
+                let old_owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
+                    .filter(|owner| under(owner, &key)).cloned().collect::<BTreeSet<_>>();
+                for owner in old_owners { self.release_owner_loans(&owner, self.body.expression(value).span); }
+                self.reference_origins.retain(|origin, _| !under(origin, &key));
+                self.reborrow_parents.retain(|origin, _| !under(origin, &key));
+                self.logical.origins.retain(|origin, _| !under(origin, &key));
             }
-            // A transferred old resident is not a reborrow of its new self.
-            let parents = parents.into_iter().filter(|parent| !under(parent, &key)).collect::<BTreeSet<_>>();
-            if !parents.is_empty() { self.reborrow_parents.insert(destination, parents); }
+            for (suffix, regions) in &logical_replacement {
+                self.logical.origins.entry(format!("{key}{suffix}")).or_default().extend(regions.iter().cloned());
+            }
+            for (suffix, loans, parents) in &replacement {
+                let destination = format!("{key}{suffix}");
+                for mut loan in loans.iter().cloned() {
+                    loan.owner = Some(destination.clone());
+                    self.reference_origins.entry(destination.clone()).or_default().insert(loan.clone());
+                    if !self.projection_loans.contains(&loan) { self.projection_loans.push(loan); }
+                }
+                // A transferred old resident is not a reborrow of its new self.
+                let parents = parents.iter().filter(|parent| !under(parent, &key)).cloned().collect::<BTreeSet<_>>();
+                if !parents.is_empty() { self.reborrow_parents.entry(destination).or_default().extend(parents); }
+            }
         }
         let temporary_owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
             .filter(|owner| under(owner, &temporary)).cloned().collect::<BTreeSet<_>>();
@@ -3819,25 +3871,24 @@ impl Analyzer<'_> {
         self.logical.origins.retain(|origin, _| !under(origin, &temporary));
     }
 
-    fn place_origin_key(&self, place: &CorePlace) -> Option<String> {
+    fn place_origin_keys(&self, place: &CorePlace) -> Option<AssignmentOrigins> {
         match place {
-            CorePlace::Local { name, .. } => Some(self.resolve_name(name)),
+            CorePlace::Local { name, .. } => Some(AssignmentOrigins {
+                keys: BTreeSet::from([self.resolve_name(name)]), exact: true,
+            }),
             CorePlace::Field { base, index, .. } => {
-                let mut key = self.place_origin_key(base)?;
-                key.push('.');
-                key.push_str(&index.to_string());
-                Some(key)
+                let base = self.place_origin_keys(base)?;
+                Some(AssignmentOrigins { keys: base.keys.into_iter().map(|key|
+                    projection_key(&key, &[*index])).collect(), exact: base.exact })
             }
             CorePlace::Deref { reference, .. } => {
-                // A unique handle with one known local referent writes that
-                // resident's reference fields. Caller-owned or dynamically
-                // selected referents are not a single lexical assignment.
+                // Preserve all represented local destinations. Type-grouped
+                // captured residents do not identify a single physical slot.
                 let loans = self.reference_loans_from_value(*reference);
                 if loans.iter().any(|loan| loan.indirect || loan.external) { return None; }
-                let places = loans.into_iter().map(|loan| loan.place).collect::<BTreeSet<_>>();
-                if places.len() != 1 { return None; }
-                let place = places.into_iter().next()?;
-                Some(projection_key(&place.root, &place.fields))
+                let precise = loans.iter().all(|loan| loan.capture_path.is_empty());
+                let places = loans.into_iter().map(|loan| loan.resident_key(&[])).collect::<BTreeSet<_>>();
+                (!places.is_empty()).then(|| AssignmentOrigins { exact: precise && places.len() == 1, keys: places })
             }
             CorePlace::Error => None,
         }
@@ -4015,7 +4066,7 @@ impl Analyzer<'_> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let parents = parents.into_iter().map(|mut parent| {
-            parent.place.fields.extend_from_slice(fields);
+            parent.project_referent(fields);
             parent
         }).collect::<Vec<_>>();
         let conflicts = self.projection_loans.iter().any(|loan| {
@@ -4054,8 +4105,8 @@ impl Analyzer<'_> {
         // preserving disjoint sibling updates.  Only a live projection loan
         // may trigger the error: NLL release of the child before this store
         // deliberately reopens the carrier for a new reference.
-        if let Some(carrier) = self.place_origin_key(place)
-            && self.live_reborrow_descends_from(&carrier)
+        if let Some(carrier) = self.place_origin_keys(place).and_then(|origins|
+            origins.keys.into_iter().find(|carrier| self.live_reborrow_descends_from(carrier)))
         {
             self.error(
                 span,

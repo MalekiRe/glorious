@@ -93,6 +93,91 @@ const AFTER_UNKNOWN: &str = "#![no_std]
     fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); relay(42,@select) }";
 
 #[test]
+fn stored_reference_liveness_follows_live_aliases_into_ordinary_and_captured_storage() {
+    for source in [
+        "#![no_std] fn main() -> i64 { let backing = 1; let mut value = (&backing,0); let result = &mut value; { let local = 42; result.0 = &local; }; *result.0 }",
+        "#![no_std] fn main() -> i64 { let backing = 1; let mut value = (&backing,0); let mut task = move (value) { &mut value }; let result = (&mut task)(); { let local = 42; result.0 = &local; }; *result.0 }",
+    ] {
+        let fixture = Fixture::new(source);
+        let inputs = fixture.inputs();
+        let summaries = derive_control_summaries(&inputs, Default::default());
+        let bound = summaries.bind(&inputs).unwrap();
+        let owner = fixture.names["main"];
+        let body = &fixture.bodies[&owner];
+        let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, bound.body(owner)).unwrap();
+        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &[],
+            &crate::TraitSolver::new(&fixture.interface), None, Arc::new(facts));
+        assert!(flow.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"),
+            "{source}\n{:?}\n{:#?}", flow.diagnostics, flow.events);
+    }
+}
+
+#[test]
+fn unobserved_branded_calls_require_the_whole_sealed_constructor_contract() {
+    let fixture = Fixture::new("#![no_std] fn inspect<T>(value:T) -> () {
+        let task = move (value) { &value }; let mut marker = 0;
+        marker = 1; let result = (&task)(); ()
+    }");
+    let owner = fixture.names["inspect"];
+    let body = &fixture.bodies[&owner];
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let labels = bound.lexical_dependencies(owner).unwrap();
+    let (id, call, callee) = body.expressions.iter().enumerate().find_map(|(index, expression)| {
+        let CoreKind::Call { callee, .. } = expression.kind else { return None; };
+        Some((CoreId(index as u32), expression, callee))
+    }).unwrap();
+    assert!(summaries.get(CallableBrand::Named(owner)).unwrap().invocation_evidence()
+        .all(|(site, _)| site.location.expression != id), "mutation remains unobserved");
+    let invocation = bound.declared_call_control(body, call, labels).unwrap();
+    assert!(invocation.normal && !invocation.unknown && invocation.declared_function.is_none());
+    assert!(matches!(&invocation.returns[0].source, payloads::PayloadSource::BorrowCapture {
+        resident_ty: Type::Generic(0), ..
+    }), "the closure contract retains the caller's checked generic namespace: {invocation:?}");
+    for erase in [false, true] {
+        let mut changed = body.clone();
+        let Type::Reference { referent, .. } = &mut changed.expressions[callee.0 as usize].ty else { panic!("receiver"); };
+        let Type::Callable { result, contract, .. } = referent.as_mut() else { panic!("callable"); };
+        if erase { contract.environment = None; } else { *result = Box::new(Type::Unit); }
+        assert!(bound.declared_call_control(&changed, call, labels).is_none(),
+            "neither an erased environment nor a matching brand with a different contract selects code");
+    }
+    let mut stale = body.clone();
+    stale.expressions[body.root.0 as usize].ty = Type::Never;
+    assert!(bound.declared_call_control(&stale, call, labels).is_none(), "stale defining bodies reject");
+}
+
+#[test]
+fn retained_capture_storage_results_compose_after_reborrows_and_unknown_prefixes() {
+    let mut failures = vec![];
+    for source in [
+        "#![no_std] fn main() -> i64 { let value = 42; let inner = move (value) { &value }; let outer = move (inner) { &inner }; let borrowed = (&outer)(); let result = borrowed(); *result }",
+        "#![no_std] fn main() -> i64 { let mut value = (1,2); let mut task = move (value) { &mut value }; { let result = (&mut task)(); let old = move *result; *result = (20,42); () }; let result = (&mut task)(); result.1 }",
+    ] {
+        let fixture = Fixture::new(source);
+        let inputs = fixture.inputs();
+        let summaries = derive_control_summaries(&inputs, Default::default());
+        let bound = summaries.bind(&inputs).unwrap();
+        let owner = fixture.names["main"];
+        let body = &fixture.bodies[&owner];
+        let control = bound.body(owner).unwrap();
+        let calls = body.expressions.iter().enumerate().filter_map(|(index, expression)| {
+            let CoreKind::Call { callee, .. } = expression.kind else { return None; };
+            Some((CoreId(index as u32), expression.span, body.expression(callee).ty.clone(), control.get(CoreId(index as u32)).cloned()))
+        }).collect::<Vec<_>>();
+        let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, Some(control)).unwrap();
+        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &[],
+            &crate::TraitSolver::new(&fixture.interface), None, Arc::new(facts));
+        let escape = crate::EscapeFlow::analyze_with_interface(body, &flow, &fixture.interface);
+        if !flow.diagnostics.is_empty() || !escape.diagnostics.is_empty() {
+            failures.push(format!("{source}\n{:?}\n{:?}\n{calls:#?}", flow.diagnostics, escape.diagnostics));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
 fn returned_factory_capability_requires_the_exact_checked_body_batch() {
     let fixture = Fixture::new("#![no_std]
         fn wrap(task:(i64) -> i64) -> () -> i64 { move (task) { task(42) } }
@@ -519,7 +604,8 @@ fn an_unconditional_coverage_gap_retains_observed_captured_return_dependencies()
         path.guards.iter().any(|guard| matches!(guard, ControlGuard::InvocationReturned(_)))));
     let control = summaries.bind(&inputs).unwrap().body(owner).unwrap();
     let invocation = control.get(read).unwrap();
-    assert!(invocation.unknown && invocation.normal);
+    assert!(!invocation.unknown && invocation.normal,
+        "the sealed branded closure settles this call, not the enclosing execution");
     assert!(invocation.returns.iter().any(|payload|
         matches!(payload.source, payloads::PayloadSource::Capture { .. })));
     assert!(invocation.labels.is_empty() && invocation.transfers.is_empty());

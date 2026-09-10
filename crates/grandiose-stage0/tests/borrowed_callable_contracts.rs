@@ -24,6 +24,41 @@ fn run(source: &str, expected: i64) {
 }
 
 #[test]
+fn owned_capture_storage_borrows_preserve_nested_contents_and_updates() {
+    for source in [
+        "pub fn main() -> i64 { let value = (20,22); let task = move (value) { &value }; let result = (&task)(); result.0 + result.1 }",
+        "pub fn main() -> i64 { let backing = 42; let value = (&backing,0); let task = move (value) { &value }; let result = (&task)(); *result.0 }",
+        "pub fn main() -> i64 { let value = (0,42); let task = move (value) { &value.1 }; let result = (&task)(); *result }",
+        "pub fn main() -> i64 { let mut value = 41; let mut task = move (value) { &mut value }; let result = (&mut task)(); *result = *result + 1; *result }",
+        "pub fn main() -> i64 { let first = 1; let final_value = 42; let mut value = (&first,0); let mut task = move (value) { &mut value }; let result = (&mut task)(); result.0 = &final_value; *result.0 }",
+        "pub fn main() -> i64 { let a = 1; let b = 42; let first = (&a,0); let second = (&b,0); let task = move (first,second) { let unused = first.1; &second }; let result = (&task)(); *result.0 }",
+    ] { run(source, 42); }
+}
+
+#[test]
+fn borrowed_capture_storage_keeps_owner_and_written_reference_lifetimes() {
+    for (source, codes) in [
+        ("fn bad() -> &i64 { let value = 42; let task = move (value) { &value }; (&task)() } pub fn main() -> i64 { *bad() }", &["G5013", "G5017"][..]),
+        ("pub fn main() -> i64 { let value = 42; let task = move (value) { &value }; let result = (&task)(); let moved = move task; *result }", &["G5004"][..]),
+        ("pub fn main() -> i64 { let mut value = 42; let mut task = move (value) { &mut value }; let first = (&mut task)(); let second = (&mut task)(); *first + *second }", &["G5004", "G5006", "G5007"][..]),
+        ("pub fn main() -> i64 { let backing = 1; let mut value = (&backing,0); let mut task = move (value) { &mut value }; let result = (&mut task)(); { let local = 42; result.0 = &local; }; *result.0 }", &["G5013", "G5017"][..]),
+    ] {
+        for level in ["0", "2"] {
+            let outcome = StageZeroCompiler::new().compile(request(source, level));
+            assert!(outcome.is_err(), "invalid lifetime or alias was accepted: {source}");
+            let diagnostics = outcome.unwrap_err().diagnostics();
+            assert!(diagnostics.iter().any(|diagnostic| codes.contains(&diagnostic.code)), "{source}: {diagnostics:#?}");
+            let represented = ["(&task)()", "(&mut task)()"].into_iter().flat_map(|call|
+                source.match_indices(call).map(|(start, _)| start..start + call.len())).collect::<Vec<_>>();
+            assert!(!diagnostics.iter().any(|diagnostic| diagnostic.code == "G5023"
+                && diagnostic.primary.as_ref().is_some_and(|span| represented.iter().any(|call|
+                    call.contains(&(span.start as usize))))),
+                "represented capture storage must reach the actual lifetime or alias obligation: {source}: {diagnostics:#?}");
+        }
+    }
+}
+
+#[test]
 fn returned_capture_references_compose_through_receivers_and_products() {
     for source in [
         "pub fn main() -> i64 { let value = 42; let reference = &value; let task = move (reference) { reference }; let result = (&task)(); *result }",

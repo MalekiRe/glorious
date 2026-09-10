@@ -112,7 +112,18 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
         Some(Value { core: None, owners: BTreeSet::new(), path: vec![],
             fallback_regions: regions,
             fallback_loans: loans.into_iter().map(|mut loan| {
-                loan.place.fields.extend_from_slice(fields); loan
+                loan.project_referent(fields); loan
+            }).collect(),
+        })
+    }
+    fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, unique: bool) -> Option<Value> {
+        let (regions, loans) = self.invocation_origins(receiver);
+        if loans.is_empty() || (unique && loans.iter().any(|loan| !loan.unique)) { return None; }
+        Some(Value { core: None, owners: BTreeSet::new(), path: vec![], fallback_regions: regions,
+            fallback_loans: loans.into_iter().map(|mut loan| {
+                loan.capture_path.push(projection.clone());
+                loan.unique = unique;
+                loan
             }).collect(),
         })
     }
@@ -365,11 +376,7 @@ impl Analyzer<'_> {
                 .owners
                 .iter()
                 .flat_map(|owner| self.origin_loans(&projection_key(owner, &value.path[..deref])))
-                .map(|loan| {
-                    let mut fields = loan.place.fields;
-                    fields.extend_from_slice(&value.path[deref + 1..]);
-                    projection_key(&loan.place.root, &fields)
-                })
+                .map(|loan| loan.resident_key(&value.path[deref + 1..]))
                 .collect();
         }
         value
@@ -387,11 +394,7 @@ impl Analyzer<'_> {
             return self
                 .reference_loans_from_value_path(value, &path[..deref])
                 .into_iter()
-                .map(|loan| {
-                    let mut fields = loan.place.fields;
-                    fields.extend_from_slice(&path[deref + 1..]);
-                    projection_key(&loan.place.root, &fields)
-                })
+                .map(|loan| loan.resident_key(&path[deref + 1..]))
                 .collect();
         }
         let owner = if self.pending_results.contains(&value) {
@@ -406,10 +409,7 @@ impl Analyzer<'_> {
     }
 
     pub(super) fn capture_type_key(ty: &Type) -> String {
-        format!(
-            "<capture-{:?}>",
-            crate::Digest::of_bytes(&crate::types::canonical_type_encoding(ty))
-        )
+        crate::resident_invocations::CaptureProjection::new(ty, &[]).origin_suffix()
     }
 
     fn known_capture_types(&self, owners: &BTreeSet<String>) -> Vec<Type> {

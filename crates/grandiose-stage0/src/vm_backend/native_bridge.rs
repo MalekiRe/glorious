@@ -228,19 +228,19 @@ fn collect_layout_closure(
     parameters: &[VmType],
     result: &VmType,
     available: &[VmNominalCopyDescriptor],
-) -> Result<(Vec<VmNominalCopyDescriptor>, BTreeSet<Vec<u8>>), VmArtifactError> {
+) -> Result<(Vec<VmNominalCopyDescriptor>, BTreeMap<Vec<u8>, VmType>), VmArtifactError> {
     let mut pending = parameters.to_vec();
     pending.push(result.clone());
     let mut seen = BTreeSet::new();
     let mut found = BTreeMap::new();
-    let mut residents = BTreeSet::new();
+    let mut residents = BTreeMap::new();
     while let Some(ty) = pending.pop() {
         let key = nominal_key(&ty);
         if !seen.insert(key.clone()) {
             continue;
         }
         if owned_resident(&ty) {
-            residents.insert(key.clone());
+            residents.insert(key.clone(), ty.clone());
         }
         match ty {
             VmType::Nominal {
@@ -308,7 +308,7 @@ pub(super) fn validate_resident_operations(
                 .iter()
                 .map(|resident| nominal_key(&resident.ty))
                 .collect::<BTreeSet<_>>();
-            if actual != expected {
+            if actual.iter().ne(expected.keys()) {
                 return Err(error(
                     "native resident operations do not match the import layout closure",
                 ));

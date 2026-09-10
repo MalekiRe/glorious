@@ -4797,7 +4797,7 @@ impl Elaborator<'_> {
 
     fn place_uses_shared_reference(&self, value: CoreId) -> bool {
         match self.expressions[value.0 as usize].kind {
-            CoreKind::Deref(reference) => matches!(self.expressions[reference.0 as usize].ty,
+            CoreKind::Deref(reference) => matches!(self.inference.resolve_type_structure(self.expressions[reference.0 as usize].ty.clone()),
                 Type::Reference { mutability: Mutability::Shared, .. })
                 || self.place_uses_shared_reference(reference),
             CoreKind::Field { base, .. } => self.place_uses_shared_reference(base),
@@ -9766,139 +9766,33 @@ impl Elaborator<'_> {
         })
     }
     fn assignment_place(&mut self, id: ExprId, span: Span) -> CorePlace {
-        let expression = self.body.expression(id);
-        match &expression.kind {
-            ExprKind::Path(path) => {
-                let [name] = path.as_slice() else {
-                    self.error(
-                        span,
-                        "G4137",
-                        "top-level and qualified values are not assignable places",
-                    );
-                    self.recovered = true;
-                    return CorePlace::Error;
-                };
-                let Some(ty) = self.locals.lookup(name).cloned() else {
-                    self.error(
-                        span,
-                        "G4137",
-                        "assignment destination is not a local binding",
-                    );
-                    self.recovered = true;
-                    return CorePlace::Error;
-                };
-                if !self.check_local_mutability(name, span) {
-                    return CorePlace::Error;
-                }
-                CorePlace::Local {
-                    name: name.clone(),
-                    ty: self.inference.resolve_type_structure(ty),
-                }
-            }
+        // Selection precedes permission checking. Reads, borrows and writes
+        // share the same field/type/privacy/refinement producer, including its
+        // explicit Core dereference. Only an owned root needs a mutable binding;
+        // a unique referent does not make its reference carrier reassignable.
+        let value = match self.body.expression(id).kind.clone() {
             ExprKind::Field { base, name } => {
-                let base = self.assignment_place(*base, expression.span);
-                if let Type::Tuple(fields) = base.ty() {
-                    let Some((index, ty)) = name.parse::<usize>().ok()
-                        .and_then(|index| fields.get(index).cloned().map(|ty| (index, ty)))
-                    else {
-                        self.error(span, "G4139", "tuple does not declare the assigned field index");
-                        self.recovered = true;
-                        return CorePlace::Error;
-                    };
-                    return CorePlace::Field {
-                        base: Box::new(base), index: index as u32,
-                        field_count: fields.len() as u32, ty,
-                    };
-                }
-                let Type::Nominal {
-                    definition,
-                    arguments,
-                } = base.ty()
-                else {
-                    self.error(span, "G4138", "assignment field requires a struct place");
-                    self.recovered = true;
-                    return CorePlace::Error;
-                };
-                let Some(fields) = self
-                    .signatures
-                    .instantiate_struct_fields_generic(definition, &arguments)
-                    .ok()
-                else {
-                    self.error(
-                        span,
-                        "G4138",
-                        "assignment field requires a visible struct place",
-                    );
-                    self.recovered = true;
-                    return CorePlace::Error;
-                };
-                let field_count = fields.len() as u32;
-                let Some((index, field)) = fields
-                    .into_iter()
-                    .enumerate()
-                    .find(|(_, field)| field.name == *name)
-                else {
-                    self.error(span, "G4139", "struct does not declare the assigned field");
-                    self.recovered = true;
-                    return CorePlace::Error;
-                };
-                if !self.field_is_accessible(&field, span) {
-                    self.error(
-                        span,
-                        "G4140",
-                        "assignment accesses a private field outside its declaring module",
-                    );
-                    self.recovered = true;
-                    return CorePlace::Error;
-                }
-                CorePlace::Field {
-                    base: Box::new(base),
-                    index: index as u32,
-                    field_count,
-                    ty: field.ty,
-                }
+                let base = self.expression(base);
+                self.project_field(base, name, span, true)
             }
-            ExprKind::Deref(reference) => {
-                let reference = self.expression(*reference);
-                let Type::Reference {
-                    mutability,
-                    referent,
-                    ..
-                } = self.expressions[reference.0 as usize].ty.clone()
-                else {
-                    self.error(
-                        span,
-                        "G4140",
-                        "assignment through dereference requires a reference",
-                    );
-                    self.recovered = true;
-                    return CorePlace::Error;
-                };
-                if !matches!(mutability, Mutability::Unique) || self.place_uses_shared_reference(reference) {
-                    self.error(
-                        span,
-                        "G4141",
-                        "assignment through a shared reference is not permitted",
-                    );
-                    self.recovered = true;
-                    return CorePlace::Error;
-                }
-                CorePlace::Deref {
-                    reference,
-                    ty: *referent,
-                    unique: true,
-                }
-            }
-            _ => {
-                self.error(
-                    span,
-                    "G4137",
-                    "assignment destination is not an addressable local place",
-                );
-                self.recovered = true;
-                CorePlace::Error
-            }
+            _ => self.expression(id),
+        };
+        if matches!(self.expressions[value.0 as usize].kind, CoreKind::Error) { return CorePlace::Error; }
+        let Some(place) = self.expression_place(value) else {
+            self.error(span, "G4137", "assignment destination is not an addressable local place");
+            self.recovered = true;
+            return CorePlace::Error;
+        };
+        if self.place_uses_shared_reference(value) {
+            self.error(span, "G4141", "assignment through a shared reference is not permitted");
+            self.recovered = true;
+            return CorePlace::Error;
         }
+        if let Some(name) = self.owned_place_root(value)
+            && !self.check_local_mutability(&name, span) {
+            return CorePlace::Error;
+        }
+        place
     }
     /// Resolve a nominal application's source arguments in declaration-slot
     /// order. Omitted arguments use inference only for type slots; the other
@@ -10325,6 +10219,12 @@ impl Elaborator<'_> {
     }
     fn field(&mut self, base: ExprId, name: String, span: Span) -> CoreId {
         let base = self.expression(base);
+        self.project_field(base, name, span, false)
+    }
+
+    fn project_field(&mut self, base: CoreId, name: String, span: Span, assignment: bool) -> CoreId {
+        let shape_error = if assignment { "G4138" } else { "G4128" };
+        let field_error = if assignment { "G4139" } else { "G4129" };
         // Handler result inference can already have solved this local's
         // type while its Core node still carries the original variable.
         let base_ty = self.expressions[base.0 as usize].ty.clone();
@@ -10344,7 +10244,7 @@ impl Elaborator<'_> {
             let Some((index, ty)) = name.parse::<usize>().ok()
                 .and_then(|index| fields.get(index).cloned().map(|ty| (index, ty)))
             else {
-                return self.fail(span, "G4129", "tuple does not declare the requested field index");
+                return self.fail(span, field_error, "tuple does not declare the requested field index");
             };
             return self.alloc(CoreKind::Field {
                 base, index: index as u32, field_count: fields.len() as u32,
@@ -10355,7 +10255,7 @@ impl Elaborator<'_> {
             arguments,
         } = base_ty
         else {
-            return self.fail(span, "G4128", "field projection requires a struct value");
+            return self.fail(span, shape_error, "field projection requires a struct value");
         };
         let fields = self
             .signatures
@@ -10365,7 +10265,7 @@ impl Elaborator<'_> {
         let Some(fields) = fields else {
             return self.fail(
                 span,
-                "G4128",
+                shape_error,
                 "field projection requires a struct value or a proven enum variant",
             );
         };
@@ -10381,7 +10281,7 @@ impl Elaborator<'_> {
         let Some((index, field)) = field else {
             return self.fail(
                 span,
-                "G4129",
+                field_error,
                 "aggregate does not declare the requested field or payload index",
             );
         };
@@ -10490,25 +10390,25 @@ impl Elaborator<'_> {
             })
     }
 
-    /// Convert a stable value projection into its assignable place form. This
-    /// is used only for lexical refinement facts; temporaries deliberately do
-    /// not acquire a mutable post-state identity.
+    /// Convert a stable value projection into its storage form. Assignment and
+    /// lexical refinement consume this same selection. Permission is checked
+    /// separately; temporaries do not acquire an owned mutable-place identity.
     fn expression_place(&self, id: CoreId) -> Option<CorePlace> {
         let expression = self.expressions.get(id.0 as usize)?;
         match &expression.kind {
             CoreKind::Local(name) => Some(CorePlace::Local {
                 name: name.clone(),
-                ty: expression.ty.clone(),
+                ty: self.inference.resolve_type_structure(expression.ty.clone()),
             }),
             CoreKind::Deref(reference) => {
                 let Type::Reference { mutability, .. } =
-                    &self.expressions.get(reference.0 as usize)?.ty
+                    self.inference.resolve_type_structure(self.expressions.get(reference.0 as usize)?.ty.clone())
                 else {
                     return None;
                 };
                 Some(CorePlace::Deref {
                     reference: *reference,
-                    ty: expression.ty.clone(),
+                    ty: self.inference.resolve_type_structure(expression.ty.clone()),
                     unique: matches!(mutability, Mutability::Unique),
                 })
             }
@@ -10520,7 +10420,7 @@ impl Elaborator<'_> {
                 base: Box::new(self.expression_place(*base)?),
                 index: *index,
                 field_count: *field_count,
-                ty: expression.ty.clone(),
+                ty: self.inference.resolve_type_structure(expression.ty.clone()),
             }),
             _ => None,
         }

@@ -734,11 +734,62 @@ before any subsequent reference access; copying a handle does not extend that
 lifetime or run source destruction.
 
 This completes the tested local-frame/captured-handle move, restoration and
-borrowed-inspection slice, not all captured-storage lifetime contracts. A direct
-borrow of a generated capture slot currently has the invocation frame's lease;
-it is not yet an environment-lifetime returned loan. The active positive source
-case returning `&value` from a closure owning `value` still fails G5023 during
-source result-provenance checking, before either runtime is reached. Its input
-storage projection and the subsequent environment-lifetime native contract
-remain open. Native owned handlers, resumption transfer and full fusion are
-separate outstanding boundaries.
+borrowed-inspection slice, not all captured-storage lifetime contracts. The
+capture-storage boundary below extends it to returned loans of owned captures.
+Native owned handlers, resumption transfer and full fusion remain separate
+outstanding boundaries.
+
+## Returned loans of callable-owned storage
+
+The shared invocation payload relation distinguishes returning a captured value
+from borrowing its resident storage. Its capture-storage projection retains the
+receiver path, sealed callable type, resident type and logical fields. Ownership
+keeps the real receiver owner for overlap and lifetime obligations, while escape
+keeps that owner's existing storage identity. Nested capture paths are logical
+invocation coordinates, not invented physical Core environment fields.
+
+Both consumers apply the new projection through their ordinary invocation input
+adapters. Dereference reads and writes follow the same stored capture path.
+Assignment snapshots the RHS before replacing destination provenance. Exact
+ordinary destinations permit strong updates; ambiguous aliases and type-grouped
+capture destinations retain a union of possible contents. Loan liveness closes
+over the existing loan graph, so a live alias also retains references subsequently
+stored in its referent. Lexical scope exit then checks those same live loans.
+Escape joins omit an absent declaration alternative only when the shared product
+positively covers every result reference; an unknown value remains unknown.
+
+Callable-control summaries retain the symbolic explicit and captured residents
+actually used to derive them. Abstract and observed return contracts use the
+same payload projection rules. A complete compiler-branded constructor type in
+the same sealed body's generic namespace can select an independent contract
+after an unobserved prefix. Matching only an environment brand, an erased type,
+another specialization or a stale body cannot select it. This settles the call
+conditional on reaching it; mutation coverage and its guards remain unknown.
+Cross-owner generic instantiation still requires an independently checked mapping.
+
+Field assignment now uses the ordinary field-selection/type/privacy producer
+and its explicit dereferences before checking write permission. Unique referent
+authority is distinct from permission to reassign the handle's binding. The
+separate assignment field walker is removed.
+
+Generated capture-slot borrows resolve the existing environment home through the
+exact lent initialization sidecar. Equal payload addresses cannot identify
+zero-byte owners. During a machine invocation, the home's initialization state
+is the generated code's actual writable flag view; nested entries lend and return
+that same ownership. Returning or failing a loan detaches its flag pointers
+before their stack storage expires. Ordinary local borrows retain their existing
+frame lifetime. The former copy-in/copy-out initialization reconstruction is gone.
+
+Generated import adapters derive their transitive ABI layouts from the checked
+program-wide nominal table, also used by VM native storage. The adapter validator
+requires every added descriptor to occur unchanged in that exact source graph.
+The common native ABI closure producer supplies both import validation and
+generated resident obligations; its duplicate generated-layout walker is removed.
+Function-local Copy descriptor demands need not grow through reference handles.
+
+This is not complete guarded storage analysis. Capture destinations grouped by
+resident type cannot prove exact slot replacement. Explicit environment-destruction
+retirement for every runtime home/borrowed-slot formation path still needs a
+lifecycle audit; returned handles must not be treated as source ownership.
+Native handlers, general resumption transfer, full fusion and complete library
+and self-hosted-compiler acceptance remain open.

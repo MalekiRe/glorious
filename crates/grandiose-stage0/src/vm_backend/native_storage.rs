@@ -2,7 +2,7 @@
 //! value initialization, not by a native call. Resident bytes are authoritative;
 //! the separate state records only initialization and checked-reference origins.
 
-use super::native_memory::{NativeFields, NativeLayout, NativeShape, ReferenceRead};
+use super::native_memory::{GeneratedInitialization, NativeFields, NativeLayout, NativeShape, ReferenceRead};
 use super::native_profile::{AllocationKind, NativeAllocation, NativeMemoryMeasurements};
 use super::{
     ExecutionBudget, VmArtifactError, VmFunction, VmInstruction,
@@ -10,8 +10,9 @@ use super::{
 };
 use grandiose_runtime::memory::RawAllocation;
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell, RefMut},
     collections::{BTreeMap, BTreeSet},
+    ops::{Deref, DerefMut},
     rc::Rc,
     sync::{Arc, Weak},
 };
@@ -20,7 +21,16 @@ fn error(message: &'static str) -> VmArtifactError {
     VmArtifactError::NativeMemory { message }
 }
 
-pub(super) type HomeRegistry = Rc<RefCell<BTreeMap<usize, Weak<NativeHome>>>>;
+/// Allocations support explicit unsafe address adoption. Generated capture
+/// inputs instead name the exact lent slot by its initialization sidecar; byte
+/// equality cannot distinguish zero-sized owners or establish a capture loan.
+#[derive(Debug, Default)]
+pub(super) struct RegisteredHomes {
+    pub(super) allocations: BTreeMap<usize, Weak<NativeHome>>,
+    native_inputs: BTreeMap<usize, Weak<NativeHome>>,
+}
+
+pub(super) type HomeRegistry = Rc<RefCell<RegisteredHomes>>;
 
 // One result slot per ordinary producing instruction. Handler payload tables
 // are installed explicitly by the control engine.
@@ -799,6 +809,175 @@ struct Initialization {
     variants: BTreeMap<Vec<u32>, u32>,
 }
 
+/// Ownership of initialization moves with execution. While machine code owns
+/// the mask, all VM/home accesses read and update those exact flags. The saved
+/// state is inactive until the loan returns; it is never consulted as a shadow
+/// mask. Nested engine entries restore the immediately enclosing owner.
+#[derive(Debug)]
+enum InitializationStorage {
+    Owned(Initialization),
+    Generated { view: GeneratedInitialization, previous: Box<Self> },
+}
+
+impl Default for InitializationStorage {
+    fn default() -> Self { Self::Owned(Initialization::default()) }
+}
+
+impl InitializationStorage {
+    fn snapshot(view: &GeneratedInitialization) -> Result<Initialization, VmArtifactError> {
+        let mut holes = view.holes()?;
+        let root = !holes.remove(&vec![]);
+        Ok(Initialization { root, holes, variants: BTreeMap::new() })
+    }
+
+    fn install(&mut self, initialization: Initialization) -> Result<(), VmArtifactError> {
+        match self {
+            Self::Owned(state) => { *state = initialization; Ok(()) }
+            Self::Generated { view, .. } => view.install(initialization.root, &initialization.holes),
+        }
+    }
+
+    fn detach_inactive_loan(&mut self, identity: usize) -> bool {
+        let Self::Generated { view, previous } = self else { return false; };
+        if view.identity() != identity { return previous.detach_inactive_loan(identity); }
+        view.expire();
+        *self = *std::mem::take(previous);
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+struct InitializationCell(RefCell<InitializationStorage>);
+
+impl InitializationCell {
+    fn borrow(&self) -> Result<InitializationRead<'_>, VmArtifactError> {
+        let storage = self.0.borrow();
+        let generated = match &*storage {
+            InitializationStorage::Owned(_) => None,
+            InitializationStorage::Generated { view, .. } => Some(InitializationStorage::snapshot(view)?),
+        };
+        Ok(InitializationRead { storage, generated })
+    }
+
+    fn borrow_mut(&self) -> Result<InitializationWrite<'_>, VmArtifactError> {
+        let storage = self.0.borrow_mut();
+        let generated = match &*storage {
+            InitializationStorage::Owned(_) => None,
+            InitializationStorage::Generated { view, .. } => Some(InitializationStorage::snapshot(view)?),
+        };
+        Ok(InitializationWrite { storage, generated })
+    }
+
+    fn clear(&self, path: &[u32]) {
+        let mut storage = self.0.borrow_mut();
+        match &mut *storage {
+            InitializationStorage::Owned(state) => {
+                if path.is_empty() { *state = Initialization::default(); }
+                else {
+                    state.holes.retain(|hole| !hole.starts_with(path));
+                    state.holes.insert(path.to_vec());
+                    state.variants.retain(|field, _| !field.starts_with(path));
+                }
+            }
+            InitializationStorage::Generated { view, .. } => {
+                // Retirement cannot grant read authority, even if an unsafe
+                // producer supplied invalid flags. The view remains scoped.
+                let _ = view.clear(path);
+            }
+        }
+    }
+}
+
+struct InitializationRead<'a> {
+    storage: Ref<'a, InitializationStorage>,
+    generated: Option<Initialization>,
+}
+
+impl Deref for InitializationRead<'_> {
+    type Target = Initialization;
+    fn deref(&self) -> &Initialization {
+        match &*self.storage {
+            InitializationStorage::Owned(state) => state,
+            InitializationStorage::Generated { .. } => self.generated.as_ref().expect("native initialization read"),
+        }
+    }
+}
+
+struct InitializationWrite<'a> {
+    storage: RefMut<'a, InitializationStorage>,
+    generated: Option<Initialization>,
+}
+
+impl Deref for InitializationWrite<'_> {
+    type Target = Initialization;
+    fn deref(&self) -> &Initialization {
+        match &*self.storage {
+            InitializationStorage::Owned(state) => state,
+            InitializationStorage::Generated { .. } => self.generated.as_ref().expect("native initialization write"),
+        }
+    }
+}
+
+impl DerefMut for InitializationWrite<'_> {
+    fn deref_mut(&mut self) -> &mut Initialization {
+        match &mut *self.storage {
+            InitializationStorage::Owned(state) => state,
+            InitializationStorage::Generated { .. } => self.generated.as_mut().expect("native initialization write"),
+        }
+    }
+}
+
+impl Drop for InitializationWrite<'_> {
+    fn drop(&mut self) {
+        if let Some(state) = self.generated.take() {
+            // The mutable borrow prevents the owning loan from expiring while
+            // this short synchronous update holds its checked writable view.
+            self.storage.install(state).expect("live native initialization write");
+        }
+    }
+}
+
+pub(super) struct NativeHomeLoan {
+    home: Arc<NativeHome>,
+    identity: Option<usize>,
+}
+
+impl NativeHomeLoan {
+    pub(super) fn finish(mut self) -> Result<(), VmArtifactError> { self.restore() }
+
+    fn restore(&mut self) -> Result<(), VmArtifactError> {
+        let Some(identity) = self.identity.take() else { return Ok(()); };
+        self.home.registry.borrow_mut().native_inputs.remove(&identity);
+        let mut storage = self.home.state.0.borrow_mut();
+        let active = std::mem::take(&mut *storage);
+        let InitializationStorage::Generated { view, previous } = active else {
+            return Err(error("native initialization loan lost its owner"));
+        };
+        if view.identity() != identity {
+            *storage = InitializationStorage::Generated { view, previous };
+            // An invalid return order still cannot leave this caller's expired
+            // sidecar in the chain used by the later, active loan.
+            storage.detach_inactive_loan(identity);
+            return Err(error("native initialization loans returned out of order"));
+        }
+        let snapshot = InitializationStorage::snapshot(&view);
+        view.expire();
+        *storage = *previous;
+        match snapshot {
+            Ok(snapshot) => storage.install(snapshot),
+            Err(failure) => {
+                // Never leave a flag pointer reachable after its stack expires.
+                storage.install(Initialization::default())?;
+                Err(failure)
+            }
+        }
+    }
+}
+
+impl Drop for NativeHomeLoan {
+    fn drop(&mut self) { let _ = self.restore(); }
+}
+
 /// Retaining this allocation is not retaining a language owner or running its
 /// Drop hook. Source cleanup explicitly clears initialization before releasing
 /// the home; outstanding runtime references cannot read a cleared resident.
@@ -809,7 +988,7 @@ pub(super) struct NativeHome {
     live: Cell<bool>,
     external: bool,
     pub(super) layout: Arc<NativeLayout>,
-    state: RefCell<Initialization>,
+    state: InitializationCell,
     address_exposed: Cell<bool>,
     live_bytes: Rc<Cell<usize>>,
     measurements: Option<Rc<NativeMemoryMeasurements>>,
@@ -857,7 +1036,7 @@ impl NativeHome {
             live: Cell::new(true),
             external: false,
             layout,
-            state: RefCell::new(Initialization::default()),
+            state: InitializationCell::default(),
             address_exposed: Cell::new(false),
             live_bytes,
             measurements: budget.native_memory.measurements.clone(),
@@ -867,7 +1046,7 @@ impl NativeHome {
         if bytes != 0 {
             home.registry
                 .borrow_mut()
-                .insert(home.pointer().addr(), Arc::downgrade(&home));
+                .allocations.insert(home.pointer().addr(), Arc::downgrade(&home));
         }
         Ok(home)
     }
@@ -913,7 +1092,7 @@ impl NativeHome {
             live: Cell::new(true),
             external: true,
             layout,
-            state: RefCell::new(Initialization::default()),
+            state: InitializationCell::default(),
             address_exposed: Cell::new(true),
             live_bytes: budget.native_memory.home_bytes.clone(),
             measurements: budget.native_memory.measurements.clone(),
@@ -930,22 +1109,41 @@ impl NativeHome {
         self.external
     }
 
-    /// Generated callable invocation lends the existing capture home. An
-    /// external *owned* view would retire its callable leases at callback exit
-    /// while the enclosing environment still owns those bytes.
-    pub(super) unsafe fn capture_loan(
-        layout: Arc<NativeLayout>, pointer: *mut u8, budget: &mut ExecutionBudget,
-        holes: &BTreeSet<Vec<u32>>,
-    ) -> Result<Arc<Self>, VmArtifactError> {
-        if layout.memory.size() == 0 {
-            // There are no bytes/address leases to alias. The checked input
-            // position and its sidecar retain the distinct logical ZST owner.
-            return unsafe { Self::external_argument_with_holes(layout, pointer, budget, Some(holes)) };
+    /// Transfer initialization to a generated capture input. The sidecar is the
+    /// input's logical identity even when multiple homes have no payload bytes.
+    /// The guard must return before the caller releases that writable sidecar.
+    pub(super) unsafe fn lend_native(self: &Arc<Self>, flags: *mut u8,
+        paths: Arc<[Vec<u32>]>, budget: &mut ExecutionBudget,
+    ) -> Result<NativeHomeLoan, VmArtifactError> {
+        self.project(&[])?;
+        budget.reserve_value("native resident initialization loan", 1)?;
+        budget.reserve_value("native resident logical paths", paths.len())?;
+        let view = unsafe { GeneratedInitialization::new(flags, paths, Rc::new(Cell::new(true)))? };
+        let identity = view.identity();
+        let mut registry = self.registry.borrow_mut();
+        if registry.native_inputs.contains_key(&identity) {
+            return Err(error("native capture sidecar already has a resident owner"));
         }
-        let home = budget.native_memory.homes.borrow().get(&pointer.addr()).and_then(Weak::upgrade)
+        let mut storage = self.state.0.borrow_mut();
+        let previous = Box::new(std::mem::take(&mut *storage));
+        *storage = InitializationStorage::Generated { view, previous };
+        registry.native_inputs.insert(identity, Arc::downgrade(self));
+        Ok(NativeHomeLoan { home: self.clone(), identity: Some(identity) })
+    }
+
+    /// Resolve the exact input established by `lend_native`. Both generated
+    /// borrowing and VM re-entry use this existing home and its active mask;
+    /// neither invents an owned view or infers identity from byte addresses.
+    pub(super) fn capture_loan(
+        layout: Arc<NativeLayout>, pointer: *mut u8, flags: *const u8, budget: &ExecutionBudget,
+    ) -> Result<Arc<Self>, VmArtifactError> {
+        let home = budget.native_memory.homes.borrow().native_inputs.get(&flags.addr()).and_then(Weak::upgrade)
             .ok_or_else(|| error("generated capture input has no live resident owner"))?;
-        if home.ty() != &layout.ty { return Err(error("generated capture input has a different owner layout")); }
-        unsafe { home.initialize_native_with_holes(budget, Some(holes))?; }
+        if home.ty() != &layout.ty || home.pointer() != pointer {
+            return Err(error("generated capture input has a different owner layout or address"));
+        }
+        home.project(&[])?;
+        home.state.borrow()?;
         Ok(home)
     }
 
@@ -981,7 +1179,7 @@ impl NativeHome {
         ) -> Result<(), VmArtifactError> {
             budget.tick()?;
             if holes.is_some_and(|holes| holes.contains(path)) {
-                home.state.borrow_mut().holes.insert(path.clone());
+                home.state.borrow_mut()?.holes.insert(path.clone());
                 return Ok(());
             }
             let (offset, fields) = match &layout.shape {
@@ -994,7 +1192,7 @@ impl NativeHome {
                     let fields = variants
                         .get(tag as usize)
                         .ok_or_else(|| error("invalid native enum discriminant"))?;
-                    home.state.borrow_mut().variants.insert(path.clone(), tag);
+                    home.state.borrow_mut()?.variants.insert(path.clone(), tag);
                     (*payload_offset, fields)
                 }
                 NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable | NativeShape::Reference { .. } => {
@@ -1027,12 +1225,12 @@ impl NativeHome {
         }
         // Adoption validates existing resident bytes; it must not revoke
         // callable leases supplied by the producer before reading them.
-        *self.state.borrow_mut() = Initialization::default();
+        *self.state.borrow_mut()? = Initialization::default();
         if let Err(failure) = visit(self, &self.layout, self.pointer(), &mut vec![], budget, holes, admission) {
             self.clear(&[]);
             return Err(failure);
         }
-        self.state.borrow_mut().root = !holes.is_some_and(|holes| holes.contains(&vec![]));
+        self.state.borrow_mut()?.root = !holes.is_some_and(|holes| holes.contains(&vec![]));
         Ok(())
     }
     /// Lexical storage death releases bytes even when dead SSA reference
@@ -1047,7 +1245,7 @@ impl NativeHome {
             self.live_bytes
                 .set(self.live_bytes.get() - self.layout.memory.size());
             if self.layout.memory.size() != 0 {
-                self.registry.borrow_mut().remove(&self.pointer.addr());
+                self.registry.borrow_mut().allocations.remove(&self.pointer.addr());
             }
         }
     }
@@ -1074,7 +1272,7 @@ impl NativeHome {
         if !self.live.get() {
             return Err(error("native storage lifetime has ended"));
         }
-        let state = self.state.borrow();
+        let state = self.state.borrow()?;
         if !state.root {
             return Err(error("native sidecar write requires a live resident root"));
         }
@@ -1182,17 +1380,16 @@ impl NativeHome {
     }
 
     pub(super) fn is_initialized(&self, path: &[u32]) -> bool {
-        let state = self.state.borrow();
-        state.root && !state.holes.iter().any(|hole| path.starts_with(hole))
+        self.live.get() && self.state.borrow().is_ok_and(|state|
+            state.root && !state.holes.iter().any(|hole| path.starts_with(hole)))
     }
 
     pub(super) fn is_fully_initialized(&self, path: &[u32]) -> bool {
-        let state = self.state.borrow();
-        state.root
+        self.live.get() && self.state.borrow().is_ok_and(|state| state.root
             && !state
                 .holes
                 .iter()
-                .any(|hole| path.starts_with(hole) || hole.starts_with(path))
+                .any(|hole| path.starts_with(hole) || hole.starts_with(path)))
     }
 
     /// Generated byte operations supply their checked logical mask separately
@@ -1201,7 +1398,7 @@ impl NativeHome {
         -> Result<(), VmArtifactError>
     {
         self.project(path)?;
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.borrow_mut()?;
         if !path.is_empty() && (!state.root || state.holes.iter().any(|hole|
             hole.len() < path.len() && path.starts_with(hole))) {
             return Err(error("native storage field cannot initialize an absent parent"));
@@ -1223,14 +1420,7 @@ impl NativeHome {
                 callables.clear(pointer.addr(), layout.memory.size());
             }
         }
-        let mut state = self.state.borrow_mut();
-        if path.is_empty() {
-            *state = Initialization::default();
-        } else {
-            state.holes.retain(|hole| !hole.starts_with(path));
-            state.holes.insert(path.to_vec());
-            state.variants.retain(|field, _| !field.starts_with(path));
-        }
+        self.state.clear(path);
     }
 
     /// Observe an enum tag written by native code. A valid native replacement
@@ -1249,7 +1439,7 @@ impl NativeHome {
         if tag as usize >= count {
             return Err(error("invalid native enum discriminant"));
         }
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.borrow_mut()?;
         if state
             .variants
             .insert(path.to_vec(), tag)
@@ -1457,7 +1647,7 @@ impl NativeHome {
         if !super::vm_type_matches(&super::borrowed_value_type(value, &layout.ty), &layout.ty) {
             return Err(error("native storage value has a different concrete type"));
         }
-        if !path.is_empty() && !self.state.borrow().root {
+        if !path.is_empty() && !self.state.borrow()?.root {
             return Err(error(
                 "native storage field cannot initialize an absent parent",
             ));
@@ -1475,19 +1665,19 @@ impl NativeHome {
                     if let Some(measurements) = &self.measurements {
                         measurements.copied(AllocationKind::Home, layout.memory.size());
                     }
-                    *self.state.borrow_mut() = source.state.borrow().clone();
+                    *self.state.borrow_mut()? = source.state.borrow()?.clone();
                 }
                 return Ok(());
             }
-            *self.state.borrow_mut() = Initialization::default();
+            *self.state.borrow_mut()? = Initialization::default();
         } else {
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.borrow_mut()?;
             state.holes.retain(|hole| !hole.starts_with(path));
             state.variants.retain(|field, _| !field.starts_with(path));
         }
         budget.native_memory.residents.clear(pointer.addr(), layout.memory.size());
         self.store_at(&layout, pointer, &mut path.to_vec(), value, budget)?;
-        self.state.borrow_mut().root = true;
+        self.state.borrow_mut()?.root = true;
         Ok(())
     }
 
@@ -1501,7 +1691,7 @@ impl NativeHome {
     ) -> Result<(), VmArtifactError> {
         if matches!(value, VmValue::Uninitialized(_)) {
             budget.native_memory.residents.clear(pointer.addr(), layout.memory.size());
-            self.state.borrow_mut().holes.insert(path.clone());
+            self.state.borrow_mut()?.holes.insert(path.clone());
             return Ok(());
         }
         if let VmValue::Resident(source) = value {
@@ -1509,7 +1699,7 @@ impl NativeHome {
             if source_layout.ty != layout.ty {
                 return Err(error("native field move has a different layout"));
             }
-            let origin = source.state.borrow().clone();
+            let origin = source.state.borrow()?.clone();
             unsafe {
                 std::ptr::copy(source_pointer, pointer, layout.memory.size());
             }
@@ -1517,7 +1707,7 @@ impl NativeHome {
             if let Some(measurements) = &self.measurements {
                 measurements.copied(AllocationKind::Home, layout.memory.size());
             }
-            let mut state = self.state.borrow_mut();
+            let mut state = self.state.borrow_mut()?;
             let prefixed =
                 |relative: &[u32]| path.iter().chain(relative).copied().collect::<Vec<_>>();
             if !origin.root {
@@ -1582,7 +1772,7 @@ impl NativeHome {
             unsafe {
                 pointer.cast::<u32>().write(tag);
             }
-            self.state.borrow_mut().variants.insert(path.clone(), tag);
+            self.state.borrow_mut()?.variants.insert(path.clone(), tag);
         }
         Ok(())
     }
@@ -1725,17 +1915,128 @@ mod tests {
         let layout = Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
         let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
         home.store(&[], &VmValue::Tuple(Arc::from([VmValue::I64(17), VmValue::I64(42)])), &mut budget).unwrap();
-        let holes = BTreeSet::from([vec![0]]);
-        let loan = unsafe { NativeHome::capture_loan(layout.clone(), home.pointer(), &mut budget, &holes) }.unwrap();
+        let mut flags = [1, 1, 1];
+        let paths = Arc::from([vec![], vec![0], vec![1]]);
+        assert!(NativeHome::capture_loan(layout.clone(), home.pointer(), flags.as_ptr(), &budget).is_err(),
+            "matching bytes do not establish a lent capture input");
+        let native_loan = unsafe { home.lend_native(flags.as_mut_ptr(), paths, &mut budget) }.unwrap();
+        let loan = NativeHome::capture_loan(layout.clone(), home.pointer(), flags.as_ptr(), &budget).unwrap();
         assert!(Arc::ptr_eq(&home, &loan));
+        flags[1] = 0;
         assert!(!home.is_initialized(&[0]));
         loan.store(&[1], &VmValue::I64(43), &mut budget).unwrap();
+        loan.clear(&[1]);
+        assert_eq!(flags, [1, 0, 0], "VM operations publish to the active native mask");
+        loan.store(&[1], &VmValue::I64(43), &mut budget).unwrap();
+        assert_eq!(flags, [1, 0, 1]);
         drop(loan);
-        assert_eq!(super::super::expect_i64(home.load(&[1], &mut budget).unwrap()).unwrap(), 43);
         let mut unrelated = [17i64, 42];
-        assert!(unsafe { NativeHome::capture_loan(layout, unrelated.as_mut_ptr().cast(), &mut budget, &BTreeSet::new()) }.is_err());
+        assert!(NativeHome::capture_loan(layout.clone(), unrelated.as_mut_ptr().cast(), flags.as_ptr(), &budget).is_err());
         let wrong = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
-        assert!(unsafe { NativeHome::capture_loan(wrong, home.pointer(), &mut budget, &BTreeSet::new()) }.is_err());
+        assert!(NativeHome::capture_loan(wrong, home.pointer(), flags.as_ptr(), &budget).is_err());
+        native_loan.finish().unwrap();
+        flags = [0, 0, 0];
+        assert_eq!(flags, [0, 0, 0]);
+        assert!(!home.is_initialized(&[0]));
+        assert_eq!(super::super::expect_i64(home.load(&[1], &mut budget).unwrap()).unwrap(), 43);
+        assert!(NativeHome::capture_loan(layout, home.pointer(), flags.as_ptr(), &budget).is_err(),
+            "a returned input no longer authenticates storage");
+    }
+
+    #[test]
+    fn native_initialization_loans_compose_across_nested_engine_entries() {
+        let mut budget = budget(1024);
+        let ty = VmType::Tuple(vec![VmType::I64, VmType::I64]);
+        let layout = Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
+        let home = NativeHome::new(layout, &mut budget).unwrap();
+        home.store(&[], &VmValue::Tuple(Arc::from([VmValue::I64(20), VmValue::I64(22)])), &mut budget).unwrap();
+        let paths: Arc<[Vec<u32>]> = Arc::from([vec![], vec![0], vec![1]]);
+        let mut outer_flags = [1, 1, 1];
+        let outer = unsafe { home.lend_native(outer_flags.as_mut_ptr(), paths.clone(), &mut budget) }.unwrap();
+        home.clear(&[0]);
+        assert_eq!(outer_flags, [1, 0, 1]);
+        let mut inner_flags = [1, 0, 1];
+        let inner = unsafe { home.lend_native(inner_flags.as_mut_ptr(), paths, &mut budget) }.unwrap();
+        home.store(&[0], &VmValue::I64(20), &mut budget).unwrap();
+        inner_flags[2] = 0;
+        assert_eq!(inner_flags, [1, 1, 0]);
+        assert!(!home.is_initialized(&[1]));
+        assert_eq!(outer_flags, [1, 0, 1], "inactive flags are not a competing authority");
+        inner.finish().unwrap();
+        assert_eq!(outer_flags, [1, 1, 0]);
+        inner_flags = [0, 0, 0];
+        assert_eq!(inner_flags, [0, 0, 0]);
+        home.store(&[1], &VmValue::I64(22), &mut budget).unwrap();
+        assert_eq!(outer_flags, [1, 1, 1]);
+        outer.finish().unwrap();
+        assert!(home.is_fully_initialized(&[]));
+        assert_eq!(super::super::expect_i64(home.load(&[1], &mut budget).unwrap()).unwrap(), 22);
+    }
+
+    #[test]
+    fn native_capture_inputs_preserve_distinct_zero_byte_owners_and_retirement() {
+        let mut budget = budget(1024);
+        let layout = Arc::new(super::super::native_memory::native_layout(&VmType::Unit, &Arc::from([]), &mut vec![]).unwrap());
+        let first = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        let second = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        for home in [&first, &second] { home.store(&[], &VmValue::Unit, &mut budget).unwrap(); }
+        assert_eq!(first.pointer(), second.pointer());
+        let mut first_flags = [1];
+        let mut second_flags = [1];
+        let first_loan = unsafe { first.lend_native(first_flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.unwrap();
+        let second_loan = unsafe { second.lend_native(second_flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.unwrap();
+        let selected = NativeHome::capture_loan(layout.clone(), second.pointer(), second_flags.as_ptr(), &budget).unwrap();
+        assert!(Arc::ptr_eq(&selected, &second));
+        first_flags[0] = 0;
+        assert_eq!(first_flags, [0]);
+        assert!(!first.is_initialized(&[]));
+        assert!(selected.is_initialized(&[]));
+        second_loan.finish().unwrap();
+        first_loan.finish().unwrap();
+        assert!(selected.is_initialized(&[]), "the reference follows the home beyond the invocation");
+        second.retire();
+        assert!(!selected.is_initialized(&[]));
+        assert!(selected.load(&[], &mut budget).is_err());
+        assert!(NativeHome::capture_loan(layout, second.pointer(), second_flags.as_ptr(), &budget).is_err());
+    }
+
+    #[test]
+    fn invalid_native_initialization_never_survives_its_loan_as_read_authority() {
+        let mut budget = budget(1024);
+        let layout = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        home.store(&[], &VmValue::I64(42), &mut budget).unwrap();
+        let mut flags = [2];
+        assert!(unsafe { home.lend_native(flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.is_err());
+        flags[0] = 1;
+        let loan = unsafe { home.lend_native(flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.unwrap();
+        flags[0] = 2;
+        assert_eq!(flags, [2]);
+        assert!(home.scalar_value().is_err());
+        assert!(NativeHome::capture_loan(layout.clone(), home.pointer(), flags.as_ptr(), &budget).is_err());
+        assert!(loan.finish().is_err());
+        flags[0] = 1;
+        assert!(!home.is_initialized(&[]));
+        assert!(NativeHome::capture_loan(layout, home.pointer(), flags.as_ptr(), &budget).is_err());
+    }
+
+    #[test]
+    fn out_of_order_native_loan_return_detaches_the_expiring_sidecar() {
+        let mut budget = budget(1024);
+        let layout = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let home = NativeHome::new(layout, &mut budget).unwrap();
+        home.store(&[], &VmValue::I64(42), &mut budget).unwrap();
+        let mut outer_flags = [1];
+        let mut inner_flags = [1];
+        let outer = unsafe { home.lend_native(outer_flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.unwrap();
+        let inner = unsafe { home.lend_native(inner_flags.as_mut_ptr(), Arc::from([vec![]]), &mut budget) }.unwrap();
+        assert!(outer.finish().is_err());
+        outer_flags[0] = 2;
+        assert_eq!(outer_flags, [2]);
+        assert_eq!(super::super::expect_i64(home.scalar_value().unwrap()).unwrap(), 42);
+        inner.finish().unwrap();
+        assert_eq!(super::super::expect_i64(home.scalar_value().unwrap()).unwrap(), 42);
+        assert!(budget.native_memory.homes.borrow().native_inputs.is_empty());
     }
 
     #[test]

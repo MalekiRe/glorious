@@ -143,10 +143,15 @@ impl<'a> CallableContext<'a> {
                     (target, parent.iter().chain(fields).copied().collect::<Vec<_>>())
                 } else {
                     let (pointer, flags) = unsafe { self.slots(slots, 0) };
-                    let paths = plan.frame_layouts[function as usize].paths[*src as usize].clone().into();
-                    let live = self.scopes.borrow_mut().last_mut().ok_or_else(|| invalid("generated borrow has no live frame"))?.lifetime();
-                    let native = unsafe { NativeReference::generated(pointer, self.layout(function, *src)?, flags.cast_mut(), paths, live)? };
-                    (ReferenceTarget::Native(native), fields.clone())
+                    let layout = self.layout(function, *src)?;
+                    let target = if *src < body.captures {
+                        ReferenceTarget::Home(NativeHome::capture_loan(layout, pointer, flags, unsafe { &*self.budget })?)
+                    } else {
+                        let paths = plan.frame_layouts[function as usize].paths[*src as usize].clone().into();
+                        let live = self.scopes.borrow_mut().last_mut().ok_or_else(|| invalid("generated borrow has no live frame"))?.lifetime();
+                        ReferenceTarget::Native(unsafe { NativeReference::generated(pointer, layout, flags.cast_mut(), paths, live)? })
+                    };
+                    (target, fields.clone())
                 };
                 let (_, layout) = target.native_project(&path)?;
                 // Formation is not a value read. Unique handles can restore an
@@ -366,6 +371,7 @@ impl<'a> CallableContext<'a> {
         };
         let mut flags = Vec::with_capacity(loan.values.len());
         let mut incoming = Vec::with_capacity(2 * callee_body.parameters as usize);
+        let mut native_loans = Vec::with_capacity(loan.values.len());
         // Native and VM-created callables share the same homes. A scalar VM
         // capture is materialized once into that domain before lending it.
         {
@@ -392,6 +398,9 @@ impl<'a> CallableContext<'a> {
                 );
                 incoming.push(home.pointer().cast_const());
                 incoming.push(flags.last().unwrap().as_ptr());
+                native_loans.push(unsafe {
+                    home.lend_native(flags.last_mut().unwrap().as_mut_ptr(), paths.clone().into(), budget)?
+                });
             }
             for index in 0..arguments {
                 let (pointer, flags) = unsafe { self.slots(slots, index + 1) };
@@ -404,24 +413,7 @@ impl<'a> CallableContext<'a> {
             self.module
                 .invoke_native(target_index, context, incoming.as_ptr(), result)
         };
-        let _accounting = unsafe { self.budget_scope(context)? };
-        let budget = unsafe { &mut *self.budget };
-        if !destroy {
-            for (index, (value, flags)) in loan.values.iter().zip(&flags).enumerate() {
-                let VmValue::Resident(home) = value else {
-                    unreachable!()
-                };
-                let holes = unsafe {
-                    self.holes(
-                        &plan.frame_layouts[target_index].paths[index],
-                        flags.as_ptr(),
-                    )?
-                };
-                unsafe {
-                    home.initialize_native_with_holes(budget, Some(&holes))?;
-                }
-            }
-        }
+        for native_loan in native_loans.into_iter().rev() { native_loan.finish()?; }
         if status != 0 {
             return Err(invalid("generated callable invocation failed"));
         }

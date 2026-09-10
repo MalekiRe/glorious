@@ -3773,11 +3773,33 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
     Ok(VerifiedVmProgram { program })
 }
 
+/// One checked program-wide layout table. Function-local descriptor demands
+/// need not include types reached only through reference handles; their
+/// defining residents elsewhere in this graph supply the same layout authority.
+fn program_nominal_layouts(program: &CandidateVmProgram)
+    -> Result<BTreeMap<Vec<u8>, VmNominalCopyDescriptor>, VmArtifactError> {
+    let mut layouts = BTreeMap::new();
+    for descriptor in program.functions.values().flat_map(|function| &function.nominal_copy_descriptors) {
+        let key = vm_nominal_copy_descriptor_key(descriptor);
+        if let Some(previous) = layouts.get(&key) {
+            if previous != descriptor {
+                return Err(VmArtifactError::MalformedEncoding {
+                    message: "program nominal layout declarations disagree",
+                });
+            }
+        } else {
+            layouts.insert(key, descriptor.clone());
+        }
+    }
+    Ok(layouts)
+}
+
 // Public/decoded bytecode always reconstructs semantics from its own bodies.
 // The optional source is used only by the private compiler-generated native
 // execution adapter, never to produce a portable VerifiedVmProgram.
 fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&VerifiedVmProgram>) -> Result<(), VmArtifactError> {
     let semantics = native_semantics.map_or(program, |source| &source.program);
+    let source_layouts = program_nominal_layouts(semantics)?;
     if native_semantics.is_some() && (program.functions.keys().ne(semantics.functions.keys())
         || program.callable_environments != semantics.callable_environments
         || program.functions.iter().any(|(key, adapter)| {
@@ -3785,7 +3807,14 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
             adapter.captures != source.captures || adapter.parameters != source.parameters
                 || adapter.registers.get(..adapter.parameters as usize) != source.registers.get(..source.parameters as usize)
                 || adapter.instructions.first() != source.instructions.first()
-                || adapter.nominal_copy_descriptors != source.nominal_copy_descriptors
+                // Adapter imports require a transitive ABI layout closure,
+                // including borrowed pointees. Those descriptors may be
+                // declared by a different source function, but every one
+                // must come unchanged from this exact sealed source graph.
+                || source.nominal_copy_descriptors.iter().any(|descriptor|
+                    !adapter.nominal_copy_descriptors.contains(descriptor))
+                || adapter.nominal_copy_descriptors.iter().any(|descriptor|
+                    source_layouts.get(&vm_nominal_copy_descriptor_key(descriptor)) != Some(descriptor))
                 || adapter.safety != source.safety
         })) {
         return Err(VmArtifactError::MalformedEncoding { message: "generated adapter differs from its source invocation contract" });
@@ -3823,23 +3852,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
     // same instantiated nominal layout must freeze byte-for-byte identical
     // descriptors, or a caller can construct one layout and a callee can
     // project it as another.
-    let mut nominal_layouts = Vec::<&VmNominalCopyDescriptor>::new();
-    for function in program.functions.values() {
-        for descriptor in &function.nominal_copy_descriptors {
-            if let Some(previous) = nominal_layouts.iter().find(|previous| {
-                previous.definition == descriptor.definition
-                    && previous.arguments == descriptor.arguments
-            }) {
-                if **previous != *descriptor {
-                    return Err(VmArtifactError::MalformedEncoding {
-                        message: "program nominal layout declarations disagree",
-                    });
-                }
-            } else {
-                nominal_layouts.push(descriptor);
-            }
-        }
-    }
+    if native_semantics.is_some() { program_nominal_layouts(program)?; }
     let declared = program
         .host_capabilities
         .iter()
@@ -15430,7 +15443,7 @@ fn execute_program_in_float_profile(
         });
     }
     budget.reserve_allocation(function.registers.len())?;
-    budget.native_memory.install_program_layouts(program);
+    budget.native_memory.install_program_layouts(program)?;
     let mut registers = RuntimeRegisters::for_function_with_native_return(function, budget, native_return)?;
     let mut next_storage_id = 0u64;
     for (index, value) in arguments.iter().enumerate() {

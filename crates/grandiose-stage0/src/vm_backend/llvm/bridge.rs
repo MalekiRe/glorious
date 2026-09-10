@@ -45,62 +45,6 @@ fn runtime_error(error: LlvmError) -> VmArtifactError {
     }
 }
 
-fn resident_types(
-    parameters: &[VmType],
-    result: &VmType,
-    descriptors: &[VmNominalCopyDescriptor],
-) -> Result<Vec<VmType>, VmArtifactError> {
-    let mut pending = parameters.to_vec();
-    pending.push(result.clone());
-    let mut seen = BTreeSet::new();
-    let mut residents = BTreeMap::new();
-    while let Some(ty) = pending.pop() {
-        let key = nominal_key(&ty);
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        if owned_resident(&ty) {
-            residents.insert(key, ty.clone());
-        }
-        match ty {
-            VmType::Tuple(fields) => pending.extend(fields),
-            VmType::Reference { referent, .. }
-            | VmType::RawPointer {
-                pointee: referent, ..
-            }
-            | VmType::Array(referent)
-            | VmType::FixedArray {
-                element: referent, ..
-            }
-            | VmType::StaticData {
-                element: referent, ..
-            } => pending.push(*referent),
-            VmType::Nominal {
-                definition,
-                arguments,
-            } => {
-                let descriptor = descriptors
-                    .iter()
-                    .find(|item| item.definition == definition && item.arguments == arguments)
-                    .ok_or_else(|| {
-                        super::error("generated native resident has no source layout descriptor")
-                    })?;
-                pending.extend(descriptor.variants.iter().flatten().cloned());
-                pending.extend(arguments.into_iter().filter_map(|argument| match argument {
-                    super::super::VmGenericArgument::Type(ty) => Some(ty),
-                    _ => None,
-                }));
-            }
-            VmType::Callable { parameters, result, .. } => {
-                pending.extend(parameters);
-                pending.push(*result);
-            }
-            _ => {}
-        }
-    }
-    Ok(residents.into_values().collect())
-}
-
 /// Private execution representation, not portable verified bytecode. Replaced
 /// bodies execute LLVM compiled from these exact original verified bodies;
 /// unknown user host imports cannot supply their semantic transfer summaries.
@@ -108,6 +52,8 @@ fn vm_wrappers(
     plan: &crate::vm_backend::llvm::LlvmIrProgram,
 ) -> Result<CandidateVmProgram, VmArtifactError> {
     let mut program = plan.program.program.clone();
+    let available = super::super::program_nominal_layouts(&program)?
+        .into_values().collect::<Vec<_>>();
     // A generated wrapper is an explicit native authority boundary, even
     // when the original source signature was safe. Public safe admission is
     // checked against the unchanged original source graph, never this adapter.
@@ -130,9 +76,12 @@ fn vm_wrappers(
         contract.extend_from_slice(&plan.abi().fingerprint().as_bytes());
         contract.extend_from_slice(&definition.0.as_bytes());
         let source_contract = Digest::of_bytes(&contract);
-        let mut resident_operations =
-            resident_types(&parameters, &result, &function.nominal_copy_descriptors)?
-                .into_iter()
+        let (descriptors, residents) = collect_layout_closure(&parameters, &result, &available)?;
+        let layouts = function.nominal_copy_descriptors.iter().cloned().chain(descriptors)
+            .map(|descriptor| (super::super::vm_nominal_copy_descriptor_key(&descriptor), descriptor))
+            .collect::<BTreeMap<_, _>>();
+        function.nominal_copy_descriptors = layouts.into_values().collect();
+        let mut resident_operations = residents.into_values()
                 .map(|ty| {
                     let mut source = contract.clone();
                     encode_type(&ty, &mut source);
@@ -370,6 +319,7 @@ fn invoke_native(
         .saturating_sub(call.depth.saturating_add(1));
     let mut values = vec![ScalarSlot::new(); count];
     let mut flags = vec![Vec::<u8>::new(); count];
+    let mut capture_loans = Vec::with_capacity(captures);
     let mut arguments = Vec::with_capacity(2 * count);
     let mut argument_scope = call.budget.native_memory.residents.scope();
     for slot in &mut values {
@@ -398,7 +348,11 @@ fn invoke_native(
                 }
                 home.expose_address();
                 let pointer = home.pointer();
-                if !capture { call.registers[register as usize] = None; }
+                if capture {
+                    capture_loans.push(unsafe {
+                        home.lend_native(flags[index].as_mut_ptr(), initialization[index].clone().into(), call.budget)?
+                    });
+                } else { call.registers[register as usize] = None; }
                 pointer
             }
             ArgumentPlan::Value(_) => {
@@ -454,16 +408,9 @@ fn invoke_native(
     // slot plan, with owned arguments retaining their original backing address.
     let status = unsafe { module.invoke_native(index, &mut context, arguments.as_ptr(), result) };
     invocation.call.budget.instructions = context.instructions;
-    // Generated capture parameters alias their incoming flags. Re-adopt that
-    // same storage before either successful return or propagation of a fault.
-    for index in 0..captures {
-        let register = invocation.call.arguments[index];
-        let Some(VmValue::Resident(home)) = invocation.call.registers[register as usize].as_ref() else {
-            return Err(super::error("generated capture loan lost its resident"));
-        };
-        let holes = unsafe { read_initialization(flags[index].as_ptr(), &initialization[index], invocation.call.budget, true)? };
-        unsafe { home.initialize_native_with_holes(invocation.call.budget, Some(&holes))?; }
-    }
+    // Return the same mask ownership before success or fault propagation. Home
+    // references observed the writable flags throughout the generated call.
+    for loan in capture_loans.into_iter().rev() { loan.finish()?; }
     if let Some(error) = allocation.failure {
         return Err(error);
     }
@@ -581,8 +528,9 @@ unsafe fn invoke_vm_checked(
     let mut captured = Vec::with_capacity(captures);
     for index in 0..captures {
         let layout = invocation.plans.parameters[definition][index].clone();
-        let home = unsafe { super::super::native_storage::NativeHome::capture_loan(
-            layout, arguments[index].cast_mut(), invocation.call.budget, &holes[index])? };
+        let flags = unsafe { slots.add(2 * index + 1).read() };
+        let home = super::super::native_storage::NativeHome::capture_loan(
+            layout, arguments[index].cast_mut(), flags, invocation.call.budget)?;
         captured.push(VmValue::Resident(home));
     }
     let captures_environment = RuntimeCaptureEnvironment::with_ownership(captured, vec![false; captures]);
@@ -767,19 +715,12 @@ unsafe fn read_initialization(
 mod tests {
     use super::*;
 
-    #[test]
-    fn generated_adapter_uses_exact_source_semantics_without_certifying_portable_host_code() {
+    fn compile_test_ir(source: &str) -> crate::vm_backend::llvm::LlvmIrProgram {
         use crate::{
             CompilationMode, CompilationRequest, CompilerBuildIdentity, LogicalPath, PackageKey,
             SourceInput, StageZeroCompiler,
         };
         let package = PackageKey("native-tail-proof@0.1.0".into());
-        let source = "fn pure(value: i64) -> i64 { value - 1 }
-            fn native_end(value: &mut i64) -> i64 { *value }
-            fn vm_relay(value: &mut i64) -> i64 {
-                let marker = 41001; let ignored = pure(1); tail native_end(value)
-            }
-            pub fn main() -> i64 { let mut value = 42; vm_relay(&mut value) }";
         let input = CompilationRequest {
             build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"native-tail-proof")),
             mode: CompilationMode::Build,
@@ -795,7 +736,7 @@ mod tests {
             capability_manifest: vec![],
             runtime_manifest: None,
         };
-        let ir = StageZeroCompiler::new()
+        StageZeroCompiler::new()
             .compile_llvm_partitioned(
                 input,
                 crate::vm_backend::llvm::LlvmTarget::host().unwrap(),
@@ -805,7 +746,45 @@ mod tests {
                     })
                 },
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    #[test]
+    fn generated_adapters_extend_layouts_only_from_the_exact_source_graph() {
+        let ir = compile_test_ir("struct Pair { first:i64, second:i64 }
+            pub fn main() -> i64 {
+                let marker = 41001;
+                let value = Pair { first:20, second:22 };
+                let task = move (value) { &value }; let result = (&task)();
+                result.first + result.second
+            }");
+        let original = ir.vm_program().canonical_bytes();
+        let adapter = vm_wrappers(&ir).unwrap();
+        assert!(adapter.functions.iter().any(|(key, function)|
+            function.nominal_copy_descriptors.len() > ir.program.program.functions[key].nominal_copy_descriptors.len()),
+            "the generated reference-only ABI needs a layout declared elsewhere in the source graph");
+        let mut forged = adapter.clone();
+        let function = forged.functions.values_mut().find(|function|
+            !function.nominal_copy_descriptors.is_empty()).unwrap();
+        let mut descriptor = function.nominal_copy_descriptors[0].clone();
+        descriptor.definition = DefKey(Digest::of_bytes(b"not-a-sealed-source-layout"));
+        function.nominal_copy_descriptors.push(descriptor);
+        function.nominal_copy_descriptors.sort_by_key(super::super::super::vm_nominal_copy_descriptor_key);
+        forged.fingerprint = forged.computed_fingerprint();
+        assert!(super::super::super::validate_program(&forged, Some(&ir.program)).is_err(),
+            "a well-formed extra layout still needs sealed source authority");
+        assert_eq!(ir.vm_program().canonical_bytes(), original);
+        assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+    }
+
+    #[test]
+    fn generated_adapter_uses_exact_source_semantics_without_certifying_portable_host_code() {
+        let ir = compile_test_ir("fn pure(value: i64) -> i64 { value - 1 }
+            fn native_end(value: &mut i64) -> i64 { *value }
+            fn vm_relay(value: &mut i64) -> i64 {
+                let marker = 41001; let ignored = pure(1); tail native_end(value)
+            }
+            pub fn main() -> i64 { let mut value = 42; vm_relay(&mut value) }");
         let original = ir.vm_program().canonical_bytes();
         let mut adapter = vm_wrappers(&ir).unwrap();
         assert!(matches!(

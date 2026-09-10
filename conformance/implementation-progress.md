@@ -5,6 +5,75 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 114 / native ABI 12: loans of owned capture storage
+
+The previously failing positive that returns `&value` from a closure owning
+`value` now reaches all execution engines. The shared invocation payload relation
+projects a borrow of captured storage separately from a captured reference value.
+Ownership and escape instantiate it using the receiver's existing owner/storage
+identity, including nested callable captures, projected fields and stored loans.
+No physical Core environment fields or external-reference authority are invented.
+
+Assignment now shares field selection and unique-referent permission with reads
+and borrows. Its provenance update snapshots the RHS and retains all possible
+destination alternatives; only an exact ordinary destination permits a strong
+replacement. A discovered safety regression stored `&local` through a returned
+capture loan and was accepted after `local`'s block ended. Loan liveness now closes
+through the existing reference graph, fixing both ordinary and captured aggregate
+aliases. The negative reaches G5013, rather than an opaque-result rejection.
+
+Callable-control summaries retain their actual symbolic invocation inputs. Both
+observed and independent abstract return contracts use the same projection rules.
+A full branded constructor type in the same sealed generic namespace can settle
+an unobserved invocation after mutation. The enclosing coverage gap remains
+unknown. Erased environments, altered signatures and stale defining bodies reject.
+The old separate declaration-payload inference is removed.
+
+Generated capture borrows now name the existing environment home. Its exact
+initialization sidecar identifies the lent slot, including distinct zero-byte
+owners. Native/VM re-entry observes and updates that same writable flag state;
+return, invalid flags and out-of-order loan teardown detach expiring sidecars.
+Generated imports use the checked program-wide nominal layout table and the common
+native ABI layout-closure producer. Adapter-added descriptors require unchanged
+authority from that exact source graph. The duplicate generated-layout walk and
+post-call mask reconstruction are removed.
+
+Focused control verification passes **21 tests**
+(`target/owned-capture-storage-control-v17.log`), including ordinary/captured
+short-lived stores, nested returned receivers, reinvocation after move/restore,
+generic branded code selection and unknown/stale authority negatives.
+The integrated source/runtime gate passes **30 borrowed-callable, 37 native,
+15 mutable-binding, 29 public native-bridge and 22 request tests**, none ignored
+(`target/owned-capture-storage-integration-v19.log`). The two captured-storage
+native groups contain twelve source programs, each checked in fresh and decoded
+VM, all-native O0/O2 and all three mixed partitions at native O0/O2. They cover
+nested callable storage, copied versus moved environments, nominal and fixed-array
+residents, zero-byte captures, field updates and repeated move/restore invocation.
+Source negatives cover owner escape, moving a borrowed closure, overlapping unique
+loans and a short-lived reference written through the returned loan at O0/O2.
+
+The complete unit run in `target/owned-capture-storage-integration-v18.log` has
+**363 passes / one test-fixture failure**, not a green command. Combining the new
+layout assertion with the old tail-proof fixture changed its first verification
+failure. The original tail-proof source and exact error assertion are restored;
+the new layout closure/forgery checks are a separate test. All **four adapter
+unit tests pass** in `target/owned-capture-storage-adapter-v21.log`, including the
+restored tail-proof assertion and rejection of an unauthenticated extra layout.
+The final complete unit gate passes **365 tests**, none ignored
+(`target/owned-capture-storage-units-final-v22.log`). Combined with the five
+integration targets above, this checkpoint has **498 distinct passing tests**.
+
+Cache is 114 and native ABI is 12; bytecode 72, verifier 38 and schema 116 remain
+unchanged. This does not finish guarded storage: type-grouped captures cannot prove
+exact slot replacement, and arbitrary cross-owner generic code selection is not
+inferred from brands. Explicit environment-death retirement across every runtime
+home/borrowed-slot formation path still needs a lifecycle audit. Native handlers,
+resumption transfer and full fusion remain open. The latest broad source-library
+matrix remains the cache-112 **16 passes / 15 failures** below; no library or
+self-hosting acceptance is promoted by this checkpoint. Source-lock refresh and
+independent audit pass with 100 locked Glorious files and all 11,455 public
+contracts still open.
+
 ## Cache 113 / native ABI 11: reference origins and backing initialization
 
 Reference handles now share the execution-domain resident byte-transport

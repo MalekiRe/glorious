@@ -64,13 +64,10 @@ impl NativeMemory {
 
     pub(super) fn live_native_bytes(&self) -> usize { self.live_bytes + self.home_bytes.get() }
 
-    pub(super) fn install_program_layouts(&mut self, program: &super::CandidateVmProgram) {
-        if self.program_descriptors.is_some() { return; }
-        let mut descriptors = BTreeMap::new();
-        for descriptor in program.functions.values().flat_map(|function| &function.nominal_copy_descriptors) {
-            descriptors.entry(super::vm_nominal_copy_descriptor_key(descriptor)).or_insert_with(|| descriptor.clone());
-        }
-        self.program_descriptors = Some(descriptors.into_values().collect::<Vec<_>>().into());
+    pub(super) fn install_program_layouts(&mut self, program: &super::CandidateVmProgram) -> Result<(), VmArtifactError> {
+        if self.program_descriptors.is_some() { return Ok(()); }
+        self.program_descriptors = Some(super::program_nominal_layouts(program)?.into_values().collect::<Vec<_>>().into());
+        Ok(())
     }
 
     fn layout_descriptors(&mut self, function: &VmFunction) -> Arc<[VmNominalCopyDescriptor]> {
@@ -93,7 +90,7 @@ impl NativeMemory {
     }
 
     fn home_reference(&self, pointer: *mut u8, referent: &VmType, unique: bool) -> Result<Option<VmValue>, VmArtifactError> {
-        let home = self.homes.borrow().range(..=pointer.addr()).next_back()
+        let home = self.homes.borrow().allocations.range(..=pointer.addr()).next_back()
             .and_then(|(_, home)| home.upgrade());
         let Some(home) = home else { return Ok(None); };
         let Some(fields) = home.find_path(pointer, referent)? else { return Ok(None); };
@@ -391,11 +388,87 @@ pub(super) struct NativeReference {
 #[derive(Clone, Debug)]
 enum ReferenceInitialization {
     Raw(Rc<RefCell<BTreeSet<Vec<u32>>>>),
-    Generated {
-        flags: *mut u8,
-        paths: Arc<[Vec<u32>]>,
-        live: Rc<Cell<bool>>,
-    },
+    Generated(GeneratedInitialization),
+}
+
+/// The exact writable logical mask lent to generated code. Stack referents
+/// retain this view directly; resident homes select it only while their native
+/// loan is active. Neither consumer keeps a competing initialization snapshot.
+#[derive(Clone, Debug)]
+pub(super) struct GeneratedInitialization {
+    flags: *mut u8,
+    paths: Arc<[Vec<u32>]>,
+    live: Rc<Cell<bool>>,
+}
+
+impl GeneratedInitialization {
+    pub(super) unsafe fn new(flags: *mut u8, paths: Arc<[Vec<u32>]>, live: Rc<Cell<bool>>)
+        -> Result<Self, VmArtifactError>
+    {
+        if flags.is_null() || paths.first().is_none_or(|path| !path.is_empty()) {
+            return Err(error("generated reference lacks its backing initialization contract"));
+        }
+        let view = Self { flags, paths, live };
+        view.any_hole(|_| false)?;
+        Ok(view)
+    }
+
+    pub(super) fn identity(&self) -> usize { self.flags.addr() }
+
+    pub(super) fn expire(&self) { self.live.set(false); }
+
+    fn check_live(&self) -> Result<(), VmArtifactError> {
+        if !self.live.get() { return Err(error("generated reference outlived its backing frame")); }
+        Ok(())
+    }
+
+    fn any_hole(&self, selected: impl Fn(&[u32]) -> bool) -> Result<bool, VmArtifactError> {
+        self.check_live()?;
+        let mut absent = false;
+        for (index, path) in self.paths.iter().enumerate() {
+            match unsafe { *self.flags.add(index) } {
+                0 => { absent |= selected(path); }
+                1 => {}
+                _ => return Err(error("invalid generated reference initialization flag")),
+            }
+        }
+        Ok(absent)
+    }
+
+    pub(super) fn holes(&self) -> Result<BTreeSet<Vec<u32>>, VmArtifactError> {
+        self.check_live()?;
+        let mut holes = BTreeSet::new();
+        for (index, path) in self.paths.iter().enumerate() {
+            match unsafe { *self.flags.add(index) } {
+                0 => { holes.insert(path.clone()); }
+                1 => {}
+                _ => return Err(error("invalid generated reference initialization flag")),
+            }
+        }
+        Ok(holes)
+    }
+
+    fn replace(&self, path: &[u32], holes: &BTreeSet<Vec<u32>>) -> Result<(), VmArtifactError> {
+        self.check_live()?;
+        for (index, candidate) in self.paths.iter().enumerate().filter(|(_, p)| p.starts_with(path)) {
+            unsafe { *self.flags.add(index) = u8::from(!holes.iter().any(|hole| candidate.starts_with(hole))); }
+        }
+        Ok(())
+    }
+
+    pub(super) fn clear(&self, path: &[u32]) -> Result<(), VmArtifactError> {
+        self.replace(path, &BTreeSet::from([path.to_vec()]))
+    }
+
+    /// A resident's root and descendant initialization are independent while
+    /// building a value. An absent root still prevents every descendant read.
+    pub(super) fn install(&self, root: bool, holes: &BTreeSet<Vec<u32>>)
+        -> Result<(), VmArtifactError>
+    {
+        self.replace(&[], holes)?;
+        unsafe { *self.flags = u8::from(root && !holes.contains(&vec![])); }
+        Ok(())
+    }
 }
 
 impl super::ReferenceTarget {
@@ -433,26 +506,14 @@ impl super::ReferenceTarget {
 
 impl ReferenceInitialization {
     fn check_live(&self) -> Result<(), VmArtifactError> {
-        if let Self::Generated { live, .. } = self && !live.get() {
-            return Err(error("generated reference outlived its backing frame"));
-        }
-        Ok(())
+        match self { Self::Generated(view) => view.check_live(), Self::Raw(_) => Ok(()) }
     }
 
     fn any_hole(&self, selected: impl Fn(&[u32]) -> bool) -> Result<bool, VmArtifactError> {
         self.check_live()?;
         match self {
             Self::Raw(holes) => Ok(holes.borrow().iter().any(|hole| selected(hole))),
-            Self::Generated { flags, paths, .. } => {
-                for (index, path) in paths.iter().enumerate() {
-                    match unsafe { *flags.add(index) } {
-                        0 => { if selected(path) { return Ok(true); } }
-                        1 => {}
-                        _ => return Err(error("invalid generated reference initialization flag")),
-                    }
-                }
-                Ok(false)
-            }
+            Self::Generated(view) => view.any_hole(selected),
         }
     }
 
@@ -463,12 +524,7 @@ impl ReferenceInitialization {
                 state.retain(|hole| !hole.starts_with(path));
                 state.extend(holes.iter().cloned());
             }
-            Self::Generated { flags, paths, live } => {
-                if !live.get() { return Err(error("generated reference outlived its backing frame")); }
-                for (index, candidate) in paths.iter().enumerate().filter(|(_, p)| p.starts_with(path)) {
-                    unsafe { *flags.add(index) = u8::from(!holes.iter().any(|hole| candidate.starts_with(hole))); }
-                }
-            }
+            Self::Generated(view) => view.replace(path, holes)?,
         }
         Ok(())
     }
@@ -484,11 +540,7 @@ impl NativeReference {
     pub(super) unsafe fn generated(pointer: *mut u8, layout: Arc<NativeLayout>, flags: *mut u8,
         paths: Arc<[Vec<u32>]>, live: Rc<Cell<bool>>,
     ) -> Result<Self, VmArtifactError> {
-        if flags.is_null() || paths.first().is_none_or(|path| !path.is_empty()) {
-            return Err(error("generated reference lacks its backing initialization contract"));
-        }
-        let initialization = ReferenceInitialization::Generated { flags, paths, live };
-        initialization.any_hole(|_| false)?;
+        let initialization = ReferenceInitialization::Generated(unsafe { GeneratedInitialization::new(flags, paths, live)? });
         Ok(Self { pointer, layout, path: vec![], initialization })
     }
 

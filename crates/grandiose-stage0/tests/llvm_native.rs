@@ -69,7 +69,26 @@ fn generated_borrowed_referents_preserve_move_and_restore_through_capture_calls(
 
 #[test]
 fn generated_references_to_capture_storage_survive_the_invocation_frame() {
-    check_mixed_capture_source("pub fn main() -> i64 { let value = (20,22); let task = move (value) { &value }; let result = (&task)(); result.0 + result.1 }");
+    for source in [
+        "pub fn main() -> i64 { let value = (20,22); let task = move (value) { &value }; let result = (&task)(); result.0 + result.1 }",
+        "pub fn main() -> i64 { let backing = 42; let value = (&backing,0); let task = move (value) { &value }; let result = (&task)(); *result.0 }",
+        "pub fn main() -> i64 { let value = (0,42); let task = move (value) { &value.1 }; let result = (&task)(); *result }",
+        "pub fn main() -> i64 { let mut value = 41; let mut task = move (value) { &mut value }; let result = (&mut task)(); *result = *result + 1; *result }",
+        "pub fn main() -> i64 { let first = 1; let final_value = 42; let mut value = (&first,0); let mut task = move (value) { &mut value }; let result = (&mut task)(); result.0 = &final_value; *result.0 }",
+        "pub fn main() -> i64 { let a = 1; let b = 42; let first = (&a,0); let second = (&b,0); let task = move (first,second) { let unused = first.1; &second }; let result = (&task)(); *result.0 }",
+        "pub fn main() -> i64 { let empty = (); let task = move (empty) { &empty }; let result = (&task)(); let observed = *result; 42 }",
+        "pub fn main() -> i64 { let mut value = (1,2); let mut task = move (value) { &mut value }; { let result = (&mut task)(); let old = move *result; *result = (20,22); () }; let result = (&mut task)(); result.0 + result.1 }",
+    ] { check_mixed_capture_source(source); }
+}
+
+#[test]
+fn generated_nested_capture_storage_keeps_logical_owners() {
+    for source in [
+        "pub fn main() -> i64 { let value = 42; let inner = move (value) { &value }; let outer = move (inner) { &inner }; let borrowed = (&outer)(); let result = borrowed(); *result }",
+        "pub fn main() -> i64 { let value = 42; let task = move (value) { &value }; let copied = task; let result = (&copied)(); let moved = move task; *result }",
+        "struct Pair { first:i64, second:i64 } pub fn main() -> i64 { let value = Pair { first:20, second:22 }; let task = move (value) { &value }; let result = (&task)(); result.first + result.second }",
+        "pub fn main() -> i64 { let value: [i64;2] = [20,22]; let task = move (value) { &value }; let result = (&task)(); handle *result { [first,second] => first + second } }",
+    ] { check_mixed_capture_source(source); }
 }
 
 fn check_mixed_capture_source(source: &str) {
