@@ -54,7 +54,17 @@ impl OutlivesPredicate {
                 }
             }
             Type::Array(ty) | Type::FixedArray { element: ty, .. } => Self::implied_by_type(ty, output),
-            // Callable inputs live in their own binder scope. Never export
+            Type::Callable { contract, .. } => {
+                // Capture-region guarantees are free in this value. Remove
+                // its invocation binder before exporting them; an invocation
+                // bound region cannot become an ambient assumption.
+                let mut valid = true;
+                let regions = contract.body_regions.map_terms(|argument|
+                    crate::types::regions::open_argument(argument.clone(), |_| None)
+                        .unwrap_or_else(|| { valid = false; argument }));
+                if valid { output.extend_from_slice(regions.facts()); }
+            }
+            // Invocation inputs live in their own binder scope. Never export
             // their well-formedness requirements into the containing scope.
             _ => {}
         }
@@ -94,6 +104,7 @@ impl OutlivesPredicate {
                 let mut pending = vec![*longer];
                 let mut seen = vec![];
                 while let Some(region) = pending.pop() {
+                    if region == Lifetime::Static { return true; }
                     if seen.contains(&region) {
                         continue;
                     }
@@ -129,7 +140,7 @@ impl OutlivesPredicate {
         }
     }
 
-    fn components(subject: &Type, lifetime: Lifetime) -> Option<Vec<Self>> {
+    pub(crate) fn components(subject: &Type, lifetime: Lifetime) -> Option<Vec<Self>> {
         let value = |subject: &Type| Self::Type {
             subject: subject.clone(),
             lifetime,

@@ -2409,6 +2409,7 @@ mod tests {
             safety: crate::Safety::Safe,
             unsafe_scopes: Default::default(),
             unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
             parameters: vec![("function".into(), function.clone())],
             expressions: vec![
                 CoreExpr {
@@ -2534,6 +2535,7 @@ mod tests {
             safety: crate::Safety::Safe,
             unsafe_scopes: Default::default(),
             unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {
@@ -2639,6 +2641,7 @@ mod tests {
             safety: crate::Safety::Safe,
             unsafe_scopes: Default::default(),
             unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {
@@ -2748,6 +2751,7 @@ mod tests {
             safety: crate::Safety::Safe,
             unsafe_scopes: Default::default(),
             unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {

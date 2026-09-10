@@ -3,6 +3,52 @@
 use super::*;
 use crate::CallableContract;
 
+/// Check invocation prerequisites again from frozen identities and resident
+/// contracts. In particular a phantom outlives bound cannot disappear merely
+/// because no argument or result contains a physical reference.
+pub(super) fn validate_invocation_prerequisites(
+    body: &TypedBody, expression: &CoreExpr, signatures: &ElaboratedInterface,
+    scope: &TraitSolver, outlives: &[crate::OutlivesPredicate], diagnostics: &mut Vec<CoreDiagnostic>,
+) {
+    let CoreKind::Call { callee, arguments, .. } = &expression.kind else { return; };
+    let Some(callee) = body.expressions.get(callee.0 as usize) else { return; };
+    let mut solver = scope.fresh_query();
+    let mut valid = true;
+    if let Some(selected) = crate::callable_declarations::selected_template(signatures, callee, Some(scope)) {
+        valid = selected.signature.instantiate_generic(&selected.arguments)
+            .is_ok_and(|signature| solver.callable_prerequisites_proven(&signature));
+    } else if let CoreKind::TraitMethod { deferred: Some(deferred), method_arguments, .. } = &callee.kind {
+        valid = solver.declared_method_signature(TraitGoal { subject: deferred.subject.clone(), relation: deferred.relation.clone() },
+            &deferred.name, method_arguments).is_some_and(|signature| solver.callable_prerequisites_proven(&signature));
+    } else if matches!(callee.kind, CoreKind::Function { .. } | CoreKind::TraitMethod { .. }) {
+        valid = false;
+    }
+    let ty = match &callee.ty { Type::Reference { referent, .. } => referent.as_ref(), ty => ty };
+    if let Type::Callable { contract, parameters, .. } = ty && contract.has_residual() {
+        let mut substitution = CallLifetimeSubstitution { outlives: outlives.to_vec(),
+            nominal_variances: Some(solver.nominal_variances()), preserve_free_generics: true,
+            ..Default::default() };
+        for (parameter, argument) in parameters.iter().zip(arguments) {
+            let Some(argument) = body.expressions.get(argument.0 as usize) else { valid = false; break; };
+            if align_lifetime_types(parameter, &argument.ty, &mut substitution, LifetimeMode::InstantiateBound, 0).is_err() {
+                valid = false;
+            }
+        }
+        valid &= substitution.inference_outlives.is_empty();
+        valid &= contract.try_map_terms(|value, extra| substitute_call_generic_argument(value, &substitution, extra))
+            .is_ok_and(|contract| solver.callable_prerequisites_proven(&CallableSignature {
+                safety: crate::Safety::Safe, generics: 0, generic_kinds: vec![], parameters: vec![],
+                result: Type::Unit, effects: EffectRow::empty(), invocation: crate::Quantity::ONCE,
+                where_bounds: contract.residual.where_bounds, where_outlives: contract.residual.where_outlives,
+                where_associated_type_bindings: contract.residual.type_bindings,
+                where_associated_effect_bindings: contract.residual.effect_bindings,
+                universal_bounds: contract.universal,
+            }));
+    }
+    if !valid { diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
+        message: "Typed Core invocation does not establish its frozen declaration prerequisites".into() }); }
+}
+
 impl Elaborator<'_> {
     pub(super) fn queue_callable_abi_erasure(&mut self, expected: Type, actual: Type, span: Span) {
         fn may_require_proof(ty: &Type) -> bool {
@@ -273,6 +319,7 @@ impl Elaborator<'_> {
                     environment: Some(Box::new(Type::Unit)),
                     after_environment: Some(Box::new(Type::Unit)),
                     captures: vec![], shared_receiver: true, unique_receiver: true,
+                    body_regions: Default::default(),
                     residual: crate::AssociatedItemContract {
                         where_bounds: signature.where_bounds,
                         where_outlives: signature.where_outlives,

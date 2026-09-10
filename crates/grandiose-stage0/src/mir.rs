@@ -8378,7 +8378,7 @@ fn generic_argument_retains_generic_placeholder(value: &GenericArgument) -> bool
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => true,
         GenericArgument::Lifetime(
-            crate::Lifetime::Static | crate::Lifetime::Elided | crate::Lifetime::Bound { .. },
+            crate::Lifetime::Static | crate::Lifetime::Elided | crate::Lifetime::Bound { .. } | crate::Lifetime::Inferred(_),
         )
         | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_) => false,

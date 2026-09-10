@@ -25,6 +25,10 @@ pub(super) fn semantic_fingerprint(body: &TypedBody) -> Digest {
         encoder.bytes(b"unsafe-implementation-requirements");
         encoder.debug(&body.unsafe_implementations);
     }
+    if !body.body_regions.is_empty() {
+        encoder.bytes(b"body-region-constraints");
+        body.body_regions.encode(&mut encoder.bytes);
+    }
     encoder.id(body.root);
     Digest::of_bytes(&encoder.bytes)
 }

@@ -681,7 +681,7 @@ impl BoundControlSummaries<'_> {
         let summary = self.summaries.get(CallableBrand::Named(owner))?;
         let seal = summary.dependencies.get(&owner)?;
         if seal.valid.is_err() { return None; }
-        let template = crate::callable_declarations::selected_template(&seal.interface, expression)?;
+        let template = crate::callable_declarations::selected_template(&seal.interface, expression, None)?;
         let brand = match expression.kind {
             CoreKind::Function { definition, host_import: None, .. } => CallableBrand::Named(definition),
             CoreKind::TraitMethod { method, deferred: None, .. } => CallableBrand::Named(method),
@@ -805,7 +805,7 @@ impl BoundControlSummaries<'_> {
         let (summary, substitutions) = if let Some(definition) = definition {
             let summary = self.summaries.get(CallableBrand::Named(definition))?;
             let substitutions = summary.dependencies.get(&definition).and_then(|seal|
-                crate::callable_declarations::selected_template(&seal.interface, operand))
+                crate::callable_declarations::selected_template(&seal.interface, operand, None))
                 .map(|template| template.arguments);
             (summary, substitutions)
         } else {
@@ -1464,7 +1464,7 @@ impl Analyzer<'_, '_> {
                     ty: expr.ty.clone(), span: expr.span,
                 };
                 result.shape = match crate::callable_declarations::selected_template(
-                    self.bodies[&frame.owner].interface, &selected,
+                    self.bodies[&frame.owner].interface, &selected, None,
                 ) {
                     Some(template) => ControlValueShape::Callable {
                         brand: CallableBrand::Named(method), generic_arguments: Some(template.arguments), captures: vec![],

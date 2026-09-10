@@ -412,6 +412,13 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
                     output.extend_from_slice(&index.to_le_bytes());
                 }
                 Lifetime::Elided => output.push(3),
+                Lifetime::Inferred(region) => {
+                    // Source-body identities must be erased before emission.
+                    // Reserve a rejecting wire tag, as for inference cells.
+                    output.push(6);
+                    output.extend_from_slice(&region.owner.0.as_bytes());
+                    output.extend_from_slice(&region.index.to_le_bytes());
+                }
                 Lifetime::Placeholder(region) => {
                     // Reserved, like Infer above: neither the decoder nor
                     // the validator admits proof-local regions to bytecode.

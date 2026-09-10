@@ -3,6 +3,11 @@ use crate::AssociatedItemContract;
 
 impl TraitSolver {
     pub(crate) fn callable_prerequisites_proven(&mut self, signature: &crate::CallableSignature) -> bool {
+        // A prerequisite can name the environment of an input whose Fn or
+        // RunsIn evidence is quantified instead of an ordinary where-bound.
+        // Register the same sealed input contracts before checking the whole
+        // conjunction, without granting any environment lifetime assumption.
+        for parameter in &signature.parameters { self.remember_callable_environments(parameter); }
         let contract = signature.prerequisites();
         self.contract_domains_proven(&contract)
             && self.contract_proven(&contract, &Arc::clone(&self.lexical_assumptions), 0)

@@ -22,6 +22,7 @@ pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
 pub const DEFAULT_MAX_TRAIT_STEPS: u32 = 1_000_000;
 mod contracts;
 mod callable;
+pub(crate) mod variance;
 
 // Structural performance regression accounting, not wall-clock assertions.
 // Thread-local state keeps concurrently running compiler tests independent.
@@ -351,6 +352,7 @@ pub struct TraitSolver {
     /// solver preserves the same body-local, interface-only boundary as impl
     /// rule selection.
     definitions: Arc<BTreeMap<DefKey, ElaboratedHeader>>,
+    nominal_variances: Arc<std::sync::OnceLock<Arc<variance::NominalVariances>>>,
     tables: BTreeMap<Digest, TableState>,
     /// Principal ownership queries share the trait query's budget and lexical
     /// environment. This stack also cuts mixed `Use`/ordinary-trait cycles.
@@ -514,6 +516,7 @@ impl TraitSolver {
                     .then(|| (*key, header.clone()))
             }).collect()),
             tables: BTreeMap::new(),
+            nominal_variances: Arc::new(std::sync::OnceLock::new()),
             principal_active: vec![],
             limits,
             steps: 0,
@@ -542,6 +545,7 @@ impl TraitSolver {
             manual_use_nominals: Arc::clone(&self.manual_use_nominals),
             traits: Arc::clone(&self.traits),
             definitions: Arc::clone(&self.definitions),
+            nominal_variances: Arc::clone(&self.nominal_variances),
             tables: BTreeMap::new(),
             principal_active: vec![],
             limits,
@@ -1200,6 +1204,7 @@ impl TraitSolver {
             manual_use_nominals: self.manual_use_nominals.clone(),
             traits: self.traits.clone(),
             definitions: self.definitions.clone(),
+            nominal_variances: Arc::clone(&self.nominal_variances),
             tables: BTreeMap::new(),
             principal_active: vec![],
             limits: self.limits.clone(),
@@ -4461,7 +4466,7 @@ fn projection_argument_is_known(value: &GenericArgument, binders: &[u32], positi
     match value {
         GenericArgument::Type(value) => projection_type_is_known(value, binders, position),
         GenericArgument::EffectRow(value) => projection_row_is_known(value, binders, position),
-        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
+        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_) | Lifetime::Inferred(_))
         | GenericArgument::ConstInteger(_) | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_) | GenericArgument::ConstGeneric { .. } => true,
         GenericArgument::Lifetime(Lifetime::Bound { depth, index }) =>
@@ -4628,7 +4633,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
                     .iter()
                     .all(|effect| effect.arguments.iter().all(generic_argument_is_concrete))
         }
-        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
+        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided | crate::Lifetime::Inferred(_))
         | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstIntegerExpr(_) => false,
@@ -4662,7 +4667,7 @@ fn generic_argument_is_concrete_in_hrtb_scope(
         GenericArgument::Lifetime(crate::Lifetime::Bound { depth, index }) => hrtb_binders
             .get(*depth as usize)
             .is_some_and(|count| *index < *count),
-        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
+        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided | crate::Lifetime::Inferred(_))
         | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstIntegerExpr(_)

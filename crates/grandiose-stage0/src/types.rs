@@ -13,6 +13,8 @@ use crate::{
 
 pub mod integer_const;
 pub(crate) mod regions;
+mod body_regions;
+pub use body_regions::BodyRegionConstraints;
 mod universes;
 mod callable;
 pub(crate) mod label;
@@ -161,6 +163,10 @@ pub enum EffectTail {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Lifetime {
     Infer(LifetimeInferVar),
+    /// A closed existential region belonging to one elaborated body. Unlike
+    /// an inference cell this identity survives freezing; distinct unsolved
+    /// roots must not acquire equality merely because both used elision.
+    Inferred(BodyRegion),
     Static,
     Generic(u32),
     /// A fresh rigid region used only while checking a universal predicate.
@@ -178,6 +184,12 @@ pub enum Lifetime {
         index: u32,
     },
     Elided,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct BodyRegion {
+    pub(crate) owner: DefKey,
+    pub(crate) index: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -643,6 +655,9 @@ pub enum TypeError {
     LifetimeMismatch { expected: Lifetime, found: Lifetime },
     EscapingUniversalRegion(UniversalRegion),
     InvalidUniversalScope,
+    InconsistentRegionConstraints,
+    BorrowExceedsLocalStorage,
+    RegionConstraintLimit,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -659,6 +674,9 @@ pub struct InferContext {
     /// Body elaboration may inspect partially constrained constructor types.
     /// Sealing ends this phase and resolves unconstrained elision holes.
     pending_body_lifetimes: bool,
+    body_regions: BodyRegionConstraints,
+    body_local_storage: BTreeSet<BodyRegion>,
+    body_region_requirements: Vec<crate::OutlivesPredicate>,
     next_universe: u32,
     active_universes: Vec<u32>,
     /// A private partial-zonk mode used only by transactional leak checking.
@@ -733,6 +751,22 @@ impl InferContext {
         Lifetime::Infer(variable)
     }
 
+    /// A fresh loan may be shortened or equated with another inferred loan,
+    /// but it cannot outlive the storage it borrows. Keep that upper bound
+    /// in the same region constraint system instead of treating a local
+    /// borrow as either a rigid elision name or an unconstrained hole.
+    pub(crate) fn fresh_borrow_lifetime(&mut self, owner: DefKey) -> Lifetime {
+        let Lifetime::Infer(storage) = self.fresh_lifetime() else { unreachable!() };
+        let region = BodyRegion { owner, index: storage.0 };
+        self.lifetime_bindings[storage.0 as usize] = Some(Lifetime::Inferred(region));
+        self.body_local_storage.insert(region);
+        let loan = self.fresh_lifetime();
+        self.body_region_requirements.push(crate::OutlivesPredicate::Region {
+            longer: Lifetime::Inferred(region), shorter: loan,
+        });
+        loan
+    }
+
     pub fn resolve_lifetime(&mut self, lifetime: Lifetime) -> Result<Lifetime, TypeError> {
         let Lifetime::Infer(variable) = lifetime else { return Ok(lifetime); };
         let binding = self.lifetime_bindings.get(variable.0 as usize)
@@ -771,13 +805,50 @@ impl InferContext {
         }
     }
 
-    /// Only constructor holes lacking any field/context evidence use ordinary
-    /// elision. Named declaration regions are never generalized or rebound.
-    pub(crate) fn finish_body_lifetimes(&mut self) {
-        for binding in &mut self.lifetime_bindings {
-            if binding.is_none() { *binding = Some(Lifetime::Elided); }
+    /// Freeze the surviving equivalence classes, without inventing equality
+    /// between independent constructor holes or rebinding declaration regions.
+    pub(crate) fn finish_body_lifetimes(&mut self, owner: DefKey,
+        requirements: &[crate::OutlivesPredicate], ambient: &[crate::OutlivesPredicate]) -> Result<(), TypeError> {
+        let mut regions = self.body_local_storage.clone();
+        for (index, binding) in self.lifetime_bindings.iter_mut().enumerate() {
+            if binding.is_none() {
+                let region = BodyRegion { owner, index: index as u32 };
+                regions.insert(region);
+                *binding = Some(Lifetime::Inferred(region));
+            }
         }
         self.pending_body_lifetimes = false;
+        let requirements = requirements.iter().chain(&std::mem::take(&mut self.body_region_requirements))
+            .map(|fact| self.zonk_outlives(fact)).collect::<Result<_, _>>()?;
+        let (constraints, replacements) = BodyRegionConstraints::solve(regions, self.body_local_storage.clone(), requirements, ambient)
+            .map_err(|error| match error {
+                body_regions::ConstraintFailure::LocalStorage => TypeError::BorrowExceedsLocalStorage,
+                body_regions::ConstraintFailure::Unsatisfied => TypeError::InconsistentRegionConstraints,
+                body_regions::ConstraintFailure::Limit => TypeError::RegionConstraintLimit,
+            })?;
+        for binding in &mut self.lifetime_bindings {
+            if let Some(Lifetime::Inferred(region)) = binding
+                && let Some(replacement) = replacements.get(region) { *binding = Some(*replacement); }
+        }
+        self.body_regions = constraints;
+        Ok(())
+    }
+
+    pub(crate) fn body_regions(&self) -> &BodyRegionConstraints { &self.body_regions }
+
+    pub(crate) fn require_outlives(&mut self, predicate: crate::OutlivesPredicate) {
+        self.body_region_requirements.push(predicate);
+    }
+
+    fn zonk_outlives(&mut self, predicate: &crate::OutlivesPredicate) -> Result<crate::OutlivesPredicate, TypeError> {
+        Ok(match predicate {
+            crate::OutlivesPredicate::Type { subject, lifetime } => crate::OutlivesPredicate::Type {
+                subject: self.zonk(subject.clone())?, lifetime: self.zonk_lifetime(*lifetime)?,
+            },
+            crate::OutlivesPredicate::Region { longer, shorter } => crate::OutlivesPredicate::Region {
+                longer: self.zonk_lifetime(*longer)?, shorter: self.zonk_lifetime(*shorter)?,
+            },
+        })
     }
 
     pub fn fresh(&mut self) -> Type {
@@ -1211,21 +1282,24 @@ impl InferContext {
                 result,
                 effects,
                 invocation,
-            } => Ok(Type::Callable { contract: Box::new(contract.try_map_terms(|value, _| self.zonk_generic_argument(value))?),
+            } => {
+                let mut contract = contract.try_map_terms(|value, _| self.zonk_generic_argument(value))?;
+                let parameters = parameters.into_iter().map(|parameter| self.zonk(parameter)).collect::<Result<Vec<_>, _>>()?;
+                let result = Box::new(self.zonk(*result)?);
+                let effects = self.zonk_effects_allowing_generic_tail(effects)?;
+                contract.body_regions = contract.body_regions.union(&self.body_regions.for_callable(&contract, &parameters, &result, &effects));
+                Ok(Type::Callable { contract: Box::new(contract),
                 safety,
                 lifetime_binders,
-                parameters: parameters
-                    .into_iter()
-                    .map(|parameter| self.zonk(parameter))
-                    .collect::<Result<_, _>>()?,
-                result: Box::new(self.zonk(*result)?),
+                parameters,
+                result,
                 // A callable type can legitimately retain a declaration-owned
                 // row binder while it is nested in a generic body.  The row
                 // itself is closed only when that callable is invoked or an
                 // executable interface is finalized.
-                effects: self.zonk_effects_allowing_generic_tail(effects)?,
+                effects,
                 invocation,
-            }),
+            }) },
             value => Ok(value),
         }
     }
@@ -2693,12 +2767,17 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 Lifetime::Bound { .. } => 2,
                 Lifetime::Elided => 3,
                 Lifetime::Placeholder(_) => 5,
+                Lifetime::Inferred(_) => 6,
             });
             if let Lifetime::Generic(index) = lifetime {
                 output.extend_from_slice(&index.to_le_bytes());
             }
             if let Lifetime::Infer(variable) = lifetime {
                 output.extend_from_slice(&variable.0.to_le_bytes());
+            }
+            if let Lifetime::Inferred(region) = lifetime {
+                output.extend_from_slice(&region.owner.0.as_bytes());
+                output.extend_from_slice(&region.index.to_le_bytes());
             }
             if let Lifetime::Placeholder(region) = lifetime {
                 output.extend_from_slice(&region.universe.to_le_bytes());
@@ -3217,6 +3296,11 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
                 Lifetime::Placeholder(region) => {
                     output.push(5);
                     output.extend_from_slice(&region.universe.to_le_bytes());
+                    output.extend_from_slice(&region.index.to_le_bytes());
+                }
+                Lifetime::Inferred(region) => {
+                    output.push(6);
+                    output.extend_from_slice(&region.owner.0.as_bytes());
                     output.extend_from_slice(&region.index.to_le_bytes());
                 }
             }

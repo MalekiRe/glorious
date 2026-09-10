@@ -89,6 +89,8 @@ impl InferContext {
         self.pending_effect_equalities = pending.into_iter().map(|(left, right)| {
             Ok((self.zonk_effects_allowing_generic_tail(left)?, self.zonk_effects_allowing_generic_tail(right)?))
         }).collect::<Result<_, TypeError>>()?;
+        self.body_region_requirements = self.body_region_requirements.clone().iter()
+            .map(|predicate| self.zonk_outlives(predicate)).collect::<Result<_, _>>()?;
 
         // Older cells have now been resolved through any younger aliases.
         // Discard proof-local assignments; remaining holes are ordinary
@@ -107,6 +109,19 @@ mod tests {
 
     fn reference(lifetime: Lifetime) -> Type {
         Type::Reference { mutability: Mutability::Shared, lifetime, referent: Box::new(Type::Unit) }
+    }
+
+    #[test]
+    fn pending_body_region_requirements_cannot_export_a_universal_region() {
+        let mut inference = InferContext::for_body();
+        let outer = inference.fresh_lifetime();
+        let scope = inference.begin_universal_scope(1).unwrap();
+        inference.require_outlives(crate::OutlivesPredicate::Region {
+            longer: scope.region(0).unwrap(), shorter: outer,
+        });
+        assert!(matches!(inference.finish_universal_scope(scope), Err(TypeError::EscapingUniversalRegion(_))));
+        assert!(inference.body_region_requirements.is_empty());
+        assert_eq!(inference.resolve_lifetime(outer).unwrap(), outer);
     }
 
     #[test]

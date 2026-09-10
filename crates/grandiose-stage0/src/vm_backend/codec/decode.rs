@@ -125,6 +125,35 @@ mod const_kind_tests {
     }
 }
 
+#[cfg(test)]
+mod body_region_tests {
+    use super::*;
+
+    #[test]
+    fn body_regions_are_erased_at_emission_and_rejected_on_the_wire() {
+        let definition = crate::DefKey(crate::Digest::of_bytes(b"body-region-wire"));
+        let lifetime = Lifetime::Inferred(crate::types::BodyRegion { owner: definition, index: 0 });
+        let source = crate::GenericArgument::Lifetime(lifetime);
+        let expected = VmGenericArgument::Lifetime(Lifetime::Elided);
+        assert_eq!(crate::vm_backend::vm_effect_generic_argument(&source).unwrap(), expected);
+        assert_eq!(crate::vm_backend::vm_effect_argument(definition, &source).unwrap(), expected);
+        for value in [VmGenericArgument::Lifetime(lifetime), expected.clone()] {
+            let valid = value == expected;
+            assert_eq!(crate::vm_backend::validate_vm_generic_arguments(std::slice::from_ref(&value)).is_ok(), valid);
+            let mut bytes = vec![];
+            super::super::encode_vm_generic_argument(&value, &mut bytes);
+            let decoded = Decoder::new(&bytes).vm_generic_argument_at_depth(0);
+            assert_eq!(decoded.is_ok(), valid);
+            if valid { assert_eq!(decoded.unwrap(), expected); }
+            else {
+                for end in 0..bytes.len() {
+                    assert!(Decoder::new(&bytes[..end]).vm_generic_argument_at_depth(0).is_err());
+                }
+            }
+        }
+    }
+}
+
 use super::super::{
     VmArtifactError, VmCapture, VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace,
     VmCleanupProof, VmCompare, VmContinuationPolicy, VmEffectInstance, VmEffectRow,

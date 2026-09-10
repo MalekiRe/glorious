@@ -166,6 +166,71 @@ fn outlives_where_evidence_allows_only_directional_reference_returns() {
 }
 
 #[test]
+fn nominal_variance_follows_callable_inputs_and_mutable_nested_fields() {
+    let prefix = "struct Consumer<'a> { call: (&'a i64) -> i64 } struct Slot<'a,'b> { value: &'a mut &'b i64 }";
+    for (body, accepted) in [
+        ("fn main<'a,'b>(value: Consumer<'a>) -> Consumer<'b> where 'b:'a { value }", true),
+        ("fn main<'a,'b>(value: Consumer<'a>) -> Consumer<'b> where 'a:'b { value }", false),
+        ("fn main<'a,'b,'c>(value: Slot<'a,'b>) -> Slot<'c,'b> where 'a:'c { value }", true),
+        ("fn main<'a,'b,'c>(value: Slot<'a,'b>) -> Slot<'a,'c> where 'b:'c { value }", false),
+    ] {
+        let (core, _) = core_and_signatures_for("nominal-field-variance@0.1.0", &format!("{prefix} {body}"));
+        assert_eq!(core.diagnostics.is_empty(), accepted, "{body}: {:?}", core.diagnostics);
+    }
+}
+
+#[test]
+fn frozen_invocation_prerequisites_preserve_free_caller_regions() {
+    let (definition, core, signatures) = frontend_for("frozen-caller-region-prerequisites@0.1.0", r#"
+        trait Marker<'a> {}
+        fn need<'a,T>(value: &'a T) -> i64 where T: Marker<'a> { 42 }
+        fn main<'a,T>(value: &'a T) -> i64 where T: Marker<'a> { need(value) }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let grandiose_stage0::ElaboratedHeader::Callable(signature) = &signatures.definitions[&definition] else { panic!(); };
+    let valid = core.validate_projection_obligations(&signatures, &signature.where_bounds);
+    assert!(valid.is_empty(), "{valid:?}");
+    let missing = core.validate_projection_obligations(&signatures, &[]);
+    assert!(missing.iter().any(|diagnostic| diagnostic.code == "G4304"), "{missing:?}");
+}
+
+#[test]
+fn structural_callable_output_inference_cannot_capture_quantified_regions() {
+    let (core, signatures) = core_and_signatures_for("nested-output-region-leak@0.1.0", r#"
+        struct Envelope<T> { value: T }
+        trait Step { type Output; fn step(value: &mut Self) -> <Self as Step>::Output; }
+        struct Wrap<F> { callback: F }
+        impl<F,T> Step for Wrap<F>
+        where for<'a> &'a mut F: Fn<(),Output=Envelope<T>,Effects={}> {
+            type Output = Envelope<T>;
+            fn step(value: &mut Self) -> Envelope<T> { let callback = &mut value.callback; callback() }
+        }
+        fn main<F>(value: &mut Wrap<F>) -> i64
+        where for<'a> &'a mut F: Fn<(),Output=Envelope<&'a i64>,Effects={}> {
+            Step::step(value); 42
+        }
+    "#);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    assert!(core.diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G4140" | "G4169")),
+        "a single implementation output slot captured a quantified region: {:?}", core.diagnostics);
+}
+
+#[test]
+fn frozen_body_region_constraints_are_rechecked_and_fingerprinted() {
+    let source = "struct Token<'a> { value: i64 } fn pair<'a,'b>() -> (Token<'a>, Token<'b>) where 'a: 'b { (Token { value: 42 }, Token { value: 0 }) } fn main() -> i64 { let pair = pair(); pair.0.value }";
+    let (mut core, signatures) = core_and_signatures_for("frozen-body-regions@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    assert!(core.validate_projection_obligations(&signatures, &[]).is_empty());
+    let original = core.semantic_fingerprint();
+    core.body_regions = Default::default();
+    assert_ne!(core.semantic_fingerprint(), original);
+    let diagnostics = core.validate_projection_obligations(&signatures, &[]);
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4304"), "{diagnostics:?}");
+}
+
+#[test]
 fn graph_associated_result_bounds_support_generic_calls_and_duplication() {
     let (definition, core, signatures) = frontend_for("graph-generic-consumer@0.1.0", r#"
         trait Eq {} trait Hash {}
@@ -1194,6 +1259,7 @@ fn typed_core_validation_rejects_dangling_expression_edges() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Block(vec![CoreId(1)]),
@@ -1250,6 +1316,7 @@ fn typed_core_projection_validation_rechecks_frozen_trait_evidence() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![("value".into(), Type::Generic(0))],
         expressions: vec![CoreExpr {
             kind: CoreKind::Local("value".into()),
@@ -1330,6 +1397,7 @@ fn typed_core_rejects_alias_spelled_delayed_effect_projection_metadata() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -1413,6 +1481,7 @@ fn typed_core_rechecks_hrtb_effect_projection_evidence_in_function_metadata() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Function {
@@ -1469,6 +1538,7 @@ fn typed_core_validation_rejects_impossible_structural_projection() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Field {
@@ -1574,6 +1644,7 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1654,6 +1725,7 @@ fn placeflow_does_not_freeze_a_capture_loan_without_source_storage() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1722,6 +1794,7 @@ fn typed_core_validation_rejects_inference_in_callable_effect_arguments() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -1762,6 +1835,7 @@ fn forged_nominal_effect_row_inference_cannot_cross_the_core_or_mir_boundary() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -1814,6 +1888,7 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::TraitMethod {
@@ -1882,6 +1957,7 @@ fn typed_core_semantic_fingerprint_ignores_arena_allocation_order_and_spans() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1908,6 +1984,7 @@ fn typed_core_semantic_fingerprint_ignores_arena_allocation_order_and_spans() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -1970,6 +2047,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -2073,6 +2151,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Function {
@@ -2751,6 +2830,7 @@ fn placeflow_ignores_a_forged_conflicting_suffix_after_a_direct_transfer() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![("value".into(), i64.clone())],
         expressions: vec![
             CoreExpr {
@@ -5552,6 +5632,7 @@ fn escapeflow_fails_closed_for_a_forged_nested_external_store_place() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![("slot".into(), slot.clone())],
         expressions: vec![
             CoreExpr {
@@ -5651,11 +5732,11 @@ fn call_lifetime_instantiation_preserves_a_generic_reference_relationship() {
         core.expressions.iter().any(|expression| matches!(
             expression.ty,
             Type::Reference {
-                lifetime: Lifetime::Elided,
+                lifetime: Lifetime::Inferred(_),
                 ..
             }
         )),
-        "callee lifetime was not instantiated into the caller: {core:#?}"
+        "callee lifetime was not frozen into a distinct caller body region: {core:#?}"
     );
 }
 
@@ -6028,7 +6109,7 @@ fn call_reference_provenance_preserves_return_and_suspension_escape_obligations(
         "pub fn relay<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> &i64 { let value = 1; relay(&value) }",
     );
     assert!(
-        returned.diagnostics.is_empty(),
+        returned.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5017"),
         "{:#?}",
         returned.diagnostics
     );
@@ -6187,6 +6268,7 @@ fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking(
             safety: grandiose_stage0::Safety::Safe,
             unsafe_scopes: Default::default(),
             unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
             parameters: vec![("callback".into(), callback.clone())],
             expressions: vec![
                 CoreExpr {
@@ -6633,6 +6715,7 @@ fn forged_array_reference_slots_keep_reborrow_and_escape_provenance() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -6778,6 +6861,7 @@ fn forged_aggregate_reference_carrier_cannot_be_replaced_while_child_reborrow_is
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {
@@ -7120,6 +7204,7 @@ fn frozen_core_rejects_bound_lifetimes_that_escape_callable_binders() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -7156,6 +7241,7 @@ fn frozen_core_rejects_bound_lifetimes_that_escape_callable_binders() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![CoreExpr {
             kind: CoreKind::Literal("0".into()),
@@ -7392,6 +7478,7 @@ fn typed_core_rejects_replayed_capture_environment_brand() {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_scopes: Default::default(),
         unsafe_implementations: Default::default(),
+        body_regions: Default::default(),
         parameters: vec![],
         expressions: vec![
             CoreExpr {

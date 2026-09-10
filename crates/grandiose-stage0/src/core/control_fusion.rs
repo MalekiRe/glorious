@@ -20,6 +20,7 @@ struct Frame {
     proof_root: CallableBrand,
     calls: Vec<(CallableBrand, CoreId)>,
     arguments: Option<Vec<GenericArgument>>,
+    regions: BTreeMap<crate::types::BodyRegion, crate::types::BodyRegion>,
     locals: BTreeMap<String, Input>,
     resumptions: BTreeMap<ResumptionId, (ResumptionId, String, Type)>,
     labels: BTreeMap<LabelBrand, LabelBrand>,
@@ -125,6 +126,7 @@ struct ControlEnvironment {
     semantic: Type,
     resident: Type,
     arguments: Option<Vec<GenericArgument>>,
+    regions: BTreeMap<crate::types::BodyRegion, crate::types::BodyRegion>,
     labels: BTreeMap<LabelBrand, LabelBrand>,
     captures: Vec<ValueContract>,
 }
@@ -161,10 +163,13 @@ pub(crate) fn transform(
     }
     let mut pass = Fusion {
         owner, control, control_captures, output: TypedBody { expressions: vec![], unsafe_scopes: BTreeSet::new(),
-            ..source.clone() }, next: 0, active: BTreeMap::new(), stack: vec![CallableBrand::Named(owner)],
+            ..source.clone() }, next: 0,
+        next_region: source.body_regions.regions().iter().filter(|region| region.owner == owner)
+            .map(|region| region.index).max().map_or(0, |index| index + 1),
+        active: BTreeMap::new(), stack: vec![CallableBrand::Named(owner)],
         values: vec![], environments: vec![], label_results: BTreeMap::new(),
     };
-    let mut frame = pass.frame(owner, CallableBrand::Named(owner), None, vec![], vec![])?;
+    let mut frame = pass.frame(owner, CallableBrand::Named(owner), None, BTreeMap::new(), vec![], vec![])?;
     frame.locals.extend(source.parameters.iter().map(|(name, ty)| (name.clone(), Input {
         place: CorePlace::Local { name: name.clone(), ty: ty.clone() }, contract: ValueContract::ordinary(ty.clone()),
     })));
@@ -201,6 +206,7 @@ struct Fusion<'a> {
     control: &'a BoundControlSummaries<'a>,
     output: TypedBody,
     next: u32,
+    next_region: u32,
     active: BTreeMap<Activation, LabelBrand>,
     stack: Vec<CallableBrand>,
     values: Vec<Value>,
@@ -251,8 +257,9 @@ impl Fusion<'_> {
         }
     }
     fn frame(&mut self, owner: DefKey, callable: CallableBrand, arguments: Option<Vec<GenericArgument>>,
+        regions: BTreeMap<crate::types::BodyRegion, crate::types::BodyRegion>,
         calls: Vec<(CallableBrand, CoreId)>, replacements: Vec<(Type, Type)>) -> Result<Frame, CoreDiagnostic> {
-        let mut frame = Frame { owner, callable, proof_root: CallableBrand::Named(self.owner), calls, arguments,
+        let mut frame = Frame { owner, callable, proof_root: CallableBrand::Named(self.owner), calls, arguments, regions,
             locals: BTreeMap::new(), resumptions: BTreeMap::new(), labels: BTreeMap::new(), environments: BTreeMap::new(),
             refinements: BTreeMap::new(), replacements, nodes: BTreeMap::new(),
             invocations: std::sync::Arc::new(self.control.body(owner).ok_or_else(||
@@ -296,12 +303,21 @@ impl Fusion<'_> {
                 _ => {}
             }
         }
+        let regions = input.body_regions.map_terms(|argument| self.argument(&frame, argument));
+        self.output.body_regions = self.output.body_regions.union(&regions);
         Ok(frame)
     }
     fn rename(&self, frame: &Frame, value: GenericArgument) -> GenericArgument {
         crate::types::CallableContract::replace_value_types(value, &frame.replacements, 0)
     }
     fn argument(&self, frame: &Frame, value: GenericArgument) -> GenericArgument {
+        // Rename template-local existential regions before inserting caller
+        // arguments. Two helper expansions cannot share a local region, and
+        // an inserted caller region must not be captured by that renaming.
+        let value = crate::types::regions::map_argument_regions(value, &mut |lifetime, _| Some(match lifetime {
+            Lifetime::Inferred(region) => Lifetime::Inferred(frame.regions.get(&region).copied().unwrap_or(region)),
+            value => value,
+        })).expect("fusion region renaming preserves binder depths");
         let value = frame.arguments.as_ref().map_or_else(|| value.clone(), |arguments|
             crate::signature::substitute_trait_generic_argument(value.clone(), arguments));
         self.rename(frame, value)
@@ -836,7 +852,7 @@ impl Fusion<'_> {
             let labels = free.iter().map(|brand| (*brand, frame.labels[brand])).collect();
             let representation = Representation::Callable([self.environments.len()].into());
             self.environments.push(ControlEnvironment { constructor, semantic: semantic_ty.clone(), resident: physical.clone(),
-                arguments: frame.arguments.clone(), labels, captures });
+                arguments: frame.arguments.clone(), regions: frame.regions.clone(), labels, captures });
             let result = self.alloc(CoreKind::Tuple(fields), physical, span);
             return Ok(self.with_contract(result, ValueContract { ty: semantic_ty, representation }));
         }
@@ -914,15 +930,15 @@ impl Fusion<'_> {
                 prefix.push(self.alloc(CoreKind::Transfer { brand, value }, Type::Never, span));
             }
             target => {
-                let (brand, generic_arguments, labels, capture_types) = match target {
+                let (brand, generic_arguments, labels, capture_types, capture_regions) = match target {
                     Selected::Environment(index) => {
                         let environment = &self.environments[index];
-                        (CallableBrand::Closure(environment.constructor.brand()), environment.arguments.clone(), environment.labels.clone(), Some(environment.captures.clone()))
+                        (CallableBrand::Closure(environment.constructor.brand()), environment.arguments.clone(), environment.labels.clone(), Some(environment.captures.clone()), Some(environment.regions.clone()))
                     }
                     Selected::Observed(FusionTarget::Callable { brand, generic_arguments, labels }) => {
                         let labels = labels.into_iter().map(|(brand, target)| self.target(&target, span).map(|target| (brand, target)))
                             .collect::<Result<BTreeMap<_, _>, _>>()?;
-                        (brand, generic_arguments, labels, None)
+                        (brand, generic_arguments, labels, None, None)
                     }
                     _ => unreachable!("label selections were normalized above"),
                 };
@@ -948,7 +964,18 @@ impl Fusion<'_> {
                 if parameters.len() != values.len() { return Err(diagnostic(span, "expanded invocation input arity mismatch")); }
                 let mut calls = parent.calls.clone(); calls.push((parent.callable, id));
                 let arguments = generic_arguments.map(|values| values.into_iter().map(|value| self.rename(parent, value)).collect());
-                let mut child = self.frame(owner, brand, arguments, calls, parent.replacements.clone())?;
+                let regions = if let Some(regions) = capture_regions { regions }
+                    else if closure.is_some() && owner == parent.owner { parent.regions.clone() }
+                    else {
+                        let mut regions = BTreeMap::new();
+                        for region in input.body_regions.regions() {
+                            let fresh = crate::types::BodyRegion { owner: self.owner, index: self.next_region };
+                            self.next_region = self.next_region.checked_add(1).ok_or_else(|| diagnostic(span, "control fusion exhausted body-region identities"))?;
+                            regions.insert(*region, fresh);
+                        }
+                        regions
+                    };
+                let mut child = self.frame(owner, brand, arguments, regions, calls, parent.replacements.clone())?;
                 child.proof_root = parent.proof_root;
                 child.labels = labels;
                 if !captures.is_empty() {

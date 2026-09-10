@@ -593,9 +593,22 @@ struct CallLifetimeSubstitution {
     /// absent from every value parameter and result.
     preserve_free_generics: bool,
     /// Variance checking may replace an input type with its proven coerced
-    /// view. Do not lose inference equations from that discarded structure.
-    inference_equalities: Vec<(Lifetime, Lifetime)>,
+    /// view. Do not lose directional constraints from that discarded structure.
+    inference_outlives: Vec<crate::OutlivesPredicate>,
     outlives: Vec<crate::OutlivesPredicate>,
+    variance: crate::trait_solver::variance::Variance,
+    nominal_variances: Option<std::sync::Arc<crate::trait_solver::variance::NominalVariances>>,
+}
+
+impl CallLifetimeSubstitution {
+    fn at_variance<T>(&mut self, variance: crate::trait_solver::variance::Variance,
+        apply: impl FnOnce(&mut Self) -> Result<T, LifetimeError>) -> Result<T, LifetimeError> {
+        let previous = self.variance;
+        self.variance = previous.compose(variance);
+        let result = apply(self);
+        self.variance = previous;
+        result
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -893,6 +906,9 @@ pub struct TypedBody {
     /// raw-memory operation. These identities are requirements, not host trust
     /// certificates, and never grant lexical unsafe permission.
     pub unsafe_implementations: std::collections::BTreeSet<DefKey>,
+    /// Closed existential region identities and their checked directional
+    /// constraints. This is inference output, not invocation permission.
+    pub body_regions: crate::types::BodyRegionConstraints,
     pub parameters: Vec<(String, Type)>,
     pub expressions: Vec<CoreExpr>,
     pub root: CoreId,
@@ -1057,6 +1073,13 @@ impl TypedBody {
             {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
                     message: "Typed Core tuple projection differs from its structural field layout".into() });
+            }
+            if let CoreKind::Closure { .. } = &expression.kind
+                && let Type::Callable { contract, parameters, result, effects, .. } = &expression.ty
+                && !contract.body_regions.includes(&self.body_regions.for_callable(contract, parameters, result, effects))
+            {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core closure omits its captured body-region constraints".into() });
             }
             if let CoreKind::Completion { computation, handles_operations: true, .. } = &expression.kind
                 && !self.expressions.get(computation.0 as usize)
@@ -1398,6 +1421,8 @@ impl TypedBody {
         let mut outlives = outlives.to_vec();
         for (_, parameter) in &self.parameters { crate::OutlivesPredicate::implied_by_type(parameter, &mut outlives); }
         outlives.extend(scoped.implied_outlives(self.parameters.iter().map(|(_, ty)| ty.clone())));
+        let valid_regions = self.body_regions.valid_in(&outlives);
+        if valid_regions { outlives.extend_from_slice(self.body_regions.facts()); }
         scoped.set_outlives_assumptions(outlives.clone());
         let invalid_domain = terms.types.iter().find(|ty| !scoped.type_domains_proven(ty)).map(|ty| format!("type {ty:?}"))
             .or_else(|| terms.arguments.iter().find(|argument| !scoped.argument_domains_proven(argument)).map(|argument| format!("argument {argument:?}")))
@@ -1422,8 +1447,13 @@ impl TypedBody {
         if let Some(invalid) = invalid_domain {
             diagnostics.push(CoreDiagnostic { code: "G4303", span, message: format!("Typed Core projection does not establish its declared domain requirements: {invalid}") });
         }
+        if !valid_regions {
+            diagnostics.push(CoreDiagnostic { code: "G4304", span,
+                message: "Typed Core region constraints imply an unproved rigid outlives requirement".into() });
+        }
         for expression in &self.expressions {
             effect_contracts::validate_application(expression, signatures, &scoped, &outlives, &mut diagnostics);
+            callable_contracts::validate_invocation_prerequisites(self, expression, signatures, &scoped, &outlives, &mut diagnostics);
         }
         diagnostics
     }
@@ -2533,7 +2563,7 @@ fn lifetime_is_out_of_scope_bound(lifetime: Lifetime, binders: &[u32]) -> bool {
         Lifetime::Bound { depth, index } => binders
             .get(depth as usize)
             .is_none_or(|binder_count| index >= *binder_count),
-        Lifetime::Static | Lifetime::Generic(_) | Lifetime::Elided => false,
+        Lifetime::Static | Lifetime::Generic(_) | Lifetime::Elided | Lifetime::Inferred(_) => false,
     }
 }
 
@@ -3370,6 +3400,7 @@ impl TypedBody {
                 .map_or(crate::Safety::Safe, |signature| signature.safety),
             unsafe_scopes: elaborator.unsafe_scopes,
             unsafe_implementations: unsafe_implementation_definitions(signatures),
+            body_regions: elaborator.inference.body_regions().clone(),
             parameters,
             expressions: elaborator.expressions,
             root,
@@ -3585,6 +3616,7 @@ impl TypedBody {
             safety: context.signature.safety,
             unsafe_scopes: elaborator.unsafe_scopes,
             unsafe_implementations: unsafe_implementation_definitions(signatures),
+            body_regions: elaborator.inference.body_regions().clone(),
             parameters,
             expressions: elaborator.expressions,
             root,
@@ -3712,6 +3744,7 @@ impl TypedBody {
             safety: crate::Safety::Safe,
             unsafe_scopes: elaborator.unsafe_scopes,
             unsafe_implementations: unsafe_implementation_definitions(signatures),
+            body_regions: elaborator.inference.body_regions().clone(),
             parameters: vec![],
             expressions: elaborator.expressions,
             root,
@@ -3825,6 +3858,7 @@ impl TypedBody {
             safety: crate::Safety::Safe,
             unsafe_scopes: elaborator.unsafe_scopes,
             unsafe_implementations: unsafe_implementation_definitions(signatures),
+            body_regions: elaborator.inference.body_regions().clone(),
             parameters: vec![],
             expressions: elaborator.expressions,
             root,
@@ -4083,6 +4117,7 @@ struct PendingRigidEquality {
     expected: Type,
     actual: Type,
     span: Span,
+    mode: LifetimeMode,
 }
 
 /// A nominal default containing integer arithmetic cannot embed body-local
@@ -4434,24 +4469,24 @@ impl Elaborator<'_> {
                 let value = self.expression(value);
                 let value_ty = self.expressions[value.0 as usize].ty.clone();
                 let place = self.assignment_place(place, expression.span);
-                if !matches!(&place, CorePlace::Error)
-                    && self
-                        .unify_rigid_lifetimes(place.ty(), value_ty.clone(), expression.span)
-                        .is_err()
-                {
+                let joined = (!matches!(&place, CorePlace::Error)).then(||
+                    self.unify_input_lifetimes(place.ty(), value_ty.clone(), expression.span));
+                if matches!(joined.as_ref(), Some(Err(()))) {
                     self.error(
                         expression.span,
                         "G4136",
                         "assignment value does not match destination type",
                     );
                     self.recovered = true;
-                } else if let Ok(joined) = self.inference.unify(place.ty(), value_ty.clone()) {
+                } else if let Some(Ok(joined)) = joined {
                     let previous = self.inference.resolve_type_structure(place.ty());
+                    let joined = crate::CallableContract::retain_abi_with_refinements(previous.clone(), &joined);
                     if previous != joined {
                         self.callable_value_joins.push((previous, joined.clone()));
                         let actual = self.inference.resolve_type_structure(value_ty);
-                        if actual != joined && !matches!(actual, Type::Never | Type::Infer(_) | Type::Error) {
-                            self.callable_value_joins.push((actual, joined));
+                        let refined_actual = crate::CallableContract::retain_abi_with_refinements(actual.clone(), &joined);
+                        if actual != refined_actual && !matches!(actual, Type::Never | Type::Infer(_) | Type::Error) {
+                            self.callable_value_joins.push((actual, refined_actual));
                         }
                     }
                 }
@@ -4654,7 +4689,7 @@ impl Elaborator<'_> {
                     Type::Callable { parameters, .. } => parameters,
                     _ => vec![],
                 };
-                let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
+                let arguments = self.call_arguments_with_context(Some(callee), &parameters, arguments);
                 self.call(callee, arguments, expression.span)
             }
             ExprKind::OperatorChain {
@@ -5008,7 +5043,7 @@ impl Elaborator<'_> {
                 let expected = expected.expect("guarded above");
                 let result_context = self.freshen_call_context_lifetimes(*result);
                 let _ = self.inference.unify(result_context, expected.clone());
-                let arguments = self.call_arguments_with_context(callee, &parameters, arguments);
+                let arguments = self.call_arguments_with_context(Some(callee), &parameters, arguments);
                 let call = self.call_with_expected(callee, arguments, expression.span,
                     if open_call_lifetimes { None } else { Some(&expected) });
                 let call = self.reference_reborrow_expected(call, &expected);
@@ -5018,11 +5053,11 @@ impl Elaborator<'_> {
                 // them; the outer invocation still jointly checks every
                 // argument and retains its frozen provenance relation.
                 let compatible = if open_call_lifetimes {
-                    let mut substitution = CallLifetimeSubstitution::default();
+                    let mut substitution = self.call_lifetime_substitution();
                     align_lifetime_types(&expected, &actual, &mut substitution, LifetimeMode::Instantiate, 0)
                         .map_err(|_| ())
                         .and_then(|aligned| {
-                            self.solve_call_lifetime_equalities(&mut substitution, expression.span)?;
+                            self.retain_call_lifetime_constraints(&mut substitution);
                             self.inference.unify(aligned, actual).map(|_| ()).map_err(|_| ())
                         })
                 } else { self.unify_rigid_lifetimes(expected, actual, expression.span) };
@@ -5304,7 +5339,7 @@ impl Elaborator<'_> {
         }
         // A projected dereference retains the incoming loan's lifetime;
         // a fresh local or temporary borrow does not acquire that authority.
-        let lifetime = self.projected_reborrow_lifetime(value).unwrap_or(Lifetime::Elided);
+        let lifetime = self.projected_reborrow_lifetime(value).unwrap_or_else(|| self.inference.fresh_borrow_lifetime(self.definition));
         self.alloc(CoreKind::Borrow { unique, value }, Type::Reference {
             mutability: if unique { Mutability::Unique } else { Mutability::Shared },
             lifetime, referent: Box::new(ty),
@@ -6192,6 +6227,7 @@ impl Elaborator<'_> {
     }
     fn header_lifetime(&mut self, spelling: Option<&str>) -> Lifetime {
         match spelling {
+            None | Some("'_") if self.bound_lifetime_scopes.is_empty() => self.inference.fresh_lifetime(),
             None | Some("'_") => Lifetime::Elided,
             Some("'static") => Lifetime::Static,
             Some(name) => match self
@@ -7888,16 +7924,37 @@ impl Elaborator<'_> {
     fn seal_types(&mut self) {
         // Value types retain residual contracts across storage. Their uses
         // discharge those predicates; freezing must preserve their terms.
-        self.inference.finish_body_lifetimes();
         self.propagate_pending_inference();
-        let pending = std::mem::take(&mut self.pending_callable_bounds);
-        let associated = std::mem::take(&mut self.pending_associated_checks);
-        let equalities = std::mem::take(&mut self.pending_rigid_equalities);
         if self.inference.finish_numeric_defaults().is_err() {
             let span = self.body.expression(self.body.root).span;
             self.error(span, "G4116", "numeric literal constraints are incompatible");
             self.recovered = true;
         }
+        self.propagate_pending_inference();
+        let mut requirements = self.pending_outlives.iter().map(|(bound, _)| bound.clone()).collect::<Vec<_>>();
+        // Environment scope is an ordinary type-outlives obligation. Its
+        // existential scope must be constrained with the other call regions,
+        // before sealing; checking an unconstrained closed atom afterwards
+        // cannot infer the relation to its captured residents.
+        requirements.extend(self.pending_environment_bounds.iter().map(|(subject, lifetime, _)|
+            crate::OutlivesPredicate::Type { subject: subject.clone(), lifetime: *lifetime }));
+        if let Err(error) = self.inference.finish_body_lifetimes(self.definition, &requirements, &self.ambient_outlives) {
+            let span = self.body.expression(self.body.root).span;
+            if error == crate::TypeError::BorrowExceedsLocalStorage {
+                self.error(span, "G5017", "inferred borrow region exceeds its body-local storage lifetime");
+            } else if error == crate::TypeError::InconsistentRegionConstraints {
+                self.error(span, "G5017", "inferred region constraints require an unproved rigid outlives relation");
+            } else if error == crate::TypeError::RegionConstraintLimit {
+                self.error(span, "G4304", "body region inference exceeded its bounded constraint proof");
+            } else {
+                self.error(span, "G4304", "body region constraints do not establish their rigid outlives requirements");
+            }
+            self.recovered = true;
+        }
+        self.ambient_outlives.extend_from_slice(self.inference.body_regions().facts());
+        let pending = std::mem::take(&mut self.pending_callable_bounds);
+        let associated = std::mem::take(&mut self.pending_associated_checks);
+        let equalities = std::mem::take(&mut self.pending_rigid_equalities);
         for default in std::mem::take(&mut self.pending_integer_defaults) {
             self.retry_integer_default(default, false);
         }
@@ -8323,8 +8380,8 @@ impl Elaborator<'_> {
 
     /// Unify a body contract without allowing its declared regions to be
     /// solved from a shorter local loan. This is used at returns, assignments,
-    /// and aggregate field construction; call sites use the opening variant
-    /// below instead.
+    /// and local annotations. Constructor inputs and call sites open their
+    /// declaration elisions instead.
     fn unify_rigid_lifetimes(
         &mut self,
         expected: Type,
@@ -8332,11 +8389,16 @@ impl Elaborator<'_> {
         span: Span,
     ) -> Result<(), ()> {
         self.queue_callable_abi_erasure(expected.clone(), actual.clone(), span);
-        self.unify_rigid_lifetimes_after_inference(expected, actual, span, true)
+        self.unify_rigid_lifetimes_after_inference(expected, actual, span, true, LifetimeMode::Rigid).map(|_| ())
+    }
+
+    fn unify_input_lifetimes(&mut self, expected: Type, actual: Type, span: Span) -> Result<Type, ()> {
+        self.queue_callable_abi_erasure(expected.clone(), actual.clone(), span);
+        self.unify_rigid_lifetimes_after_inference(expected, actual, span, true, LifetimeMode::InstantiateBound)
     }
 
     fn retry_rigid_equality(&mut self, equality: PendingRigidEquality, defer: bool) {
-        if self.unify_rigid_lifetimes_after_inference(equality.expected, equality.actual, equality.span, defer).is_err() {
+        if self.unify_rigid_lifetimes_after_inference(equality.expected, equality.actual, equality.span, defer, equality.mode).is_err() {
             self.error(equality.span, "G4110", "deferred type constraint does not match its required type");
             self.recovered = true;
         }
@@ -8348,11 +8410,12 @@ impl Elaborator<'_> {
         actual: Type,
         span: Span,
         defer: bool,
-    ) -> Result<(), ()> {
+        mode: LifetimeMode,
+    ) -> Result<Type, ()> {
         // Equality inference may solve constructor-owned holes, but never a
         // declared region. The directional lifetime proof below still owns
         // all outlives/coercion checks when rigid lifetimes differ.
-        let _ = self.inference.unify(expected.clone(), actual.clone());
+        if matches!(mode, LifetimeMode::Rigid) { let _ = self.inference.unify(expected.clone(), actual.clone()); }
         let expected = self.inference.zonk(expected.clone()).unwrap_or(expected);
         let actual = self.inference.zonk(actual.clone()).unwrap_or(actual);
         let expected = self.inference.resolve_type_structure(expected);
@@ -8360,15 +8423,15 @@ impl Elaborator<'_> {
         let expected = self.normalize_type_projections(expected);
         let actual = self.normalize_type_projections(actual);
         if defer && (type_has_unresolved_projection(&expected) || type_has_unresolved_projection(&actual)) {
-            self.pending_rigid_equalities.push(PendingRigidEquality { expected, actual, span });
-            return Ok(());
+            self.pending_rigid_equalities.push(PendingRigidEquality { expected: expected.clone(), actual, span, mode });
+            return Ok(expected);
         }
-        let mut substitution = CallLifetimeSubstitution { outlives: self.ambient_outlives.clone(), ..Default::default() };
+        let mut substitution = self.call_lifetime_substitution();
         let aligned = match align_lifetime_types(
             &expected,
             &actual,
             &mut substitution,
-            LifetimeMode::Rigid,
+            mode,
             0,
         ) {
             Ok(value) => value,
@@ -8377,12 +8440,8 @@ impl Elaborator<'_> {
                 return Err(());
             }
         };
-        self.solve_call_lifetime_equalities(&mut substitution, span)?;
-        if self.inference.unify(aligned, actual).is_err() {
-            Err(())
-        } else {
-            Ok(())
-        }
+        self.retain_call_lifetime_constraints(&mut substitution);
+        self.inference.unify(aligned, actual).map_err(|_| ())
     }
 
     /// Open one callable's lifetime binders, prove each reference argument
@@ -8405,11 +8464,8 @@ impl Elaborator<'_> {
         crate::types::EffectRow,
         CallLifetimeSubstitution,
     ), ()> {
-        let mut substitution = CallLifetimeSubstitution {
-            preserve_free_generics: matches!(mode, LifetimeMode::InstantiateBound),
-            outlives: self.ambient_outlives.clone(),
-            ..CallLifetimeSubstitution::default()
-        };
+        let mut substitution = self.call_lifetime_substitution();
+        substitution.preserve_free_generics = matches!(mode, LifetimeMode::InstantiateBound);
         let mut aligned_parameters = Vec::with_capacity(parameters.len());
         for (parameter, argument) in parameters.iter().zip(arguments) {
             let parameter = self.inference.zonk(parameter.clone()).unwrap_or_else(|_| parameter.clone());
@@ -8438,7 +8494,7 @@ impl Elaborator<'_> {
                     return Err(());
                 }
             };
-            self.solve_call_lifetime_equalities(&mut substitution, span)?;
+            self.retain_call_lifetime_constraints(&mut substitution);
             aligned_parameters.push(aligned);
         }
         // Only an explicitly unsafe direct-reference result may choose a
@@ -8474,18 +8530,18 @@ impl Elaborator<'_> {
         Ok((aligned_parameters, result, effects, substitution))
     }
 
-    fn solve_call_lifetime_equalities(
+    fn retain_call_lifetime_constraints(
         &mut self,
         substitution: &mut CallLifetimeSubstitution,
-        span: Span,
-    ) -> Result<(), ()> {
-        for (left, right) in std::mem::take(&mut substitution.inference_equalities) {
-            if self.inference.unify_lifetimes(left, right).is_err() {
-                self.lifetime_error(span, LifetimeError::UnsatisfiedOutlives);
-                return Err(());
-            }
+    ) {
+        for predicate in std::mem::take(&mut substitution.inference_outlives) {
+            self.inference.require_outlives(predicate);
         }
-        Ok(())
+    }
+
+    fn call_lifetime_substitution(&self) -> CallLifetimeSubstitution {
+        CallLifetimeSubstitution { outlives: self.ambient_outlives.clone(),
+            nominal_variances: Some(self.trait_solver.nominal_variances()), ..Default::default() }
     }
 
     fn lifetime_error(&mut self, span: Span, error: LifetimeError) {
@@ -9049,7 +9105,7 @@ impl Elaborator<'_> {
             };
             let declared = self.signatures.normalize_type_aliases(declared);
             let provided = self.signatures.normalize_type_aliases(provided);
-            let mut lifetimes = CallLifetimeSubstitution::default();
+            let mut lifetimes = self.call_lifetime_substitution();
             let declared = match align_lifetime_types(
                 &declared,
                 &provided,
@@ -9076,8 +9132,8 @@ impl Elaborator<'_> {
                     *argument = GenericArgument::Lifetime(*lifetime);
                 }
             }
-            if self.solve_call_lifetime_equalities(&mut lifetimes, span).is_err()
-                || self.inference.unify(declared, provided).is_err() {
+            self.retain_call_lifetime_constraints(&mut lifetimes);
+            if self.inference.unify(declared, provided).is_err() {
                 return Some(self.fail(
                     span,
                     "G4184",
@@ -9603,7 +9659,7 @@ impl Elaborator<'_> {
             let field_ty = self.normalize_type_projections(field.ty);
             let value = self.expression_expected(value, Some(field_ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
-            if self.unify_rigid_lifetimes(field_ty, actual, span).is_err() {
+            if self.unify_input_lifetimes(field_ty, actual, span).is_err() {
                 self.error(
                     span,
                     "G4126",
@@ -9749,7 +9805,7 @@ impl Elaborator<'_> {
             }
             let value = self.expression_expected(value, Some(field.ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
-            if self.unify_rigid_lifetimes(field.ty, actual, span).is_err() {
+            if self.unify_input_lifetimes(field.ty, actual, span).is_err() {
                 return Some(self.fail(
                     span,
                     "G4134",
@@ -10241,7 +10297,7 @@ impl Elaborator<'_> {
             .map(|(value, expected)| {
                 let value = self.expression_expected(value, Some(expected.clone()));
                 let actual = self.expressions[value.0 as usize].ty.clone();
-                if self.unify_rigid_lifetimes(expected, actual, span).is_err() {
+                if self.unify_input_lifetimes(expected, actual, span).is_err() {
                     self.error(
                         span,
                         "G4131",
@@ -10896,7 +10952,7 @@ impl Elaborator<'_> {
     /// conceal a genuine incompatible argument.
     fn call_arguments_with_context(
         &mut self,
-        callee: CoreId,
+        callee: Option<CoreId>,
         parameters: &[Type],
         arguments: Vec<ExprId>,
     ) -> Vec<CoreId> {
@@ -10941,7 +10997,7 @@ impl Elaborator<'_> {
             .map(|(index, value)| {
                 let parameter = contextual_parameters.get(index).cloned();
                 let expected = parameter.as_ref().map(|parameter| {
-                    self.direct_bound_callable_contract(callee, &parameters[index])
+                    callee.and_then(|callee| self.direct_bound_callable_contract(callee, &parameters[index]))
                         .unwrap_or_else(|| parameter.clone())
                 });
                 // Generic parameters begin as inference variables. Expose a
@@ -10978,11 +11034,10 @@ impl Elaborator<'_> {
                     // operand; otherwise the first region mismatch prevents
                     // `Slice<'a, u8>` from fixing T in `compare<T>(a, b".")`.
                     // The final call still checks all operands jointly.
-                    let mut regions = CallLifetimeSubstitution::default();
+                    let mut regions = self.call_lifetime_substitution();
                     if let Ok(aligned) = align_lifetime_types(&parameter, &actual, &mut regions, LifetimeMode::Instantiate, 0) {
-                        if self.solve_call_lifetime_equalities(&mut regions, self.body.expression(value).span).is_ok() {
-                            let _ = self.inference.unify(aligned, actual);
-                        }
+                        self.retain_call_lifetime_constraints(&mut regions);
+                        let _ = self.inference.unify(aligned, actual);
                     }
                     invariant_variables(&raw_parameter, false, &mut selected_invariants);
                 }
@@ -11586,7 +11641,15 @@ impl Elaborator<'_> {
             )
             && let Some(parameter) = declaration.parameters.first()
         {
-            let _ = self.inference.unify(parameter.clone(), subject.clone());
+            // Receiver type inference uses the same opened lifetime relation
+            // as ordinary call operands. A declaration's elision is not an
+            // equality with the fresh loan of a local receiver.
+            let parameter = self.freshen_call_context_lifetimes(parameter.clone());
+            let mut regions = self.call_lifetime_substitution();
+            if let Ok(aligned) = align_lifetime_types(&parameter, &subject, &mut regions, LifetimeMode::Instantiate, 0) {
+                self.retain_call_lifetime_constraints(&mut regions);
+                let _ = self.inference.unify(aligned, subject.clone());
+            }
         }
         selected_subject = self.inference.resolve_type_structure(selected_subject);
         if self.inference.zonk(selected_subject.clone()).is_err() {
@@ -11684,19 +11747,8 @@ impl Elaborator<'_> {
                     .collect::<Vec<_>>();
                 let receiver_offset = usize::from(receiver.is_some());
                 let mut values = receiver.into_iter().collect::<Vec<_>>();
-                for (index, argument) in remaining_arguments.iter().enumerate() {
-                    let parameter_index = index + receiver_offset;
-                    let value = match parameters.get(parameter_index) {
-                        Some(parameter) => {
-                            let value = self.expression_expected(*argument, Some(parameter.clone()));
-                            let actual = self.expressions[value.0 as usize].ty.clone();
-                            let _ = self.inference.unify(parameter.clone(), actual);
-                            value
-                        }
-                        None => self.expression(*argument),
-                    };
-                    values.push(value);
-                }
+                values.extend(self.call_arguments_with_context(Some(callee),
+                    parameters.get(receiver_offset..).unwrap_or(&[]), remaining_arguments.to_vec()));
                 let call = self.call(callee, values, span);
                 self.check_callable_contract_bounds(signature, None, span);
                 return Some(call);
@@ -11785,19 +11837,8 @@ impl Elaborator<'_> {
         );
         let receiver_offset = usize::from(receiver.is_some());
         let mut values = receiver.into_iter().collect::<Vec<_>>();
-        for (index, argument) in remaining_arguments.iter().enumerate() {
-            let parameter_index = index + receiver_offset;
-            let value = match parameters.get(parameter_index) {
-                Some(parameter) => {
-                    let value = self.expression_expected(*argument, Some(parameter.clone()));
-                    let actual = self.expressions[value.0 as usize].ty.clone();
-                    let _ = self.inference.unify(parameter.clone(), actual);
-                    value
-                }
-                None => self.expression(*argument),
-            };
-            values.push(value);
-        }
+        values.extend(self.call_arguments_with_context(Some(callee),
+            parameters.get(receiver_offset..).unwrap_or(&[]), remaining_arguments.to_vec()));
         let call = self.call(callee, values, span);
         self.check_callable_contract_bounds(*signature.clone(), None, span);
         Some(call)
@@ -11897,26 +11938,20 @@ impl Elaborator<'_> {
             .map(|parameter| self.normalize_type_projections(parameter))
             .collect::<Vec<_>>();
         let result = self.normalize_type_projections(operation.signature.result.clone());
-        let values = arguments
-            .into_iter()
-            .zip(&parameters)
-            .map(|(argument, expected)| {
-                let argument = self.expression_expected(argument, Some(expected.clone()));
-                let actual = self.expressions[argument.0 as usize].ty.clone();
-                if self
-                    .unify_rigid_lifetimes(expected.clone(), actual, span)
-                    .is_err()
-                {
-                    self.error(
-                        span,
-                        "G4154",
-                        "effect operation argument does not match its declaration",
-                    );
-                    self.recovered = true;
-                }
-                argument
-            })
-            .collect::<Vec<_>>();
+        let reference_contract = callable_reference_origin_from_contract(self.signatures, &parameters, &result);
+        let values = self.call_arguments_with_context(None, &parameters, arguments);
+        let (parameters, result, _, _) = match self.instantiate_call_lifetimes(parameters, result,
+            EffectRow::empty(), &values, span, None, LifetimeMode::InstantiateBound) {
+            Ok(value) => value,
+            Err(()) => return Some(self.fail(span, "G4154", "effect operation argument does not match its declaration")),
+        };
+        for (expected, argument) in parameters.iter().zip(&values) {
+            let actual = self.expressions[argument.0 as usize].ty.clone();
+            if self.inference.unify(expected.clone(), actual).is_err() {
+                self.error(span, "G4154", "effect operation argument does not match its declaration");
+                self.recovered = true;
+            }
+        }
         self.check_callable_contract_bounds(operation.signature.clone(), Some(&values), span);
         // The selected operation payload/result contracts above are already
         // normalized before unification. Its protocol identity must cross the
@@ -11934,11 +11969,6 @@ impl Elaborator<'_> {
             arguments: effect_arguments,
         };
         self.check_effect_instance(&instance, Some(operation_index), span);
-        let reference_contract = callable_reference_origin_from_contract(
-            self.signatures,
-            &parameters,
-            &result,
-        );
         let reference_shape =
             call_reference_shape(self.signatures, &result, &reference_contract);
         // Quantity, shape and invocation prerequisites were checked against
@@ -14674,6 +14704,7 @@ fn align_lifetime_types(
     mode: LifetimeMode,
     depth: u32,
 ) -> Result<Type, LifetimeError> {
+    use crate::trait_solver::variance::Variance;
     match (expected, actual) {
         (
             Type::Reference {
@@ -14694,27 +14725,19 @@ fn align_lifetime_types(
                 mode,
                 depth,
             )?;
-            let referent = align_lifetime_types(
-                expected_referent,
-                actual_referent,
-                substitution,
-                mode,
-                depth,
-            )?;
             // `&mut` is covariant in its loan region but invariant in the
             // stored referent: accepting a shorter nested reference here
             // could permit a later write through the unique outer loan to
             // violate the promised longer inner lifetime.
-            if *expected_mutability == Mutability::Unique {
-                check_invariant_lifetimes(expected_referent, actual_referent, substitution, mode, depth)?;
-            }
+            let referent = substitution.at_variance(if *expected_mutability == Mutability::Unique { Variance::Invariant } else { Variance::Covariant },
+                |substitution| align_lifetime_types(expected_referent, actual_referent, substitution, mode, depth))?;
             Ok(Type::Reference {
                 mutability: *expected_mutability,
                 // The actual lifetime is intentionally retained here. A
                 // longer `'static` argument may satisfy an elided parameter;
                 // ordinary type unification must not turn that safe coercion
                 // back into an equality failure.
-                lifetime: aligned_lifetime(*expected_lifetime, *actual_lifetime, mode, depth),
+                lifetime: *actual_lifetime,
                 referent: Box::new(referent),
             })
         }
@@ -14740,13 +14763,11 @@ fn align_lifetime_types(
             Type::RawPointer { mutability: expected_mutability, pointee: expected_pointee },
             Type::RawPointer { mutability: actual_mutability, pointee: actual_pointee },
         ) if expected_mutability == actual_mutability => {
-            let pointee = align_lifetime_types(expected_pointee, actual_pointee, substitution, mode, depth)?;
             // A writable pointer is invariant in stored values: shortening
             // an embedded reference could otherwise enable an invalid write.
             // Const pointers allow the ordinary covariant lifetime relation.
-            if *expected_mutability == crate::PointerMutability::Mut {
-                check_invariant_lifetimes(expected_pointee, actual_pointee, substitution, mode, depth)?;
-            }
+            let pointee = substitution.at_variance(if *expected_mutability == crate::PointerMutability::Mut { Variance::Invariant } else { Variance::Covariant },
+                |substitution| align_lifetime_types(expected_pointee, actual_pointee, substitution, mode, depth))?;
             Ok(Type::RawPointer { mutability: *expected_mutability, pointee: Box::new(pointee) })
         }
         (
@@ -14766,8 +14787,12 @@ fn align_lifetime_types(
                 arguments: expected_arguments
                     .iter()
                     .zip(actual_arguments)
-                    .map(|(expected, actual)| {
-                        align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
+                    .enumerate()
+                    .map(|(index, (expected, actual))| {
+                        let variance = substitution.nominal_variances.as_ref()
+                            .map_or(Variance::Invariant, |nominal| nominal.argument(*expected_definition, index));
+                        substitution.at_variance(variance, |substitution|
+                            align_lifetime_generic_argument(expected, actual, substitution, mode, depth))
                     })
                     .collect::<Result<_, _>>()?,
             })
@@ -14796,19 +14821,20 @@ fn align_lifetime_types(
             && expected_item_arguments.len() == actual_item_arguments.len() =>
         {
             Ok(Type::Projection {
-                subject: Box::new(align_lifetime_types(
+                subject: Box::new(substitution.at_variance(Variance::Invariant, |substitution| align_lifetime_types(
                     expected_subject,
                     actual_subject,
                     substitution,
                     mode,
                     depth,
-                )?),
+                ))?),
                 trait_definition: *expected_trait,
                 trait_arguments: expected_trait_arguments
                     .iter()
                     .zip(actual_trait_arguments)
                     .map(|(expected, actual)| {
-                        align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
+                        substitution.at_variance(Variance::Invariant, |substitution|
+                            align_lifetime_generic_argument(expected, actual, substitution, mode, depth))
                     })
                     .collect::<Result<_, _>>()?,
                 name: expected_name.clone(),
@@ -14817,7 +14843,8 @@ fn align_lifetime_types(
                     .iter()
                     .zip(actual_item_arguments)
                     .map(|(expected, actual)| {
-                        align_lifetime_generic_argument(expected, actual, substitution, mode, depth)
+                        substitution.at_variance(Variance::Invariant, |substitution|
+                            align_lifetime_generic_argument(expected, actual, substitution, mode, depth))
                     })
                     .collect::<Result<_, _>>()?,
             })
@@ -14851,7 +14878,8 @@ fn align_lifetime_types(
             // inference pass sees the already-proven coercion rather than
             // trying to rediscover it as an equality.
             for (expected, actual) in expected_parameters.iter().zip(actual_parameters) {
-                align_lifetime_types(actual, expected, substitution, mode, depth + 1)?;
+                substitution.at_variance(Variance::Contravariant, |substitution|
+                    align_lifetime_types(expected, actual, substitution, mode, depth + 1))?;
             }
             Ok(Type::Callable { contract: if expected_contract.is_empty() { actual_contract.clone() } else { expected_contract.clone() },
                 safety: *expected_safety,
@@ -14879,26 +14907,6 @@ fn align_lifetime_types(
         // inferable at the same locations as before this lifetime pass.
         _ => Ok(expected.clone()),
     }
-}
-
-fn check_invariant_lifetimes(
-    expected: &Type,
-    actual: &Type,
-    substitution: &mut CallLifetimeSubstitution,
-    mode: LifetimeMode,
-    depth: u32,
-) -> Result<(), LifetimeError> {
-    // The forward pass has opened callee regions into caller coordinates.
-    // Reverse variance must compare that instantiated contract rigidly: a
-    // callee `'a` already bound to `'static` is not a caller-local short loan,
-    // and caller Generic indices must never become new callee substitutions.
-    // Use the original contract, not the aligned type (which already contains
-    // coercions), so fixed nested regions still enforce real invariance.
-    let expected = match mode {
-        LifetimeMode::Instantiate | LifetimeMode::InstantiateBound => substitute_call_lifetimes(expected.clone(), substitution, depth)?,
-        LifetimeMode::Rigid => expected.clone(),
-    };
-    align_lifetime_types(actual, &expected, substitution, LifetimeMode::Rigid, depth).map(|_| ())
 }
 
 /// Open the selected binder of a higher-ranked callable for elaborating its
@@ -15074,7 +15082,7 @@ fn align_lifetime_generic_argument(
         }
         (GenericArgument::Lifetime(expected), GenericArgument::Lifetime(actual)) => {
             bind_lifetime(*expected, *actual, substitution, mode, depth)?;
-            Ok(GenericArgument::Lifetime(aligned_lifetime(*expected, *actual, mode, depth)))
+            Ok(GenericArgument::Lifetime(*actual))
         }
         (GenericArgument::EffectRow(expected), GenericArgument::EffectRow(actual)) => {
             align_lifetime_effect_row(expected, actual, substitution, mode, depth)
@@ -15111,6 +15119,14 @@ fn align_lifetime_effect_row(
     substitution: &mut CallLifetimeSubstitution,
     mode: LifetimeMode,
     depth: u32,
+) -> Result<EffectRow, LifetimeError> {
+    substitution.at_variance(crate::trait_solver::variance::Variance::Invariant,
+        |substitution| align_lifetime_effect_row_identity(expected, actual, substitution, mode, depth))
+}
+
+fn align_lifetime_effect_row_identity(
+    expected: &EffectRow, actual: &EffectRow, substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode, depth: u32,
 ) -> Result<EffectRow, LifetimeError> {
     // An open body-local tail is a genuine inference term, not a malformed
     // lifetime relation.  There is no corresponding effect instance whose
@@ -15206,13 +15222,6 @@ fn opens_call_lifetime(value: Lifetime, mode: LifetimeMode, depth: u32) -> bool 
             && matches!(value, Lifetime::Bound { depth: binder, .. } if binder == depth))
 }
 
-fn aligned_lifetime(expected: Lifetime, actual: Lifetime, mode: LifetimeMode, depth: u32) -> Lifetime {
-    if matches!(expected, Lifetime::Infer(_))
-        || (matches!(actual, Lifetime::Infer(_)) && !opens_call_lifetime(expected, mode, depth)) {
-        expected
-    } else { actual }
-}
-
 fn bind_lifetime(
     expected: Lifetime,
     actual: Lifetime,
@@ -15220,23 +15229,49 @@ fn bind_lifetime(
     mode: LifetimeMode,
     depth: u32,
 ) -> Result<(), LifetimeError> {
+    use crate::trait_solver::variance::Variance;
+    if opens_call_lifetime(expected, mode, depth) {
+        return bind_covariant_lifetime(expected, actual, substitution, mode, depth);
+    }
+    match substitution.variance {
+        Variance::Bivariant => Ok(()),
+        Variance::Covariant => bind_covariant_lifetime(expected, actual, substitution, mode, depth),
+        Variance::Contravariant => bind_covariant_lifetime(actual, expected, substitution, LifetimeMode::Rigid, depth),
+        Variance::Invariant => {
+            bind_covariant_lifetime(expected, actual, substitution, mode, depth)?;
+            bind_covariant_lifetime(actual, expected, substitution, LifetimeMode::Rigid, depth)
+        }
+    }
+}
+
+fn bind_covariant_lifetime(
+    expected: Lifetime, actual: Lifetime, substitution: &mut CallLifetimeSubstitution,
+    mode: LifetimeMode, depth: u32,
+) -> Result<(), LifetimeError> {
+    // Declaration elision opens at invocation; it is not an equation with
+    // the caller's still-unsolved local borrow. Keep that region identity.
+    if expected == Lifetime::Elided && matches!(mode, LifetimeMode::Instantiate | LifetimeMode::InstantiateBound) {
+        return Ok(());
+    }
     // An unsolved caller hole can still open a callee binder. Retain that
     // hole in the application until body inference seals it; feeding the
     // declaration's Generic/Bound name back into unification would instead
     // capture the hole and poison earlier generic instances sharing it.
     if matches!(actual, Lifetime::Infer(_)) && !opens_call_lifetime(expected, mode, depth) {
-        substitution.inference_equalities.push((expected, actual));
+        substitution.inference_outlives.push(crate::OutlivesPredicate::Region { longer: actual, shorter: expected });
         return Ok(());
     }
     match expected {
         Lifetime::Infer(_) => {
-            substitution.inference_equalities.push((expected, actual));
+            substitution.inference_outlives.push(crate::OutlivesPredicate::Region { longer: actual, shorter: expected });
             Ok(())
         }
+        Lifetime::Inferred(_) => (crate::OutlivesPredicate::Region { longer: actual, shorter: expected }.proven_by(&substitution.outlives))
+            .then_some(())
+            .ok_or(LifetimeError::UnsatisfiedOutlives),
         Lifetime::Static => (actual == Lifetime::Static)
             .then_some(())
             .ok_or(LifetimeError::UnsatisfiedOutlives),
-        Lifetime::Elided if matches!(mode, LifetimeMode::Instantiate | LifetimeMode::InstantiateBound) => Ok(()),
         Lifetime::Elided => matches!(actual, Lifetime::Elided | Lifetime::Static)
             .then_some(())
             .ok_or(LifetimeError::UnsatisfiedOutlives),
@@ -15510,7 +15545,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
                     .all(|effect| effect.arguments.iter().all(generic_argument_is_concrete))
                 && value.projections.is_empty()
         }
-        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided)
+        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Inferred(_))
         | GenericArgument::ConstInteger(_)
         | GenericArgument::ConstIntegerExpr(_)
         | GenericArgument::ConstQuantity(_) => true,

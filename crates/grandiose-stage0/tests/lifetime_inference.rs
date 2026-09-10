@@ -175,6 +175,29 @@ fn call_context_opens_a_higher_ranked_callback_region_into_a_caller_hole() {
 }
 
 #[test]
+fn covariant_carriers_can_share_a_shorter_region_without_equating_caller_regions() {
+    // Preserve the former negative fixture verbatim. Section 9.2 derives
+    // Probe's covariance from its shared reference field: selecting a fresh
+    // common shorter region does not prove 'a:'b or 'b:'a.
+    assert_eq!(run(r#"
+        struct Probe<'a> { target: &'a i64 }
+        fn need_same<'a>(left: Probe<'a>, right: Probe<'a>) -> i64 { 42 }
+        fn invalid<'a, 'b>(left: &'a i64, right: &'b i64) -> i64 {
+            need_same(Probe { target: left }, Probe { target: right })
+        }
+        pub fn main() -> i64 { 42 }
+    "#), 42);
+    assert_eq!(run(r#"
+        struct Probe<'a> { target: &'a i64 }
+        fn add<'a>(left: Probe<'a>, right: Probe<'a>) -> i64 { *left.target + *right.target }
+        fn inner<'a>(incoming: &'a i64) -> i64 {
+            let local = 2; add(Probe { target: incoming }, Probe { target: &local })
+        }
+        pub fn main() -> i64 { let incoming = 40; inner(&incoming) }
+    "#), 42);
+}
+
+#[test]
 fn call_context_cannot_lengthen_or_merge_rigid_caller_regions() {
     for source in [r#"
         struct Probe<'a> { target: &'a i64 }
@@ -188,8 +211,9 @@ fn call_context_cannot_lengthen_or_merge_rigid_caller_regions() {
     "#, r#"
         struct Probe<'a> { target: &'a i64 }
         fn need_same<'a>(left: Probe<'a>, right: Probe<'a>) -> i64 { 42 }
-        fn invalid<'a, 'b>(left: &'a i64, right: &'b i64) -> i64 {
-            need_same(Probe { target: left }, Probe { target: right })
+        fn invalid<'a, 'b>(left: &'a i64, right: &'b i64) -> &'b i64 {
+            need_same(Probe { target: left }, Probe { target: right });
+            left
         }
         pub fn main() -> i64 { 42 }
     "#, r#"

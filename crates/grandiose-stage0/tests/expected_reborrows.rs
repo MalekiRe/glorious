@@ -272,7 +272,7 @@ fn helper_created_static_views_replace_an_empty_payload() {
     }
 }
 
-fn check_generic_reference_replacement(action: &str) {
+fn generic_reference_replacement_source(action: &str) -> String {
     let prefix = r#"use std::*;
         enum Maybe<T> { Some(T), None(()) }
         struct State<'a> { previous: Maybe<Slice<'a,u8>> }
@@ -281,7 +281,11 @@ fn check_generic_reference_replacement(action: &str) {
             handle state.previous { Maybe::Some(value) => value, Maybe::None(_) => b"!" }
         }
     "#;
-    let source = format!("{prefix} pub fn main() -> i64 {{ let mut state: State<'_> = State {{ previous: Maybe::None(()) }}; {action} as<i64>(*Slice::get_unchecked(select(state), 0)) }}");
+    format!("{prefix} pub fn main() -> i64 {{ let mut state: State<'_> = State {{ previous: Maybe::None(()) }}; {action} as<i64>(*Slice::get_unchecked(select(state), 0)) }}")
+}
+
+fn check_generic_reference_replacement(action: &str) {
+    let source = generic_reference_replacement_source(action);
     for optimization in ["0", "2"] {
         let artifact = StageZeroCompiler::new().compile(request(&source, optimization))
             .unwrap_or_else(|error| panic!("{action}: {error:?}")).artifact.unwrap();
@@ -306,6 +310,47 @@ fn helper_created_references_compose_with_captured_targets() {
 }
 
 #[test]
+fn inferred_body_region_bounds_survive_freezing_and_specialization() {
+    accepts("struct Token<'a> { value: i64 } fn pair<'a,'b>() -> (Token<'a>,Token<'b>) where 'a: 'b { (Token { value: 40 }, Token { value: 2 }) } pub fn main() -> i64 { let pair = pair(); pair.0.value + pair.1.value }");
+    accepts("struct Token<'a> { value: i64 } fn static_token<'a>() -> Token<'a> where 'a: 'static { Token { value: 42 } } pub fn main() -> i64 { static_token().value }");
+    accepts("fn add<'a>(left: &'a i64, right: &'a i64) -> i64 { *left + *right } pub fn main() -> i64 { let left = 40; let right = 2; add(&left, &right) }");
+    rejects("fn require_static(value: &'static i64) -> i64 { *value } pub fn main() -> i64 { let local = 42; require_static(&local) }", &["G5017"]);
+}
+
+#[test]
+fn inferred_shared_call_regions_can_shorten_an_incoming_loan_to_local_storage() {
+    accepts("fn add<'a>(left: &'a i64, right: &'a i64) -> i64 { *left + *right } fn inner<'a>(incoming: &'a i64) -> i64 { let local = 2; add(incoming, &local) } pub fn main() -> i64 { let value = 40; inner(&value) }");
+}
+
+#[test]
+fn nominal_callback_and_mutable_field_variance_cannot_extend_local_borrows() {
+    rejects("struct Consumer<'a> { call: (&'a i64) -> i64 } fn static_read(value: &'static i64) -> i64 { *value } fn invoke<'a>(consumer: Consumer<'a>, value: &'a i64) -> i64 { (consumer.call)(value) } pub fn main() -> i64 { let local = 42; let consumer: Consumer<'static> = Consumer { call: static_read }; invoke(consumer, &local) }", &["G5017"]);
+    rejects("struct Slot<'a,'b> { value: &'a mut &'b i64 } fn require_same<'a,'b>(left: Slot<'a,'b>, right: Slot<'a,'b>) { } fn invalid<'a,'b,'c>(left: &'a mut &'b i64, right: &'a mut &'c i64) { require_same(Slot { value: left }, Slot { value: right }); } pub fn main() -> i64 { 42 }", &["G5017"]);
+}
+
+#[test]
+fn captured_inferred_region_stores_retain_real_incoming_loans() {
+    let program = |after: &str| format!(r#"
+        enum Maybe<T> {{ Some(T), None(()) }}
+        struct Slot<'a> {{ value: Maybe<&'a i64> }}
+        fn set<'a,'b>(slot: &mut Slot<'b>, value: &'a i64) where 'a: 'b {{ slot.value = Maybe::Some(value); }}
+        fn get<'a>(slot: Slot<'a>) -> i64 {{ handle slot.value {{ Maybe::Some(value) => *value, Maybe::None(_) => 0 }} }}
+        pub fn main() -> i64 {{
+            let mut backing = 42;
+            let mut slot: Slot<'_> = Slot {{ value: Maybe::None(()) }};
+            let target = &mut slot;
+            let incoming = &backing;
+            let update = move (target, incoming) {{ set(target, incoming); }};
+            update();
+            {after}
+            get(slot)
+        }}
+    "#);
+    accepts(&program(""));
+    rejects(&program("backing = 43;"), &["G5007", "G5008"]);
+}
+
+#[test]
 fn helper_created_static_reference_payloads_execute_in_generated_code() {
     use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
     for optimization in [0, 2] {
@@ -313,6 +358,20 @@ fn helper_created_static_reference_payloads_execute_in_generated_code() {
             .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
         // SAFETY: compile and execute only this locally checked source and
         // its trusted static-memory/Slice operations.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
+fn captured_inferred_region_replacements_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = generic_reference_replacement_source("let target = &mut state; let update = move (target) { set(target); }; update();");
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: the same checked captured-target regression stores a
+        // one-byte static Slice and reads its in-bounds first element.
         let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
         assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
     }

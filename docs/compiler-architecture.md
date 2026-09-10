@@ -1145,3 +1145,52 @@ Distinct body-region constraints and guarded storage outcomes still require
 authoritative producer/consumer integration. No runtime reference representation
 or source lifetime guarantee changes, and full compiler/library/self-hosted
 acceptance remains open.
+
+## Closed body regions and directional invocation constraints
+
+Body inference publishes `BodyRegionConstraints`: distinct closed existential
+regions, rigid local-storage upper bounds, and directed outlives obligations.
+The bounded constraint solver checks every induced rigid-boundary requirement
+against the lexical environment. It identifies only regions proved equivalent;
+unrelated elision holes do not become equal or static. Frozen Core independently
+checks that product before using its facts. Callable contracts retain the
+connected constraints of their free residents and result terms. Inference holes
+and universal placeholders still cannot cross a persistence boundary.
+
+Calls, trait receivers, operation inputs, constructor fields and assignment use
+the shared directional region alignment before ordinary type unification.
+Environment scopes join the same type-outlives constraints before sealing.
+Assignment transports callable refinements without replacing the destination's
+reference regions or declared callable ABI. The trait solver derives nominal
+variance by a bounded monotone fixed point over normalized representation fields;
+unresolved projections and compiler brands remain invariant. Protocol identities
+and mutable referents retain their invariant obligations.
+
+Resident invocation stores and both resource consumers use these closed region
+relations without equating captured and explicit inputs. Returned constructor
+payloads retain the sealed instantiated capture type separately from the longer
+incoming value's provenance. Generic lifetime substitution keeps free caller
+regions rigid. Frozen invocation validation rechecks selected declaration and
+resident prerequisites, including phantom bounds. The existing implementation
+substitution producer accepts the caller's scoped solver when quantified Fn
+evidence determines Output/Effects binders absent from a generic receiver head;
+closed materialization uses the same producer without lexical assumptions.
+Associated Output inference uses the existing structural implementation matcher,
+so a represented `Option<U>` equality can determine U without allowing U to
+capture a predicate-local quantified region.
+
+Fingerprints, instance identities and callable metadata transport closed region
+identities. Fusion freshens template-local regions before inserting caller
+arguments and carries their constraints into the receiving Core. Callable
+serialization retains the product; decoded metadata rejects malformed constraints.
+Source typing now admits the whole body batch before inter-body control/resource
+analysis, so rejected region inference cannot publish missing provenance as an
+invocation fact. The runtime reference representation is unchanged.
+
+This repairs the previously active generic captured-target replacement, including
+generated native execution, and preserves incoming captured-loan rejection. It
+does not supply complete guarded storage outcomes, native owned handlers, full
+library composition or self-hosting. Those acceptance requirements remain open.
+The new nested-output generic capture execution fixture still reaches missing
+checked borrow access at its caller argument; structural output selection is
+repaired, but that source/resource boundary remains an active regression.

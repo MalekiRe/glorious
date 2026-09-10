@@ -164,6 +164,7 @@ pub(crate) fn receiver_candidate(ty: &Type) -> Option<&Type> {
 pub(crate) fn selected_template(
     signatures: &ElaboratedInterface,
     expression: &CoreExpr,
+    scope: Option<&TraitSolver>,
 ) -> Option<SelectedTemplate> {
     if let CoreKind::Constant { definition, arguments } = &expression.kind {
         let signature = body_signature(signatures, *definition)?;
@@ -201,6 +202,7 @@ pub(crate) fn selected_template(
                 trait_arguments,
                 method_arguments,
                 receiver.as_ref(),
+                scope,
             )
             .ok()?;
             let signature = implementation_body_signature(implementation, signature);
@@ -224,6 +226,7 @@ pub(crate) fn implementation_arguments(
     relation_values: &[GenericArgument],
     method_arguments: &[GenericArgument],
     receiver: Option<&Type>,
+    scope: Option<&TraitSolver>,
 ) -> Result<Vec<GenericArgument>, String> {
     if relation_values.len() != implementation.relation.arguments.len() {
         return Err("selected trait relation has the wrong argument arity".into());
@@ -272,7 +275,11 @@ pub(crate) fn implementation_arguments(
         // determine Output/Effects binders absent from the Self
         // head. Recover those exact frozen terms, not new body
         // inference or a default for an unconstrained binder.
-        TraitSolver::new(signatures)
+        // Output/Effects can be functionally determined by a lexical
+        // quantified Fn contract even when the receiver remains generic.
+        // Closed materialization needs no caller assumptions; frozen generic
+        // validation must retain its existing scoped solver environment.
+        scope.map_or_else(|| TraitSolver::new(signatures), TraitSolver::fresh_query)
             .complete_callable_implementation_arguments(implementation, &mut bindings)
             .ok_or_else(|| {
                 "selected trait implementation has invalid quantified callable arguments".to_owned()

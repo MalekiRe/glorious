@@ -86,7 +86,7 @@ impl InstanceKey {
                     // its declaration-local generic effect metadata.
                     if !matches!(
                         value,
-                        Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
+                        Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. } | Lifetime::Inferred(_)
                     ) {
                         return Err(InstanceKeyError::NonConcreteLifetime { slot });
                     }
@@ -347,7 +347,7 @@ fn is_concrete_type(value: &Type) -> bool {
         } => {
             matches!(
                 lifetime,
-                Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
+                Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. } | Lifetime::Inferred(_)
             )
                 && is_concrete_type(referent)
         }
@@ -388,7 +388,7 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
         GenericArgument::Lifetime(value) => {
             matches!(
                 value,
-                Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
+                Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. } | Lifetime::Inferred(_)
             )
         }
         GenericArgument::ConstInteger(_) | GenericArgument::ConstQuantity(_) => true,
@@ -408,6 +408,11 @@ fn encode_lifetime(value: Lifetime, output: &mut Vec<u8>) {
             output.extend_from_slice(&index.to_le_bytes());
         }
         Lifetime::Elided => output.push(2),
+        Lifetime::Inferred(region) => {
+            output.push(3);
+            output.extend_from_slice(&region.owner.0.as_bytes());
+            output.extend_from_slice(&region.index.to_le_bytes());
+        }
         Lifetime::Generic(_) | Lifetime::Infer(_) | Lifetime::Placeholder(_) => unreachable!("validated concrete lifetime"),
     }
 }
@@ -967,6 +972,19 @@ mod tests {
         .unwrap();
         assert_ne!(elided, static_lifetime);
         assert_ne!(elided.fingerprint(), static_lifetime.fingerprint());
+    }
+
+    #[test]
+    fn inferred_body_regions_are_closed_but_distinct_instance_identities() {
+        let mut keys = std::collections::BTreeSet::new();
+        for (body, index) in [(b"left-body".as_slice(), 0), (b"left-body".as_slice(), 1), (b"right-body".as_slice(), 0)] {
+            let lifetime = Lifetime::Inferred(crate::types::BodyRegion { owner: definition(body), index });
+            let key = InstanceKey::new(definition(b"regional-instance"), &[GenericKind::Lifetime],
+                vec![InstanceArgument::Lifetime(lifetime)]).unwrap();
+            assert!(keys.insert(key));
+        }
+        assert!(InstanceKey::new(definition(b"regional-instance"), &[GenericKind::Lifetime],
+            vec![InstanceArgument::Lifetime(Lifetime::Infer(crate::types::LifetimeInferVar(0)))]).is_err());
     }
 
     #[test]

@@ -1940,6 +1940,13 @@ impl StageZeroCompiler {
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
+        // Inter-body control and resource contracts require a completely
+        // admitted Typed Core batch. A recovered body's missing region or
+        // capture evidence cannot be interpreted as an execution/provenance
+        // result, either for that body or for its otherwise valid callers.
+        if !diagnostics.is_empty() {
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
+        }
         // Every demanded body has crossed typing before any ownership check
         // or MIR lowering begins. Inter-body contracts can now be derived
         // from this complete immutable batch without source-order guessing.
@@ -2692,7 +2699,7 @@ pub(crate) fn materialization_body_arguments(
             };
             let relation_values = &key.arguments()[..relation_arguments];
             return crate::callable_declarations::implementation_arguments(signatures, implementation,
-                relation_values, &key.arguments()[relation_arguments..relation_arguments + method_arguments], receiver);
+                relation_values, &key.arguments()[relation_arguments..relation_arguments + method_arguments], receiver, None);
         }
     }
     Ok(key.arguments().to_vec())

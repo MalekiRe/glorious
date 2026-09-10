@@ -158,6 +158,7 @@ impl Analyzer<'_> {
             .collect::<Vec<_>>();
         let relations = crate::resident_invocations::derive(
             signatures,
+            &self.body.body_regions,
             self.body.expression(callee),
             callee_value,
             &arguments,

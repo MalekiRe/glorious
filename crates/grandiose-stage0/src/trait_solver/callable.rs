@@ -88,8 +88,9 @@ impl TraitSolver {
     ) -> Option<()> {
         for bound in &implementation.universal_bounds {
             if !is_intrinsic_callable_trait(&bound.relation) { continue; }
-            let needs_type = bound.type_bindings.iter().any(|binding|
-                matches!(&binding.value, Type::Generic(index) if !substitution.types.contains_key(index)));
+            let needs_type = implementation.generic_kinds.iter().enumerate().any(|(index, kind)|
+                *kind == crate::GenericKind::Type && !substitution.types.contains_key(&(index as u32)))
+                && bound.type_bindings.iter().any(|binding| binding.name == "Output");
             let needs_row = bound.effect_bindings.iter().any(|binding| binding.value.tails.iter().any(|tail|
                 matches!(tail, crate::EffectTail::Generic(index) if !substitution.effect_rows.contains_key(index))));
             if !needs_type && !needs_row { continue; }
@@ -105,8 +106,7 @@ impl TraitSolver {
             let lexical = scoped.lexical_universal.iter().filter_map(|bound| bound.for_goal(&goal)).collect::<Vec<_>>();
             let evidence = scoped.callable_evidence(&goal);
             for binding in &bound.type_bindings {
-                let Type::Generic(index) = &binding.value else { continue; };
-                if substitution.types.contains_key(index) || binding.name != "Output" { continue; }
+                if binding.name != "Output" { continue; }
                 let actual = evidence.as_ref().map(|value| value.output.clone()).or_else(|| {
                     let mut values = lexical.iter().flat_map(|bound| &bound.type_bindings)
                         .filter(|binding| binding.name == "Output" && binding.item_arguments.is_empty()).map(|binding| binding.value.clone());
@@ -114,10 +114,14 @@ impl TraitSolver {
                     values.all(|value| value == selected).then_some(selected)
                 });
                 if let Some(actual) = actual {
-                    // A binder outside `for` cannot become its freshly opened
-                    // region, including through nested callable metadata.
-                    if has_free_hrtb_placeholder(&actual, 0) { return None; }
-                    install_item_argument(substitution, *index, GenericArgument::Type(actual));
+                    // Match the complete associated output, not only a bare
+                    // generic leaf: Option<U> can determine U as well. Open
+                    // only this predicate's binder; the existing structural
+                    // matcher prevents any new outer slot from capturing its
+                    // placeholders, including beneath nested callable terms.
+                    let GenericArgument::Type(template) = crate::types::regions::open_argument(
+                        GenericArgument::Type(binding.value.clone()), |index| scope.region(index))? else { return None; };
+                    match_type_at(&template, &actual, substitution, 1)?;
                 }
             }
             for binding in &bound.effect_bindings {
@@ -136,6 +140,7 @@ impl TraitSolver {
                     install_item_argument(substitution, index, GenericArgument::EffectRow(actual));
                 }
             }
+            solve_pending_effect_rows(substitution)?;
             scoped.quantified_inference.finish_universal_scope(scope).ok()?;
             self.steps = scoped.steps;
         }

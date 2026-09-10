@@ -30,6 +30,23 @@ fn executes(body: &str) {
 }
 
 #[test]
+fn helper_expansions_freshen_closed_body_regions_and_keep_their_constraints() {
+    executes("struct Token<'a> { value:i64 }
+        fn pair<'a,'b>() -> (Token<'a>,Token<'b>) where 'a:'b {
+            (Token { value:40 },Token { value:2 })
+        }
+        fn run<F>(task:F) -> ! where F:Fn<(i64,),Output = ! > {
+            let pair = pair(); let local = pair.0.value + pair.1.value;
+            let borrowed = &local; task(*borrowed)
+        }
+        pub fn main() -> i64 {
+            let first = @first: i64 { run((value:i64) -> ! { @first(value) }) };
+            let second = @second: i64 { run((value:i64) -> ! { @second(value) }) };
+            first + second - 42
+        }");
+}
+
+#[test]
 fn lexical_captures_survive_aliases_aggregates_and_generic_forwarding() {
     for body in [
         "pub fn main() -> i64 { @done: i64 { let task = () -> ! { @done(42) }; let (alias,) = (task,); alias() } }",

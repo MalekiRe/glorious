@@ -220,13 +220,17 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
 /// receiver is conflated with a reference supplied as T. A Vec<&T> resident
 /// and the short &mut Vec receiver are distinct regions, even if their final
 /// caller-facing type encodings both contain `Elided`.
-pub(crate) fn expression_relations(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> ResidentRelations {
+pub(crate) fn expression_relations(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr,
+    body_regions: &crate::types::BodyRegionConstraints) -> ResidentRelations {
     use crate::Type;
     let Type::Callable { parameters, contract, .. } = &expression.ty else { return ResidentRelations::default(); };
     if let Some(signature) = rigid_callable_signature(signatures, expression) {
         return parameter_relations(signatures, &rigid_declaration_parameters(&signature.parameters), &signature.where_outlives);
     }
-    parameter_relations(signatures, parameters, &contract.residual.where_outlives)
+    let mut outlives = contract.residual.where_outlives.clone();
+    outlives.extend_from_slice(contract.body_regions.facts());
+    outlives.extend_from_slice(body_regions.facts());
+    parameter_relations(signatures, parameters, &outlives)
 }
 
 pub(crate) fn call_origin(signatures: &crate::ElaboratedInterface, callee: &crate::core::CoreExpr) -> Option<crate::core::CallReferenceOrigin> {
@@ -236,7 +240,7 @@ pub(crate) fn call_origin(signatures: &crate::ElaboratedInterface, callee: &crat
 }
 
 fn rigid_callable_signature(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Option<crate::CallableSignature> {
-    let selected = crate::callable_declarations::selected_template(signatures, expression)?;
+    let selected = crate::callable_declarations::selected_template(signatures, expression, None)?;
     // Distinct type slots can be related by ordinary trait conversion. Keep
     // their realized region equality, while declaration-local elision stays
     // separate from substituted residents in both functions and methods.
@@ -358,6 +362,7 @@ fn rigid_resident_type(ty: &crate::Type, regions: &mut BTreeMap<crate::Lifetime,
             // independently elided &mut Owner<T> receiver. Its invocation
             // binder and proof-only environment identities stay untouched.
             contract.captures = contract.captures.iter().map(|capture| rigid_resident_type(capture, regions)).collect();
+            contract.body_regions = contract.body_regions.map_terms(|argument| rigid_resident_argument(&argument, regions));
             Type::Callable { contract: Box::new(contract), safety: *safety, lifetime_binders: *lifetime_binders,
                 parameters: parameters.clone(), result: result.clone(), effects: effects.clone(), invocation: *invocation }
         }

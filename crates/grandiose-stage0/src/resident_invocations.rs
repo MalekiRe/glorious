@@ -105,6 +105,7 @@ pub(crate) struct Relations<V> {
 /// expansion; this is a may-store relation, never an execution-order rewrite.
 pub(crate) fn derive<D: Inputs>(
     signatures: &crate::ElaboratedInterface,
+    body_regions: &crate::types::BodyRegionConstraints,
     expression: &CoreExpr,
     callee: D::Value,
     arguments: &[Operand<D::Value>],
@@ -119,7 +120,7 @@ pub(crate) fn derive<D: Inputs>(
     add_relations(
         signatures,
         arguments,
-        regions::expression_relations(signatures, expression),
+        regions::expression_relations(signatures, expression, body_regions),
         domain,
         &mut stores,
         &mut reference_writes,
@@ -184,11 +185,12 @@ pub(crate) fn derive<D: Inputs>(
             .iter()
             .map(|operand| operand.ty.clone())
             .collect::<Vec<_>>();
-        let outlives = match &callable.ty {
-            Type::Callable { contract, .. } => contract.residual.where_outlives.as_slice(),
-            _ => &[],
+        let mut outlives = body_regions.facts().to_vec();
+        if let Type::Callable { contract, .. } = &callable.ty {
+            outlives.extend_from_slice(&contract.residual.where_outlives);
+            outlives.extend_from_slice(contract.body_regions.facts());
         };
-        let mut relations = regions::parameter_relations(signatures, &types, outlives);
+        let mut relations = regions::parameter_relations(signatures, &types, &outlives);
         relations.stores.retain(|transfer|
             include_explicit || transfer.destination < count || transfer.source < count);
         relations.reference_writes.retain_mut(|write| {
@@ -516,7 +518,7 @@ mod tests {
         let mut domain = Domain::default();
         domain.captured.insert(0, vec![Operand { ty: writable.clone(), value: (1, vec![]) }]);
         let expression = expression(callable(vec![]));
-        let captured = derive(&signatures, &expression, (0, vec![]), &[], &domain);
+        let captured = derive(&signatures, &Default::default(), &expression, (0, vec![]), &[], &domain);
         assert_eq!(captured.reference_writes.len(), 1);
         let write = &captured.reference_writes[0];
         assert_eq!(write.destination, (1, vec![]));
@@ -559,6 +561,7 @@ mod tests {
         );
         let relations = derive(
             &signatures,
+            &Default::default(),
             &expression(callable(vec![reference.clone()])),
             (0, vec![]),
             &[Operand {
@@ -600,6 +603,7 @@ mod tests {
         }
         let relations = derive(
             &signatures,
+            &Default::default(),
             &expression(callback),
             (0, vec![]),
             &[Operand {
@@ -616,10 +620,10 @@ mod tests {
         let signatures = crate::ElaboratedInterface::default();
         let expression = expression(callable(vec![]));
         let mut domain = Domain::default();
-        let unknown = derive(&signatures, &expression, (0, vec![]), &[], &domain);
+        let unknown = derive(&signatures, &Default::default(), &expression, (0, vec![]), &[], &domain);
         assert_eq!(unknown.unresolved.len(), 1);
         domain.captured.insert(0, vec![]);
-        let known = derive(&signatures, &expression, (0, vec![]), &[], &domain);
+        let known = derive(&signatures, &Default::default(), &expression, (0, vec![]), &[], &domain);
         assert!(known.unresolved.is_empty());
     }
 
@@ -640,6 +644,7 @@ mod tests {
         domain.captured.insert(10_000, vec![]);
         let relations = derive(
             &signatures,
+            &Default::default(),
             &expression(callback.clone()),
             (0, vec![]),
             &[],
@@ -658,6 +663,7 @@ mod tests {
         );
         let relations = derive(
             &signatures,
+            &Default::default(),
             &expression(callback),
             (0, vec![]),
             &[],

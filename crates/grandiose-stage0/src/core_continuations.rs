@@ -401,6 +401,7 @@ mod tests {
             safety: crate::Safety::Safe,
             unsafe_scopes: Default::default(),
             unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
             parameters: vec![],
             root: CoreId(nodes.len() as u32 - 1),
             expressions: nodes

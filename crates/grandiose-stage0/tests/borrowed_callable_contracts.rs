@@ -72,14 +72,16 @@ fn returned_capture_references_compose_through_receivers_and_products() {
 
 #[test]
 fn returned_capture_references_retain_escape_and_mutation_obligations() {
-    for (source, code) in [
-        ("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } fn bad() -> &i64 { let value = 42; make(&value)() } pub fn main() -> i64 { *bad() }", "G5013"),
-        ("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let mut value = 42; let result = make(&value)(); value = 0; *result }", "G5007"),
+    for (source, codes) in [
+        // Closed region constraints may reject the escaping local at Core
+        // sealing before EscapeFlow's storage snapshot reports G5013.
+        ("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } fn bad() -> &i64 { let value = 42; make(&value)() } pub fn main() -> i64 { *bad() }", &["G5013", "G5017"][..]),
+        ("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let mut value = 42; let result = make(&value)(); value = 0; *result }", &["G5007"][..]),
     ] {
         for level in ["0", "2"] {
             let diagnostics = StageZeroCompiler::new().compile(request(source, level))
                 .expect_err("returned capture must keep its backing loan").diagnostics();
-            assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == code), "{source}: {diagnostics:#?}");
+            assert!(diagnostics.iter().any(|diagnostic| codes.contains(&diagnostic.code)), "{source}: {diagnostics:#?}");
             let represented = source.find("make(&value)()").unwrap();
             assert!(!diagnostics.iter().any(|diagnostic| diagnostic.code == "G5023"
                 && diagnostic.primary.as_ref().is_some_and(|span|
@@ -390,6 +392,43 @@ fn non_head_callable_arguments_cannot_capture_a_quantified_region() {
 }
 
 #[test]
+fn selected_generic_capture_methods_retain_quantified_output_evidence() {
+    run(r#"
+        trait Step { type Output; fn step(value: &mut Self) -> <Self as Step>::Output; }
+        struct Wrap<F> { callback: F }
+        impl<F,T> Step for Wrap<F>
+        where for<'a> &'a mut F: Fn<(),Output=T,Effects={}> {
+            type Output = T;
+            fn step(value: &mut Self) -> T { let callback = &mut value.callback; callback() }
+        }
+        fn call<F,T>(value: &mut Wrap<F>) -> T
+        where for<'a> &'a mut F: Fn<(),Output=T,Effects={}> { Step::step(value) }
+        pub fn main() -> i64 {
+            let value = 42;
+            let mut wrapped = Wrap { callback: move (value) { value } };
+            call(&mut wrapped)
+        }
+    "#, 42);
+    run(r#"
+        struct Envelope<T> { value: T }
+        trait Step { type Output; fn step(value: &mut Self) -> <Self as Step>::Output; }
+        struct Wrap<F> { callback: F }
+        impl<F,T> Step for Wrap<F>
+        where for<'a> &'a mut F: Fn<(),Output=Envelope<T>,Effects={}> {
+            type Output = Envelope<T>;
+            fn step(value: &mut Self) -> Envelope<T> { let callback = &mut value.callback; callback() }
+        }
+        fn call<F,T>(value: &mut Wrap<F>) -> Envelope<T>
+        where for<'a> &'a mut F: Fn<(),Output=Envelope<T>,Effects={}> { Step::step(value) }
+        pub fn main() -> i64 {
+            let value = 42;
+            let mut wrapped = Wrap { callback: move (value) { Envelope { value: value } } };
+            call(&mut wrapped).value
+        }
+    "#, 42);
+}
+
+#[test]
 fn environment_scope_retains_the_stored_capture_lifetimes() {
     let prelude = r#"
         fn require_static<Env,F>(callback: &F) -> i64
@@ -421,7 +460,16 @@ fn environment_scope_retains_the_stored_capture_lifetimes() {
             demand_static(&stored)
         }
     "#;
-    for source in [direct.as_str(), contextual] {
+    // The original carrier has no resident or prerequisite mentioning
+    // 'env: its unused marker is bivariant (§9.2), not Environment evidence.
+    // Preserve that source as a positive test and separately demand the
+    // actual sealed static-environment predicate at the consumer boundary.
+    run(contextual, 42);
+    let contextual_requirement = contextual.replace(
+        "fn demand_static<Env,F>(stored: &Stored<'static,Env,F>) -> i64 { 42 }",
+        "fn demand_static<Env,F>(stored: &Stored<'static,Env,F>) -> i64 where Env: Environment<'static> { 42 }");
+    assert_ne!(contextual_requirement, contextual);
+    for source in [direct.as_str(), contextual_requirement.as_str()] {
       for level in ["0", "2"] {
         let diagnostics = StageZeroCompiler::new().compile(request(&source, level))
             .expect_err("a borrowed local capture is not a static environment").diagnostics();

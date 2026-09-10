@@ -5,6 +5,77 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 124: closed body regions and directional invocation contracts
+
+The previously active generic captured-target replacement now executes at VM
+O0/O2 (fresh and decoded) and generated native O0/O2. Body inference retains
+distinct existential regions and checked storage upper bounds instead of closing
+every unresolved lifetime to the same elision marker. Directed constraints are
+sealed, fingerprinted, independently rechecked in Core and transported with
+captured callable contracts. Both invocation-store consumers use those facts.
+Fusion freshens helper-local regions, and instance/serialized callable identities
+retain the new closed terms. Runtime reference storage is unchanged.
+
+Call, trait-receiver, constructor, operation and assignment input checking share
+directional region alignment. Nominal variance comes from normalized representation
+fields and a bounded fixed point; mutable referents, unknown projections and
+compiler brands remain invariant. Assignment keeps the declared ABI while joining
+resident callable refinements. Environment scope obligations participate before
+region sealing. Returned factory payloads retain their sealed capture types while
+preserving incoming provenance. Frozen calls independently prove declaration and
+resident prerequisites, including caller-scoped quantified implementation bindings.
+Invalid Typed Core batches stop before inter-body resource analysis.
+
+Two old negative-fixture assumptions were inconsistent with representation-derived
+variance: covariant carriers can share a shorter region without equating caller
+regions, and an unused lifetime marker does not prove a static environment.
+Both original sources remain as positive tests; the negative cases now explicitly
+demand the missing outlives or sealed Environment predicate. Dangling-reference
+sources and mutation prohibitions remain unchanged. One escaping-return assertion
+accepts the earlier Core G5017 as well as EscapeFlow G5013, and still forbids a
+spurious G5023 at the represented capture invocation.
+
+Verification (no ignored checks):
+
+- All 410 unit checks pass after the final structural-output selection change
+  (`target/body-regions-units-final-v2.log`). All 20 reference-result-contract
+  and 22 request/cache checks pass (`target/body-regions-final-contracts-v1.log`).
+- All 38 expected-reborrow and 18 lifetime-inference checks pass
+  (`target/body-regions-boundaries-v2.log`), including the original captured
+  replacement source, the new native execution gate and incoming-loan negatives.
+- The final capture target has thirteen passes and one active acceptance failure
+  (`target/body-regions-captures-final-v4.log`). The new selected generic method
+  test's direct Output case executes fresh/decoded O0/O2, but its nested
+  `Envelope<T>` case reaches G5016 at the caller's `&mut wrapped` argument.
+  Structural Output inference succeeds; the missing checked-access product is
+  still a pipeline failure. The complete positive execution test remains active,
+  not ignored or changed to expect rejection.
+- Twelve focused frozen-Core checks pass, including retained free caller regions,
+  missing prerequisite rejection and tampered body-region proof rejection
+  (`target/body-regions-frozen-final-v1.log`). A separate nested-output negative
+  proves that structural inference cannot capture a quantified region
+  (`target/body-regions-output-leak-final-v1.log`). The earlier full-Core comparison
+  found nine existing failures on clean HEAD as well as this batch; the subsequent
+  focused fixes removed the extra failures, not the nine baseline failures.
+- The fusion checkpoint has 28 passes and one known native-owned-handler failure
+  (`target/body-regions-fusion-integration-v1.log`). The new repeated helper-region
+  expansion regression passes fresh/decoded O0/O2. This is not native-handler
+  acceptance. The foundation library source gate passes
+  (`target/body-regions-foundation-trace-v1.log`).
+
+Full-library composition still fails with 36 diagnostic records at the typing gate
+(`target/body-regions-library-final-v9.log`). The two recursive iterator-method
+prerequisite failures are repaired by scoped structural Output/Effects selection.
+Earlier downstream resource errors
+are not discharged by stopping at an invalid typing batch. Array/API, graph,
+custom-Drop, unsafe, minimum-use, mandatory-tail and native-handler work remain.
+The complete 31-test source matrix was not rerun; cache 114's 16 passing / 15
+failing result is historical, not a cache-124 claim. Full compiler conformance,
+library completion and all 11,455 GSC-2 contracts remain unfinished.
+
+Cache generation is 124 and interface generation is 22. Native ABI 12, bytecode
+72, verifier 38 and VM schema 116 are unchanged. Earlier entries are historical.
+
 ## Cache 123: checked borrow access and actual captured provenance
 
 The captured-target regression had compared an actual captured root (`state`)

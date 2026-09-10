@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 123 verification below,
+Updated from the current source and cache 124 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,37 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 124 repairs generic captured-target replacement through closed body-region
+constraints shared by invocation stores and both resource consumers. The original
+source executes fresh/decoded VM O0/O2 and generated native O0/O2; incoming
+captured-loan mutation remains rejected. Nominal variance, directional call/input
+alignment, environment-scope inference, frozen prerequisite validation and
+factory capture payload typing use the same authoritative semantic products.
+Fusion freshens helper-local region identities, and frozen/decoded contracts
+retain and validate their constraints.
+
+The focused gates pass: 410 unit, 38 reborrow, 18 lifetime-inference, 20 reference
+contract and 22 request checks, thirteen existing capture checks, twelve frozen-Core
+checks and one nested-output quantified-region rejection check. A new generic
+capture-method execution test remains actively failing: its direct Output case
+executes, but the nested `Envelope<T>` case reaches G5016 at `&mut wrapped` in
+the caller. This missing checked-access product is the next pipeline repair;
+the positive execution fixture is retained unchanged. The earlier Core
+integration comparison retains nine clean-HEAD failures; fusion retains one
+native-owned-handler failure. See `implementation-progress.md` for exact scope
+and logs rather than treating these overlapping targets as one conformance count.
+
+Full-library composition still fails with 36 diagnostic records at the typing gate
+(`target/body-regions-library-final-v9.log`). Scoped structural Output/Effects
+selection repairs the recursive iterator-method prerequisite errors. Invalid Core now stops the batch
+before inter-body resource analysis, so fewer reported diagnostics would not
+prove that the historical minimum-use, mandatory-tail or provenance blockers are
+fixed. Array/API, graph, custom-Drop and unsafe-call failures remain visible.
+The complete source matrix was not rerun. Full compiler/library conformance,
+native handler support and self-hosted acceptance remain open.
+
+The following cache 123 and earlier entries are historical.
 
 Cache 123 replaces diagnostic-root matching with checked borrow access from the
 existing PlaceFlow loan producer. Explicit and borrowed-refinement accesses name

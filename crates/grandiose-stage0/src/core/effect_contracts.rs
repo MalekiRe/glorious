@@ -56,9 +56,10 @@ pub(super) fn validate_application(
 
 fn accepts(required: &Type, provided: &Type, solver: &mut TraitSolver, outlives: &[crate::OutlivesPredicate]) -> bool {
     let (Ok(required), Ok(provided)) = (solver.normalize_type(required.clone()), solver.normalize_type(provided.clone())) else { return false; };
-    let mut substitution = CallLifetimeSubstitution { outlives: outlives.to_vec(), ..Default::default() };
-    let Ok(aligned) = align_lifetime_types(&required, &provided, &mut substitution, LifetimeMode::Rigid, 0) else { return false; };
+    let mut substitution = CallLifetimeSubstitution { outlives: outlives.to_vec(),
+        nominal_variances: Some(solver.nominal_variances()), ..Default::default() };
+    let Ok(aligned) = align_lifetime_types(&required, &provided, &mut substitution, LifetimeMode::InstantiateBound, 0) else { return false; };
     let mut inference = InferContext::default();
-    substitution.inference_equalities.into_iter().all(|(left, right)| inference.unify_lifetimes(left, right).is_ok())
+    substitution.inference_outlives.is_empty()
         && inference.unify(aligned, provided).is_ok()
 }

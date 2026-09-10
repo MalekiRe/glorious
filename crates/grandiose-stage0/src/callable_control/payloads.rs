@@ -429,7 +429,16 @@ fn construct_payload(&self, value: &ControlValue,
                     captures: captures.into_iter().map(|capture| {
                         // Borrowed formation retains the factory's own slot;
                         // its address is not an incoming caller reference.
-                        if capture.contents.is_empty() { derive(&capture.value) }
+                        if capture.contents.is_empty() {
+                            let mut payload = derive(&capture.value);
+                            // The projection retains the incoming value's
+                            // provenance, but capture storage has the sealed
+                            // constructor's instantiated resident type. A
+                            // checked covariant input may have a longer region
+                            // than this resident view; it is not its identity.
+                            payload.ty = capture.resident_ty;
+                            payload
+                        }
                         else { InvocationPayload::unknown(capture.resident_ty) }
                     }).collect() },
                 None => PayloadSource::Unknown,

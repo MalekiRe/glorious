@@ -14,6 +14,10 @@ pub struct CallableContract {
     /// Capture types retain free regions even when the ABI does not mention
     /// them in its arguments or result.
     pub captures: Vec<Type>,
+    /// Existential facts retained by the callable's free value terms,
+    /// including capture-storage borrows in its result. These are checked
+    /// environment guarantees, not residual call prerequisites.
+    pub(crate) body_regions: super::BodyRegionConstraints,
     pub shared_receiver: bool,
     pub unique_receiver: bool,
     pub residual: crate::AssociatedItemContract,
@@ -24,13 +28,78 @@ impl Default for CallableContract {
     fn default() -> Self {
         Self {
             environment: None, after_environment: None, captures: vec![],
+            body_regions: Default::default(),
             shared_receiver: false, unique_receiver: false,
             residual: crate::AssociatedItemContract::default(), universal: vec![],
         }
     }
 }
 
+#[cfg(test)]
+mod abi_refinement_tests {
+    use super::*;
+    use crate::{EffectRow, Lifetime, Mutability, Quantity, Safety};
+
+    fn reference(lifetime: Lifetime, referent: Type) -> Type {
+        Type::Reference { mutability: Mutability::Shared, lifetime, referent: Box::new(referent) }
+    }
+
+    #[test]
+    fn assignment_refinement_preserves_reference_regions_and_the_declared_callable_abi() {
+        let function = |lifetime, contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![reference(lifetime, Type::Unit)], result: Box::new(Type::Unit),
+            effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let previous = reference(Lifetime::Elided, function(Lifetime::Static, CallableContract::default()));
+        let mut resident = CallableContract::default();
+        resident.captures.push(Type::Unit);
+        let aligned = reference(Lifetime::Generic(0), function(Lifetime::Elided, resident.clone()));
+        let refined = CallableContract::retain_abi_with_refinements(previous, &aligned);
+        assert_eq!(refined, reference(Lifetime::Elided, function(Lifetime::Static, resident)));
+        assert_eq!(CallableContract::retain_abi_with_refinements(reference(Lifetime::Elided, Type::Unit),
+            &reference(Lifetime::Generic(0), Type::Unit)), reference(Lifetime::Elided, Type::Unit));
+    }
+}
+
 impl CallableContract {
+    /// A successful assignment may join resident callable refinements. That
+    /// is not permission to replace the destination's declared ABI or its
+    /// reference regions with the temporary aligned view used by unification.
+    pub(crate) fn retain_abi_with_refinements(previous: Type, joined: &Type) -> Type {
+        let argument = |previous, joined: &GenericArgument| match (previous, joined) {
+            (GenericArgument::Type(previous), GenericArgument::Type(joined)) =>
+                GenericArgument::Type(Self::retain_abi_with_refinements(previous, joined)),
+            (previous, _) => previous,
+        };
+        match (previous, joined) {
+            (Type::Callable { contract: _, safety, lifetime_binders, parameters, result, effects, invocation },
+             Type::Callable { contract, parameters: joined_parameters, result: joined_result, .. }) if parameters.len() == joined_parameters.len() => Type::Callable {
+                contract: contract.clone(), safety, lifetime_binders,
+                parameters: parameters.into_iter().zip(joined_parameters).map(|(previous, joined)| Self::retain_abi_with_refinements(previous, joined)).collect(),
+                result: Box::new(Self::retain_abi_with_refinements(*result, joined_result)), effects, invocation,
+            },
+            (Type::Reference { mutability, lifetime, referent }, Type::Reference { referent: joined, .. }) => Type::Reference {
+                mutability, lifetime, referent: Box::new(Self::retain_abi_with_refinements(*referent, joined)),
+            },
+            (Type::RawPointer { mutability, pointee }, Type::RawPointer { pointee: joined, .. }) => Type::RawPointer {
+                mutability, pointee: Box::new(Self::retain_abi_with_refinements(*pointee, joined)),
+            },
+            (Type::Nominal { definition, arguments }, Type::Nominal { definition: other, arguments: joined })
+                if definition == *other && arguments.len() == joined.len() => Type::Nominal {
+                    definition, arguments: arguments.into_iter().zip(joined).map(|(previous, joined)| argument(previous, joined)).collect(),
+                },
+            (Type::Tuple(fields), Type::Tuple(joined)) if fields.len() == joined.len() => Type::Tuple(fields.into_iter().zip(joined)
+                .map(|(previous, joined)| Self::retain_abi_with_refinements(previous, joined)).collect()),
+            (Type::Array(element), Type::Array(joined)) => Type::Array(Box::new(Self::retain_abi_with_refinements(*element, joined))),
+            (Type::FixedArray { element, length }, Type::FixedArray { element: joined, .. }) => Type::FixedArray {
+                element: Box::new(Self::retain_abi_with_refinements(*element, joined)), length,
+            },
+            (Type::StaticData { element, tag, alignment }, Type::StaticData { element: joined, .. }) => Type::StaticData {
+                element: Box::new(Self::retain_abi_with_refinements(*element, joined)), tag, alignment,
+            },
+            (previous, _) => previous,
+        }
+    }
+
     /// Replace complete callable refinements without changing ABI structure
     /// or binding any type/region cell. The replacement terms are shifted
     /// under nested callable and predicate binders to avoid capture.
@@ -123,6 +192,7 @@ impl CallableContract {
             environment: (self.environment == other.environment).then(|| self.environment.clone()).flatten(),
             after_environment: (self.after_environment == other.after_environment).then(|| self.after_environment.clone()).flatten(),
             captures: union(&self.captures, &other.captures),
+            body_regions: self.body_regions.union(&other.body_regions),
             shared_receiver: self.shared_receiver && other.shared_receiver,
             unique_receiver: self.unique_receiver && other.unique_receiver,
             residual: crate::AssociatedItemContract {
@@ -152,6 +222,7 @@ impl CallableContract {
         let captures = self.captures.iter().map(&mut map_type).collect();
         Self {
             environment, after_environment, captures,
+            body_regions: self.body_regions.map_terms(|value| map(value, &[])),
             shared_receiver: self.shared_receiver,
             unique_receiver: self.unique_receiver,
             residual: self.residual.map_terms(|value| map(value, &[])),
@@ -238,6 +309,7 @@ impl CallableContract {
         output.push(u8::from(self.after_environment.is_some()));
         if let Some(environment) = &self.after_environment { super::encode_type(environment, output); }
         super::encode_types(&self.captures, output);
+        self.body_regions.encode(output);
         contract(&self.residual, output);
         output.extend_from_slice(&(self.universal.len() as u64).to_le_bytes());
         for bound in &self.universal {

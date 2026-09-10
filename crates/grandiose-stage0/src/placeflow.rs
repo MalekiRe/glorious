@@ -582,6 +582,7 @@ mod checked_borrow_tests {
             referent: Box::new(scalar.clone()) };
         let span = Span { file: crate::FileKey(crate::Digest::of_bytes(b"checked-borrow")), start: 0, end: 1 };
         TypedBody { safety: crate::Safety::Safe, unsafe_scopes: BTreeSet::new(), unsafe_implementations: BTreeSet::new(),
+            body_regions: Default::default(),
             parameters: vec![("input".into(), reference(unique_input))],
             expressions: vec![
                 crate::core::CoreExpr { kind: CoreKind::Local("input".into()), ty: reference(unique_input), span },

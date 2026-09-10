@@ -16,7 +16,7 @@ mod const_value_tests {
     fn const_values_are_kind_checked_at_each_mutable_ir_boundary() {
         let body = TypedBody {
             safety: crate::Safety::Safe, unsafe_scopes: Default::default(),
-            unsafe_implementations: Default::default(), parameters: vec![],
+            unsafe_implementations: Default::default(), body_regions: Default::default(), parameters: vec![],
             expressions: vec![CoreExpr {
                 kind: CoreKind::ConstValue(GenericArgument::ConstInteger(42u32.into())),
                 ty: Type::Scalar(ScalarType::U32),
@@ -724,6 +724,7 @@ mod tests {
             safety: Safety::Safe,
             unsafe_scopes: BTreeSet::new(),
             unsafe_implementations: BTreeSet::new(),
+            body_regions: Default::default(),
             parameters: vec![],
             expressions: vec![],
             root: CoreId(0),

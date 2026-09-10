@@ -3658,6 +3658,16 @@ fn vm_effect_row(value: &crate::types::EffectRow) -> Result<VmEffectRow, Box<Typ
     })
 }
 
+/// Body-region identity is source proof, not an effect dispatch token. Keep
+/// declaration identities as before; erase only closed body existentials at
+/// the same boundary that removes reference regions from value layouts.
+fn vm_lifetime(value: Lifetime) -> Lifetime {
+    match value {
+        Lifetime::Inferred(_) => Lifetime::Elided,
+        value => value,
+    }
+}
+
 fn vm_effect_generic_argument(
     value: &crate::GenericArgument,
 ) -> Result<VmGenericArgument, Box<Type>> {
@@ -3666,7 +3676,7 @@ fn vm_effect_generic_argument(
     Ok(match value {
         GenericArgument::Type(value) => VmGenericArgument::Type(vm_type(value)?),
         GenericArgument::EffectRow(value) => VmGenericArgument::EffectRow(vm_effect_row(value)?),
-        GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
+        GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(vm_lifetime(*value)),
         GenericArgument::ConstInteger(value) => VmGenericArgument::ConstInteger((*value).into()),
         GenericArgument::ConstIntegerExpr(value) => VmGenericArgument::ConstIntegerExpr(value.clone()),
         GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
@@ -3743,7 +3753,7 @@ fn vm_effect_argument(
                 tails: value.tails.clone(),
             })
         }
-        GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
+        GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(vm_lifetime(*value)),
         GenericArgument::ConstInteger(value) => VmGenericArgument::ConstInteger((*value).into()),
         GenericArgument::ConstIntegerExpr(value) => VmGenericArgument::ConstIntegerExpr(value.clone()),
         GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
@@ -9115,7 +9125,7 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
     for value in values {
         match value {
             VmGenericArgument::Type(value) => validate_vm_type(value)?,
-            VmGenericArgument::Lifetime(Lifetime::Infer(_)) => return Err(VmArtifactError::MalformedEncoding {
+            VmGenericArgument::Lifetime(Lifetime::Infer(_) | Lifetime::Inferred(_)) => return Err(VmArtifactError::MalformedEncoding {
                 message: "VM identity retains a body-local lifetime inference variable",
             }),
             VmGenericArgument::ConstInteger(_) => {}
