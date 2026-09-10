@@ -266,11 +266,15 @@ fn unused_named_linear_fixed_array_is_rejected() {
 /// The complete array module additionally requires universal RunsIn callback
 /// evidence, tracked separately; do not change its production bounds here.
 fn library_request(source: &str, optimization: &str) -> CompilationRequest {
+    library_request_with_fragments(source, optimization, &[])
+}
+
+fn library_request_with_fragments(source: &str, optimization: &str, additional: &[&str]) -> CompilationRequest {
     let mut request = request(source, optimization);
     let mut library = grandiose_stage0::service::STANDARD_LIBRARY_FRAGMENTS
         .iter()
         .filter(|(path, _)| {
-            matches!(
+            additional.contains(path) || matches!(
                 *path,
                 "src/lib.glorious" | "src/foundation.glorious" | "src/memory.glorious"
             )
@@ -313,6 +317,39 @@ fn library_request(source: &str, optimization: &str) -> CompilationRequest {
         library.as_bytes(),
     ));
     request
+}
+
+#[test]
+fn library_char_encoding_writes_only_the_fixed_array_prefix() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = r#"use std::*;
+        fn encoded(value: char) -> (usize,[u8;4]) {
+            let mut output = [as<u8>(255),as<u8>(255),as<u8>(255),as<u8>(255)];
+            let width = char::encode_utf8(value,&mut output);
+            (width,output)
+        }
+        pub fn main() -> i64 {
+            let a = handle encoded('\0') { (1,[0,255,255,255]) => 1, _ => 0 };
+            let b = handle encoded('\u{7f}') { (1,[127,255,255,255]) => 1, _ => 0 };
+            let c = handle encoded('\u{80}') { (2,[194,128,255,255]) => 1, _ => 0 };
+            let d = handle encoded('\u{7ff}') { (2,[223,191,255,255]) => 1, _ => 0 };
+            let e = handle encoded('\u{800}') { (3,[224,160,128,255]) => 1, _ => 0 };
+            let f = handle encoded('\u{ffff}') { (3,[239,191,191,255]) => 1, _ => 0 };
+            let g = handle encoded('\u{10000}') { (4,[240,144,128,128]) => 1, _ => 0 };
+            let h = handle encoded('\u{10ffff}') { (4,[244,143,191,191]) => 1, _ => 0 };
+            a+b+c+d+e+f+g+h+34
+        }"#;
+    for optimization in [0,2] {
+        let input = library_request_with_fragments(source, &optimization.to_string(), &["src/char_escape.glorious"]);
+        let artifact = StageZeroCompiler::new().compile(input.clone()).unwrap().artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the source-owned encoder writes only its borrowed four-byte array.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
 }
 
 #[test]

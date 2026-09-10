@@ -8,26 +8,25 @@ impl char {
         let width = char_utf8_len(value);
         let output = array_as_mut_slice(out);
         let pointer = unsafe { __g1_memory_cast<(),u8>(__g1_memory_as_raw_unique(output.storage)) };
-        // Writes are within the four-byte output and touch only the used prefix.
-        unsafe {
-            handle width {
-                1 => __g1_memory_write(pointer, as<u8>(scalar)),
-                2 => {
-                    __g1_memory_write(pointer, as<u8>(192 + scalar / 64));
-                    __g1_memory_write(__g1_memory_offset(pointer, 1), as<u8>(128 + scalar % 64));
-                },
-                3 => {
-                    __g1_memory_write(pointer, as<u8>(224 + scalar / 4096));
-                    __g1_memory_write(__g1_memory_offset(pointer, 1), as<u8>(128 + (scalar / 64) % 64));
-                    __g1_memory_write(__g1_memory_offset(pointer, 2), as<u8>(128 + scalar % 64));
-                },
-                _ => {
-                    __g1_memory_write(pointer, as<u8>(240 + scalar / 262144));
-                    __g1_memory_write(__g1_memory_offset(pointer, 1), as<u8>(128 + (scalar / 4096) % 64));
-                    __g1_memory_write(__g1_memory_offset(pointer, 2), as<u8>(128 + (scalar / 64) % 64));
-                    __g1_memory_write(__g1_memory_offset(pointer, 3), as<u8>(128 + scalar % 64));
-                },
-            }
+        // Each clause acknowledges its writes: callable clause bodies do not
+        // inherit unsafe permission. All offsets stay in the used prefix.
+        handle width {
+            1 => unsafe { __g1_memory_write(pointer, as<u8>(scalar)) },
+            2 => unsafe {
+                __g1_memory_write(pointer, as<u8>(192 + scalar / 64));
+                __g1_memory_write(__g1_memory_offset(pointer, 1), as<u8>(128 + scalar % 64));
+            },
+            3 => unsafe {
+                __g1_memory_write(pointer, as<u8>(224 + scalar / 4096));
+                __g1_memory_write(__g1_memory_offset(pointer, 1), as<u8>(128 + (scalar / 64) % 64));
+                __g1_memory_write(__g1_memory_offset(pointer, 2), as<u8>(128 + scalar % 64));
+            },
+            _ => unsafe {
+                __g1_memory_write(pointer, as<u8>(240 + scalar / 262144));
+                __g1_memory_write(__g1_memory_offset(pointer, 1), as<u8>(128 + (scalar / 4096) % 64));
+                __g1_memory_write(__g1_memory_offset(pointer, 2), as<u8>(128 + (scalar / 64) % 64));
+                __g1_memory_write(__g1_memory_offset(pointer, 3), as<u8>(128 + scalar % 64));
+            },
         };
         width
     }

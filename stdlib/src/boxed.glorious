@@ -18,13 +18,21 @@ impl<T> Box<T> {
     pub fn as_mut<'a>(value: &'a mut Self) -> &'a mut T { unsafe { __g1_memory_borrow_unique(value.pointer) } }
     pub fn allocator(value: &Self) -> AllocatorId { AllocatorId(0) }
     pub fn into_inner(value: Self) -> T {
-        let Box { pointer: pointer, ownership: PhantomData {}, unique: VecOwner {} } = value;
+        let pointer = value.pointer;
+        // Transfer the resident under the raw-storage contract, then retire
+        // the Box without invoking its custom Drop on the now-empty storage.
         let item = unsafe { __g1_memory_read(__g1_memory_as_const(pointer)) };
-        unsafe { __g1_memory_deallocate(__g1_memory_cast<T,u8>(pointer), size_of<T>(), align_of<T>()) };
+        unsafe {
+            __g1_memory_forget(value);
+            __g1_memory_deallocate(__g1_memory_cast<T,u8>(pointer), size_of<T>(), align_of<T>())
+        };
         item
     }
     pub unsafe fn into_raw(value: Self) -> *mut T {
-        let Box { pointer: pointer, ownership: PhantomData {}, unique: VecOwner {} } = value;
+        let pointer = value.pointer;
+        // The caller now owns the unchanged initialized allocation; moving
+        // its obligation into this raw contract must not run Box's Drop.
+        unsafe { __g1_memory_forget(value) };
         pointer
     }
     pub unsafe fn from_raw(value: *mut T, allocator: AllocatorId) -> Self {

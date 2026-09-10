@@ -69,6 +69,119 @@ fn request_with_linear_vec_finish(application: &str) -> CompilationRequest {
     request
 }
 
+fn request_with_boxed(application: &str, optimization: u8) -> CompilationRequest {
+    let mut input = request(application);
+    let library = grandiose_stage0::service::STANDARD_LIBRARY_FRAGMENTS.iter()
+        .filter(|(path, _)| matches!(*path,
+            "src/lib.glorious" | "src/foundation.glorious" | "src/memory.glorious" | "src/boxed.glorious"))
+        .map(|(_, source)| *source).collect::<Vec<_>>().join("\n");
+    input.sources[1] = SourceInput::new(PackageKey("std@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(), library.as_bytes());
+    input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+    input
+}
+
+#[test]
+fn box_consuming_apis_transfer_residents_without_running_the_old_destructor() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = r#"use std::*;
+        struct Probe<'a> { count: &'a mut i64 }
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.count = *self.count + 1; }
+        }
+        struct Token { value: i64 }
+        impl Use<[1,1]> for Token {}
+        struct Empty {}
+        impl Use<[1,1]> for Empty {}
+        pub fn main() -> i64 {
+            let mut count = 0;
+            let first = {
+                let owner = Box::new(Probe { count: &mut count });
+                let resident = Box::into_inner(owner);
+                *resident.count
+            };
+            let second = {
+                let owner = Box::new(Probe { count: &mut count });
+                let allocator = Box::allocator(&owner);
+                let raw = unsafe { Box::into_raw(owner) };
+                let restored = unsafe { Box::from_raw(raw,allocator) };
+                *Box::as_ref(&restored).count
+            };
+            let Token { value: value } = Box::into_inner(Box::new(Token { value: 40 }));
+            let Empty {} = Box::into_inner(Box::new(Empty {}));
+            handle (first,second,count) { (0,1,2) => value + 2, _ => 0 }
+        }"#;
+    for optimization in [0,2] {
+        let input = request_with_boxed(source, optimization);
+        let artifact = StageZeroCompiler::new().compile(input.clone()).unwrap().artifact.unwrap();
+        let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(artifact.run_std_i64().unwrap(), 42);
+        // SAFETY: the local roundtrip retains exact allocation and owner identity.
+        let (result, profile) = unsafe { decoded.run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(profile.native_memory.raw_live_bytes, 0);
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        // SAFETY: the local raw roundtrip returns the same initialized unique allocation.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
+fn box_consuming_apis_do_not_erase_linear_or_unsafe_obligations() {
+    for (source, code) in [
+        ("use std::*; struct Token {} impl Use<[1,1]> for Token {} pub fn main() -> i64 { let value = Box::into_inner(Box::new(Token {})); 42 }", "G5024"),
+        ("use std::*; pub fn main() -> i64 { let value = Box::into_raw(Box::new(42)); 42 }", "G4201"),
+    ] {
+        let error = StageZeroCompiler::new().compile(request_with_boxed(source, 0)).unwrap_err();
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{source}\n{error:#?}");
+    }
+}
+
+#[test]
+fn box_owned_transfers_preserve_drop_counts_and_zero_sized_linear_residents() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = r#"use std::*;
+        struct Probe<'a> { count: &'a mut i64 }
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.count = *self.count + 1; }
+        }
+        struct Token { value: i64 }
+        impl Use<[1,1]> for Token {}
+        struct Empty {}
+        impl Use<[1,1]> for Empty {}
+        pub fn main() -> i64 {
+            let mut count = 0;
+            {
+                let resident = Box::into_inner(Box::new(Probe { count: &mut count }));
+                ()
+            };
+            {
+                let owner = Box::new(Probe { count: &mut count });
+                let allocator = Box::allocator(&owner);
+                let raw = unsafe { Box::into_raw(owner) };
+                let restored = unsafe { Box::from_raw(raw,allocator) };
+                ()
+            };
+            let Token { value: value } = Box::into_inner(Box::new(Token { value: 40 }));
+            let Empty {} = Box::into_inner(Box::new(Empty {}));
+            value + count
+        }"#;
+    for optimization in [0,2] {
+        let input = request_with_boxed(source, optimization);
+        let artifact = StageZeroCompiler::new().compile(input.clone()).unwrap().artifact.unwrap();
+        assert_eq!(artifact.run_std_i64().unwrap(), 42);
+        let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the local raw roundtrip transfers the same unique allocation.
+        let (result, profile) = unsafe { decoded.run_i64_for_authoring_with_unsafe(Default::default()) }.unwrap();
+        assert_eq!(result, 42);
+        assert_eq!(profile.native_memory.raw_live_bytes, 0);
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
 #[test]
 fn borrowed_subviews_keep_the_named_input_region_across_helper_returns() {
     for application in [

@@ -5,6 +5,46 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 126 library-source follow-up: clause safety and Box ownership transfer
+
+`char::encode_utf8` now acknowledges raw writes inside each clause's explicit
+unsafe scope. The compiler's existing callable/clause safety boundary and its
+negative tests are unchanged. `Box::into_inner` and unsafe `Box::into_raw` no
+longer pattern-deconstruct an owner with custom Drop. Their defining-module
+unsafe implementation reads the resident or transfers the raw allocation, then
+retires the old Box with the existing memory-forget contract. Into-inner releases
+the empty allocation; neither path runs the old Box destructor.
+
+Four focused groups pass:
+
+- UTF-8 boundary values exercise all four widths and preserve the unused array
+  suffix, fresh/decoded VM and generated native O0/O2
+  (`target/library-char-prefix-v1.log`). This uses the exact encoder source and
+  the existing non-callback array-helper test profile, not the full array module.
+- Box owned transfers preserve destructor counts, exact-linear and zero-sized
+  residents in those same execution modes; decoded VM also ends with zero live
+  raw allocation bytes (`target/library-box-owned-v1.log`).
+- Box source negatives retain G5024 for an abandoned returned linear owner and
+  G4201 for an unacknowledged into-raw call (`target/library-box-consuming-v2.log`).
+- The existing deferred callable/handler unsafe-scope negative group passes
+  (`target/library-clause-unsafe-v1.log`).
+
+The expanded Box composition group remains an active failing positive test:
+after a raw roundtrip, loading the nested reference through `Box::as_ref` reaches
+G5023, unresolved referent storage (`target/library-box-consuming-v2.log`). Its
+original source and success assertions are retained; owned-transfer execution
+does not establish complete returned-reference provenance.
+
+Full composition now has **3 typing diagnostic records**, all at graph's
+`reverse_edges`, down from the previous root's 36
+(`target/library-source-contracts-root-v1.log`). Parsing currently erases its
+trailing discard semicolon, making the HashMap insertion result the arm's result;
+that compiler boundary remains to repair. The root still fails before resource
+analysis. Random's separate G5024 partial-array ownership failure, the new Box
+reference regression, native handlers, complete library acceptance and
+self-hosting remain open. Source digests invalidate changed library inputs;
+compiler/interface/runtime generations are unchanged from cache 126.
+
 ## Cache 126: literal element evidence and inferred array extents
 
 Array elaboration now retains the literal's length without needing an expected

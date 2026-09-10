@@ -15,6 +15,20 @@ The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
 
+The cache-126 library-source follow-up moves UTF-8 writes into each clause's
+explicit unsafe scope and implements Box consuming APIs through the existing
+raw ownership-transfer/forget contract, without custom-Drop pattern
+deconstruction. Four focused groups pass, including fresh/decoded VM and
+generated-native O0/O2 execution. A new Box raw-roundtrip reference-getter
+composition still fails G5023 and is retained as an active positive regression.
+
+The latest full-composition root has **3 typing diagnostic records**, all at
+graph's `reverse_edges` (`target/library-source-contracts-root-v1.log`). Its
+trailing semicolon is lost by the parser, so a discarded insertion result becomes
+the arm result. Resource checking remains masked by this failure; the separate
+random root still exposes G5024 for partially initialized array ownership.
+This reduction from 36 typing records is not full-library acceptance.
+
 Cache 126 repairs the literal typing failures exposed by random: unannotated
 arrays retain their const extent, and octet literals supply `u8` to unresolved
 standard Slice element cells through ordinary inference. Generic/nested/empty
