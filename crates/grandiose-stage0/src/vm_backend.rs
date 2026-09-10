@@ -44,7 +44,7 @@ use codec::{
 };
 pub(crate) use codec::vm_nominal_copy_descriptor_key;
 mod native_memory;
-mod native_callable;
+mod native_residents;
 mod native_profile;
 mod native_bridge;
 mod native_storage;

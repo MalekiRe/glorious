@@ -171,7 +171,9 @@ impl Body<'_, '_> {
                 let aligned = self.value(format!("icmp eq i64 {remainder}, 0"));
                 let valid = self.value(format!("and i1 {nonnull}, {aligned}"));
                 self.guard(&valid, 10);
-                self.store_scalar(dst, &pointer)?;
+                self.argument_slot(0, &self.pointer(arguments[0]), &format!("%init{}", arguments[0]));
+                self.callable_action(8, dst, &self.pointer(dst));
+                self.mark(dst, &[], true);
             }
             M::Forget => {
                 self.mark(arguments[0], &[], false);

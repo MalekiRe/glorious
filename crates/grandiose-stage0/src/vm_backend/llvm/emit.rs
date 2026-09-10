@@ -26,6 +26,23 @@ pub(in crate::vm_backend) struct FunctionPlan {
     pub(in crate::vm_backend) layouts: Vec<Arc<NativeLayout>>,
     pub(in crate::vm_backend) paths: Vec<Vec<Vec<u32>>>,
     pub(in crate::vm_backend) result: Arc<NativeLayout>,
+    pub(in crate::vm_backend) pattern_references: Vec<PatternReferencePlan>,
+    pattern_reference_width: usize,
+    pattern_reference_depth: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(in crate::vm_backend) struct PatternReferencePlan {
+    pub(in crate::vm_backend) handle: Arc<NativeLayout>,
+    pub(in crate::vm_backend) referent: Arc<NativeLayout>,
+    pub(in crate::vm_backend) paths: Vec<Vec<u32>>,
+}
+
+#[derive(Clone)]
+struct PatternStorage {
+    flags: String,
+    paths: Vec<Vec<u32>>,
+    path: Vec<u32>,
 }
 
 pub(super) struct Plan<'a> {
@@ -102,7 +119,7 @@ impl<'a> Plan<'a> {
                         layout.memory.size() as u64
                             + layout.memory.alignment() as u64
                             + resident_paths.len() as u64
-                            + if layout.owns_callable() { 4 * std::mem::size_of::<usize>() as u64 } else { 0 },
+                            + if layout.has_resident_metadata() { 4 * std::mem::size_of::<usize>() as u64 } else { 0 },
                     )
                     .ok_or_else(|| unsupported(0, "native activation layout overflow"))?;
                 layouts.push(layout);
@@ -126,7 +143,7 @@ impl<'a> Plan<'a> {
                             .checked_add(
                                 layout.memory.size() as u64 + layout.memory.alignment() as u64
                                     + paths[*argument as usize].len() as u64
-                                    + if layout.owns_callable() { 4 * std::mem::size_of::<usize>() as u64 } else { 0 },
+                                    + if layout.has_resident_metadata() { 4 * std::mem::size_of::<usize>() as u64 } else { 0 },
                             )
                             .ok_or_else(|| {
                                 unsupported(0, "native parallel-transfer storage overflow")
@@ -169,6 +186,19 @@ impl<'a> Plan<'a> {
             result.packet_alignment = result.packet_alignment.max(packet.alignment() as u64);
             result.packet_offsets.push(offsets);
             result.packet_init_offsets.push(init_offsets);
+            let mut pattern_references = BTreeMap::new();
+            let mut pattern_reference_depth = 0;
+            for instruction in &function.instructions {
+                if let I::PatternTest { subject, pattern, .. } = instruction {
+                    plan_pattern_references(layouts[*subject as usize].clone(), pattern, &mut pattern_references, 0, &mut pattern_reference_depth)?;
+                }
+            }
+            let pattern_references = pattern_references.into_values().collect::<Vec<_>>();
+            let pattern_reference_width = pattern_references.iter().map(|plan| plan.paths.len()).max().unwrap_or(0);
+            let pattern_bytes = pattern_reference_width.checked_mul(pattern_reference_depth)
+                .ok_or_else(|| unsupported(0, "native pattern reference metadata overflow"))?;
+            if pattern_bytes > MAX_INIT_PATHS { return Err(unsupported(0, "native pattern reference metadata exceeds the finite body limit")); }
+            frame_bytes += pattern_bytes as u64;
             result.frame_bytes = result.frame_bytes.max(frame_bytes);
             if frame_bytes > MAX_FRAME_BYTES {
                 return Err(unsupported(
@@ -180,6 +210,9 @@ impl<'a> Plan<'a> {
                 layouts,
                 paths,
                 result: result_layout,
+                pattern_references,
+                pattern_reference_width,
+                pattern_reference_depth,
             });
         }
         // Validate every instruction before publishing any executable IR.
@@ -387,6 +420,7 @@ pub(super) struct Body<'a, 'p> {
     data: &'a FunctionPlan,
     pc: usize,
     serial: u32,
+    pattern_reference_depth: usize,
     output: String,
     declarations: BTreeSet<String>,
 }
@@ -400,6 +434,7 @@ impl<'a, 'p> Body<'a, 'p> {
             data: &plan.plans[index],
             pc: 0,
             serial: 0,
+            pattern_reference_depth: 0,
             output: String::new(),
             declarations: BTreeSet::new(),
         }
@@ -471,7 +506,7 @@ impl<'a, 'p> Body<'a, 'p> {
         ))
     }
     fn mark(&mut self, register: u32, path: &[u32], initialized: bool) {
-        if !initialized && path.is_empty() && self.data.layouts[register as usize].owns_callable() {
+        if !initialized && path.is_empty() && self.data.layouts[register as usize].has_resident_metadata() {
             self.clear_bytes(&self.pointer(register), self.data.layouts[register as usize].memory.size());
         }
         let paths = self.data.paths[register as usize].clone();
@@ -666,8 +701,12 @@ impl<'a, 'p> Body<'a, 'p> {
 
     fn emit(&mut self) -> Result<(), LlvmError> {
         writeln!(self.output, "define internal i32 @g1_body_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:\n  call void @g1_residents(ptr %ctx, i32 2, ptr null, ptr null, i64 0)\n  %status = call i32 @g1_frame_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next)\n  call void @g1_residents(ptr %ctx, i32 3, ptr null, ptr null, i64 0)\n  ret i32 %status\n}}\ndefine internal i32 @g1_frame_{}(ptr %ctx, ptr %args, ptr %result, ptr %tail_args, ptr %tail_storage, ptr %tail_next) {{\nentry:", self.index, self.index, self.index).unwrap();
-        let maxargs = 2 * (self.plan.max_arguments + 1).max(1);
+        let maxargs = 2 * (self.plan.max_arguments + 1).max(2);
         self.line(format!("%callargs = alloca [{maxargs} x ptr], align 8"));
+        let pattern_bytes = self.data.pattern_reference_width * self.data.pattern_reference_depth;
+        if pattern_bytes != 0 {
+            self.line(format!("%pattern_flags = alloca [{pattern_bytes} x i8], align 1"));
+        }
         for (pc, instruction) in self.function.instructions.iter().enumerate() {
             if let I::Leave { arguments, .. } = instruction {
                 for (index, argument) in arguments.iter().enumerate() {
@@ -679,7 +718,7 @@ impl<'a, 'p> Body<'a, 'p> {
                     ));
                     self.line(format!("%leave_init_{pc}_{index} = alloca [{} x i8], align 1",
                         self.data.paths[*argument as usize].len()));
-                    if layout.owns_callable() {
+                    if layout.has_resident_metadata() {
                         self.track_bytes(&format!("%leave_{pc}_{index}"), layout.memory.size());
                     }
                 }
@@ -705,7 +744,7 @@ impl<'a, 'p> Body<'a, 'p> {
                     layout.memory.alignment()
                 ));
             }
-            if !capture && layout.owns_callable() {
+            if !capture && layout.has_resident_metadata() {
                 self.track_bytes(&format!("%r{register}"), layout.memory.size());
             }
             if capture {
@@ -888,7 +927,7 @@ impl<'a, 'p> Body<'a, 'p> {
                         "getelementptr i8, ptr %r{value}, i64 {byte_offset}"
                     ));
                     self.copy_bytes(&self.pointer(*dst), &source, &element);
-                    if element.owns_callable() { self.clear_bytes(&source, element.memory.size()); }
+                    if element.has_resident_metadata() { self.clear_bytes(&source, element.memory.size()); }
                     for flag in 0..width {
                         let source =
                             self.value(format!("getelementptr i8, ptr {flags}, i64 {flag}"));
@@ -910,36 +949,26 @@ impl<'a, 'p> Body<'a, 'p> {
             I::Borrow {
                 dst,
                 src,
-                fields,
-                reborrow,
                 ..
             } => {
-                let (pointer, layout) = if *reborrow {
-                    let VmType::Reference { referent, .. } =
-                        &self.function.registers[*src as usize]
-                    else {
-                        return Err(self.unsupported("native reborrow lacks a reference source"));
-                    };
-                    let layout = layout::concrete_layout(
-                        referent,
-                        &self.function.nominal_copy_descriptors.clone().into(),
-                    )?;
-                    (self.load(*src)?, layout)
-                } else {
-                    (self.pointer(*src), self.data.layouts[*src as usize].clone())
-                };
-                let VmType::Reference { referent, .. } = &self.function.registers[*dst as usize] else {
-                    return Err(self.unsupported("native borrow destination has no reference layout"));
-                };
-                let pointer = self.typed_projection(pointer, layout, fields, referent, None)?;
-                self.store_scalar(*dst, &pointer)?;
-            }
-            I::DerefCopy { dst, reference } => {
-                let pointer = self.load(*reference)?;
-                self.copy_bytes(&self.pointer(*dst), &pointer, &self.data.layouts[*dst as usize].clone());
+                self.argument_slot(0, &self.pointer(*src), &format!("%init{src}"));
+                self.callable_action(4, *dst, &self.pointer(*dst));
                 self.mark(*dst, &[], true);
             }
+            I::DerefCopy { dst, reference } | I::DerefMove { dst, reference } => {
+                self.argument_slot(0, &self.pointer(*reference), &format!("%init{reference}"));
+                self.argument_slot(1, &self.pointer(*dst), &format!("%init{dst}"));
+                self.callable_action(5, *reference, &self.pointer(*dst));
+                let pointer = self.load(*reference)?;
+                self.copy_bytes(&self.pointer(*dst), &pointer, &self.data.layouts[*dst as usize].clone());
+                if matches!(instruction, I::DerefMove { .. }) {
+                    self.callable_action(6, *reference, &self.pointer(*dst));
+                }
+            }
             I::DerefStore { reference, src } => {
+                self.argument_slot(0, &self.pointer(*reference), &format!("%init{reference}"));
+                self.argument_slot(1, &self.pointer(*src), &format!("%init{src}"));
+                self.callable_action(7, *reference, &self.pointer(*src));
                 let pointer = self.load(*reference)?;
                 self.copy_bytes(
                     &pointer,
@@ -978,7 +1007,7 @@ impl<'a, 'p> Body<'a, 'p> {
                 )?;
                 self.copy_bytes(&self.pointer(*dst), &pointer, &layout);
                 self.copy_flags(*dst, *base, fields);
-                if layout.owns_callable() { self.clear_bytes(&pointer, layout.memory.size()); }
+                if layout.has_resident_metadata() { self.clear_bytes(&pointer, layout.memory.size()); }
                 self.mark(*base, fields, false);
             }
             I::MakeTuple { dst, fields }
@@ -990,7 +1019,7 @@ impl<'a, 'p> Body<'a, 'p> {
             | I::MakeEnum { dst, fields, .. }
             | I::MakeEnumOwned { dst, fields, .. } => {
                 let layout = self.data.layouts[*dst as usize].clone();
-                if layout.owns_callable() { self.clear_bytes(&self.pointer(*dst), layout.memory.size()); }
+                if layout.has_resident_metadata() { self.clear_bytes(&self.pointer(*dst), layout.memory.size()); }
                 let (offset, items) = match (&layout.shape, instruction) {
                     (NativeShape::Product(items), _) => (0, items.clone()),
                     (
@@ -1032,7 +1061,7 @@ impl<'a, 'p> Body<'a, 'p> {
                     self.pointer(*subject),
                     self.data.layouts[*subject as usize].clone(),
                     pattern,
-                    Some((*subject, vec![])),
+                    Some(PatternStorage { flags: format!("%init{subject}"), paths: self.data.paths[*subject as usize].clone(), path: vec![] }),
                     pattern.read_requirement(),
                 )?;
                 let value = self.value(format!("zext i1 {matched} to i8"));
@@ -1212,19 +1241,18 @@ impl<'a, 'p> Body<'a, 'p> {
         pointer: String,
         layout: Arc<NativeLayout>,
         pattern: &VmPattern,
-        storage: Option<(u32, Vec<u32>)>,
+        storage: Option<PatternStorage>,
         requirement: PatternRead,
     ) -> Result<String, LlvmError> {
         // Use the frame's published logical paths, including captured input
         // sidecars. Branch before generating any payload read: masking a result
         // after an uninitialized LLVM load would still be undefined behavior.
-        if requirement != PatternRead::None && let Some((register, path)) = &storage {
-            let paths = self.data.paths[*register as usize].clone();
+        if requirement != PatternRead::None && let Some(PatternStorage { flags, paths, path }) = &storage {
             let mut present = "true".to_owned();
-            for candidate in paths.iter().filter(|candidate|
+            for (index, _) in paths.iter().enumerate().filter(|(_, candidate)|
                 path.starts_with(candidate.as_slice())
                     || (requirement == PatternRead::Value && candidate.starts_with(path))) {
-                let flag = self.flag(*register, candidate);
+                let flag = self.value(format!("getelementptr i8, ptr {flags}, i64 {index}"));
                 let flag = self.value(format!("load i8, ptr {flag}, align 1"));
                 let initialized = self.value(format!("icmp eq i8 {flag}, 1"));
                 present = self.value(format!("and i1 {present}, {initialized}"));
@@ -1252,21 +1280,26 @@ impl<'a, 'p> Body<'a, 'p> {
         pointer: String,
         layout: Arc<NativeLayout>,
         pattern: &VmPattern,
-        storage: Option<(u32, Vec<u32>)>,
+        storage: Option<PatternStorage>,
     ) -> Result<String, LlvmError> {
         if !matches!(pattern, VmPattern::Any)
             && let NativeShape::Reference {
-                referent,
-                descriptors,
                 ..
             } = &layout.shape
         {
-            let target = layout::concrete_layout(referent, descriptors)?;
+            let index = self.data.pattern_references.iter().position(|plan| plan.handle.ty == layout.ty)
+                .expect("published native pattern reference layout");
+            let plan = self.data.pattern_references[index].clone();
+            let offset = self.pattern_reference_depth * self.data.pattern_reference_width;
+            let flags = self.value(format!("getelementptr i8, ptr %pattern_flags, i64 {offset}"));
+            self.argument_slot(0, &pointer, "null");
+            self.callable_action(9, index as u32, &flags);
             let pointer = self.value(format!("load ptr, ptr {pointer}, align 8"));
-            // Reference bytes describe the handle, not its referent. The
-            // existing borrowed-value ABI does not transport referent sidecars;
-            // do not misapply the handle's logical paths to the target storage.
-            return self.pattern(pointer, target, pattern, None, pattern.read_requirement());
+            self.pattern_reference_depth += 1;
+            let matched = self.pattern(pointer, plan.referent, pattern,
+                Some(PatternStorage { flags, paths: plan.paths, path: vec![] }), pattern.read_requirement());
+            self.pattern_reference_depth -= 1;
+            return matched;
         }
         match pattern {
             VmPattern::Any => Ok("true".into()),
@@ -1383,10 +1416,48 @@ impl<'a, 'p> Body<'a, 'p> {
     }
 }
 
-fn pattern_field_storage(storage: &Option<(u32, Vec<u32>)>, index: u32) -> Option<(u32, Vec<u32>)> {
-    storage.as_ref().map(|(register, path)| {
-        let mut path = path.clone();
-        path.push(index);
-        (*register, path)
+fn pattern_field_storage(storage: &Option<PatternStorage>, index: u32) -> Option<PatternStorage> {
+    storage.as_ref().map(|storage| {
+        let mut storage = storage.clone();
+        storage.path.push(index);
+        storage
     })
+}
+
+fn plan_pattern_references(layout: Arc<NativeLayout>, pattern: &VmPattern,
+    plans: &mut BTreeMap<Vec<u8>, PatternReferencePlan>, depth: usize, maximum_depth: &mut usize,
+) -> Result<(), LlvmError> {
+    if matches!(pattern, VmPattern::Any) { return Ok(()); }
+    if let NativeShape::Reference { referent, descriptors, .. } = &layout.shape {
+        let target = layout::concrete_layout(referent, descriptors)?;
+        let mut paths = BTreeSet::new();
+        collect_paths(&target, &mut vec![], &mut paths)?;
+        plans.entry(layout::type_key(&layout.ty)).or_insert_with(|| PatternReferencePlan {
+            handle: layout.clone(), referent: target.clone(), paths: paths.into_iter().collect(),
+        });
+        *maximum_depth = (*maximum_depth).max(depth + 1);
+        return plan_pattern_references(target, pattern, plans, depth + 1, maximum_depth);
+    }
+    let fields = match &layout.shape {
+        NativeShape::Product(fields) => fields,
+        NativeShape::Enum { variants, .. } => {
+            let VmPattern::Enum { variant, .. } = pattern else { return Ok(()); };
+            &variants[*variant as usize]
+        }
+        _ => return Ok(()),
+    };
+    let selected = match pattern {
+        VmPattern::Tuple(patterns) => patterns.iter().enumerate().collect::<Vec<_>>(),
+        VmPattern::Array { elements, rest, .. } => elements.iter().enumerate()
+            .map(|(index, pattern)| (crate::pattern::ArrayPatternRest::index(*rest, index), pattern)).collect(),
+        VmPattern::Record { fields, .. } | VmPattern::Enum { fields, .. } => fields.iter()
+            .map(|field| (field.index as usize, &field.pattern)).collect(),
+        _ => vec![],
+    };
+    for (index, pattern) in selected {
+        if let Some(field) = fields.get(index) {
+            plan_pattern_references(field.layout, pattern, plans, depth, maximum_depth)?;
+        }
+    }
+    Ok(())
 }

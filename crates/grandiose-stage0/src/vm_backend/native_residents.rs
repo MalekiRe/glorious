@@ -1,10 +1,10 @@
-//! Execution-domain callable residents. Bytes contain a verified definition key
-//! and an opaque identity, never a Rust object or a process function pointer.
-//! Address leases retain the existing capture environment while it inhabits raw
-//! storage; byte moves do not create source owners or invoke source cleanup.
+//! Shared execution-domain resident metadata. Callable bytes contain a definition key
+//! and an opaque identity; reference bytes contain a genuine machine pointer.
+//! One byte-transport protocol preserves their respective environment leases and
+//! backing-storage identities. Byte moves never create source owners.
 
 use super::{DefKey, RuntimeCaptureEnvironment, VmArtifactError, VmType, VmValue};
-use std::{cell::RefCell, collections::BTreeMap, sync::{Arc, Weak, atomic::{AtomicU64, Ordering}}};
+use std::{cell::{Cell, RefCell}, collections::BTreeMap, rc::Rc, sync::{Arc, Weak, atomic::{AtomicU64, Ordering}}};
 
 pub(super) const BYTES: usize = 40;
 
@@ -24,24 +24,79 @@ struct Lease {
     environment: Arc<RuntimeCaptureEnvironment>,
 }
 
-#[derive(Default)]
-struct ResidentState {
-    identities: BTreeMap<u64, Identity>,
-    leases: BTreeMap<usize, Lease>,
+#[derive(Clone, Debug)]
+enum ReferenceOrigin {
+    Home(Weak<super::native_storage::NativeHome>),
+    Native(super::native_memory::NativeReference),
+}
+
+#[derive(Clone, Debug)]
+struct ReferenceLease {
+    pointer: *mut u8,
+    origin: ReferenceOrigin,
+    fields: Arc<[u32]>,
+    unique: bool,
+    referent: VmType,
+}
+
+#[derive(Clone)]
+enum ResidentLease {
+    Callable(Lease),
+    Reference(ReferenceLease),
+}
+
+impl ResidentLease {
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Callable(_) => BYTES,
+            Self::Reference(_) => std::mem::size_of::<*mut u8>(),
+        }
+    }
 }
 
 #[derive(Default)]
-pub(super) struct CallableResidents { state: RefCell<ResidentState> }
+struct ResidentState {
+    identities: BTreeMap<u64, Identity>,
+    leases: BTreeMap<usize, ResidentLease>,
+}
 
-impl std::fmt::Debug for CallableResidents {
+#[derive(Default)]
+pub(super) struct ResidentMetadata { state: RefCell<ResidentState> }
+
+/// Compiler-owned temporary storage has a synchronous lifetime. Revocation
+/// neither reads its bytes nor performs source destruction.
+pub(super) struct ResidentScope {
+    residents: Rc<ResidentMetadata>,
+    regions: Vec<(usize, usize)>,
+    live: Option<Rc<Cell<bool>>>,
+}
+
+impl ResidentScope {
+    pub(super) fn track(&mut self, address: usize, bytes: usize) { self.regions.push((address, bytes)); }
+    pub(super) fn lifetime(&mut self) -> Rc<Cell<bool>> {
+        self.live.get_or_insert_with(|| Rc::new(Cell::new(true))).clone()
+    }
+}
+
+impl Drop for ResidentScope {
+    fn drop(&mut self) {
+        if let Some(live) = &self.live { live.set(false); }
+        for (address, bytes) in &self.regions { self.residents.clear(*address, *bytes); }
+    }
+}
+
+impl std::fmt::Debug for ResidentMetadata {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let state = self.state.borrow();
-        f.debug_struct("CallableResidents").field("identities", &state.identities.len())
+        f.debug_struct("ResidentMetadata").field("identities", &state.identities.len())
             .field("leases", &state.leases.len()).finish()
     }
 }
 
-impl CallableResidents {
+impl ResidentMetadata {
+    pub(super) fn scope(self: &Rc<Self>) -> ResidentScope {
+        ResidentScope { residents: self.clone(), regions: vec![], live: None }
+    }
     fn prune(&self) {
         self.state.borrow_mut().identities.retain(|_, identity| identity.environment.strong_count() != 0);
     }
@@ -51,8 +106,9 @@ impl CallableResidents {
         let end = address.saturating_add(bytes);
         let removed = {
             let mut state = self.state.borrow_mut();
-            let keys = state.leases.keys().copied().filter(|slot|
-                *slot < end && slot.saturating_add(BYTES) > address).collect::<Vec<_>>();
+            let keys = state.leases.iter().filter(|(slot, lease)|
+                **slot < end && slot.saturating_add(lease.bytes()) > address)
+                .map(|(slot, _)| *slot).collect::<Vec<_>>();
             keys.into_iter().filter_map(|slot| state.leases.remove(&slot)).collect::<Vec<_>>()
         };
         // Releasing the final environment can retire captured native homes,
@@ -61,13 +117,13 @@ impl CallableResidents {
         self.prune();
     }
 
-    /// Preserve only complete callable residents. Partial byte overwrites
+    /// Preserve only complete typed residents. Partial byte overwrites
     /// invalidate the destination's lease and cannot synthesize authority.
     pub(super) fn copy(&self, source: usize, destination: usize, bytes: usize) {
         if source == destination || bytes == 0 { return; }
         let end = source.saturating_add(bytes);
         let copied = self.state.borrow().leases.range(source..end)
-            .filter(|(slot, _)| slot.saturating_add(BYTES) <= end)
+            .filter(|(slot, lease)| slot.saturating_add(lease.bytes()) <= end)
             .map(|(slot, lease)| (destination + (slot - source), lease.clone()))
             .collect::<Vec<_>>();
         self.clear(destination, bytes);
@@ -78,12 +134,23 @@ impl CallableResidents {
         let retained = old_bytes.min(bytes);
         let end = source.saturating_add(retained);
         let moved = self.state.borrow().leases.range(source..end)
-            .filter(|(slot, _)| slot.saturating_add(BYTES) <= end)
+            .filter(|(slot, lease)| slot.saturating_add(lease.bytes()) <= end)
             .map(|(slot, lease)| (destination + (slot - source), lease.clone()))
             .collect::<Vec<_>>();
         self.clear(source, old_bytes);
         self.clear(destination, bytes);
         self.state.borrow_mut().leases.extend(moved);
+    }
+
+    pub(super) fn expose_references(&self, source: usize, bytes: usize) -> Result<(), VmArtifactError> {
+        let end = source.saturating_add(bytes);
+        for (slot, lease) in self.state.borrow().leases.range(source..end) {
+            if slot.saturating_add(lease.bytes()) > end { continue; }
+            if let ResidentLease::Reference(ReferenceLease { origin: ReferenceOrigin::Home(home), .. }) = lease {
+                home.upgrade().ok_or_else(|| error("stored reference outlived its native home"))?.expose_address();
+            }
+        }
+        Ok(())
     }
 
     pub(super) unsafe fn write(&self, destination: *mut u8, value: VmValue) -> Result<(), VmArtifactError> {
@@ -114,7 +181,7 @@ impl CallableResidents {
             std::ptr::copy_nonoverlapping(callee.0.as_bytes().as_ptr(), destination, 32);
             destination.add(32).cast::<u64>().write(token);
         }
-        self.state.borrow_mut().leases.insert(destination.addr(), Lease { token, environment: captures });
+        self.state.borrow_mut().leases.insert(destination.addr(), ResidentLease::Callable(Lease { token, environment: captures }));
         Ok(())
     }
 
@@ -124,6 +191,7 @@ impl CallableResidents {
         let identity = state.identities.get(&token)
             .ok_or_else(|| error("native callable identity is unknown in this execution domain"))?;
         let lease = state.leases.get(&source.addr())
+            .and_then(|lease| match lease { ResidentLease::Callable(lease) => Some(lease), _ => None })
             .filter(|lease| lease.token == token)
             .ok_or_else(|| error("native callable bytes have no resident ownership lease"))?;
         let callee = unsafe { std::slice::from_raw_parts(source, 32) };
@@ -137,6 +205,78 @@ impl CallableResidents {
         }
         Ok(VmValue::Callable { callee: identity.callee, signature: identity.signature.clone(),
             captures: lease.environment.clone() })
+    }
+
+    /// Store the checked handle identity, including a unique restoration loan.
+    /// It is not a fresh promise that every referent field is initialized.
+    pub(super) unsafe fn write_reference(&self, destination: *mut u8, value: &VmValue,
+        expose: bool, require_initialized: bool,
+    ) -> Result<(), VmArtifactError> {
+        let VmValue::Reference { target, fields, unique, referent } = value else {
+            return Err(error("native reference metadata requires a reference"));
+        };
+        let (pointer, origin) = match target {
+            super::ReferenceTarget::Home(home) => {
+                let (pointer, layout) = home.project(fields)?;
+                if layout.ty != *referent
+                    || (require_initialized && !home.is_fully_initialized(fields))
+                    || (!unique && !home.is_initialized(fields)) {
+                    return Err(error("native storage reference has an invalid checked origin"));
+                }
+                if expose { home.expose_address(); }
+                (pointer, ReferenceOrigin::Home(Arc::downgrade(home)))
+            }
+            super::ReferenceTarget::Native(native) => {
+                let projected = native.project(fields)?;
+                if projected.ty() != referent
+                    || (require_initialized && !projected.is_fully_initialized())
+                    || (!unique && !projected.is_initialized(&[])) {
+                    return Err(error("native reference resident has a different or absent referent"));
+                }
+                (projected.pointer(), ReferenceOrigin::Native(native.clone()))
+            }
+            _ => return Err(error("native storage reference lacks an addressable origin")),
+        };
+        self.clear(destination.addr(), std::mem::size_of::<*mut u8>());
+        unsafe { destination.cast::<*mut u8>().write(pointer); }
+        self.state.borrow_mut().leases.insert(destination.addr(), ResidentLease::Reference(ReferenceLease {
+            pointer, origin, fields: fields.clone(), unique: *unique, referent: referent.clone(),
+        }));
+        Ok(())
+    }
+
+    /// A handle's address selects its exact logical projection, not the numeric
+    /// referent address (distinct zero-byte fields may share that address).
+    pub(super) unsafe fn read_reference(&self, source: *const u8, referent: &VmType, unique: bool)
+        -> Result<Option<VmValue>, VmArtifactError>
+    {
+        let stored = match self.state.borrow().leases.get(&source.addr()) {
+            Some(ResidentLease::Reference(reference)) => reference.clone(),
+            Some(_) => return Err(error("native reference slot contains different resident metadata")),
+            None => return Ok(None),
+        };
+        if unsafe { source.cast::<*mut u8>().read() } != stored.pointer
+            || &stored.referent != referent || (unique && !stored.unique) {
+            return Err(error("native reference bytes have a different origin or authority"));
+        }
+        let target = match stored.origin {
+            ReferenceOrigin::Home(home) => {
+                let home = home.upgrade().ok_or_else(|| error("stored reference outlived its native home"))?;
+                let (pointer, layout) = home.project(&stored.fields)?;
+                if pointer != stored.pointer || &layout.ty != referent {
+                    return Err(error("stored reference no longer names its checked projection"));
+                }
+                super::ReferenceTarget::Home(home)
+            }
+            ReferenceOrigin::Native(native) => {
+                let projected = native.project(&stored.fields)?;
+                if projected.pointer() != stored.pointer || projected.ty() != referent {
+                    return Err(error("stored native reference no longer names its checked projection"));
+                }
+                super::ReferenceTarget::Native(native)
+            }
+        };
+        Ok(Some(VmValue::Reference { target, fields: stored.fields, unique, referent: stored.referent }))
     }
 }
 
@@ -166,6 +306,72 @@ mod tests {
     }
 
     #[test]
+    fn reference_byte_transport_preserves_logical_zero_sized_origins_and_revokes_partial_writes() {
+        use crate::vm_backend::ReferenceTarget;
+        let mut budget = budget();
+        budget.unsafe_execution = false;
+        let owner_layout = Arc::new(native_layout(&VmType::Tuple(vec![VmType::Unit, VmType::Unit]), &Arc::from([]), &mut vec![]).unwrap());
+        let owner = NativeHome::new(owner_layout, &mut budget).unwrap();
+        owner.store(&[], &VmValue::Tuple(vec![VmValue::Unit, VmValue::Unit].into()), &mut budget).unwrap();
+        let reference_type = VmType::Reference { unique: true, referent: Box::new(VmType::Unit) };
+        let layout = native_layout(&reference_type, &Arc::from([]), &mut vec![]).unwrap();
+        let mut source = [0usize; 2];
+        let mut destination = [0usize; 2];
+        for index in 0..2 {
+            let value = VmValue::Reference { target: ReferenceTarget::Home(owner.clone()), fields: Arc::from([index as u32]),
+                unique: true, referent: VmType::Unit };
+            unsafe { layout.write(source.as_mut_ptr().add(index).cast(), value, &mut budget).unwrap(); }
+        }
+        assert_eq!(source[0], source[1], "equal addresses do not identify a logical zero-byte field");
+        budget.native_memory.residents.copy(source.as_ptr().addr(), destination.as_ptr().addr(), 2 * std::mem::size_of::<usize>());
+        destination.copy_from_slice(&source);
+        budget.native_memory.residents.clear(source.as_ptr().addr(), 2 * std::mem::size_of::<usize>());
+        owner.clear(&[0]);
+        for index in 0..2 {
+            let value = unsafe { layout.read(destination.as_ptr().add(index).cast(), &mut budget).unwrap() };
+            let VmValue::Reference { target, fields, .. } = value else { panic!() };
+            assert_eq!(fields.as_ref(), &[index as u32]);
+            assert_eq!(target.native_initialized(&fields, true), index == 1);
+        }
+        let byte = native_layout(&VmType::U8, &Arc::from([]), &mut vec![]).unwrap();
+        let pointer = destination.as_mut_ptr().cast::<u8>();
+        let unchanged = unsafe { *pointer };
+        unsafe { byte.write(pointer, VmValue::U8(unchanged), &mut budget).unwrap(); }
+        assert!(unsafe { layout.read(pointer, &mut budget) }.is_err(), "matching overwritten bits do not retain a checked loan");
+        assert!(unsafe { layout.read(destination.as_ptr().add(1).cast(), &mut budget) }.is_ok());
+        owner.retire();
+        assert!(unsafe { layout.read(destination.as_ptr().add(1).cast(), &mut budget) }.is_err());
+        budget.native_memory.residents.clear(destination.as_ptr().addr(), 2 * std::mem::size_of::<usize>());
+    }
+
+    #[test]
+    fn scoped_reference_transport_retires_handles_and_cannot_extend_a_backing_frame() {
+        use crate::vm_backend::{ReferenceTarget, native_memory::NativeReference};
+        let mut budget = budget();
+        let target_layout = Arc::new(native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let ty = VmType::Reference { unique: false, referent: Box::new(VmType::I64) };
+        let layout = native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap();
+        let mut payload = 42i64;
+        let mut flags = [1u8];
+        let mut slots = [0usize; 2];
+        let mut scope = budget.native_memory.residents.scope();
+        scope.track(slots.as_ptr().addr(), std::mem::size_of::<usize>());
+        let native = unsafe { NativeReference::generated((&raw mut payload).cast(), target_layout,
+            flags.as_mut_ptr(), Arc::from([vec![]]), scope.lifetime()).unwrap() };
+        let value = VmValue::Reference { target: ReferenceTarget::Native(native), fields: Arc::from([]), unique: false, referent: VmType::I64 };
+        unsafe { layout.write(slots.as_mut_ptr().cast(), value, &mut budget).unwrap(); }
+        budget.native_memory.residents.copy(slots.as_ptr().addr(), unsafe { slots.as_ptr().add(1) }.addr(), std::mem::size_of::<usize>());
+        slots[1] = slots[0];
+        assert!(unsafe { layout.read(slots.as_ptr().add(1).cast(), &mut budget) }.is_ok());
+        drop(scope);
+        assert!(unsafe { layout.read(slots.as_ptr().cast(), &mut budget) }.is_err());
+        assert!(unsafe { layout.read(slots.as_ptr().add(1).cast(), &mut budget) }.is_err(), "a copied handle cannot extend the frame behind its pointer");
+        assert_eq!(payload, 42, "runtime lease retirement does not destroy source storage");
+        budget.native_memory.residents.clear(slots.as_ptr().addr(), std::mem::size_of_val(&slots));
+        assert!(budget.native_memory.residents.state.borrow().leases.is_empty());
+    }
+
+    #[test]
     fn concrete_callable_layout_and_move_keep_the_exact_environment() {
         let mut budget = budget();
         let layout = native_layout(&signature(), &Arc::from([]), &mut vec![]).unwrap();
@@ -177,12 +383,12 @@ mod tests {
         unsafe { layout.write(source, callable(environment.clone()), &mut budget).unwrap(); }
         let value = unsafe { layout.read(source, &mut budget).unwrap() };
         assert!(Arc::ptr_eq(&captures(value), &environment));
-        budget.native_memory.callables.copy(source.addr(), destination.addr(), BYTES);
+        budget.native_memory.residents.copy(source.addr(), destination.addr(), BYTES);
         unsafe { std::ptr::copy_nonoverlapping(source, destination, BYTES); }
-        budget.native_memory.callables.clear(source.addr(), BYTES);
+        budget.native_memory.residents.clear(source.addr(), BYTES);
         assert!(unsafe { layout.read(source, &mut budget) }.is_err());
         assert!(Arc::ptr_eq(&captures(unsafe { layout.read(destination, &mut budget).unwrap() }), &environment));
-        budget.native_memory.callables.clear(destination.addr(), BYTES);
+        budget.native_memory.residents.clear(destination.addr(), BYTES);
         assert_eq!(Arc::strong_count(&environment), 1);
     }
 
@@ -238,7 +444,7 @@ mod tests {
         assert!(unsafe { restricted_layout.read(pointer, &mut budget) }.is_ok());
         assert!(unsafe { shared_layout.read(pointer, &mut budget) }.is_err(),
             "a raw callable view cannot manufacture shared or unique invocation permission");
-        budget.native_memory.callables.clear(pointer.addr(), BYTES);
+        budget.native_memory.residents.clear(pointer.addr(), BYTES);
     }
 
     #[test]
@@ -252,14 +458,14 @@ mod tests {
         assert!(Arc::ptr_eq(&captures(unsafe { layout.read(resized, &mut budget).unwrap() }), &environment));
         budget.native_memory.deallocate(resized, grandiose_runtime::memory::MemoryLayout::new(80, 8).unwrap()).unwrap();
         assert_eq!(Arc::strong_count(&environment), 1);
-        assert!(budget.native_memory.callables.state.borrow().leases.is_empty());
+        assert!(budget.native_memory.residents.state.borrow().leases.is_empty());
         for _ in 0..256 {
             let environment = self::environment(VmValue::I64(42));
             let weak = Arc::downgrade(&environment);
             let mut slot = [0u64; 5];
             let pointer = slot.as_mut_ptr().cast();
             unsafe { layout.write(pointer, callable(environment), &mut budget).unwrap(); }
-            budget.native_memory.callables.clear(pointer.addr(), BYTES);
+            budget.native_memory.residents.clear(pointer.addr(), BYTES);
             assert!(weak.upgrade().is_none(), "popped or overwritten callbacks must be reclaimable");
         }
     }
@@ -294,7 +500,7 @@ mod tests {
         let layout = native_layout(&signature(), &Arc::from([]), &mut vec![]).unwrap();
         let pointer = budget.native_memory.allocate(layout.memory, 1024, 1024).unwrap();
         unsafe { layout.write(pointer, callable(environment), &mut budget).unwrap(); }
-        let registry = std::rc::Rc::downgrade(&budget.native_memory.callables);
+        let registry = std::rc::Rc::downgrade(&budget.native_memory.residents);
         drop(budget);
         assert!(registry.upgrade().is_none());
         assert!(weak_environment.upgrade().is_none());
@@ -315,10 +521,10 @@ mod tests {
         let mut slot = [0u64; 5];
         let pointer = slot.as_mut_ptr().cast();
         unsafe { layout.write(pointer, callable(outer), &mut budget).unwrap(); }
-        budget.native_memory.callables.clear(pointer.addr(), BYTES);
+        budget.native_memory.residents.clear(pointer.addr(), BYTES);
         assert!(weak_outer.upgrade().is_none());
         assert!(weak_home.upgrade().is_none());
         assert!(weak_inner.upgrade().is_none());
-        assert!(budget.native_memory.callables.state.borrow().identities.is_empty());
+        assert!(budget.native_memory.residents.state.borrow().identities.is_empty());
     }
 }

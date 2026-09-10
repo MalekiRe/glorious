@@ -18,7 +18,7 @@ pub(super) struct NativeMemory {
     pub(super) home_bytes: Rc<Cell<usize>>,
     pub(super) measurements: Option<Rc<NativeMemoryMeasurements>>,
     pub(super) homes: super::native_storage::HomeRegistry,
-    pub(super) callables: Rc<super::native_callable::CallableResidents>,
+    pub(super) residents: Rc<super::native_residents::ResidentMetadata>,
     program_descriptors: Option<Arc<[VmNominalCopyDescriptor]>>,
     storage_plans: BTreeMap<super::DefKey, Arc<super::native_storage::NativeFramePlan>>,
     native_return_plans: BTreeMap<super::DefKey, Arc<super::native_storage::NativeFramePlan>>,
@@ -100,6 +100,17 @@ impl NativeMemory {
         if !home.is_fully_initialized(&fields) { return Err(error("native reference names moved-out source storage")); }
         Ok(Some(VmValue::Reference { target: super::ReferenceTarget::Home(home), fields: fields.into(), unique, referent: referent.clone() }))
     }
+
+    pub(super) unsafe fn raw_reference(&self, pointer: *mut u8, layout: Arc<NativeLayout>, unique: bool)
+        -> Result<VmValue, VmArtifactError>
+    {
+        if pointer.is_null() || pointer.addr() % layout.memory.alignment() != 0 {
+            return Err(error("raw reference creation requires a non-null aligned pointer"));
+        }
+        if let Some(reference) = self.home_reference(pointer, &layout.ty, unique)? { return Ok(reference); }
+        Ok(VmValue::Reference { referent: layout.ty.clone(), unique, fields: Arc::from([]),
+            target: super::ReferenceTarget::Native(NativeReference::new(pointer, layout)) })
+    }
     pub(super) fn allocate(
         &mut self,
         layout: MemoryLayout,
@@ -142,7 +153,7 @@ impl NativeMemory {
             return Err(error("raw release layout does not match allocation"));
         }
         self.live_bytes -= layout.size();
-        self.callables.clear(pointer.addr(), layout.size());
+        self.residents.clear(pointer.addr(), layout.size());
         self.allocations.remove(&pointer.addr());
         Ok(())
     }
@@ -185,7 +196,7 @@ impl NativeMemory {
         }
         match result {
             Ok(()) => {
-                self.callables.relocate(pointer.addr(), old.size(), output.addr(), size);
+                self.residents.relocate(pointer.addr(), old.size(), output.addr(), size);
                 self.live_bytes = self.live_bytes - old.size() + size;
                 Ok(output)
             }
@@ -318,7 +329,22 @@ pub(super) struct NativeLayout {
     pub(super) shape: NativeShape,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ReferenceRead {
+    Resident,
+    External,
+}
+
 impl NativeLayout {
+    pub(super) fn has_resident_metadata(&self) -> bool {
+        match &self.shape {
+            NativeShape::Callable | NativeShape::Reference { .. } => true,
+            NativeShape::Product(fields) => fields.distinct().any(|field| field.layout.has_resident_metadata()),
+            NativeShape::Enum { variants, .. } => variants.iter().flat_map(NativeFields::distinct).any(|field| field.layout.has_resident_metadata()),
+            _ => false,
+        }
+    }
+
     pub(super) fn owns_callable(&self) -> bool {
         match &self.shape {
             NativeShape::Callable => true,
@@ -359,19 +385,121 @@ pub(super) struct NativeReference {
     // state; constructing a fresh reference from raw storage remains an
     // unsafe promise of initialized source storage.
     path: Vec<u32>,
-    holes: Rc<RefCell<BTreeSet<Vec<u32>>>>,
+    initialization: ReferenceInitialization,
+}
+
+#[derive(Clone, Debug)]
+enum ReferenceInitialization {
+    Raw(Rc<RefCell<BTreeSet<Vec<u32>>>>),
+    Generated {
+        flags: *mut u8,
+        paths: Arc<[Vec<u32>]>,
+        live: Rc<Cell<bool>>,
+    },
+}
+
+impl super::ReferenceTarget {
+    pub(super) fn native_project(&self, fields: &[u32]) -> Result<(*mut u8, Arc<NativeLayout>), VmArtifactError> {
+        match self {
+            Self::Home(home) => home.project(fields),
+            Self::Native(native) => {
+                let projected = native.project(fields)?;
+                Ok((projected.pointer, projected.layout))
+            }
+            _ => Err(error("reference has no native backing storage")),
+        }
+    }
+
+    pub(super) fn native_initialized(&self, fields: &[u32], complete: bool) -> bool {
+        match self {
+            Self::Home(home) => if complete { home.is_fully_initialized(fields) } else { home.is_initialized(fields) },
+            Self::Native(native) => if complete {
+                native.project(fields).is_ok_and(|field| field.is_fully_initialized())
+            } else { native.is_initialized(fields) },
+            _ => false,
+        }
+    }
+
+    pub(super) fn replace_native_initialization(&self, fields: &[u32], holes: &BTreeSet<Vec<u32>>)
+        -> Result<(), VmArtifactError>
+    {
+        match self {
+            Self::Home(home) => home.replace_initialization(fields, holes),
+            Self::Native(native) => native.replace_initialization(fields, holes),
+            _ => Err(error("reference has no native backing initialization")),
+        }
+    }
+}
+
+impl ReferenceInitialization {
+    fn check_live(&self) -> Result<(), VmArtifactError> {
+        if let Self::Generated { live, .. } = self && !live.get() {
+            return Err(error("generated reference outlived its backing frame"));
+        }
+        Ok(())
+    }
+
+    fn any_hole(&self, selected: impl Fn(&[u32]) -> bool) -> Result<bool, VmArtifactError> {
+        self.check_live()?;
+        match self {
+            Self::Raw(holes) => Ok(holes.borrow().iter().any(|hole| selected(hole))),
+            Self::Generated { flags, paths, .. } => {
+                for (index, path) in paths.iter().enumerate() {
+                    match unsafe { *flags.add(index) } {
+                        0 => { if selected(path) { return Ok(true); } }
+                        1 => {}
+                        _ => return Err(error("invalid generated reference initialization flag")),
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+
+    fn replace(&self, path: &[u32], holes: &BTreeSet<Vec<u32>>) -> Result<(), VmArtifactError> {
+        match self {
+            Self::Raw(state) => {
+                let mut state = state.borrow_mut();
+                state.retain(|hole| !hole.starts_with(path));
+                state.extend(holes.iter().cloned());
+            }
+            Self::Generated { flags, paths, live } => {
+                if !live.get() { return Err(error("generated reference outlived its backing frame")); }
+                for (index, candidate) in paths.iter().enumerate().filter(|(_, p)| p.starts_with(path)) {
+                    unsafe { *flags.add(index) = u8::from(!holes.iter().any(|hole| candidate.starts_with(hole))); }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl NativeReference {
     fn new(pointer: *mut u8, layout: Arc<NativeLayout>) -> Self {
-        Self { pointer, layout, path: vec![], holes: Rc::default() }
+        Self { pointer, layout, path: vec![], initialization: ReferenceInitialization::Raw(Rc::default()) }
+    }
+
+    /// The generated frame publishes these exact logical paths. The lease is
+    /// revoked synchronously before its flag or payload stack storage expires.
+    pub(super) unsafe fn generated(pointer: *mut u8, layout: Arc<NativeLayout>, flags: *mut u8,
+        paths: Arc<[Vec<u32>]>, live: Rc<Cell<bool>>,
+    ) -> Result<Self, VmArtifactError> {
+        if flags.is_null() || paths.first().is_none_or(|path| !path.is_empty()) {
+            return Err(error("generated reference lacks its backing initialization contract"));
+        }
+        let initialization = ReferenceInitialization::Generated { flags, paths, live };
+        initialization.any_hole(|_| false)?;
+        Ok(Self { pointer, layout, path: vec![], initialization })
     }
 
     pub(super) fn ty(&self) -> &VmType {
         &self.layout.ty
     }
 
+    pub(super) fn pointer(&self) -> *mut u8 { self.pointer }
+
     pub(super) fn project(&self, path: &[u32]) -> Result<Self, VmArtifactError> {
+        self.initialization.check_live()?;
         let mut pointer = self.pointer;
         let mut layout = self.layout.clone();
         let mut logical_path = self.path.clone();
@@ -382,7 +510,7 @@ impl NativeReference {
                     payload_offset,
                     variants,
                 } => {
-                    if self.holes.borrow().iter().any(|hole| logical_path.starts_with(hole)) {
+                    if self.initialization.any_hole(|hole| logical_path.starts_with(hole))? {
                         return Err(error("native enum projection names a moved-out resident"));
                     }
                     // SAFETY: construction promises a live, initialized resident;
@@ -413,18 +541,29 @@ impl NativeReference {
             pointer,
             layout,
             path: logical_path,
-            holes: self.holes.clone(),
+            initialization: self.initialization.clone(),
         })
     }
 
     pub(super) fn is_initialized(&self, path: &[u32]) -> bool {
         let path = self.path.iter().chain(path).copied().collect::<Vec<_>>();
-        !self.holes.borrow().iter().any(|hole| path.starts_with(hole))
+        self.initialization.any_hole(|hole| path.starts_with(hole)).is_ok_and(|absent| !absent)
     }
 
-    fn is_fully_initialized(&self) -> bool {
-        !self.holes.borrow().iter().any(|hole|
-            self.path.starts_with(hole) || hole.starts_with(&self.path))
+    pub(super) fn is_fully_initialized(&self) -> bool {
+        self.initialization.any_hole(|hole|
+            self.path.starts_with(hole) || hole.starts_with(&self.path)).is_ok_and(|absent| !absent)
+    }
+
+    pub(super) fn replace_initialization(&self, path: &[u32], holes: &BTreeSet<Vec<u32>>)
+        -> Result<(), VmArtifactError>
+    {
+        let field = self.project(path)?;
+        if self.initialization.any_hole(|hole| hole.len() < field.path.len() && field.path.starts_with(hole))? {
+            return Err(error("native field cannot initialize an absent parent"));
+        }
+        let holes = holes.iter().map(|path| field.path.iter().chain(path).copied().collect()).collect();
+        self.initialization.replace(&field.path, &holes)
     }
 
     pub(super) fn read(
@@ -464,7 +603,8 @@ impl NativeReference {
         }
         // SAFETY: native reference creation and the source borrow/use contract
         // establish validity. DerefCopy/Move separately retain resident uses.
-        unsafe { field.layout.read(field.pointer, budget) }
+        unsafe { field.layout.read_with_reference_admission(field.pointer, budget,
+            match field.initialization { ReferenceInitialization::Raw(_) => ReferenceRead::External, _ => ReferenceRead::Resident }) }
     }
 
     pub(super) fn take(&self, path: &[u32], budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError> {
@@ -473,16 +613,14 @@ impl NativeReference {
             return Err(error("native reference resident was moved out"));
         }
         let value = field.read(&[], budget)?;
-        budget.native_memory.callables.clear(field.pointer.addr(), field.layout.memory.size());
-        let mut holes = self.holes.borrow_mut();
-        holes.retain(|hole| !hole.starts_with(&field.path));
-        holes.insert(field.path);
+        budget.native_memory.residents.clear(field.pointer.addr(), field.layout.memory.size());
+        self.initialization.replace(&field.path, &BTreeSet::from([field.path.clone()]))?;
         Ok(value)
     }
 
     pub(super) fn write(&self, path: &[u32], value: VmValue, budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
         let field = self.project(path)?;
-        if self.holes.borrow().iter().any(|hole| hole != &field.path && field.path.starts_with(hole)) {
+        if self.initialization.any_hole(|hole| hole != field.path && field.path.starts_with(hole))? {
             return Err(error("native field cannot initialize an absent parent"));
         }
         // Native byte storage can carry a partially moved aggregate, but the
@@ -516,13 +654,11 @@ impl NativeReference {
         }
         let mut replacement_holes = BTreeSet::new();
         let value = match value { VmValue::Resident(home) => home.load(&[], budget)?, value => value };
-        budget.native_memory.callables.clear(field.pointer.addr(), field.layout.memory.size());
+        budget.native_memory.residents.clear(field.pointer.addr(), field.layout.memory.size());
         // SAFETY: only checked unique references reach this operation; source
         // drops/moves the old resident before replacing it.
         write_partial(&field.layout, field.pointer, value, &mut field.path.clone(), &mut replacement_holes, budget)?;
-        let mut holes = self.holes.borrow_mut();
-        holes.retain(|hole| !hole.starts_with(&field.path));
-        holes.extend(replacement_holes);
+        self.initialization.replace(&field.path, &replacement_holes)?;
         Ok(())
     }
 }
@@ -672,6 +808,15 @@ impl NativeLayout {
         source: *const u8,
         budget: &mut ExecutionBudget,
     ) -> Result<VmValue, VmArtifactError> {
+        unsafe { self.read_with_reference_admission(source, budget, ReferenceRead::Resident) }
+    }
+
+    /// Only an explicit unsafe raw/native boundary may introduce a reference
+    /// origin from external pointer bytes. Ambient unsafe execution is not this
+    /// authority; generated slots and ordinary home reads always require leases.
+    pub(super) unsafe fn read_with_reference_admission(&self, source: *const u8,
+        budget: &mut ExecutionBudget, admission: ReferenceRead,
+    ) -> Result<VmValue, VmArtifactError> {
         macro_rules! scalar {
             ($rust:ty, $variant:ident) => {
                 Ok(VmValue::$variant(unsafe { source.cast::<$rust>().read() }))
@@ -679,7 +824,7 @@ impl NativeLayout {
         }
         match &self.shape {
             NativeShape::Callable => unsafe {
-                budget.native_memory.callables.read(source, &self.ty)
+                budget.native_memory.residents.read(source, &self.ty)
             },
             NativeShape::StaticData => {
                 let pointer = unsafe { source.cast::<*const u8>().read() };
@@ -689,6 +834,12 @@ impl NativeLayout {
                 Ok(VmValue::StaticData { tag: *tag, alignment: *alignment, bytes, offset: 0, length })
             }
             NativeShape::Reference { referent, unique, descriptors } => {
+                if let Some(reference) = unsafe { budget.native_memory.residents.read_reference(source, referent, *unique)? } {
+                    return Ok(reference);
+                }
+                if matches!(admission, ReferenceRead::Resident) {
+                    return Err(error("native storage reference has no checked origin"));
+                }
                 // SAFETY: an initialized reference resident stores a genuine
                 // pointer; reading it as a pointer retains its provenance.
                 let pointer = unsafe { source.cast::<*mut u8>().read() };
@@ -696,13 +847,7 @@ impl NativeLayout {
                 if pointer.is_null() || pointer.addr() % layout.memory.alignment() != 0 {
                     return Err(error("native reference resident is null or misaligned"));
                 }
-                if let Some(reference) = budget.native_memory.home_reference(pointer, referent, *unique)? { return Ok(reference); }
-                Ok(VmValue::Reference {
-                    target: super::ReferenceTarget::Native(NativeReference::new(pointer, Arc::new(layout))),
-                    fields: Arc::from([]),
-                    unique: *unique,
-                    referent: referent.clone(),
-                })
+                unsafe { budget.native_memory.raw_reference(pointer, Arc::new(layout), *unique) }
             }
             NativeShape::Product(fields) => {
                 budget.reserve_value("native resident fields", fields.len())?;
@@ -710,7 +855,7 @@ impl NativeLayout {
                     .iter()
                     .map(|field| {
                         // SAFETY: concrete field offset/layout within the caller's resident.
-                        unsafe { field.layout.read(source.add(field.offset), budget) }
+                        unsafe { field.layout.read_with_reference_admission(source.add(field.offset), budget, admission) }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(match &self.ty {
@@ -739,7 +884,7 @@ impl NativeLayout {
                     .map(|field| unsafe {
                         field
                             .layout
-                            .read(source.add(payload_offset + field.offset), budget)
+                            .read_with_reference_admission(source.add(payload_offset + field.offset), budget, admission)
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let VmType::Nominal { definition, .. } = &self.ty else {
@@ -794,13 +939,13 @@ impl NativeLayout {
             return Err(error("native write value does not match concrete type"));
         }
         if !matches!(&value, VmValue::Resident(_)) {
-            budget.native_memory.callables.clear(destination.addr(), self.memory.size());
+            budget.native_memory.residents.clear(destination.addr(), self.memory.size());
         }
         match (&self.shape, value) {
             (_, VmValue::Resident(home)) => unsafe { home.write_bytes(destination)?; },
             (NativeShape::Callable, value) => {
                 budget.reserve_value("native callable resident lease", 1)?;
-                unsafe { budget.native_memory.callables.write(destination, value)?; }
+                unsafe { budget.native_memory.residents.write(destination, value)?; }
             }
             (NativeShape::StaticData, VmValue::StaticData { bytes, offset, length, .. }) => {
                 let end = offset.checked_add(length).ok_or_else(|| error("static byte window overflow"))?;
@@ -810,28 +955,8 @@ impl NativeLayout {
                     destination.add(std::mem::size_of::<usize>()).cast::<usize>().write(length);
                 }
             }
-            (NativeShape::Reference { referent, .. }, VmValue::Reference { target: super::ReferenceTarget::Home(home), fields, .. }) => {
-                let (pointer, layout) = home.project(&fields)?;
-                if &layout.ty != referent || !home.is_fully_initialized(&fields) {
-                    return Err(error("native home reference is uninitialized or has a different layout"));
-                }
-                home.expose_address();
-                unsafe { destination.cast::<*mut u8>().write(pointer); }
-            }
-            (
-                NativeShape::Reference { referent, .. },
-                VmValue::Reference { target: super::ReferenceTarget::Native(native), fields, .. },
-            ) => {
-                let native = native.project(&fields)?;
-                if native.ty() != referent || !native.is_fully_initialized() {
-                    return Err(error("native reference resident has a different referent layout"));
-                }
-                // SAFETY: destination is an aligned reference slot and the
-                // checked source reference supplies the actual referent pointer.
-                unsafe { destination.cast::<*mut u8>().write(native.pointer); }
-            }
-            (NativeShape::Reference { .. }, VmValue::Reference { .. }) => {
-                return Err(error("frame reference must have native-addressable storage before raw residency"));
+            (NativeShape::Reference { .. }, value @ VmValue::Reference { .. }) => {
+                unsafe { budget.native_memory.residents.write_reference(destination, &value, true, true)?; }
             }
             (
                 NativeShape::Product(fields),
@@ -1061,27 +1186,14 @@ pub(super) fn execute_memory_intrinsic(
         BorrowShared | BorrowUnique => {
             let layout = layout(0)?;
             let pointer = ptr_arg(0)?;
-            if pointer.is_null() || pointer.addr() % layout.memory.alignment() != 0 {
-                return Err(error(
-                    "native reference requires a non-null aligned pointer",
-                ));
-            }
-            if let Some(reference) = budget.native_memory.home_reference(pointer, &layout.ty, primitive == BorrowUnique)? {
-                return Ok(reference);
-            }
-            VmValue::Reference {
-                target: super::ReferenceTarget::Native(NativeReference::new(pointer, Arc::new(layout.clone()))),
-                fields: Arc::from([]),
-                unique: primitive == BorrowUnique,
-                referent: layout.ty,
-            }
+            unsafe { budget.native_memory.raw_reference(pointer, Arc::new(layout), primitive == BorrowUnique)? }
         }
         Read => {
             let (layout, source) = (layout(0)?, ptr_arg(0)?);
             // SAFETY: unsafe source promises an initialized, valid resident and
             // transfers its ownership obligations according to the raw-read contract.
-            let value = unsafe { layout.read(source, budget)? };
-            budget.native_memory.callables.clear(source.addr(), layout.memory.size());
+            let value = unsafe { layout.read_with_reference_admission(source, budget, ReferenceRead::External)? };
+            budget.native_memory.residents.clear(source.addr(), layout.memory.size());
             value
         }
         Write => {
@@ -1107,7 +1219,7 @@ pub(super) fn execute_memory_intrinsic(
                 .size();
             let (source, destination) = (ptr_arg(0)?, ptr_arg(1)?);
             if bytes != 0 {
-                budget.native_memory.callables.copy(source.addr(), destination.addr(), bytes);
+                budget.native_memory.residents.copy(source.addr(), destination.addr(), bytes);
                 // SAFETY: source owns the source/destination extent, provenance,
                 // and overlap obligations. Bytes may include uninitialized padding.
                 unsafe {
@@ -1133,6 +1245,36 @@ mod tests {
     fn budget() -> ExecutionBudget {
         ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
             limits: Default::default(), instructions: 0, allocated_elements: 0 }
+    }
+
+    #[test]
+    fn generated_reference_views_share_actual_flags_and_expire_before_stack_access() {
+        let mut budget = budget();
+        let layout = Arc::new(native_layout(&VmType::Tuple(vec![VmType::Unit, VmType::Unit]), &Arc::from([]), &mut vec![]).unwrap());
+        let pointer = std::ptr::NonNull::<u8>::dangling().as_ptr();
+        let mut flags = [1u8; 3];
+        let live = Rc::new(Cell::new(true));
+        let reference = unsafe { NativeReference::generated(pointer, layout, flags.as_mut_ptr(),
+            Arc::from([vec![], vec![0], vec![1]]), live.clone()).unwrap() };
+        let first = reference.project(&[0]).unwrap();
+        let second = reference.project(&[1]).unwrap();
+        assert_eq!(first.pointer(), second.pointer());
+        assert!(matches!(first.take(&[], &mut budget).unwrap(), VmValue::Unit));
+        assert_eq!(flags, [1, 0, 1]);
+        assert!(!reference.is_fully_initialized());
+        assert!(second.is_fully_initialized());
+        flags[1] = 1;
+        assert!(first.is_fully_initialized(), "a generated store must be visible without a shadow mask refresh");
+        first.take(&[], &mut budget).unwrap();
+        first.write(&[], VmValue::Unit, &mut budget).unwrap();
+        assert_eq!(flags, [1, 1, 1]);
+        flags[0] = 0;
+        assert_eq!(flags[0], 0);
+        assert!(first.write(&[], VmValue::Unit, &mut budget).is_err(), "a child cannot restore an absent parent");
+        live.set(false);
+        assert!(reference.project(&[]).is_err());
+        assert!(reference.read(&[], &mut budget).is_err());
+        assert!(second.write(&[], VmValue::Unit, &mut budget).is_err());
     }
 
     #[test]

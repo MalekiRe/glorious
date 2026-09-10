@@ -2,10 +2,10 @@
 //! value initialization, not by a native call. Resident bytes are authoritative;
 //! the separate state records only initialization and checked-reference origins.
 
-use super::native_memory::{NativeFields, NativeLayout, NativeReference, NativeShape};
+use super::native_memory::{NativeFields, NativeLayout, NativeShape, ReferenceRead};
 use super::native_profile::{AllocationKind, NativeAllocation, NativeMemoryMeasurements};
 use super::{
-    ExecutionBudget, ReferenceTarget, VmArtifactError, VmFunction, VmInstruction,
+    ExecutionBudget, VmArtifactError, VmFunction, VmInstruction,
     VmNominalCopyDescriptor, VmType, VmValue,
 };
 use grandiose_runtime::memory::RawAllocation;
@@ -792,26 +792,10 @@ impl NativeFramePlan {
     }
 }
 
-#[derive(Clone, Debug)]
-enum StoredTarget {
-    Home(Weak<NativeHome>),
-    Native(NativeReference),
-}
-
-#[derive(Clone, Debug)]
-struct StoredReference {
-    pointer: *mut u8,
-    target: StoredTarget,
-    fields: Arc<[u32]>,
-    unique: bool,
-    referent: VmType,
-}
-
 #[derive(Clone, Debug, Default)]
 struct Initialization {
     root: bool,
     holes: BTreeSet<Vec<u32>>,
-    references: BTreeMap<Vec<u32>, StoredReference>,
     variants: BTreeMap<Vec<u32>, u32>,
 }
 
@@ -830,7 +814,7 @@ pub(super) struct NativeHome {
     live_bytes: Rc<Cell<usize>>,
     measurements: Option<Rc<NativeMemoryMeasurements>>,
     registry: HomeRegistry,
-    callables: std::rc::Weak<super::native_callable::CallableResidents>,
+    residents: std::rc::Weak<super::native_residents::ResidentMetadata>,
 }
 
 impl Drop for NativeHome {
@@ -878,7 +862,7 @@ impl NativeHome {
             live_bytes,
             measurements: budget.native_memory.measurements.clone(),
             registry: budget.native_memory.homes.clone(),
-            callables: Rc::downgrade(&budget.native_memory.callables),
+            residents: Rc::downgrade(&budget.native_memory.residents),
         });
         if bytes != 0 {
             home.registry
@@ -900,7 +884,7 @@ impl NativeHome {
         pointer: *mut u8,
         budget: &mut ExecutionBudget,
     ) -> Result<Arc<Self>, VmArtifactError> {
-        unsafe { Self::external_argument_with_holes(layout, pointer, budget, None) }
+        unsafe { Self::argument_with_reference_admission(layout, pointer, budget, None, ReferenceRead::External) }
     }
 
     /// Bind compiler-sealed partial initialization without ever reading a
@@ -910,6 +894,12 @@ impl NativeHome {
         pointer: *mut u8,
         budget: &mut ExecutionBudget,
         holes: Option<&BTreeSet<Vec<u32>>>,
+    ) -> Result<Arc<Self>, VmArtifactError> {
+        unsafe { Self::argument_with_reference_admission(layout, pointer, budget, holes, ReferenceRead::Resident) }
+    }
+
+    unsafe fn argument_with_reference_admission(layout: Arc<NativeLayout>, pointer: *mut u8,
+        budget: &mut ExecutionBudget, holes: Option<&BTreeSet<Vec<u32>>>, admission: ReferenceRead,
     ) -> Result<Arc<Self>, VmArtifactError> {
         budget.reserve_value("native argument storage view", 1)?;
         let pointer = if layout.memory.size() == 0 {
@@ -928,10 +918,10 @@ impl NativeHome {
             live_bytes: budget.native_memory.home_bytes.clone(),
             measurements: budget.native_memory.measurements.clone(),
             registry: budget.native_memory.homes.clone(),
-            callables: Rc::downgrade(&budget.native_memory.callables),
+            residents: Rc::downgrade(&budget.native_memory.residents),
         });
         unsafe {
-            home.initialize_native_with_holes(budget, holes)?;
+            home.initialize_with_reference_admission(budget, holes, admission)?;
         }
         Ok(home)
     }
@@ -966,13 +956,19 @@ impl NativeHome {
         &self,
         budget: &mut ExecutionBudget,
     ) -> Result<(), VmArtifactError> {
-        unsafe { self.initialize_native_with_holes(budget, None) }
+        unsafe { self.initialize_with_reference_admission(budget, None, ReferenceRead::External) }
     }
 
     pub(super) unsafe fn initialize_native_with_holes(
         &self,
         budget: &mut ExecutionBudget,
         holes: Option<&BTreeSet<Vec<u32>>>,
+    ) -> Result<(), VmArtifactError> {
+        unsafe { self.initialize_with_reference_admission(budget, holes, ReferenceRead::Resident) }
+    }
+
+    unsafe fn initialize_with_reference_admission(&self, budget: &mut ExecutionBudget,
+        holes: Option<&BTreeSet<Vec<u32>>>, admission: ReferenceRead,
     ) -> Result<(), VmArtifactError> {
         fn visit(
             home: &NativeHome,
@@ -981,6 +977,7 @@ impl NativeHome {
             path: &mut Vec<u32>,
             budget: &mut ExecutionBudget,
             holes: Option<&BTreeSet<Vec<u32>>>,
+            admission: ReferenceRead,
         ) -> Result<(), VmArtifactError> {
             budget.tick()?;
             if holes.is_some_and(|holes| holes.contains(path)) {
@@ -1001,33 +998,11 @@ impl NativeHome {
                     (*payload_offset, fields)
                 }
                 NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable | NativeShape::Reference { .. } => {
-                    let value = unsafe { layout.read(pointer, budget)? };
-                    if let VmValue::Reference {
-                        target,
-                        fields,
-                        unique,
-                        referent,
-                    } = value
-                    {
-                        let target = match target {
-                            ReferenceTarget::Home(home) => {
-                                StoredTarget::Home(Arc::downgrade(&home))
-                            }
-                            ReferenceTarget::Native(native) => StoredTarget::Native(native),
-                            _ => {
-                                return Err(error("native result reference lacks a native origin"));
-                            }
-                        };
-                        home.state.borrow_mut().references.insert(
-                            path.clone(),
-                            StoredReference {
-                                pointer: unsafe { pointer.cast::<*mut u8>().read() },
-                                target,
-                                fields,
-                                unique,
-                                referent,
-                            },
-                        );
+                    let value = unsafe { layout.read_with_reference_admission(pointer, budget, admission)? };
+                    if matches!(value, VmValue::Reference { .. }) {
+                        // Unsafe external adoption establishes the raw loan once;
+                        // all later transport uses the shared resident identity.
+                        unsafe { budget.native_memory.residents.write_reference(pointer.cast_mut(), &value, false, false)?; }
                     }
                     return Ok(());
                 }
@@ -1041,6 +1016,7 @@ impl NativeHome {
                     path,
                     budget,
                     holes,
+                    admission,
                 )?;
                 path.pop();
             }
@@ -1052,7 +1028,7 @@ impl NativeHome {
         // Adoption validates existing resident bytes; it must not revoke
         // callable leases supplied by the producer before reading them.
         *self.state.borrow_mut() = Initialization::default();
-        if let Err(failure) = visit(self, &self.layout, self.pointer(), &mut vec![], budget, holes) {
+        if let Err(failure) = visit(self, &self.layout, self.pointer(), &mut vec![], budget, holes, admission) {
             self.clear(&[]);
             return Err(failure);
         }
@@ -1102,17 +1078,13 @@ impl NativeHome {
         if !state.root {
             return Err(error("native sidecar write requires a live resident root"));
         }
-        for reference in state.references.values() {
-            if let StoredTarget::Home(home) = &reference.target {
-                home.upgrade()
-                    .ok_or_else(|| error("stored reference outlived its native home"))?
-                    .expose_address();
-            }
+        if let Some(callables) = self.residents.upgrade() {
+            callables.expose_references(self.pointer().addr(), self.layout.memory.size())?;
         }
         unsafe {
             std::ptr::copy(self.pointer(), destination, self.layout.memory.size());
         }
-        if let Some(callables) = self.callables.upgrade() {
+        if let Some(callables) = self.residents.upgrade() {
             callables.copy(self.pointer().addr(), destination.addr(), self.layout.memory.size());
         }
         if let Some(measurements) = &self.measurements {
@@ -1223,8 +1195,28 @@ impl NativeHome {
                 .any(|hole| path.starts_with(hole) || hole.starts_with(path))
     }
 
+    /// Generated byte operations supply their checked logical mask separately
+    /// from payload transport. Do not reconstruct scalar values to adopt it.
+    pub(super) fn replace_initialization(&self, path: &[u32], holes: &BTreeSet<Vec<u32>>)
+        -> Result<(), VmArtifactError>
+    {
+        self.project(path)?;
+        let mut state = self.state.borrow_mut();
+        if !path.is_empty() && (!state.root || state.holes.iter().any(|hole|
+            hole.len() < path.len() && path.starts_with(hole))) {
+            return Err(error("native storage field cannot initialize an absent parent"));
+        }
+        if path.is_empty() {
+            state.root = !holes.contains(&vec![]);
+        }
+        state.holes.retain(|hole| !hole.starts_with(path));
+        state.holes.extend(holes.iter().map(|hole| path.iter().chain(hole).copied().collect()));
+        state.variants.retain(|field, _| !field.starts_with(path));
+        Ok(())
+    }
+
     pub(super) fn clear(&self, path: &[u32]) {
-        if let Some(callables) = self.callables.upgrade() {
+        if let Some(callables) = self.residents.upgrade() {
             if path.is_empty() {
                 callables.clear(self.pointer.addr(), self.layout.memory.size());
             } else if let Ok((pointer, layout)) = self.project(path) {
@@ -1237,7 +1229,6 @@ impl NativeHome {
         } else {
             state.holes.retain(|hole| !hole.starts_with(path));
             state.holes.insert(path.to_vec());
-            state.references.retain(|field, _| !field.starts_with(path));
             state.variants.retain(|field, _| !field.starts_with(path));
         }
     }
@@ -1265,7 +1256,6 @@ impl NativeHome {
             .is_some_and(|old| old != tag)
         {
             state.holes.retain(|hole| !hole.starts_with(path));
-            state.references.retain(|field, _| !field.starts_with(path));
             state
                 .variants
                 .retain(|field, _| field.as_slice() == path || !field.starts_with(path));
@@ -1400,7 +1390,7 @@ impl NativeHome {
             layout.shape,
             NativeShape::Scalar | NativeShape::StaticData | NativeShape::Callable | NativeShape::Reference { .. }
         ) {
-            return self.load_leaf(&layout, pointer, path, budget);
+            return unsafe { layout.read(pointer, budget) };
         }
         self.load_at(&layout, pointer, &mut path.to_vec(), budget)
     }
@@ -1424,7 +1414,7 @@ impl NativeHome {
                 let tag = self.variant(path, pointer, variants.len())?;
                 (*payload_offset, &variants[tag as usize], Some(tag))
             }
-            _ => return self.load_leaf(layout, pointer, path, budget),
+            _ => return unsafe { layout.read(pointer, budget) },
         };
         budget.reserve_value("native storage load fields", fields.len())?;
         let mut values = Vec::with_capacity(fields.len());
@@ -1457,39 +1447,6 @@ impl NativeHome {
         })
     }
 
-    fn load_leaf(
-        &self,
-        layout: &NativeLayout,
-        pointer: *const u8,
-        path: &[u32],
-        budget: &mut ExecutionBudget,
-    ) -> Result<VmValue, VmArtifactError> {
-        if matches!(layout.shape, NativeShape::Reference { .. }) {
-            let resident = unsafe { pointer.cast::<*mut u8>().read() };
-            if let Some(stored) = self.state.borrow().references.get(path)
-                && stored.pointer == resident
-            {
-                let target = match &stored.target {
-                    StoredTarget::Home(home) => ReferenceTarget::Home(
-                        home.upgrade()
-                            .ok_or_else(|| error("stored reference outlived its native home"))?,
-                    ),
-                    StoredTarget::Native(native) => ReferenceTarget::Native(native.clone()),
-                };
-                return Ok(VmValue::Reference {
-                    target,
-                    fields: stored.fields.clone(),
-                    unique: stored.unique,
-                    referent: stored.referent.clone(),
-                });
-            }
-            if !budget.unsafe_execution {
-                return Err(error("native storage reference has no checked origin"));
-            }
-        }
-        unsafe { layout.read(pointer, budget) }
-    }
-
     pub(super) fn store(
         &self,
         path: &[u32],
@@ -1514,7 +1471,7 @@ impl NativeHome {
                     unsafe {
                         std::ptr::copy(source.pointer(), pointer, layout.memory.size());
                     }
-                    budget.native_memory.callables.copy(source.pointer().addr(), pointer.addr(), layout.memory.size());
+                    budget.native_memory.residents.copy(source.pointer().addr(), pointer.addr(), layout.memory.size());
                     if let Some(measurements) = &self.measurements {
                         measurements.copied(AllocationKind::Home, layout.memory.size());
                     }
@@ -1526,10 +1483,9 @@ impl NativeHome {
         } else {
             let mut state = self.state.borrow_mut();
             state.holes.retain(|hole| !hole.starts_with(path));
-            state.references.retain(|field, _| !field.starts_with(path));
             state.variants.retain(|field, _| !field.starts_with(path));
         }
-        budget.native_memory.callables.clear(pointer.addr(), layout.memory.size());
+        budget.native_memory.residents.clear(pointer.addr(), layout.memory.size());
         self.store_at(&layout, pointer, &mut path.to_vec(), value, budget)?;
         self.state.borrow_mut().root = true;
         Ok(())
@@ -1544,7 +1500,7 @@ impl NativeHome {
         budget: &mut ExecutionBudget,
     ) -> Result<(), VmArtifactError> {
         if matches!(value, VmValue::Uninitialized(_)) {
-            budget.native_memory.callables.clear(pointer.addr(), layout.memory.size());
+            budget.native_memory.residents.clear(pointer.addr(), layout.memory.size());
             self.state.borrow_mut().holes.insert(path.clone());
             return Ok(());
         }
@@ -1557,7 +1513,7 @@ impl NativeHome {
             unsafe {
                 std::ptr::copy(source_pointer, pointer, layout.memory.size());
             }
-            budget.native_memory.callables.copy(source_pointer.addr(), pointer.addr(), layout.memory.size());
+            budget.native_memory.residents.copy(source_pointer.addr(), pointer.addr(), layout.memory.size());
             if let Some(measurements) = &self.measurements {
                 measurements.copied(AllocationKind::Home, layout.memory.size());
             }
@@ -1570,12 +1526,6 @@ impl NativeHome {
             state
                 .holes
                 .extend(origin.holes.iter().map(|hole| prefixed(hole)));
-            state.references.extend(
-                origin
-                    .references
-                    .into_iter()
-                    .map(|(field, reference)| (prefixed(&field), reference)),
-            );
             state.variants.extend(
                 origin
                     .variants
@@ -1604,56 +1554,12 @@ impl NativeHome {
                 (*payload_offset, layouts, fields, Some(*variant))
             }
             _ => {
-                if let VmValue::Reference {
-                    target: ReferenceTarget::Home(home),
-                    fields,
-                    unique,
-                    referent,
-                } = value
-                {
-                    let (address, selected) = home.project(fields)?;
-                    if selected.ty != *referent || (!unique && !home.is_initialized(fields)) {
-                        return Err(error(
-                            "native storage reference has an invalid checked origin",
-                        ));
-                    }
-                    // A typed VM-to-VM store retains the checked origin below.
-                    // It does not expose this address to an opaque raw/native
-                    // recipient, nor forbid a unique restoration capability.
-                    unsafe {
-                        pointer.cast::<*mut u8>().write(address);
-                    }
+                if matches!(value, VmValue::Reference { .. }) {
+                    unsafe { budget.native_memory.residents.write_reference(pointer, value, false, false)?; }
                 } else {
                     unsafe {
                         layout.write(pointer, value.clone(), budget)?;
                     }
-                }
-                if let VmValue::Reference {
-                    target,
-                    fields,
-                    unique,
-                    referent,
-                } = value
-                {
-                    let target = match target {
-                        ReferenceTarget::Home(home) => StoredTarget::Home(Arc::downgrade(home)),
-                        ReferenceTarget::Native(native) => StoredTarget::Native(native.clone()),
-                        _ => {
-                            return Err(error(
-                                "native storage reference lacks an addressable origin",
-                            ));
-                        }
-                    };
-                    self.state.borrow_mut().references.insert(
-                        path.clone(),
-                        StoredReference {
-                            pointer: unsafe { pointer.cast::<*mut u8>().read() },
-                            target,
-                            fields: fields.clone(),
-                            unique: *unique,
-                            referent: referent.clone(),
-                        },
-                    );
                 }
                 return Ok(());
             }

@@ -789,7 +789,11 @@ impl VmNativeCall<'_> {
             .clone();
         home.expose_address();
         unsafe {
-            home.initialize_native(self.budget)?;
+            if self.binding.generated.is_some() {
+                home.initialize_native_with_holes(self.budget, None)?;
+            } else {
+                home.initialize_native(self.budget)?;
+            }
         }
         self.result = Some(VmValue::Resident(home));
         Ok(())
@@ -829,7 +833,8 @@ impl VmNativeCall<'_> {
             ));
         }
         check_slot(&self.binding.result, source)?;
-        self.result = Some(unsafe { self.binding.result.read(source, self.budget)? });
+        self.result = Some(unsafe { self.binding.result.read_with_reference_admission(source, self.budget,
+            if self.binding.generated.is_some() { super::native_memory::ReferenceRead::Resident } else { super::native_memory::ReferenceRead::External })? });
         Ok(())
     }
 
@@ -998,7 +1003,8 @@ impl CallbackContext<'_, '_> {
                     }
                 })
             } else {
-                unsafe { layout.read(slot, self.call.budget)? }
+                unsafe { layout.read_with_reference_admission(slot, self.call.budget,
+                    if self.argument_holes.is_some() { super::native_memory::ReferenceRead::Resident } else { super::native_memory::ReferenceRead::External })? }
             });
         }
         self.call.budget.native_memory.callback_depth += 1;

@@ -21,8 +21,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 10;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:resident-capture-loans-v7";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 11;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:resident-reference-origins-v8";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
@@ -455,8 +455,10 @@ mod tests {
     #[test]
     fn native_patterns_observe_initialization_before_reading_moved_payloads() {
         use super::super::{VmPattern, VmPatternField};
+        for borrow_position in [None, Some(4), Some(5)] {
+        let borrowed = borrow_position.is_some();
         for case in 0..5 {
-            let entry = DefKey(Digest::of_bytes(format!("native-pattern-holes-{case}").as_bytes()));
+            let entry = DefKey(Digest::of_bytes(format!("native-pattern-holes-{case}-{borrow_position:?}").as_bytes()));
             let nominal = DefKey(Digest::of_bytes(b"native-pattern-hole-enum"));
             let is_tuple = matches!(case, 0 | 3);
             let is_array = case == 4;
@@ -474,10 +476,10 @@ mod tests {
                 else { VmPattern::Enum { definition: nominal, variant: 0, field_count: 2,
                     field_types: vec![VmType::I64,VmType::I64],
                     fields: if case == 1 { vec![] } else { vec![VmPatternField { index: 0, ty: VmType::I64, pattern: VmPattern::Any }] } } };
-            let function = VmFunction { definition: entry, safety: crate::Safety::Safe, unsafe_execution: false,
+            let mut function = VmFunction { definition: entry, safety: crate::Safety::Safe, unsafe_execution: false,
                 nominal_copy_descriptors: if is_tuple || is_array { vec![] } else { vec![descriptor] },
                 captures: 0, parameters: 0,
-                registers: vec![VmType::I64,VmType::I64,product,VmType::I64,VmType::Bool,VmType::I64],
+                registers: vec![VmType::I64,VmType::I64,product.clone(),VmType::I64,VmType::Bool,VmType::I64],
                 instructions: vec![I::DeclareResult { result: VmType::I64, returns: true },
                     I::ConstI64 { dst: 0, value: 17 }, I::ConstI64 { dst: 1, value: 42 },
                     if is_tuple { I::MakeTupleOwned { dst: 2, fields: vec![0,1] } }
@@ -490,19 +492,29 @@ mod tests {
                         else_target: if expected { 7 } else { 8 } },
                     I::Trap, I::TakeProjection { dst: 5, base: 2, fields: vec![1] }, I::Return { value: 5 }],
             };
+            if let Some(position) = borrow_position {
+                function.registers.push(VmType::Reference { unique: true, referent: Box::new(product) });
+                function.instructions.insert(position, I::Borrow { dst: 6, src: 2, fields: vec![], unique: true, reborrow: false });
+                if let I::PatternTest { subject, .. } = &mut function.instructions[6] { *subject = 6; }
+                if let I::BranchBool { then_target, else_target, .. } = &mut function.instructions[7] {
+                    *then_target += 1;
+                    *else_target += 1;
+                }
+            }
             let mut candidate = CandidateVmProgram { schema: crate::STAGE0_VM_SCHEMA,
                 runtime_manifest: None, host_capabilities: vec![], entry, functions: [(entry,function)].into(),
                 callable_environments: Default::default(), fingerprint: Digest::of_bytes(b"unsealed") };
             candidate.fingerprint = candidate.computed_fingerprint();
             let verified = verify_program(candidate).unwrap();
-            assert_eq!(verified.run_i64().unwrap(), 42, "VM case {case}");
+            assert_eq!(verified.run_i64().unwrap(), 42, "VM case {case}, borrowed={borrowed}");
             assert_eq!(super::super::decode_and_verify_program(&verified.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
             let ir = LlvmIrProgram::lower_partitioned(verified, Digest::of_bytes(b"native-pattern-initialization-test"),
                 LlvmTarget::host().unwrap(), Default::default()).unwrap();
             for optimization in [0,2] {
                 let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
-                assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42, "native case {case}, O{optimization}");
+                assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42, "native case {case}, borrowed={borrowed}, O{optimization}");
             }
+        }
         }
     }
 

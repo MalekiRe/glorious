@@ -633,8 +633,8 @@ Callback failures retain their original runtime error through native dispatch.
 Public external callback/result authority is unchanged.
 
 This supplies tested ordinary captured-callable execution in all-native and mixed
-closed graphs. General borrowed-referent initialization still needs an explicit
-generated storage contract; a reference handle's flags are not its referent's.
+closed graphs. The reference-storage migration below now supplies the ordinary
+frame-backed referent contract; environment-lifetime returned borrows remain open.
 Native owned handlers, borrowed/cross-frame resumption transfer, full helper-family
 fusion and mandatory-tail activation fusion remain separate open obligations.
 
@@ -672,7 +672,8 @@ reference representation is introduced.
 
 This admits the represented factory-produced callable returning a captured loan.
 It does not establish arbitrary opaque callbacks, complete nominal/array payload
-projection, guarded storage identities, or native borrowed-referent sidecars.
+projection, guarded storage identities, or returns borrowing an owned capture's
+storage. Native reference storage is addressed separately below.
 
 ## Pattern inspection and resident initialization
 
@@ -688,5 +689,56 @@ Generated direct and captured resident patterns use the frame's published logica
 paths, including ancestor initialization. Control flow checks the required flags
 before any payload load. Masking a result after an uninitialized LLVM load would
 not be safe. Enum tag-only cleanup continues to inspect partially consumed shells;
-it does not demand unselected payloads. Borrowed pattern auto-dereference retains
-its existing ABI and is not evidence of complete referent-sidecar support.
+it does not demand unselected payloads. Borrowed pattern auto-dereference now
+uses the reference-storage contract below; handle flags never stand in for
+referent initialization.
+
+## Native reference identity and backing initialization
+
+`vm_backend/native_residents.rs` extends the existing resident byte-transport
+domain to reference handles. Callable leases and reference origins share copy,
+relocation, partial-overwrite invalidation and scope retirement. The former
+`NativeHome` reference cache and its special leaf reader are removed. Home
+stores, native layout reads/writes, raw transport, generated instructions and
+mixed invocations consume the same handle-address metadata. A reference still
+occupies one genuine machine pointer; its logical projection is not inferred
+from numeric pointer equality. Distinct zero-byte fields retain distinct paths.
+
+Reference origins retain either the existing home weakly or a native reference's
+shared logical initialization view. A generated view names the exact published
+frame layout, logical paths and writable flag storage, guarded by its frame's
+live lease. It reads and updates those actual flags, not a persistent shadow
+mask. VM dereferences of a generated reference and generated dereferences of a
+VM home use that same backing owner. Borrow formation does not read a complete
+value: unique handles can retain restoration authority, and shared handles need
+the resident shell. Dereference and pattern operations check their own required
+initialization before generated payload loads. Moves preserve the destination's
+holes, clear the referent and retain the checked unique restoration handle;
+stores restore the source mask. Payload transfers remain LLVM instructions,
+not interpretation or reconstruction of a VM aggregate by a runtime callback.
+
+Borrowed pattern layouts and logical paths are published with the native frame
+plan. A bounded per-pattern scratch mask observes the authenticated referent
+immediately before inspection, with separate space for nested dereferences.
+Ordinary pattern control flow then applies the shared no-read/root/value rules.
+No user code or storage mutation intervenes between that observation and its
+reads. This is not a reference handle's initialization mask.
+
+Generated resident reads require an existing origin even when unsafe execution
+is enabled. Only explicit unsafe raw/native adoption may establish an external
+pointer promise; public callback/result admission and private generated slots
+select that contract explicitly. Raw borrow construction uses the same native
+origin producer in both engines. Compiler-owned machine and mixed-bridge scalar
+slots share scope retirement. Expiring a frame invalidates its backing views
+before any subsequent reference access; copying a handle does not extend that
+lifetime or run source destruction.
+
+This completes the tested local-frame/captured-handle move, restoration and
+borrowed-inspection slice, not all captured-storage lifetime contracts. A direct
+borrow of a generated capture slot currently has the invocation frame's lease;
+it is not yet an environment-lifetime returned loan. The active positive source
+case returning `&value` from a closure owning `value` still fails G5023 during
+source result-provenance checking, before either runtime is reached. Its input
+storage projection and the subsequent environment-lifetime native contract
+remain open. Native owned handlers, resumption transfer and full fusion are
+separate outstanding boundaries.

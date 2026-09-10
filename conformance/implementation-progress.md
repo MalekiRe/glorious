@@ -5,6 +5,88 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 113 / native ABI 11: reference origins and backing initialization
+
+Reference handles now share the execution-domain resident byte-transport
+mechanism with callable environments. The old per-home reference cache and
+special leaf reader are removed. Home stores, ordinary native reads/writes,
+raw copies/relocations, generated operations and mixed bridge slots preserve
+the same exact origin and logical projection. Partial overwrites revoke the
+metadata even when pointer bits are unchanged. Reference bytes remain one real
+machine pointer; equal addresses do not collapse distinct zero-sized fields.
+
+Generated borrows retain the backing frame's published layout, logical paths,
+actual initialization flags and live lease. VM operations on such references
+update those flags directly. Generated operations on VM-backed loans use the
+existing home's state. Unique formation can preserve a restoration handle;
+dereference reads have their own initialization requirement. Native `DerefMove`
+now transfers bytes and holes, clears the actual referent, and keeps the unique
+handle for `DerefStore`. Payload transfers remain generated instructions.
+
+Borrowed patterns obtain a bounded mask from the authenticated referent before
+payload loads, then use the same root/value/no-read rules as direct patterns.
+Published layouts include nested reference inspection scratch requirements.
+Generated callable receiver dereferences also authenticate the backing resident.
+Explicit unsafe raw/native adoption is distinguished from ordinary generated
+reads; an ambient unsafe-execution flag cannot recreate missing origins. Native
+frame and mixed-bridge scalar slots use the common lease-retirement scope.
+
+The preserved baseline source succeeds in fresh/decoded VM but originally fails
+native planning at `DerefMove` (`target/native-referent-contract-baseline-v2.log`).
+It now passes fresh/decoded VM, all-native O0/O2 and all three mixed partitions
+at native O0/O2 (`target/native-referent-contract-v3.log`). The earlier focused
+integration passes 42 unit and 22 native tests (`target/native-referent-integration-v4.log`).
+The borrowed-pattern supplement passes its complete ten-case group at O0/O2
+(`target/native-referent-borrowed-patterns-v6.log`).
+
+The final contract gate passes **357 unit and 29 public native-bridge tests**,
+none ignored (`target/native-referent-contract-final-v8.log`). Its pattern group
+now has fifteen cases: direct inspection and borrows formed before or after the
+move, including literal holes, wildcard shells, tag-only enum cleanup, selected
+nominal fields and omitted fixed-array holes, all fresh/decoded and native O0/O2.
+Additional units check equal-address zero-byte paths, shared generated flag
+updates, absent-parent rejection, partial-byte invalidation and frame/handle
+expiry. Public callback/result contracts and budgets are unchanged.
+
+That v8 command was not green: one request test still expected native ABI 10.
+Updating the stale literal to the actual ABI 11 gives **22 request tests passing**
+(`target/native-referent-abi-identity-v9.log`), without a production change.
+The preceding complete native gate passes **35 tests with one new active source
+failure**, none ignored (`target/native-referent-runtime-gate-v7.log`); all 356
+then-existing unit tests also pass in that run.
+The final cache-113/native-ABI-11 rerun confirms the same **35 passes / one source
+failure** (`target/native-referent-native-final-v10.log`), with none ignored.
+The final scope refinement creates its liveness token only when a backing view
+is actually borrowed, avoiding a new liveness allocation for scalar-only frames.
+All nine resident transport/lifecycle tests pass afterward
+(`target/native-referent-scope-final-v11.log`).
+
+The new positive `generated_references_to_capture_storage_survive_the_invocation_frame`
+returns `&value` from a closure that owns `value`. It fails G5023 at source
+invocation-result provenance, before either runtime. Its original source and
+success expectation remain active. This differs from the captured-reference
+return repaired in cache 112: the reference borrows the capture's own storage.
+Both that source storage projection and an environment-lifetime native returned
+loan remain open; a direct generated capture-slot borrow currently has the
+invocation frame's lease. Copying it cannot extend that frame's lifetime.
+
+After the cache-112 checkpoint, the broad source-library matrix was rerun:
+**16 passing / 15 failing**, none ignored, in
+`target/cache112-library-source-matrix-v1.log`. The same roots fail: budget,
+FFI, float conversion/parsing/shortest formatting, format, full composition,
+heap, I/O, iterator/callbacks, random, sorting, traversal and UTF-8. These include
+compiler provenance/inference/tail obligations, fixture/API mismatches and
+unfinished library code, not fifteen classified compiler bugs. Float parsing
+hits the unchanged allocation limit; shortest formatting lacks a proven tail
+carrier. No budget or source oracle is weakened.
+
+Cache is 113 and native ABI is 11; bytecode 72, verifier 38 and schema 116 are
+unchanged. Native owned handlers, general resumption transfer, full fusion,
+guard-correlated storage and broad conformance remain open. No acceptance family
+or self-hosting contract is promoted by these development tests.
+Source-lock refresh and independent audit pass with 100 locked Glorious files
+and all 11,455 public contracts still open.
+
 ## Cache 112: complete invocation-result reference coverage
 
 Normal-result projection now publishes resolved payloads and complete reference

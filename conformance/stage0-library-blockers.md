@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 112 verification below,
+Updated from the current source and cache 113 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -8,12 +8,40 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/control-fusion-library-final-v2.log`, cache 105). This includes a source
+ignored (`target/cache112-library-source-matrix-v1.log`, cache 112). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 113 / native ABI 11 migrates reference identities into the existing resident
+byte-transport domain and removes the per-home reference cache. Generated borrows,
+move/restore dereferences, borrowed patterns and callable receivers consult the
+backing storage's initialization contract. VM/native crossings retain its exact
+logical paths and flags; zero-byte projections do not use address equality as
+identity. Partial byte overwrites and frame expiry revoke authority. Generated
+reads cannot recreate it from an ambient unsafe-execution flag.
+
+The original captured unique-reference move/restore regression now passes fresh
+and decoded VM, all-native and three mixed partitions at native O0/O2. Final
+contract checks pass 357 unit, 29 public native-bridge and 22 request tests; the
+complete native checkpoint has 35 passes and one new active source failure.
+The latter returns a reference to storage owned by a capture, rather than returning
+an incoming captured reference. It fails source G5023 before runtime. Its storage
+projection and the subsequent environment-lifetime native returned-loan contract
+remain open. Direct capture-slot borrows currently have the invocation lease.
+Exact gates and stale ABI-test correction are in `implementation-progress.md`.
+
+The freshly repeated source-library matrix above retains the same 15 failing
+roots; they are not all classified compiler defects. Float parsing exhausts the
+unchanged allocation budget, and shortest formatting lacks a proven tail carrier.
+Other source provenance/inference/tail obligations, outdated fixture/API uses and
+unfinished library implementations remain. Native owned handlers, full helper-
+family and mandatory-tail activation fusion, cross-frame resumptions and guarded
+storage also remain open. No conformance or self-hosting acceptance is promoted.
+
+The following cache 112 and earlier checkpoints are historical.
 
 Cache 112 admits captured-reference returns through the shared invocation
 relation's complete reference-coverage proof. Ownership and escape authenticate

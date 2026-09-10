@@ -58,6 +58,20 @@ fn mixed_returned_unique_capture_references_transfer_their_handle() {
     check_mixed_capture_source("fn make<'a>(value:&'a mut i64) -> () -> &'a mut i64 { move (value) { value } } pub fn main() -> i64 { let mut value = 41; let result = make(&mut value)(); *result = *result + 1; *result }");
 }
 
+#[test]
+fn generated_borrowed_referents_preserve_move_and_restore_through_capture_calls() {
+    let source = "pub fn main() -> i64 { let mut value = (1,2); let reference = &mut value; let task = move (reference) { let old = move *reference; *reference = (20,22); old }; let old = task(); value.0 + value.1 + old.0 + old.1 - 3 }";
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    check_mixed_capture_source(source);
+}
+
+#[test]
+fn generated_references_to_capture_storage_survive_the_invocation_frame() {
+    check_mixed_capture_source("pub fn main() -> i64 { let value = (20,22); let task = move (value) { &value }; let result = (&task)(); result.0 + result.1 }");
+}
+
 fn check_mixed_capture_source(source: &str) {
     let ir = compile(source);
     assert_eq!(ir.vm_program().run_i64().unwrap(), 42);

@@ -371,6 +371,10 @@ fn invoke_native(
     let mut values = vec![ScalarSlot::new(); count];
     let mut flags = vec![Vec::<u8>::new(); count];
     let mut arguments = Vec::with_capacity(2 * count);
+    let mut argument_scope = call.budget.native_memory.residents.scope();
+    for slot in &mut values {
+        argument_scope.track(slot.pointer().addr(), std::mem::size_of::<ScalarSlot>());
+    }
     for (index, slot) in values.iter_mut().enumerate() {
         let pointer = match &call.binding.parameters[index] {
             ArgumentPlan::Owned(layout) | ArgumentPlan::Capture(layout) => {
@@ -419,6 +423,8 @@ fn invoke_native(
     }
     let owned_result = call.result_home.is_some();
     let mut scalar_result = ScalarSlot::new();
+    let mut result_scope = call.budget.native_memory.residents.scope();
+    result_scope.track(scalar_result.pointer().addr(), std::mem::size_of::<ScalarSlot>());
     let result = if owned_result {
         unsafe { call.result_pointer()? }
     } else {
