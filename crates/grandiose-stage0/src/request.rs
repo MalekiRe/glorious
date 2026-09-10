@@ -337,7 +337,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // outer handle's lifetime debt and physical target authority.
 // Cache 130 verifies mixed per-input frame-preservation requirements for
 // calls borrowing local storage while transferring independent residents.
-pub const STAGE0_CACHE_GENERATION: u32 = 130;
+// Cache 131 shares ordinary and tail-call representation and executable ABIs,
+// retaining directional callable permissions and target-local substitutions.
+pub const STAGE0_CACHE_GENERATION: u32 = 131;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -352,7 +354,9 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // resident provenance while retiring predecessor carriers before rejoin.
 // Verifier 39 infers checked per-input whole-value/referent requirements
 // through the executable call graph, including recursive helper summaries.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 39;
+// Verifier 40 applies the ordinary checked call ABI to tail transfers,
+// including callable variance, generic consistency and operation specialization.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 40;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

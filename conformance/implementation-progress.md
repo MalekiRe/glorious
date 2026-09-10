@@ -5,6 +5,77 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 131 / verifier 40: shared ordinary and tail invocation ABIs
+
+The unchanged stateless-callable tail regression now executes. Runtime MIR had
+compared complete tail argument types, including erased environment refinements,
+while ordinary calls used the established representation relation. The bytecode
+tail validator separately required exact callable capability equality. Both
+boundaries now share their ordinary direct-call ABI checks with mandatory tail
+transfers; the superseded equality paths are removed.
+
+The receiving executable checker uses one callee-local generic substitution for
+arguments and normal results. Callable receiver variance, mutable-reference
+invariance, safety/effects, arity and operation specialization remain checked.
+A returning target cannot inherit a terminal continuation. Tail frame, handler,
+capture and execution-safety obligations remain independent of signature matching.
+
+A deeper native composition test exposed exact-type authentication of reference
+bytes after an admitted shared callable-view conversion. Native reference
+formation and admission now share the existing scoped receiver relation, retaining
+the exact backing origin/projection and producing the requested view. Re-encoding
+a weakened view cannot recover stronger permissions. VM native-backed borrowing
+shares this view rule; generated reborrowing uses the origin producer instead of
+duplicating exact-layout checks. No new reference layout, origin table or source
+coercion was introduced.
+
+Verification:
+
+- The original ten-source incoming-borrow/nested-carrier regression passes
+  fresh and decoded VM at O0/O2 without source or assertion changes
+  (`target/tail-callable-abi-source-v1.log`). Its pre-change G7041 failure is
+  retained in `target/tail-callable-abi-baseline-v1.log`.
+- All five independent ABI groups and all 22 revision/cache tests pass
+  (`target/tail-callable-abi-final-contracts-v2.log`). Ordinary and tail cases
+  check arguments/results, nested and higher-order receiver variance, unsafe
+  callbacks, effect/signature mismatch, shared versus mutable references,
+  generic consistency, arity, terminal results and operation specialization.
+  Both fresh candidates and decoded artifacts receive these checks.
+- All 10 existing executable tail-proof groups pass
+  (`target/tail-callable-abi-tail-verifier-v1.log`). All 34 call integration
+  tests pass with `RUST_MIN_STACK=33554432`
+  (`target/tail-callable-abi-call-integration-v2.log`). The default-stack attempt
+  aborted in the unchanged deep callable-type decoder fixture, which calls
+  artifact encode/decode rather than this direct-call verifier; that host-stack
+  failure remains recorded in the v1 log and is not claimed fixed.
+- All 11 native resident metadata tests pass
+  (`target/tail-callable-abi-native-residents-final-v1.log`). The new reference-view
+  cases cover owning homes, borrowed-frame homes and generated references;
+  permission upgrades, mutable reinterpretation, generic wildcard admission,
+  authority recovery after re-encoding and expired backing storage all reject.
+- Five source scenarios execute in fresh/decoded VM and generated native O0/O2:
+  stateless, captured and incoming-borrow callbacks, tuple arguments and callable
+  results (`target/tail-callable-abi-native-final-v1.log`). An independent native
+  graph additionally weakens a nested shared argument and a returned callable
+  on the same tail edge, reads and reborrows the destination's payload, and
+  executes in VM, decoded VM, all-native and mixed VM/native O0/O2
+  (`target/tail-callable-abi-native-layout-final-v2.log`). Its earlier failures
+  are retained in the native-layout v1/v2 and final-v1 logs; the fixture's
+  assertions were not removed to bypass them. The existing generated borrowed
+  move/restoration integration also passes
+  (`target/tail-callable-abi-native-borrow-integration-v1.log`).
+- Full mandatory-tail integration is **22 passing, 2 failing**
+  (`target/tail-callable-abi-source-integration-v1.log`), including the newly
+  added native source group. The existing abstract-callback preservation failure
+  (G7042, pc 44/register 35) and G4403-versus-G5017 diagnostic assertion remain
+  unchanged, not ignored or weakened.
+
+The last full-library gate still has the 11 source minimum-use G5024 obligations
+recorded at cache 129. This ABI repair does not establish abstract invocation
+preservation, complete guarded resource contracts, native handlers, full compiler
+or library conformance, or self-hosted acceptance. Cache is 131 and verifier is
+40; interface 22, native ABI 13, bytecode 72 and VM schema 116 are unchanged.
+
 ## Cache 130 / verifier 39: per-input executable tail preservation
 
 The branch-joined vector tail regression now executes in fresh and decoded VM

@@ -3,7 +3,7 @@
 //! One byte-transport protocol preserves their respective environment leases and
 //! backing-storage identities. Byte moves never create source owners.
 
-use super::{DefKey, RuntimeCaptureEnvironment, VmArtifactError, VmType, VmValue};
+use super::{DefKey, RuntimeCaptureEnvironment, VmArtifactError, VmType, VmValue, reference_view_matches};
 use std::{cell::{Cell, RefCell}, collections::BTreeMap, rc::Rc, sync::{Arc, Weak, atomic::{AtomicU64, Ordering}}};
 
 pub(super) const BYTES: usize = 40;
@@ -229,7 +229,7 @@ impl ResidentMetadata {
         let (pointer, origin) = match target {
             super::ReferenceTarget::Home(home) => {
                 let (pointer, layout) = home.project(fields)?;
-                if layout.ty != *referent
+                if !reference_view_matches(referent, &layout.ty, *unique)
                     || (require_initialized && !home.is_fully_initialized(fields))
                     || (!unique && !home.is_initialized(fields)) {
                     return Err(error("native storage reference has an invalid checked origin"));
@@ -244,7 +244,7 @@ impl ResidentMetadata {
             }
             super::ReferenceTarget::Native(native) => {
                 let projected = native.project(fields)?;
-                if projected.ty() != referent
+                if !reference_view_matches(referent, projected.ty(), *unique)
                     || (require_initialized && !projected.is_fully_initialized())
                     || (!unique && !projected.is_initialized(&[])) {
                     return Err(error("native reference resident has a different or absent referent"));
@@ -272,34 +272,38 @@ impl ResidentMetadata {
             None => return Ok(None),
         };
         if unsafe { source.cast::<*mut u8>().read() } != stored.pointer
-            || &stored.referent != referent || (unique && !stored.unique) {
+            || (unique && !stored.unique)
+            || !reference_view_matches(referent, &stored.referent, unique) {
             return Err(error("native reference bytes have a different origin or authority"));
         }
+        // Authenticate the stored view against its exact backing projection.
+        // The returned handle carries the requested (possibly weaker) view,
+        // never a new backing layout or recovered receiver permissions.
         let target = match stored.origin {
             ReferenceOrigin::Home(home) => {
                 let home = home.upgrade().ok_or_else(|| error("stored reference outlived its native home"))?;
                 let (pointer, layout) = home.project(&stored.fields)?;
-                if pointer != stored.pointer || &layout.ty != referent {
+                if pointer != stored.pointer || !reference_view_matches(&stored.referent, &layout.ty, stored.unique) {
                     return Err(error("stored reference no longer names its checked projection"));
                 }
                 super::ReferenceTarget::Home(home)
             }
             ReferenceOrigin::BorrowedHome(home) => {
                 let (pointer, layout) = home.project(&stored.fields)?;
-                if pointer != stored.pointer || &layout.ty != referent {
+                if pointer != stored.pointer || !reference_view_matches(&stored.referent, &layout.ty, stored.unique) {
                     return Err(error("stored borrowed reference no longer names its checked projection"));
                 }
                 super::ReferenceTarget::Home(home)
             }
             ReferenceOrigin::Native(native) => {
                 let projected = native.project(&stored.fields)?;
-                if projected.pointer() != stored.pointer || projected.ty() != referent {
+                if projected.pointer() != stored.pointer || !reference_view_matches(&stored.referent, projected.ty(), stored.unique) {
                     return Err(error("stored native reference no longer names its checked projection"));
                 }
                 super::ReferenceTarget::Native(native)
             }
         };
-        Ok(Some(VmValue::Reference { target, fields: stored.fields, unique, referent: stored.referent }))
+        Ok(Some(VmValue::Reference { target, fields: stored.fields, unique, referent: referent.clone() }))
     }
 }
 
@@ -326,6 +330,63 @@ mod tests {
     fn captures(value: VmValue) -> Arc<RuntimeCaptureEnvironment> {
         let VmValue::Callable { captures, .. } = value else { panic!("callable expected") };
         captures
+    }
+
+    #[test]
+    fn reference_views_preserve_origins_without_upgrading_callable_or_write_authority() {
+        use crate::vm_backend::{ReferenceTarget, native_memory::NativeReference};
+        let strong = VmType::Tuple(vec![signature()]);
+        let mut restricted = signature();
+        if let VmType::Callable { shared_receiver, unique_receiver, .. } = &mut restricted {
+            *shared_receiver = false; *unique_receiver = false;
+        }
+        let weak = VmType::Tuple(vec![restricted]);
+        for origin in 0..3 {
+            for capable in [false, true] {
+                for unique in [false, true] {
+                    let mut budget = budget();
+                    let ty = if capable { &strong } else { &weak };
+                    let layout = Arc::new(native_layout(ty, &Arc::from([]), &mut vec![]).unwrap());
+                    let owner = NativeHome::new(layout.clone(), &mut budget).unwrap();
+                    owner.store(&[], &VmValue::Tuple(vec![callable(environment(VmValue::I64(42)))].into()), &mut budget).unwrap();
+                    let (pointer, _) = owner.project(&[]).unwrap();
+                    let mut flags = [1u8, 1];
+                    let live = Rc::new(Cell::new(true));
+                    let paths: Arc<[Vec<u32>]> = Arc::from([vec![], vec![0]]);
+                    let target = match origin {
+                        0 => ReferenceTarget::Home(owner.clone()),
+                        1 => ReferenceTarget::Home(unsafe { NativeHome::borrowed_generated(layout, pointer,
+                            flags.as_mut_ptr(), paths, live.clone(), &mut budget) }.unwrap()),
+                        _ => ReferenceTarget::Native(unsafe { NativeReference::generated(pointer, layout,
+                            flags.as_mut_ptr(), paths, live.clone()) }.unwrap()),
+                    };
+                    let reference = VmValue::Reference { target, fields: Arc::from([]), unique, referent: ty.clone() };
+                    let mut slots = [0usize; 2];
+                    let source = slots.as_mut_ptr().cast();
+                    unsafe { budget.native_memory.residents.write_reference(source, &reference, false, true) }.unwrap();
+                    for (view, writable, permitted) in [
+                        (&weak, false, true), (&strong, false, capable),
+                        (&weak, true, unique && !capable), (&strong, true, unique && capable),
+                        (&VmType::Generic(0), false, false),
+                    ] {
+                        let result = unsafe { budget.native_memory.residents.read_reference(source, view, writable) };
+                        assert_eq!(result.is_ok(), permitted, "origin={origin} capable={capable} unique={unique} view={view:?} writable={writable}: {result:?}");
+                    }
+                    let view = unsafe { budget.native_memory.residents.read_reference(source, &weak, false) }.unwrap().unwrap();
+                    assert!(matches!(&view, VmValue::Reference { referent, unique: false, .. } if referent == &weak));
+                    let destination = unsafe { slots.as_mut_ptr().add(1).cast() };
+                    unsafe { budget.native_memory.residents.write_reference(destination, &view, false, true) }.unwrap();
+                    assert!(unsafe { budget.native_memory.residents.read_reference(destination, &weak, false) }.is_ok());
+                    assert!(unsafe { budget.native_memory.residents.read_reference(destination, &strong, false) }.is_err(),
+                        "re-encoding a weakened view cannot recover the backing owner's stronger permissions");
+                    assert!(unsafe { budget.native_memory.residents.read_reference(destination, &weak, true) }.is_err());
+                    live.set(false);
+                    owner.retire();
+                    assert!(unsafe { budget.native_memory.residents.read_reference(destination, &weak, false) }.is_err());
+                    budget.native_memory.residents.clear(slots.as_ptr().addr(), std::mem::size_of_val(&slots));
+                }
+            }
+        }
     }
 
     #[test]

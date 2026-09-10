@@ -1354,3 +1354,42 @@ and generated native execution. It does not prove the behavior of an abstract
 callable parameter or repair an incompatible tail ABI. Verifier generation 39
 records the changed proof contract; runtime storage and portable instruction
 encoding are unchanged.
+
+## Shared ordinary and tail invocation ABIs
+
+Runtime MIR direct and mandatory-tail calls use one representation-compatibility
+rule for parameters and normal results. Source/Core retain semantic contract
+authority; different erased environment refinements do not change a callable's
+resident ABI. The earlier tail-only exact type equality is removed.
+
+The receiving executable verifier independently applies the same call relation
+to ordinary result slots and inherited tail continuations. One target-local
+generic substitution must satisfy every parameter and the normal destination.
+Callable receiver permissions follow variance: arguments and nested callable
+inputs have opposite directions, results preserve supplied capabilities, and
+mutable referents remain invariant. Safety, effects, arity and operation
+specialization retain their existing checks. Numeric generic indices belonging
+to different activations do not become the same binder.
+
+A terminal target supplies no normal payload; a returning target cannot inherit
+a continuation declared terminal. Mandatory transfer still requires its exact
+frame-independence, handler, capture and execution-safety proofs. Signature
+compatibility does not discharge these control and storage obligations. Decoding
+reconstructs this ABI proof, and no source annotation supplies executable
+callable permission. Native packet and resident representations are unchanged.
+
+Native reference authentication retains the same backing origin and logical
+projection while constructing the requested shared view. View formation, byte
+admission and re-encoding use the existing scoped receiver relation, not generic
+inference or a new storage layout. VM borrowing of native-backed residents
+consumes the same rule and retains the requested view through reborrowing.
+Mutable referents stay invariant, and a weakened re-encoded view cannot recover
+the origin's stronger permissions.
+Generated reborrowing delegates origin/type/initialization checks to that shared
+producer; its redundant exact-layout check is removed. Frame expiry, pointer
+identity, initialization and partial-byte-write revocation remain independent.
+
+This repairs the stateless-callable tail ABI regression, not preservation after
+an abstract callback invocation or full tail fusion. Verifier generation 40 and
+cache generation 131 record the corrected boundary. Full library minimum-use,
+guarded resource contracts, native handlers and self-hosting remain open.

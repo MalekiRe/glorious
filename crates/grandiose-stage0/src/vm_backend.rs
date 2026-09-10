@@ -3995,20 +3995,10 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
             if let VmInstruction::TailCallOwned { callee, arguments } = instruction {
                 let target = program.functions.get(callee)
                     .ok_or(VmArtifactError::MissingFunction { definition: *callee })?;
-                let source_result = declared_result(function)?;
-                let target_result = declared_result(target)?;
-                let compatible_result = match (source_result, target_result) {
-                    (Some((_, _)), Some((_, false))) => true,
-                    (Some((source, true)), Some((target, true))) => source == target,
-                    _ => false,
-                };
-                if target.captures != 0 || target.parameters as usize != arguments.len()
-                    || !compatible_result
-                    || (target.safety == Safety::Unsafe && !function.unsafe_execution)
-                    || arguments.iter().enumerate().any(|(index, argument)|
-                        function.registers.get(*argument as usize) != target.registers.get(index)) {
+                if target.safety == Safety::Unsafe && !function.unsafe_execution {
                     return Err(VmArtifactError::MalformedEncoding { message: "mandatory tail target has an incompatible activation-transfer ABI" });
                 }
+                verify_direct_call_abi(function, target, arguments, DirectCallResult::CallerContinuation)?;
             }
             if let VmInstruction::CallOwned { dst, callee, arguments }
             | VmInstruction::Call {
@@ -4022,64 +4012,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                         definition: *callee,
                     });
                 };
-                if target.captures != 0 {
-                    return Err(VmArtifactError::CallArity {
-                        expected: 0,
-                        found: target.captures,
-                    });
-                }
-                if target.parameters != arguments.len() as u32 {
-                    return Err(VmArtifactError::CallArity {
-                        expected: target.parameters,
-                        found: arguments.len() as u32,
-                    });
-                }
-                let mut generic_bindings = BTreeMap::new();
-                for (index, argument) in arguments.iter().enumerate() {
-                    let expected = register_type(target, index as u32)?;
-                    let found = register_type(function, *argument)?;
-                    if !unify_call_type(&expected, &found, &mut generic_bindings) {
-                        return Err(VmArtifactError::TypeMismatch {
-                            register: *argument,
-                            expected,
-                            found,
-                        });
-                    }
-                }
-                let found = register_type(function, *dst)?;
-                // A non-returning target has no normal edge on which `dst`
-                // becomes observable. Its source callable may have been
-                // bottom-coerced at the call site, so only the sealed control
-                // declaration (not a synthetic Unit runtime leaf) decides
-                // whether the ordinary result equality is required.
-                let target_returns = declared_result(target)?
-                    .map(|(_, returns)| returns)
-                    .unwrap_or(true);
-                let declared_return = return_type(target)?;
-                // Constructors such as `vec_new<T>()` have no value argument
-                // from which to infer `T`: their destination is the only
-                // concrete part of the call ABI.  Treat it as an additional
-                // unification site, just as ordinary parameters are.  This
-                // also rejects an artifact whose arguments and destination
-                // demand incompatible specializations of the same binder.
-                if target_returns
-                    && !unify_call_type_variance(&declared_return, &found, &mut generic_bindings, ReceiverVariance::Contravariant)
-                {
-                    return Err(VmArtifactError::TypeMismatch {
-                        register: *dst,
-                        expected: declared_return,
-                        found,
-                    });
-                }
-                verify_effect_operation_specialization(target, &generic_bindings)?;
-                let expected = instantiate_vm_type(&declared_return, &generic_bindings);
-                if target_returns && !vm_type_matches(&expected, &found) {
-                    return Err(VmArtifactError::TypeMismatch {
-                        register: *dst,
-                        expected,
-                        found,
-                    });
-                }
+                verify_direct_call_abi(function, target, arguments, DirectCallResult::Register(*dst))?;
             }
             if let VmInstruction::MakeCallable {
                 dst,
@@ -4214,6 +4147,75 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Tail activation transfer inherits a continuation instead of allocating a
+/// local result slot. This changes control, not the target's value ABI.
+#[derive(Clone, Copy)]
+enum DirectCallResult {
+    Register(u32),
+    CallerContinuation,
+}
+
+fn verify_direct_call_abi(
+    caller: &VmFunction,
+    target: &VmFunction,
+    arguments: &[u32],
+    result: DirectCallResult,
+) -> Result<(), VmArtifactError> {
+    if target.captures != 0 {
+        return Err(VmArtifactError::CallArity { expected: 0, found: target.captures });
+    }
+    if target.parameters as usize != arguments.len() {
+        return Err(VmArtifactError::CallArity {
+            expected: target.parameters, found: arguments.len() as u32,
+        });
+    }
+    let mut generic_bindings = BTreeMap::new();
+    for (index, argument) in arguments.iter().enumerate() {
+        let expected = register_type(target, index as u32)?;
+        let found = register_type(caller, *argument)?;
+        if !unify_call_type(&expected, &found, &mut generic_bindings) {
+            return Err(VmArtifactError::TypeMismatch { register: *argument, expected, found });
+        }
+    }
+    let target_result = declared_result(target)?;
+    let found = match result {
+        DirectCallResult::Register(register) => register_type(caller, register)?,
+        DirectCallResult::CallerContinuation => match (declared_result(caller)?, target_result) {
+            // A terminal target has no normal payload. A returning target
+            // still cannot inherit a continuation declared non-returning.
+            (Some((source, _)), Some((_, false)))
+            | (Some((source, true)), Some((_, true))) => source.clone(),
+            _ => return Err(VmArtifactError::MalformedEncoding {
+                message: "mandatory tail target has an incompatible activation-transfer ABI",
+            }),
+        },
+    };
+    let mismatch = |expected, found| match result {
+        DirectCallResult::Register(register) => VmArtifactError::TypeMismatch { register, expected, found },
+        DirectCallResult::CallerContinuation => VmArtifactError::MalformedEncoding {
+            message: "mandatory tail target has an incompatible activation-transfer ABI",
+        },
+    };
+    // Only the sealed control declaration, not a synthetic Unit leaf,
+    // determines whether a bottom-coerced call supplies a normal result.
+    let target_returns = target_result.map(|(_, returns)| returns).unwrap_or(true);
+    let declared_return = return_type(target)?;
+    // Inputs and the destination constrain the same target-local binders.
+    // The destination can be the only evidence for a zero-input constructor.
+    // Reverse receiver variance because the target supplies this value.
+    if target_returns && !unify_call_type_variance(
+        &declared_return, &found, &mut generic_bindings, ReceiverVariance::Contravariant,
+    ) {
+        return Err(mismatch(declared_return, found));
+    }
+    verify_effect_operation_specialization(target, &generic_bindings)?;
+    let expected = instantiate_vm_type(&declared_return, &generic_bindings);
+    if target_returns && !vm_type_matches(&expected, &found) {
+        return Err(mismatch(expected, found));
     }
     Ok(())
 }
@@ -4496,6 +4498,15 @@ fn receiver_types_match(expected: &VmType, actual: &VmType, variance: ReceiverVa
     let mut bindings = BTreeMap::new();
     unify_call_type_variance(expected, actual, &mut bindings, variance)
         && bindings.iter().all(|(index, value)| *value == VmType::Generic(*index))
+}
+
+/// A shared view may forget callable permissions, while writable referents
+/// remain invariant. Concrete storage views do not infer generic arguments
+/// or change the backing origin's layout. VM borrowing and native reference
+/// byte admission consume this same relation.
+fn reference_view_matches(expected: &VmType, actual: &VmType, unique: bool) -> bool {
+    receiver_types_match(expected, actual,
+        if unique { ReceiverVariance::Invariant } else { ReceiverVariance::Covariant })
 }
 
 /// Match a callee-side type against one caller-side type while collecting the
@@ -10705,18 +10716,18 @@ fn borrow_value(
         path.extend_from_slice(fields);
         if let ReferenceTarget::Home(home) = target {
             let (_, layout) = home.project(&path)?;
-            if layout.ty != *declared_referent {
+            if !reference_view_matches(declared_referent, &layout.ty, unique) {
                 return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: layout.ty.clone() });
             }
-            return Ok(VmValue::Reference { target: target.clone(), fields: path.into(), unique, referent: layout.ty.clone() });
+            return Ok(VmValue::Reference { target: target.clone(), fields: path.into(), unique, referent: declared_referent.clone() });
         }
         if let ReferenceTarget::Native(native) = target {
             let projected = native.project(&path)?;
             let referent = projected.ty().clone();
-            if referent != *declared_referent {
+            if !reference_view_matches(declared_referent, &referent, unique) {
                 return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: referent });
             }
-            return Ok(VmValue::Reference { target: ReferenceTarget::Native(projected), fields: Arc::from([]), unique, referent });
+            return Ok(VmValue::Reference { target: ReferenceTarget::Native(projected), fields: Arc::from([]), unique, referent: declared_referent.clone() });
         }
         let referent = if fields.is_empty() {
             parent_referent.clone()
@@ -10740,10 +10751,10 @@ fn borrow_value(
     if let VmValue::Resident(home) = value {
         let (_, layout) = home.project(fields)?;
         if !unique && !home.is_initialized(fields) { return Err(VmArtifactError::UseAfterMove { register: source }); }
-        if layout.ty != *declared_referent {
+        if !reference_view_matches(declared_referent, &layout.ty, unique) {
             return Err(VmArtifactError::ResultType { expected: declared_referent.clone(), found: layout.ty.clone() });
         }
-        return Ok(VmValue::Reference { target: ReferenceTarget::Home(home.clone()), fields: fields.to_vec().into(), unique, referent: layout.ty.clone() });
+        return Ok(VmValue::Reference { target: ReferenceTarget::Home(home.clone()), fields: fields.to_vec().into(), unique, referent: declared_referent.clone() });
     }
     Ok(VmValue::Reference {
         target: ReferenceTarget::Register(source),

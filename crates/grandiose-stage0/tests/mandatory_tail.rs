@@ -269,6 +269,34 @@ fn mandatory_tail_transfers_incoming_borrows_and_nested_carriers() {
 }
 
 #[test]
+fn mandatory_tail_callable_abi_executes_in_generated_native_code() {
+    for source in [
+        "fn apply(callback: () -> i64) -> i64 { callback() }
+         pub fn main() -> i64 { tail apply(() -> i64 { 42 }) }",
+        "fn apply(callback: () -> i64) -> i64 { callback() }
+         pub fn main() -> i64 { let answer = 42; let callback = () -> i64 { answer }; tail apply(callback) }",
+        "fn apply(callback: () -> i64) -> i64 { callback() }
+         fn relay(value: &i64) -> i64 { let callback = move (value) { *value }; tail apply(callback) }
+         pub fn main() -> i64 { let answer = 42; relay(&answer) }",
+        "fn apply(pair: (() -> i64, i64)) -> i64 { let (callback, extra) = pair; callback() + extra }
+         pub fn main() -> i64 { tail apply((() -> i64 { 40 }, 2)) }",
+        "fn make() -> () -> i64 { () -> i64 { 42 } }
+         fn relay() -> () -> i64 { tail make() }
+         pub fn main() -> i64 { let callback = relay(); callback() }",
+    ] {
+        for optimization in [0, 2] {
+            let artifact = compile_at(source, &optimization.to_string())
+                .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+            let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+            for artifact in [&artifact, &decoded] {
+                assert_eq!(artifact.run_i64().unwrap(), 42, "{source}");
+            }
+            assert_eq!(run_native(source, optimization), 42, "{source}");
+        }
+    }
+}
+
+#[test]
 fn mandatory_tail_does_not_promote_local_borrows_at_alias_or_join_boundaries() {
     for source in [
         "fn read(value: &i64) -> i64 { *value }

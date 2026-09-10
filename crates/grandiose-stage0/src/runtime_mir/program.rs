@@ -213,10 +213,7 @@ impl RuntimeProgram {
             for block in &function.blocks {
                 if let RuntimeTerminator::TailCall { callee, arguments } = &block.terminator {
                     let target = self.functions.get(callee).ok_or_else(|| RuntimeError("mandatory tail target is missing".into()))?;
-                    if target.captures != 0 || (target.result != Type::Never && target.result != function.result)
-                        || arguments.len() != target.parameters.len()
-                        || arguments.iter().zip(&target.parameters).any(|(argument, parameter)|
-                            function.locals[argument.0 as usize].ty != target.locals[parameter.0 as usize].ty)
+                    if !direct_call_abi_matches(function, target, arguments, &function.result)
                         || (target.safety == Safety::Unsafe && !function.unsafe_execution) {
                         return Err(RuntimeError("mandatory tail activation-transfer ABI mismatch".into()));
                     }
@@ -242,23 +239,9 @@ impl RuntimeProgram {
                     } = operation
                         && let Some(target) = self.functions.get(callee)
                     {
-                        if target.captures != 0
-                            || arguments.len() != target.parameters.len()
-                            || arguments.iter().zip(&target.parameters).any(
-                                |(argument, parameter)| {
-                                    !crate::control_mir::call_type_matches(
-                                        &target.locals[parameter.0 as usize].ty,
-                                        &function.locals[argument.0 as usize].ty,
-                                    )
-                                },
-                            )
-                            // A diverging target has no normal result to
-                            // inhabit the caller's otherwise-typed slot.
-                            || (target.result != Type::Never
-                                && !crate::control_mir::call_type_matches(
-                                    &target.result,
-                                    &function.locals[dst.0 as usize].ty,
-                                ))
+                        if !direct_call_abi_matches(
+                            function, target, arguments, &function.locals[dst.0 as usize].ty,
+                        )
                         {
                             return Err(RuntimeError(format!(
                                 "Runtime direct call ABI disagrees with its target: {definition:?} -> {callee:?}; arguments {:?}, parameters {:?}; result {:?}, expected {:?}",
@@ -402,6 +385,29 @@ impl RuntimeProgram {
         }
         Ok(())
     }
+}
+
+/// Ordinary and activation-transferring calls share one representation ABI.
+/// Source/Core establish semantic contract compatibility; the receiving VM
+/// independently checks the retained callable permissions and substitutions.
+fn direct_call_abi_matches(
+    caller: &RuntimeMir,
+    target: &RuntimeMir,
+    arguments: &[MirLocal],
+    result: &Type,
+) -> bool {
+    target.captures == 0
+        && arguments.len() == target.parameters.len()
+        && arguments.iter().zip(&target.parameters).all(|(argument, parameter)| {
+            crate::control_mir::call_type_matches(
+                &target.locals[parameter.0 as usize].ty,
+                &caller.locals[argument.0 as usize].ty,
+            )
+        })
+        // A diverging target never supplies the caller's result slot or
+        // inherited continuation, regardless of its otherwise-declared type.
+        && (target.result == Type::Never
+            || crate::control_mir::call_type_matches(&target.result, result))
 }
 
 fn constant_cycle(

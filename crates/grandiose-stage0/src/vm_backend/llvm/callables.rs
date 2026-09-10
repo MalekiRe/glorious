@@ -153,13 +153,11 @@ impl<'a> CallableContext<'a> {
                     };
                     (target, fields.clone())
                 };
-                let (_, layout) = target.native_project(&path)?;
                 // Formation is not a value read. Unique handles can restore an
                 // absent resident; shared handles require its shell, not every
-                // descendant. Actual dereferences/patterns check their reads.
-                if layout.ty != **referent || (!unique && !target.native_initialized(&path, false)) {
-                    return Err(invalid("generated borrow names an absent or differently typed referent"));
-                }
+                // descendant. The shared origin producer checks this view
+                // against the actual backing layout and initialization; a
+                // reborrow can retain a previously weakened shared view.
                 let value = VmValue::Reference { target, fields: path.into(), unique: *unique, referent: (**referent).clone() };
                 unsafe { (&*self.budget).native_memory.residents.write_reference(result, &value, false, false)?; }
                 Ok(())

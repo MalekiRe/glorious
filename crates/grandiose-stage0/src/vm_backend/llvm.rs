@@ -413,6 +413,82 @@ mod tests {
     use crate::vm_backend::{VmFunction, VmInstruction as I, VmNominalCopyDescriptor, verify_program};
 
     #[test]
+    fn native_tail_callable_variance_preserves_nested_arguments_and_results() {
+        let key = |name: &str| DefKey(Digest::of_bytes(name.as_bytes()));
+        let entry = key("native-tail-variance-entry");
+        let relay = key("native-tail-variance-relay");
+        let forward = key("native-tail-variance-forward");
+        let answer = key("native-tail-variance-answer");
+        let callable = |capable| VmType::Callable {
+            shared_receiver: capable, unique_receiver: capable, safety: crate::Safety::Safe,
+            parameters: vec![], result: Box::new(VmType::I64), effects: Default::default(),
+        };
+        let strong = callable(true);
+        let weak = callable(false);
+        let product = |value| VmType::Tuple(vec![value]);
+        let reference = |value| VmType::Reference { unique: false, referent: Box::new(product(value)) };
+        let function = |definition, parameters, registers, instructions| VmFunction {
+            definition, parameters, registers, instructions, safety: crate::Safety::Safe,
+            unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0,
+        };
+        let mut candidate = CandidateVmProgram {
+            schema: crate::STAGE0_VM_SCHEMA, runtime_manifest: None, host_capabilities: vec![], entry,
+            callable_environments: Default::default(), fingerprint: Digest::of_bytes(b"unsealed-tail-variance"),
+            functions: BTreeMap::from([
+                (entry, function(entry, 0,
+                    vec![strong.clone(), product(strong.clone()), reference(strong.clone()), weak.clone(), VmType::I64],
+                    vec![
+                        I::DeclareResult { result: VmType::I64, returns: true },
+                        I::MakeCallable { dst: 0, callee: answer, captures: vec![], environment: None },
+                        I::MakeTupleOwned { dst: 1, fields: vec![0] },
+                        I::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: false },
+                        I::CallOwned { dst: 3, callee: relay, arguments: vec![2] },
+                        I::CallIndirectOwned { dst: 4, callee: 3, arguments: vec![] },
+                        I::Return { value: 4 },
+                    ])),
+                (relay, function(relay, 1, vec![reference(strong.clone())], vec![
+                    I::DeclareResult { result: weak.clone(), returns: true },
+                    // One edge weakens nested argument capabilities and the
+                    // returned callable in opposite directions. The actual
+                    // payload is read by the destination, not just forwarded.
+                    I::TailCallOwned { callee: forward, arguments: vec![0] },
+                ])),
+                (forward, function(forward, 1,
+                    vec![reference(weak.clone()), product(weak.clone()), weak.clone(), VmType::I64, strong.clone(),
+                        VmType::Reference { unique: false, referent: Box::new(weak.clone()) }, weak, VmType::I64],
+                    vec![
+                        I::DeclareResult { result: strong, returns: true },
+                        I::DerefCopy { dst: 1, reference: 0 },
+                        I::TakeProjection { dst: 2, base: 1, fields: vec![0] },
+                        I::CallIndirectOwned { dst: 3, callee: 2, arguments: vec![] },
+                        I::Borrow { dst: 5, src: 0, fields: vec![0], unique: false, reborrow: true },
+                        I::DerefCopy { dst: 6, reference: 5 },
+                        I::CallIndirectOwned { dst: 7, callee: 6, arguments: vec![] },
+                        I::MakeCallable { dst: 4, callee: answer, captures: vec![], environment: None },
+                        I::Return { value: 4 },
+                    ])),
+                (answer, function(answer, 0, vec![VmType::I64], vec![
+                    I::DeclareResult { result: VmType::I64, returns: true },
+                    I::ConstI64 { dst: 0, value: 42 }, I::Return { value: 0 },
+                ])),
+            ]),
+        };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        let verified = verify_program(candidate).unwrap();
+        assert_eq!(verified.run_i64().unwrap(), 42);
+        assert_eq!(crate::decode_and_verify_program(&verified.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        for vm_functions in [BTreeSet::new(), BTreeSet::from([forward])] {
+            let ir = LlvmIrProgram::lower_partitioned(verified.clone(), Digest::of_bytes(b"native-tail-variance"),
+                LlvmTarget::host().unwrap(), vm_functions).unwrap();
+            for optimization in [0, 2] {
+                // SAFETY: only this locally authored and verified graph is executed.
+                let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+            }
+        }
+    }
+
+    #[test]
     fn native_leave_transfers_initialization_without_reviving_moved_fields() {
         let entry = DefKey(Digest::of_bytes(b"native-owned-leave-initialization"));
         let tuple = VmType::Tuple(vec![VmType::I64, VmType::I64]);
