@@ -265,6 +265,8 @@ impl Builder<'_> {
     fn place(&self, place: &EvaluationPlace, names: &BTreeMap<String, ControlValue>) -> Result<ControlPlace, ControlError> {
         let lookup = |value| self.mapped.get(&value).copied().ok_or_else(|| ControlError::Invalid("missing place operand".into()));
         Ok(match place {
+            EvaluationPlace::Resumption { id, .. } => ControlPlace::Local(*self.active_resumptions.get(id)
+                .ok_or_else(|| ControlError::Invalid("resumption place outside its lexical clause".into()))?),
             EvaluationPlace::Local { name, .. } => ControlPlace::Local(*names.get(name)
                 .ok_or_else(|| ControlError::Invalid(format!("unbound place {name}")))?),
             EvaluationPlace::Temporary { value, .. } => ControlPlace::Temporary(lookup(*value)?),

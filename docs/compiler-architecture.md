@@ -1690,3 +1690,33 @@ one input capability, with no helper-local active delimiter around it. Ordered
 multiple invocations, borrowed capability storage and arbitrary recursive helper
 proofs remain open. Missing evidence rejects; an unordered may-call set cannot
 certify replay counts or delimiter order.
+
+## Branded resumption places and directional quantity views
+
+Evaluation MIR retains a resumption place's lexical identity and complete
+contract. Its receiving validator checks them against the active binder before
+Control MIR resolves the actual token slot. PlaceFlow's existing projection and
+loan liveness rules classify that binder as storage; escape consumes the same
+checked borrow product. Borrowing no longer invents a temporary source owner
+which later aliases the binder's slot and collides with its lifetime identity.
+
+The executable resident domain retains possible control contents in a borrowed
+view without granting owned invocation authority. Shared exposure preserves the
+source's exact token; writable exposure revokes it. Existing reference-origin
+mutation and handler-expiry rules remain required. Noninvoking checked helpers
+can receive the shared handle, but borrowed invocation and arbitrary writable
+control transport are not established by this proof.
+
+Elaboration keeps directional invocation comparison views separate from actual
+argument and transfer value contracts. Contextual rewriting of a reusable named
+function does not apply to a lexical resumption. A helper's one-shot parameter
+must not rewrite an optional binder's `[0,1]` value into `[1,1]`.
+
+Cache 140 and verifier 43 record these boundaries; bytecode 72 and native ABI 14
+are unchanged. The shared-borrow helper regression passes fresh/decoded VM and
+native/mixed O0/O2, with forged place identity/type and writable-exposure rejection.
+Optional helper cancellation now passes Core but remains an active executable
+policy failure. Repeated ordinary helper calls still expose premature replay
+owner consumption. Both regressions remain preserved; ordered replay, dynamic
+cancellation, mandatory-tail handler fusion and full zero-marshalling acceptance
+are not complete.

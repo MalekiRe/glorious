@@ -5,6 +5,32 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 140: branded resumption borrowing and actual value quantities
+
+Borrowed resumptions now name the actual lexical binder's storage through an
+explicit Evaluation MIR place, independently validated by identity, name and
+complete type. PlaceFlow projects the same source owner and retains its uses
+for loan liveness. Control lowering no longer pairs a temporary and binder with
+one runtime slot. The executable verifier preserves the source token across
+shared exposure, while the handle itself carries no owned invocation proof;
+writable exposure still invalidates the source proof.
+
+The noninvoking shared-borrow helper passes fresh/decoded VM, all-native and both
+mixed partitions at O0/O2. A modified decoded graph keeps its ABI consistent
+while changing exposure to writable and rejects the subsequent invocation.
+Evaluation MIR mutation checks reject wrong borrowed brands, names and types.
+The focused Core regression proves that a helper parameter's invocation view
+does not rewrite an optional resumption's original value quantity.
+
+Two newly preserved execution regressions remain failing: optional cancellation
+inside a helper now reaches `HandlerResumeUnavailable` after Core succeeds;
+repeated ordinary helper calls consume a replay owner prematurely in Ownership
+MIR. This checkpoint does not claim either passes. General borrowed invocation,
+ordered replay helper proofs, dynamic cancellation, mandatory-tail handler fusion
+and zero-marshalling/performance acceptance remain open. Cache 140 and verifier
+43 change; portable bytecode 72 and native ABI 14 do not. Unrelated nominal-layout
+work remains outside this checkpoint.
+
 ## Cache 139: checked resumption transport through ordinary helpers
 
 The executable control verifier derives symbolic caller-input and normal-result

@@ -67,6 +67,11 @@ pub struct EvaluationRegionId(pub u32);
 /// explicit, but projecting or borrowing the place does not consume its root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvaluationPlace {
+    Resumption {
+        id: ResumptionId,
+        name: String,
+        ty: Type,
+    },
     Local {
         name: String,
         ty: Type,
@@ -365,6 +370,14 @@ impl EvaluationMir {
                     return Err(EvaluationError("completion is not attached to its direct operation handler".into()));
                 }
                 for operand in &instruction.operands {
+                    if let EvaluationOperand::Place(place) = operand {
+                        let mut root = place;
+                        while let EvaluationPlace::Field { base, .. } = root { root = base; }
+                        if let EvaluationPlace::Resumption { id, name, ty } = root
+                            && resumptions.get(name) != Some(&(*id, ty.clone())) {
+                            return Err(EvaluationError("resumption place differs from its active lexical binder and contract".into()));
+                        }
+                    }
                     let mut dependencies = vec![];
                     operand.dependencies(&mut dependencies);
                     if dependencies.iter().any(|value| !available.contains(value)) {
@@ -463,7 +476,7 @@ impl EvaluationOperand {
 impl EvaluationPlace {
     fn dependencies(&self, result: &mut Vec<EvaluationValue>) {
         match self {
-            Self::Local { .. } => {}
+            Self::Local { .. } | Self::Resumption { .. } => {}
             Self::Temporary { value, .. } => result.push(*value),
             Self::Field { base, .. } => base.dependencies(result),
             Self::Deref { reference, .. } => result.push(*reference),
@@ -614,6 +627,28 @@ mod tests {
         };
         mir.regions.extend([computation, arm]);
         mir.validate().unwrap();
+        let mut borrowed = mir.clone();
+        let reference = &mut borrowed.regions[2].instructions[0];
+        let ty = reference.ty.clone();
+        reference.operation = EvaluationOperation::Borrow { unique: false };
+        reference.ty = Type::Reference { mutability: crate::Mutability::Shared,
+            lifetime: crate::Lifetime::Elided, referent: Box::new(ty.clone()) };
+        reference.operands = vec![EvaluationOperand::Place(EvaluationPlace::Resumption {
+            id: identity, name: "resume".into(), ty,
+        })];
+        borrowed.validate().unwrap();
+        for mutation in 0..3 {
+            let mut forged = borrowed.clone();
+            let EvaluationOperand::Place(EvaluationPlace::Resumption { id, name, ty }) =
+                &mut forged.regions[2].instructions[0].operands[0] else { panic!() };
+            match mutation {
+                0 => *id = ResumptionId(8),
+                1 => *name = "different".into(),
+                _ => *ty = Type::Unit,
+            }
+            assert!(forged.validate().is_err());
+            assert!(crate::control_mir::ControlMir::lower(&forged).is_err());
+        }
         for mutation in 0..5 {
             let mut forged = mir.clone();
             match mutation {
@@ -919,6 +954,9 @@ impl Builder<'_> {
     ) -> Result<Option<EvaluationPlace>, EvaluationError> {
         let expression = self.body.expression(id);
         Ok(match &expression.kind {
+            CoreKind::Resumption { id, name } => Some(EvaluationPlace::Resumption {
+                id: *id, name: name.clone(), ty: expression.ty.clone(),
+            }),
             CoreKind::Local(name) => Some(EvaluationPlace::Local {
                 name: name.clone(),
                 ty: expression.ty.clone(),

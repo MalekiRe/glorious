@@ -2275,7 +2275,7 @@ impl Analyzer<'_> {
     fn collect_local_uses(&self, id: CoreId, uses: &mut BTreeSet<String>) {
         match &self.body.expression(id).kind {
             CoreKind::ConstValue(_) => {},
-            CoreKind::Local(name) => {
+            CoreKind::Local(name) | CoreKind::Resumption { name, .. } => {
                 uses.insert(name.clone());
             }
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
@@ -2349,7 +2349,6 @@ impl Analyzer<'_> {
                 self.collect_local_uses(*body, uses)
             }
             CoreKind::Literal(_)
-            | CoreKind::Resumption { .. }
             | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
@@ -2849,7 +2848,7 @@ impl Analyzer<'_> {
 
     fn projection(&self, id: CoreId) -> Option<Projection> {
         let projection = match &self.body.expression(id).kind {
-            CoreKind::Local(name) => Some(Projection {
+            CoreKind::Local(name) | CoreKind::Resumption { name, .. } => Some(Projection {
                 root: self.resolve_name(name),
                 fields: vec![],
             }),

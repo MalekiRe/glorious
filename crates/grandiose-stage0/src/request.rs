@@ -355,7 +355,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // fusion compares physical invocation inputs with their instantiated contracts.
 // Cache 139 checks quantity execution for capability-consuming helpers and
 // derives resumption input/result contracts from the complete executable batch.
-pub const STAGE0_CACHE_GENERATION: u32 = 139;
+// Cache 140 retains actual resumption value quantities and branded borrow places.
+pub const STAGE0_CACHE_GENERATION: u32 = 140;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -376,7 +377,8 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // distinguishes prior address exposure from a borrow that has not executed.
 // Verifier 42 authenticates scoped resumption transport and single invocation
 // through checked ordinary helper bodies, including guaranteed-use branches.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 42;
+// Verifier 43 preserves exact source tokens across read-only borrowed exposure.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 43;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

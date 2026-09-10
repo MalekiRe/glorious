@@ -1188,7 +1188,7 @@ impl Analyzer<'_> {
 
     fn place_root(&mut self, id: CoreId) -> Option<String> {
         match &self.body.expression(id).kind {
-            CoreKind::Local(name) => Some(name.clone()),
+            CoreKind::Local(name) | CoreKind::Resumption { name, .. } => Some(name.clone()),
             CoreKind::Field { base, .. } => self.place_root(*base),
             // Reborrowing `&*parent` retains the parent loan's origin; the
             // dereference is a place projection, not a body-local temporary.

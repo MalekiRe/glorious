@@ -8445,11 +8445,15 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*src as usize];
-                // A borrowed view may subsequently observe replacement of
-                // this storage. It retains possible control contents, but
-                // cannot certify a particular snapshot identity.
+                // The borrowed view retains possible control contents, not
+                // owned invocation authority. Only writable exposure revokes
+                // the source's exact token: forming a shared view cannot
+                // replace its backing resident. Later writes still invalidate
+                // storage through the ordinary reference-origin rules.
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize].opaque();
-                states.resumptions[*src as usize] = states.resumptions[*src as usize].opaque();
+                if *unique {
+                    states.resumptions[*src as usize] = states.resumptions[*src as usize].opaque();
+                }
                 states.reference_origins[*dst as usize] = if *reborrow {
                     states.reference_origins[*src as usize].clone()
                 } else {

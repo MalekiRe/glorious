@@ -5135,6 +5135,26 @@ fn an_uninvoked_resumption_capture_cannot_discharge_exact_use() {
 }
 
 #[test]
+fn helper_parameter_views_preserve_optional_resumption_value_contracts() {
+    let core = core_for("optional-helper-value-contract@0.1.0", "effect Ask { [0,1] ask() -> i64; }
+        fn choose<F>(task:F, choice:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            handle choice { 0 => 42, _ => task(42) }
+        }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => choose(k,0) } }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let mut count = 0;
+    for expression in &core.expressions {
+        if matches!(expression.kind, CoreKind::Resumption { .. }) {
+            let Type::Callable { invocation, .. } = expression.ty else { panic!() };
+            assert_eq!(invocation, Quantity::AFFINE);
+            count += 1;
+        }
+    }
+    assert_eq!(count, 1);
+}
+
+#[test]
 fn handler_binders_and_resumption_uses_retain_exact_lexical_identities() {
     let source = "effect Ask { [1,1] ask() -> i64; }
         pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer =>

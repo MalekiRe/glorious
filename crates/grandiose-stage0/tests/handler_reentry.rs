@@ -104,6 +104,60 @@ fn ordinary_helpers_return_resumption_products_to_their_live_owner() {
 }
 
 #[test]
+fn replay_resumptions_cross_multiple_ordinary_helper_calls() {
+    candidate("effect Ask { [2,2] ask() -> i64; }
+        fn apply<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { task(value) }
+        pub fn main() -> i64 { handle Ask::ask() {
+            value => value + 1, Ask::ask() with k => apply(k,19) + apply(k,21)
+        } }");
+}
+
+#[test]
+fn optional_resumption_cancellation_inside_an_ordinary_helper() {
+    candidate("effect Ask { [0,1] ask() -> i64; }
+        fn choose<F>(task:F, choice:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            handle choice { 0 => 42, _ => task(42) }
+        }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => choose(k,0) } }");
+}
+
+#[test]
+fn borrowed_resumption_handles_can_cross_a_noninvoking_helper() {
+    let mut program = candidate("effect Ask { [1,1] ask() -> i64; }
+        fn observe<T>(value:&T) -> i64 { 2 }
+        pub fn main() -> i64 { handle Ask::ask() {
+            Ask::ask() with k => { let extra = observe(&k); k(40) + extra }
+        } }");
+    // Remove the observer call so that changing the borrow's permission
+    // cannot fail merely because the helper expects a shared parameter.
+    let entry = program.functions.get_mut(&program.entry).unwrap();
+    for instruction in &mut entry.instructions {
+        if let VmInstruction::CallOwned { dst, .. } = instruction {
+            *instruction = VmInstruction::ConstI64 { dst: *dst, value: 2 };
+        }
+    }
+    program.fingerprint = program.computed_fingerprint();
+    verify_vm_program(program.clone()).unwrap();
+    let entry = program.functions.get_mut(&program.entry).unwrap();
+    let (dst, unique) = entry.instructions.iter_mut().find_map(|instruction| match instruction {
+        VmInstruction::Borrow { dst, unique, .. } => Some((*dst, unique)),
+        _ => None,
+    }).unwrap();
+    *unique = true;
+    let borrowed_type = entry.registers[dst as usize].clone();
+    for ty in &mut entry.registers {
+        if *ty == borrowed_type {
+            let VmType::Reference { unique, .. } = ty else { panic!() };
+            *unique = true;
+        }
+    }
+    program.fingerprint = program.computed_fingerprint();
+    let error = verify_vm_program(program.clone()).unwrap_err();
+    assert!(matches!(error, VmArtifactError::HandlerResumeUnavailable), "{error:?}");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&program)).is_err());
+}
+
+#[test]
 fn ordinary_helpers_preserve_completion_abi_and_branch_invocations() {
     candidate("struct Answer { value:i64 } effect Ask { [1,1] ask() -> i64; }
         fn apply<F,R>(task:F, choice:i64) -> R where F:Fn<(i64,),Output=R,Effects={}> {

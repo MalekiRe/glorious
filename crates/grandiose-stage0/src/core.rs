@@ -4499,7 +4499,6 @@ impl Elaborator<'_> {
                 let value = self.expression_expected(value, Some(expected.clone()));
                 let value_type = Self::weaken_nested_callable_invocations(&expected,
                     self.expressions[value.0 as usize].ty.clone());
-                self.expressions[value.0 as usize].ty = value_type.clone();
                 if self
                     .inference
                     .unify(label.result.clone(), value_type)
@@ -5279,6 +5278,9 @@ impl Elaborator<'_> {
         value: CoreId,
         expected: Option<Type>,
     ) -> CoreId {
+        if !matches!(self.expressions[value.0 as usize].kind, CoreKind::Function { .. }) {
+            return value;
+        }
         let Some(Type::Callable {
             invocation: required,
             ..
@@ -10930,7 +10932,8 @@ impl Elaborator<'_> {
                 &parameter,
                 self.inference.zonk(raw_actual.clone()).unwrap_or(raw_actual),
             );
-            self.expressions[argument.0 as usize].ty = actual.clone();
+            // The parameter consumes a directional invocation view; it does
+            // not change the argument's own quantity (or its lexical binder).
             // This is a directional Fn argument view, not nominal equality.
             // Keep the generative type on the value and in inferred generic
             // arguments; only an explicitly structural callable parameter
