@@ -3966,8 +3966,8 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
             }
         }
     }
-    let transfer_proofs = tail_provenance::summaries(
-        &semantics.functions)?;
+    let transfer_proofs = tail_provenance::program_summaries(
+        &semantics.functions, semantics.entry)?;
     let mut intact_captures = BTreeMap::new();
     for function in program.functions.values() {
         let control = verify_function_control(function, true, false, &transfer_proofs)?;
@@ -6163,6 +6163,7 @@ struct VerifierHandlerFrame {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierContinuation {
+    address_exposed: Vec<bool>,
     target: u32,
     dst: u32,
     registers: Vec<Option<bool>>,
@@ -6203,6 +6204,9 @@ struct VerifierPerformed {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
+    /// Addresses exposed on any executed predecessor. Unlike resident
+    /// initialization this history cannot be reset by moving or killing a slot.
+    address_exposed: Vec<bool>,
     /// Exact immediate CFG predecessor, when all paths agree. Adjacency in
     /// the instruction vector alone does not authenticate a runtime probe.
     last_instruction: Option<usize>,
@@ -6461,6 +6465,7 @@ pub(crate) fn infer_function_returns(function: &VmFunction) -> Result<bool, VmAr
 }
 
 struct VerifiedFunctionControl {
+    call_input_behaviors: BTreeMap<DefKey, Vec<tail_provenance::CallableBehavior>>,
     returns: bool,
     result_independent: bool,
     result_destruction_preserving: bool,
@@ -6470,10 +6475,20 @@ struct VerifiedFunctionControl {
 }
 
 fn verify_function_control(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
-    verify_function_control_with_reference_inputs(function, check_return_flag, assume_parameter_destructors, &BTreeSet::new(), false, transfer_proofs)
+    let entry_behaviors = if check_return_flag { transfer_proofs.entry_behaviors.get(&function.definition).map(Vec::as_slice) } else { None };
+    verify_function_control_with_hypotheses(function, check_return_flag, assume_parameter_destructors, &BTreeSet::new(), false, entry_behaviors, transfer_proofs)
 }
 
 fn verify_function_control_with_reference_inputs(function: &VmFunction, check_return_flag: bool, assume_parameter_destructors: bool, referent_only_inputs: &BTreeSet<u32>, assume_parameter_invocations: bool, transfer_proofs: &tail_provenance::TransferProofs) -> Result<VerifiedFunctionControl, VmArtifactError> {
+    verify_function_control_with_hypotheses(function, check_return_flag, assume_parameter_destructors,
+        referent_only_inputs, assume_parameter_invocations, None, transfer_proofs)
+}
+
+fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_flag: bool,
+    assume_parameter_destructors: bool, referent_only_inputs: &BTreeSet<u32>, assume_parameter_invocations: bool,
+    entry_behaviors: Option<&[tail_provenance::CallableBehavior]>, transfer_proofs: &tail_provenance::TransferProofs,
+) -> Result<VerifiedFunctionControl, VmArtifactError> {
+    let mut call_input_behaviors = BTreeMap::new();
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -6561,9 +6576,9 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
         *state = true;
     }
     let mut incoming: VerifierIncoming = vec![BTreeMap::new(); function.instructions.len()];
-    let exposed_storage = tail_provenance::exposed_storage(function);
     if let Some(entry) = incoming.first_mut() {
         entry.insert(VerifierContext::default(), VerifierState {
+            address_exposed: (0..function.registers.len()).map(|index| index < function.parameters as usize).collect(),
             last_instruction: None,
             may_initialized: initial.iter().map(|state| *state == Some(true)).collect(),
             registers: initial,
@@ -6575,9 +6590,11 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
             referent_independent: (0..function.registers.len()).map(|index| index < function.parameters as usize).collect(),
             local_labels: vec![None; function.registers.len()],
             destruction_preserves_frames: (0..function.registers.len())
-                .map(|index| assume_parameter_destructors && index < function.parameters as usize).collect(),
+                .map(|index| (assume_parameter_destructors && index < function.parameters as usize)
+                    || entry_behaviors.and_then(|inputs| inputs.get(index)).is_some_and(|input| input.destruction)).collect(),
             invocation_preserves_frames: (0..function.registers.len())
-                .map(|index| assume_parameter_invocations && index < function.parameters as usize).collect(),
+                .map(|index| (assume_parameter_invocations && index < function.parameters as usize)
+                    || entry_behaviors.and_then(|inputs| inputs.get(index)).is_some_and(|input| input.invocation)).collect(),
             labels: vec![false; function.registers.len()],
             resumptions: vec![ResumptionValue::None; function.registers.len()],
             handlers: Vec::new(),
@@ -6619,12 +6636,16 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
         states.last_instruction = Some(pc);
         let mut advances = true;
         let instruction = &function.instructions[pc];
+        tail_provenance::expose_storage(instruction, &mut states.address_exposed);
         if let Some((target, transferred)) = label_dispatch::transfer(function, instruction, &states, &transfer_proofs.label_dispatches)? {
             propagate_state(&mut incoming, &mut worklist, target, &transferred)?;
             continue;
         }
         let local_label_update = label_dispatch::produced(function, instruction, &states);
         let possible_label_targets = label_dispatch::opaque_targets(function, instruction, &states);
+        if entry_behaviors.is_some() {
+            tail_provenance::observe_call_inputs(function, instruction, &states, &mut call_input_behaviors)?;
+        }
         let (tail_update, preserves_memory, preserves_independent_memory) = tail_provenance::before_instruction(function, instruction, &mut states, transfer_proofs);
         if !preserves_independent_memory { opaque_label_targets.extend(possible_label_targets); }
         preserves_frame_memory &= preserves_memory;
@@ -7698,6 +7719,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: states.local_labels.clone(),
                         destruction_preserves_frames: states.destruction_preserves_frames.clone(),
                         invocation_preserves_frames: states.invocation_preserves_frames.clone(),
+                        address_exposed: states.address_exposed.clone(),
                         labels: states.labels.clone(),
                         resumptions: states.resumptions.clone(),
                         performed: VerifierPerformed {
@@ -7911,6 +7933,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
+                        address_exposed: continuation.address_exposed,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
@@ -7986,6 +8009,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
+                        address_exposed: continuation.address_exposed,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         handlers,
@@ -8116,6 +8140,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
+                        address_exposed: continuation.address_exposed,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
@@ -8172,6 +8197,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     forwarded.local_labels = continuation.local_labels.clone();
                     forwarded.destruction_preserves_frames = continuation.destruction_preserves_frames.clone();
                     forwarded.invocation_preserves_frames = continuation.invocation_preserves_frames.clone();
+                    forwarded.address_exposed = continuation.address_exposed.clone();
                     forwarded.labels = continuation.labels.clone();
                     forwarded.resumptions = continuation.resumptions.clone();
                     for (destination, argument) in outer
@@ -8208,6 +8234,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
+                        address_exposed: continuation.address_exposed,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
                         performed: continuation.performed,
@@ -8993,7 +9020,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 if let Some(VmInstruction::IsInitialized { dst, base, fields }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
                     && dst == condition && previous_instruction == pc.checked_sub(1) {
-                    definitely_empty = fields.is_empty() && !exposed_storage[*base as usize]
+                    definitely_empty = fields.is_empty() && !states.address_exposed[*base as usize]
                         && states.registers[*base as usize] == Some(false);
                     then_states[*base as usize] = Some(true);
                     if fields.is_empty() { else_states[*base as usize] = Some(false); }
@@ -9099,7 +9126,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
     }
     if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
-        Ok(VerifiedFunctionControl { returns: returned.is_some(), result_independent,
+        Ok(VerifiedFunctionControl { call_input_behaviors, returns: returned.is_some(), result_independent,
             result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
             captures_intact_at_boundaries })
     } else {
@@ -9484,6 +9511,7 @@ fn propagate_state(
             changed |= join_verifier_facts(&mut existing.local_labels, &state.local_labels, |left, right| if left == right { left } else { None });
             changed |= join_verifier_facts(&mut existing.destruction_preserves_frames, &state.destruction_preserves_frames, |left, right| left && right);
             changed |= join_verifier_facts(&mut existing.invocation_preserves_frames, &state.invocation_preserves_frames, |left, right| left && right);
+            changed |= join_verifier_facts(&mut existing.address_exposed, &state.address_exposed, |left, right| left || right);
             // Labels/resumptions are capability may-taints, not readability.
             // An arm cannot erase authority carried on another predecessor.
             changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
@@ -9540,6 +9568,7 @@ fn seed_terminal_call_handlers(
             local_labels: terminal.local_labels.clone(),
             destruction_preserves_frames: terminal.destruction_preserves_frames.clone(),
             invocation_preserves_frames: terminal.invocation_preserves_frames.clone(),
+            address_exposed: terminal.address_exposed.clone(),
             labels: terminal.labels.clone(), resumptions: terminal.resumptions.clone(),
             performed: VerifierPerformed { effect: frame.effect, effect_arguments: frame.effect_arguments.clone(),
                 operation: frame.operation, arguments: frame.payload_destinations.clone() },
@@ -18142,6 +18171,32 @@ impl ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exposure_tracks_borrowed_capture_storage_without_resetting_history() {
+        use super::*;
+        let owner = DefKey(Digest::of_bytes(b"capture-exposure-rule"));
+        for mode in [VmCaptureMode::SharedBorrow, VmCaptureMode::UniqueBorrow, VmCaptureMode::Copy, VmCaptureMode::Move] {
+            let mut exposed = vec![false; 3];
+            tail_provenance::expose_storage(&VmInstruction::MakeCallable {
+                dst: 2, callee: owner, captures: vec![0], environment: Some(VmCaptureEnvironment {
+                    owner, callable: 0, instance: None, destructor: None,
+                    captures: vec![VmCapture { mode, ty: VmType::I64 }],
+                }),
+            }, &mut exposed);
+            let borrows = matches!(mode, VmCaptureMode::SharedBorrow | VmCaptureMode::UniqueBorrow);
+            assert_eq!(exposed, [borrows, false, false]);
+            tail_provenance::expose_storage(&VmInstruction::StorageDead { binding: 0, local: 0 }, &mut exposed);
+            assert_eq!(exposed, [borrows, false, false], "ending storage does not retract an escaped address");
+            tail_provenance::expose_storage(&VmInstruction::Borrow { dst: 2, src: 1, fields: vec![], unique: false, reborrow: true }, &mut exposed);
+            assert_eq!(exposed, [borrows, false, false], "reborrowing does not expose the handle's own slot");
+            tail_provenance::expose_storage(&VmInstruction::InstallHandler {
+                effect: owner, effect_arguments: vec![], operation: 0, payload_destinations: vec![],
+                resume_type: VmType::Unit, continuation: VmContinuationPolicy::Consume, target: 0,
+            }, &mut exposed);
+            assert!(exposed.into_iter().all(|value| value), "saved continuations can restore the whole activation");
+        }
+    }
+
     #[test]
     fn vm_identity_rejects_proof_local_universal_regions() {
         let value = super::VmGenericArgument::Lifetime(crate::Lifetime::Placeholder(crate::types::UniversalRegion {

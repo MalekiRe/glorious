@@ -67,6 +67,7 @@ fn mandatory_tail_transfers_generic_callback_results_from_incoming_storage() {
             .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
         assert_eq!(artifact.run_i64().unwrap(), 42);
         assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        assert_eq!(run_native(source, optimization.parse().unwrap()), 42);
     }
 }
 

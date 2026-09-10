@@ -1393,3 +1393,37 @@ This repairs the stateless-callable tail ABI regression, not preservation after
 an abstract callback invocation or full tail fusion. Verifier generation 40 and
 cache generation 131 record the corrected boundary. Full library minimum-use,
 guarded resource contracts, native handlers and self-hosting remain open.
+
+## Executable entry behavior and storage-exposure history
+
+The existing executable control verifier observes destruction and invocation
+behavior at direct call edges before argument consumption or invalidation. The
+program proof closes those incoming must constraints to a greatest fixed point
+and uses them when checking actual direct-only function bodies. All callers must
+agree; recursive propagation cannot retain a property refuted by another caller.
+Program entry, first-class callable targets and executable destructor entry paths
+begin unknown, including captured inputs. Missing indirect-entry evidence never
+becomes a direct-call guarantee.
+
+These entry constraints are distinct from universal helper summaries checked
+under explicit parameter hypotheses. Actual callers cannot establish universal
+result or memory behavior under arbitrary arguments. Decoding reconstructs both
+products from executable semantics; source annotations and stored assertions do
+not certify either proof. Invocation and destruction remain independent facts.
+
+Address exposure is a persistent may fact in that same control state, not a
+whole-body prediction. Executed borrows and borrowed captures expose their source
+storage; reborrowing an existing handle does not expose the handle's own slot.
+Joins union exposure, and moves or storage death never erase escaped-address
+history. Label and saved-continuation capabilities conservatively expose the
+whole activation; snapshots and restorations retain this state. An immediately
+dominating whole-slot initialization probe can prove an uninitialized,
+not-yet-exposed local empty. A future borrow cannot force its initial cleanup
+branch, but any already exposed predecessor keeps the branch conservative.
+
+This replaces the old whole-function exposure scan and repairs the original
+generic callback tail regression through fresh/decoded VM and generated native
+O0/O2. It does not establish general indirect-entry/result provenance, complete
+guarded resource contracts, native handlers, full library acceptance or
+self-hosting. Cache generation 132 and verifier generation 41 record this proof
+boundary; runtime and serialized instruction representations are unchanged.

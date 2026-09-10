@@ -13,6 +13,98 @@ pub(super) struct TransferProofs {
     input_preserving_calls: BTreeMap<DefKey, InputPreservation>,
     pub(super) independent_results: BTreeSet<DefKey>,
     pub(super) preserving_result_destruction: BTreeSet<DefKey>,
+    pub(super) entry_behaviors: BTreeMap<DefKey, Vec<CallableBehavior>>,
+}
+
+/// Independent executable obligations: harmless destruction does not imply
+/// harmless invocation, and neither follows from an empty address graph.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct CallableBehavior {
+    pub(super) destruction: bool,
+    pub(super) invocation: bool,
+}
+
+impl CallableBehavior {
+    fn meet(&mut self, other: Self) {
+        self.destruction &= other.destruction;
+        self.invocation &= other.invocation;
+    }
+}
+
+pub(super) fn observe_call_inputs(
+    function: &VmFunction, instruction: &VmInstruction, states: &VerifierState,
+    observations: &mut BTreeMap<DefKey, Vec<CallableBehavior>>,
+) -> Result<(), VmArtifactError> {
+    let (VmInstruction::Call { callee, arguments, .. }
+        | VmInstruction::CallOwned { callee, arguments, .. }
+        | VmInstruction::TailCallOwned { callee, arguments }) = instruction else { return Ok(()); };
+    let observed = arguments.iter().map(|argument| CallableBehavior {
+        destruction: destruction_preserving(function, states, *argument),
+        invocation: invocation_preserving(function, states, *argument),
+    }).collect::<Vec<_>>();
+    if let Some(previous) = observations.get_mut(callee) {
+        if previous.len() != observed.len() {
+            return Err(VmArtifactError::CallArity { expected: previous.len() as u32, found: observed.len() as u32 });
+        }
+        for (previous, observed) in previous.iter_mut().zip(observed) { previous.meet(observed); }
+    } else { observations.insert(*callee, observed); }
+    Ok(())
+}
+
+/// Close entry hypotheses over all executable incoming edges. Universal
+/// helper summaries remain separate: an actual caller's guarantees
+/// cannot be mistaken for a property under arbitrary helper arguments.
+pub(super) fn program_summaries(functions: &BTreeMap<DefKey, VmFunction>, entry: DefKey)
+    -> Result<TransferProofs, VmArtifactError> {
+    let mut proofs = summaries(functions)?;
+    if !needs_frame_proofs(functions) { return Ok(proofs); }
+    let mut externally_enterable = BTreeSet::from([entry]);
+    for function in functions.values() {
+        for instruction in &function.instructions {
+            match instruction {
+                // A first-class target has entry paths not described by the
+                // direct-call observations. No public input or capture gains
+                // authority from only a subset of its possible invocations.
+                VmInstruction::MakeCallable { callee, environment, .. } => {
+                    externally_enterable.insert(*callee);
+                    externally_enterable.extend(environment.as_ref().and_then(|environment| environment.destructor));
+                }
+                VmInstruction::DeclareFrameCleanup { actions } =>
+                    externally_enterable.extend(actions.iter().map(|action| action.destructor)),
+                VmInstruction::HostCall { resident_operations, .. }
+                | VmInstruction::HostCallOwned { resident_operations, .. } =>
+                    externally_enterable.extend(resident_operations.iter().filter_map(|resident| resident.destructor)),
+                _ => {}
+            }
+        }
+    }
+    proofs.entry_behaviors = functions.iter().map(|(key, function)| {
+        let admitted = !externally_enterable.contains(key);
+        (*key, vec![CallableBehavior { destruction: admitted, invocation: admitted }; function.parameters as usize])
+    }).collect();
+    // Greatest fixed point of must constraints. Every real incoming edge
+    // intersects its target's hypotheses; a recursive SCC cannot retain a
+    // property refuted by any outside caller. Only finitely many bits fall.
+    loop {
+        let mut changed = false;
+        for function in functions.values() {
+            let control = verify_function_control_with_hypotheses(function, false, false,
+                &BTreeSet::new(), false, Some(&proofs.entry_behaviors[&function.definition]), &proofs)?;
+            for (callee, observed) in control.call_input_behaviors {
+                let expected = proofs.entry_behaviors.get_mut(&callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: callee })?;
+                if expected.len() != observed.len() {
+                    return Err(VmArtifactError::CallArity { expected: expected.len() as u32, found: observed.len() as u32 });
+                }
+                for (expected, observed) in expected.iter_mut().zip(observed) {
+                    let previous = *expected;
+                    expected.meet(observed);
+                    changed |= previous != *expected;
+                }
+            }
+        }
+        if !changed { return Ok(proofs); }
+    }
 }
 
 /// Every input requires a frame-independent transitive address graph except
@@ -40,14 +132,18 @@ impl InputPreservation {
     }
 }
 
+fn needs_frame_proofs(functions: &BTreeMap<DefKey, VmFunction>) -> bool {
+    functions.values().any(|function| function.instructions.iter().any(|instruction|
+        matches!(instruction, VmInstruction::TailCallOwned { arguments, .. }
+            if arguments.iter().any(|argument| function.registers.get(*argument as usize)
+                .is_some_and(|ty| !vm_tail_owned_type(ty, &function.nominal_copy_descriptors, &mut vec![]))))))
+}
+
 /// These summaries are recomputed from the program; no producer-supplied
 /// annotation can certify a helper's reference result or memory behavior.
 pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<TransferProofs, VmArtifactError> {
     let label_dispatches = label_dispatch::shims(functions);
-    if !functions.values().any(|function| function.instructions.iter().any(|instruction|
-        matches!(instruction, VmInstruction::TailCallOwned { arguments, .. }
-            if arguments.iter().any(|argument| function.registers.get(*argument as usize)
-                .is_some_and(|ty| !vm_tail_owned_type(ty, &function.nominal_copy_descriptors, &mut vec![])))))) {
+    if !needs_frame_proofs(functions) {
         // Ordinary calls and structurally owned tail carriers do not consume
         // this proof. Avoid re-verifying unrelated programs for an unused fact.
         return Ok(TransferProofs { label_dispatches, ..TransferProofs::default() });
@@ -61,6 +157,7 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
             (*definition, InputPreservation::weakest(function))).collect(),
         independent_results: functions.keys().copied().collect(),
         preserving_result_destruction: functions.keys().copied().collect(),
+        entry_behaviors: BTreeMap::new(),
     };
     let mut callers = BTreeMap::<DefKey, BTreeSet<DefKey>>::new();
     for (caller, function) in functions {
@@ -219,22 +316,26 @@ pub(super) fn referent_independent(function: &VmFunction, states: &VerifierState
         || vm_tail_owned_type(referent, &function.nominal_copy_descriptors, &mut vec![])
 }
 
-/// A never-exposed local slot cannot be revived through an alias. This is a
-/// may fact over the complete body, not an inference from empty loan sets.
-pub(super) fn exposed_storage(function: &VmFunction) -> Vec<bool> {
-    let mut exposed = (0..function.registers.len()).map(|index| index < function.parameters as usize).collect::<Vec<_>>();
-    for instruction in &function.instructions {
-        match instruction {
-            VmInstruction::Borrow { src, reborrow: false, .. } => {
-                if let Some(value) = exposed.get_mut(*src as usize) { *value = true; }
-            }
-            // These capabilities may restore the enclosing register file.
-            VmInstruction::MakeLabel { .. } | VmInstruction::InstallHandler { .. }
-            | VmInstruction::InstallHandlerOwned { .. } | VmInstruction::CaptureResumption { .. } => exposed.fill(true),
-            _ => {}
+/// Exposure is a persistent may fact of executed operations. A later borrow
+/// cannot revive a slot before that borrow has happened, but retiring a
+/// handle does not prove that an already exposed address has no aliases.
+pub(super) fn expose_storage(instruction: &VmInstruction, exposed: &mut [bool]) {
+    match instruction {
+        VmInstruction::Borrow { src, reborrow: false, .. } => {
+            if let Some(value) = exposed.get_mut(*src as usize) { *value = true; }
         }
+        // These capabilities may restore the enclosing register file. All
+        // continuation snapshots therefore retain whole-frame exposure.
+        VmInstruction::MakeLabel { .. } | VmInstruction::InstallHandler { .. }
+        | VmInstruction::InstallHandlerOwned { .. } | VmInstruction::CaptureResumption { .. } => exposed.fill(true),
+        VmInstruction::MakeCallable { captures, environment: Some(environment), .. } => {
+            for (source, capture) in captures.iter().zip(&environment.captures) {
+                if matches!(capture.mode, VmCaptureMode::SharedBorrow | VmCaptureMode::UniqueBorrow)
+                    && let Some(value) = exposed.get_mut(*source as usize) { *value = true; }
+            }
+        }
+        _ => {}
     }
-    exposed
 }
 
 fn contains_no_callable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor], active: &mut Vec<VmType>) -> bool {

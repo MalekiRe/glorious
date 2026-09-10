@@ -5,6 +5,56 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 132 / verifier 41: checked callback entries and executed storage exposure
+
+The original generic fold/callback tail regression now executes in fresh and
+decoded VM and generated native O0/O2. Its source and existing assertions are
+unchanged; generated execution assertions were added. The executable control
+verifier now supplies the actual incoming callable behavior constraints used to
+check direct-only function bodies. Destruction and invocation remain separate
+obligations. Every observed caller intersects the target's hypotheses to a fixed
+point; the program entry, first-class targets and executable destructors retain
+unknown entry behavior. Universal helper summaries remain independent of these
+actual-call guarantees, so one good caller cannot certify arbitrary arguments.
+
+The entry product alone did not repair the original regression: a whole-body
+storage-exposure scan treated a future borrow as already executed, retaining an
+impossible initial cleanup branch whose unknown destructor revoked the callback
+proof. Exposure now lives in the existing control state. Borrowing and borrowed
+captures expose their source slots; joins retain either predecessor's exposure,
+and moves/storage death never retract it. Saved-frame capabilities conservatively
+expose the whole activation. The superseded whole-body scan is removed. The
+existing immediately dominating initialization-probe check remains required.
+
+Verification:
+
+- The unchanged original callback source passes fresh/decoded VM and native
+  O0/O2 (`target/tail-callback-native-source-v1.log`). The earlier entry-only
+  failure and producer trace remain recorded; no G7042 assertion was waived.
+- Three independent bytecode groups pass fresh and decoded verification:
+  direct/transitive callback inputs, unknown or additional callers and first-class
+  target rejection, and future versus prior/path-joined exposure
+  (`target/tail-callback-exposure-vm-final-v1.log`). The exposure unit additionally
+  checks borrowed versus owned captures, reborrows, storage death and whole-frame
+  continuation exposure (`target/tail-callback-capture-exposure-v1.log`).
+- All 183 VM backend, 5 tail ABI, 3 callback input and 22 revision/cache tests
+  pass with `RUST_MIN_STACK=33554432`
+  (`target/tail-callback-integration-v1.log`). Existing mutation, destructor,
+  local-alias, handler/resumption and probe-bypass rejection gates remain active.
+  The previously recorded default-stack decoder failure is not claimed fixed.
+- Full mandatory-tail integration is **23 passing, 1 failing**
+  (`target/tail-callback-full-source-v1.log`). The unchanged local-borrow diagnostic
+  test expects G4403 but encounters earlier G5017/G7007 rejection. Its source and
+  assertion remain intact; the suite is not fully green.
+
+This repairs the concrete callback preservation regression, not general indirect
+entry/result provenance, complete guarded resource contracts or native handlers.
+The last full-library gate still has the 11 G5024 minimum-use obligations recorded
+at cache 129; it was not rerun for this executable-only change. Full compiler and
+library conformance and self-hosted acceptance remain unfinished. Cache is 132
+and verifier is 41; interface 22, native ABI 13, bytecode 72 and VM schema 116 are
+unchanged.
+
 ## Cache 131 / verifier 40: shared ordinary and tail invocation ABIs
 
 The unchanged stateless-callable tail regression now executes. Runtime MIR had
