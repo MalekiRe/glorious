@@ -640,6 +640,7 @@ pub struct PlaceFlow {
     /// continuation graph's control-only dependency projection. Shared by
     /// lifted products without re-hashing the whole arena for every closure.
     resource_input: Option<crate::Digest>,
+    resumption_transfers: Option<std::sync::Arc<crate::useflow::ResumptionTransfers>>,
     checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
     minimum_suspensions: Vec<minimum::MinimumSuspension>,
     /// Frozen per-callable loan/resource products from this exact Core arena.
@@ -687,6 +688,22 @@ pub struct PlaceFlow {
     pub diagnostics: Vec<FlowDiagnostic>,
 }
 impl PlaceFlow {
+    pub(crate) fn install_resumption_transfers(&mut self, product: std::sync::Arc<crate::useflow::ResumptionTransfers>)
+        -> Result<(), &'static str>
+    {
+        if !self.resource_input.is_some_and(|input| product.matches(input)) {
+            return Err("resumption transport product does not match ownership input");
+        }
+        for child in self.closure_flows.values_mut() { child.install_resumption_transfers(product.clone())?; }
+        self.resumption_transfers = Some(product);
+        Ok(())
+    }
+
+    pub(crate) fn retains_resumption(&self, expression: CoreId) -> bool {
+        self.resumption_transfers.as_ref().is_some_and(|product|
+            self.resource_input.is_some_and(|input| product.matches(input)) && product.retains(expression))
+    }
+
     pub(crate) fn checked_borrow(&self, expression: CoreId) -> Option<CheckedBorrow> {
         self.checked_borrows.get(&BorrowSite::Expression(expression)).cloned()
     }
@@ -942,6 +959,7 @@ impl PlaceFlow {
             .collect();
         let mut flow = Self {
             resource_input: Some(resource_input.unwrap_or_else(|| body.semantic_fingerprint())),
+            resumption_transfers: None,
             checked_borrows: a.checked_borrows,
             minimum_suspensions: a.minimum_suspensions,
             closure_flows: BTreeMap::new(),

@@ -35,6 +35,34 @@ pub(super) enum ResumptionValue {
 }
 
 impl ResumptionValue {
+    /// Source copying does not retain an owned continuation capability.
+    /// A shared reference copies only its handle, not the control resident
+    /// behind it. Structural values preserve that distinction per field.
+    pub(super) fn permits_source_copy(&self, ty: &super::VmType, layouts: &[super::VmNominalCopyDescriptor]) -> bool {
+        fn visit(value: &ResumptionValue, ty: &super::VmType,
+            layouts: &[super::VmNominalCopyDescriptor], depth: usize, nodes: &mut usize,
+        ) -> bool {
+            use super::VmType;
+            if !value.contains() { return true; }
+            if depth >= MAX_DEPTH || *nodes == 0 { return false; }
+            *nodes -= 1;
+            match ty {
+                VmType::Reference { unique, .. } => !*unique,
+                VmType::Tuple(fields) => fields.iter().enumerate().all(|(index, ty)|
+                    visit(&value.project(&[index as u32]), ty, layouts, depth + 1, nodes)),
+                VmType::FixedArray { element, length } if *length <= MAX_NODES as u64 =>
+                    (0..*length).all(|index| visit(&value.project(&[index as u32]), element, layouts, depth + 1, nodes)),
+                VmType::Nominal { definition, arguments } => layouts.iter().find(|layout|
+                    layout.definition == *definition && layout.arguments == *arguments).is_some_and(|layout|
+                    layout.variants.iter().all(|fields| visit(value, &VmType::Tuple(fields.clone()), layouts, depth + 1, nodes))),
+                VmType::Callable { .. } | VmType::Generic(_) | VmType::Array(_) | VmType::FixedArray { .. } => false,
+                _ => true,
+            }
+        }
+        let mut nodes = MAX_NODES;
+        visit(self, ty, layouts, 0, &mut nodes)
+    }
+
     pub(super) fn contains(&self) -> bool {
         !matches!(self, Self::None)
     }
@@ -149,6 +177,15 @@ impl ResumptionValue {
             _ => Self::Unknown,
         }
     }
+
+    /// An absent register contributes no ordinary callable alternative.
+    /// Retain any existing taint even when readability is absent; only the
+    /// positively empty, uninitialized side is the resident join's bottom.
+    pub(super) fn join_resident(&self, present: bool, other: &Self, other_present: bool) -> Self {
+        if !present && matches!(self, Self::None) { return other.clone(); }
+        if !other_present && matches!(other, Self::None) { return self.clone(); }
+        self.join(other)
+    }
 }
 
 #[cfg(test)]
@@ -223,5 +260,14 @@ mod tests {
         // the old bytes into that new dynamic frame's token.
         value.expire(7);
         assert_eq!(value.frame(), None);
+    }
+
+    #[test]
+    fn absent_residents_do_not_invent_nonresumption_value_alternatives() {
+        let value = Value::product([Value::None, Value::Token(7)]);
+        assert_eq!(value.join_resident(true, &Value::None, false), value);
+        assert_eq!(Value::None.join_resident(false, &value, true), value);
+        assert_eq!(Value::Token(7).join_resident(true, &Value::None, true), Value::Unknown);
+        assert_eq!(Value::Unknown.join_resident(false, &value, true), Value::Unknown);
     }
 }

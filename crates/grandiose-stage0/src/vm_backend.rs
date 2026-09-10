@@ -918,6 +918,7 @@ pub enum VmInstruction {
         dst: u32,
         src: u32,
     },
+    RetainResumption { dst: u32, src: u32, fields: Vec<u32> },
     /// Start an addressable source-storage slot. `binding` is the dense
     /// frozen MIR provenance identity retained for independently decoded
     /// artifacts; it is not a register-derived lookup.
@@ -5532,6 +5533,9 @@ pub(crate) fn lower_instruction(
             dst: dst.0,
             src: src.0,
         },
+        MirInstruction::RetainResumption { dst, src, fields } => VmInstruction::RetainResumption {
+            dst: dst.0, src: src.0, fields: fields.clone(),
+        },
         MirInstruction::Move { dst, src } => VmInstruction::Move {
             dst: dst.0,
             src: src.0,
@@ -6718,9 +6722,23 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
         };
         if let Some(fields) = copied_fields {
             for field in fields {
-                if !vm_type_is_duplicable(&register_type(function, *field)?, &function.nominal_copy_descriptors) {
+                let ty = register_type(function, *field)?;
+                if !vm_type_is_duplicable(&ty, &function.nominal_copy_descriptors)
+                    || !states.resumptions[*field as usize].permits_source_copy(&ty, &function.nominal_copy_descriptors) {
                     return Err(VmArtifactError::AffineValueCopy { register: *field });
                 }
+            }
+        }
+        let copied_projection = match instruction {
+            VmInstruction::ProjectRecord { base, index, field_type, .. }
+            | VmInstruction::ProjectTuple { base, index, field_type, .. } => Some((*base, *index, field_type)),
+            VmInstruction::ProjectArray { base, index, element_type, .. } => Some((*base, *index, element_type)),
+            _ => None,
+        };
+        if let Some((base, index, ty)) = copied_projection {
+            read(&states, base)?;
+            if !states.resumptions[base as usize].project(&[index]).permits_source_copy(ty, &function.nominal_copy_descriptors) {
+                return Err(VmArtifactError::AffineValueCopy { register: base });
             }
         }
         match instruction {
@@ -7467,6 +7485,23 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 expect_type(function, *dst, VmType::Bool)?;
                 write(&mut states, *dst)?;
+            }
+            VmInstruction::RetainResumption { dst, src, fields } => {
+                read(&states, *src)?;
+                if dst == src { return Err(VmArtifactError::HandlerResumeUnavailable); }
+                let destination = register_type(function, *dst)?;
+                if !matches!(destination, VmType::Callable { .. })
+                    || !projected_storage_types(function, &register_type(function, *src)?, fields)?.contains(&destination) {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let token = states.resumptions[*src as usize].project(fields);
+                let id = token.frame().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if !states.handlers.iter().any(|frame| frame.id == id && frame.continuation.is_replay()
+                    && !frame.continuations.is_empty()) {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                write(&mut states, *dst)?;
+                states.resumptions[*dst as usize] = token;
             }
             VmInstruction::TakeProjection { dst, base, fields } => {
                 if fields.is_empty() || dst == base {
@@ -8253,7 +8288,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if !vm_type_is_duplicable(
                     &register_type(function, *src)?,
                     &function.nominal_copy_descriptors,
-                ) {
+                ) || !states.resumptions[*src as usize].permits_source_copy(
+                    &register_type(function, *src)?, &function.nominal_copy_descriptors) {
                     return Err(VmArtifactError::AffineValueCopy { register: *src });
                 }
                 same_type(function, *dst, *src)?;
@@ -9522,6 +9558,11 @@ fn propagate_state(
                 && existing.last_instruction.take().is_some() {
                 changed = true;
             }
+            for (index, (left, right)) in existing.resumptions.iter_mut().zip(&state.resumptions).enumerate() {
+                let joined = left.join_resident(existing.registers[index].unwrap_or(existing.may_initialized[index]),
+                    right, state.registers[index].unwrap_or(state.may_initialized[index]));
+                if *left != joined { *left = joined; changed = true; }
+            }
             for ((possible, incoming_possible), definite) in existing.may_initialized.iter_mut()
                 .zip(&state.may_initialized).zip(&state.registers) {
                 let joined = *possible || definite.unwrap_or(*incoming_possible);
@@ -9557,10 +9598,6 @@ fn propagate_state(
             let previous = existing.may_invoked_resumption_inputs.len();
             existing.may_invoked_resumption_inputs.extend(state.may_invoked_resumption_inputs.iter().cloned());
             changed |= previous != existing.may_invoked_resumption_inputs.len();
-            for (left, right) in existing.resumptions.iter_mut().zip(&state.resumptions) {
-                let joined = left.join(right);
-                if *left != joined { *left = joined; changed = true; }
-            }
             if existing.pending_leave != state.pending_leave && existing.pending_leave.take().is_some() {
                 changed = true;
             }
@@ -10223,6 +10260,25 @@ fn copy_owned_value(value: &VmValue, budget: &mut ExecutionBudget) -> Result<VmV
         },
         _ => value.clone(),
     })
+}
+
+/// Retaining a control handle never duplicates its continuation or environment.
+/// Every alias names the same live frame and therefore the same remaining uses.
+fn retain_resumption(registers: &RuntimeRegisters, handlers: &[RuntimeHandlerFrame],
+    src: u32, fields: &[u32], budget: &mut ExecutionBudget) -> Result<VmValue, VmArtifactError>
+{
+    let value = registers.values.get(src as usize).and_then(Option::as_ref)
+        .ok_or(VmArtifactError::UseAfterMove { register: src })?;
+    let value = match value {
+        VmValue::Resident(home) => home.load(fields, budget)?,
+        value => project_reference(value, fields)?,
+    };
+    let VmValue::Resumption { frame: id, .. } = &value else { return Err(VmArtifactError::HandlerResumeUnavailable); };
+    if !handlers.iter().any(|frame| frame.id == *id && frame.continuation.is_replay()
+        && frame.suspended.as_ref().is_some_and(|branch| branch.remaining_replays > 0)) {
+        return Err(VmArtifactError::HandlerResumeUnavailable);
+    }
+    Ok(value)
 }
 
 #[derive(Clone, Debug)]
@@ -14179,6 +14235,9 @@ fn execute_in_float_profile(
                 pc = target;
                 continue;
             }
+            VmInstruction::RetainResumption { dst, src, fields } => {
+                registers[dst as usize] = Some(retain_resumption(&registers, &handlers, src, &fields, budget)?);
+            }
             VmInstruction::Forward => {
                 let Some(mut declined) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -14240,7 +14299,8 @@ fn execute_in_float_profile(
                 if frame.continuation == VmContinuationPolicy::Consume {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                if frame.suspended.is_none() {
+                if frame.suspended.is_none() || frame.continuation.is_replay()
+                    && frame.suspended.as_ref().is_some_and(|branch| branch.remaining_replays != 0) {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if frame.continuation == VmContinuationPolicy::Terminal {
@@ -16798,6 +16858,9 @@ fn execute_program_in_float_profile(
                 pc = target;
                 continue;
             }
+            VmInstruction::RetainResumption { dst, src, fields } => {
+                registers[*dst as usize] = Some(retain_resumption(&registers, &handlers, *src, fields, budget)?);
+            }
             VmInstruction::Forward => {
                 let Some(mut declined) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -16886,6 +16949,9 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let suspended = frame.suspended.take().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if frame.continuation.is_replay() && suspended.remaining_replays != 0 {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 abandon_program_continuation(program, suspended, frame.call_depth,
                     frame.owned_payloads.then_some(frame.shared_registers),
                     &mut registers, &mut callers, depth, budget, host)?;

@@ -18,6 +18,7 @@ pub(super) fn is_frame_transition(instruction: &VmInstruction) -> bool {
         | VmInstruction::InstallHandler { .. } | VmInstruction::InstallHandlerOwned { .. }
         | VmInstruction::UninstallHandler | VmInstruction::CompleteHandler { .. }
         | VmInstruction::ClaimEffectPayloads { .. } | VmInstruction::CaptureResumption { .. }
+        | VmInstruction::RetainResumption { .. }
         | VmInstruction::Resume { .. } | VmInstruction::ResumeReturn { .. }
         | VmInstruction::ResumeSnapshot { .. } | VmInstruction::Forward | VmInstruction::Cancel
         | VmInstruction::StorageLive { .. } | VmInstruction::StorageDead { .. }

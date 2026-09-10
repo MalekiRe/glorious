@@ -128,6 +128,9 @@ impl CleanupMir {
             {
                 return Err(invalid("cleanup invented copy authority"));
             }
+            if operand.mode == ValueTransfer::RetainResumption && !owner.retains_resumption {
+                return Err(invalid("cleanup invented resumption transport authority"));
+            }
             Ok(())
         };
         check_plan(self.frame_cleanup)?;
@@ -381,6 +384,10 @@ impl CleanupMir {
                     _ => {}
                 }
                 match &instruction.operation {
+                    CleanupOperation::ReadPlace { mode, .. }
+                    | CleanupOperation::Project { mode, .. } if *mode == ValueTransfer::RetainResumption => {
+                        check_operand(&OwnershipOperand { value: instruction.destination, mode: *mode })?;
+                    }
                     CleanupOperation::Construct { fields, .. } => {
                         for field in fields {
                             check_operand(field)?;

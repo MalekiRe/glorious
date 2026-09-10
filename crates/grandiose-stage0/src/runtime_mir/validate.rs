@@ -1443,6 +1443,7 @@ impl RuntimeMir {
         }
         match instruction {
             RuntimeOperation::IsInitialized { dst, base, fields }
+            | RuntimeOperation::RetainResumption { dst, src: base, fields }
             | RuntimeOperation::TakeProjection { dst, base, fields } => {
                 if dst == base {
                     return Err("MIR storage projection requires a distinct destination".into());
@@ -1489,7 +1490,11 @@ impl RuntimeMir {
                     candidates = projected;
                 }
                 let destination = self.local_type(*dst)?;
-                if if taking {
+                let retaining = matches!(instruction, RuntimeOperation::RetainResumption { .. });
+                if retaining && !matches!(destination, Type::Callable { .. }) {
+                    return Err("MIR resumption transport requires a callable destination".into());
+                }
+                if if taking || retaining {
                     !candidates.contains(destination)
                 } else {
                     destination != &Type::Scalar(crate::types::ScalarType::Bool)

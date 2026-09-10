@@ -1141,6 +1141,13 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::RetainResumption { dst, src, fields } => {
+            output.push(217);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&src.to_le_bytes());
+            output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
+            for field in fields { output.extend_from_slice(&field.to_le_bytes()); }
+        }
         VmInstruction::Trap => output.push(43),
     }
 }

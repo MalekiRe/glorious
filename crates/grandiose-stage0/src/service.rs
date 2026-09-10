@@ -109,7 +109,7 @@ impl StagedTypedBody {
         flow: &PlaceFlow,
         bodies: &crate::useflow::UseBodies<'_>,
         diagnostics: &mut Vec<CompileDiagnostic>,
-    ) -> (EscapeFlow, bool) {
+    ) -> (EscapeFlow, UseFlow, bool) {
         let core = &self.core;
         diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
             diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
@@ -124,7 +124,7 @@ impl StagedTypedBody {
         )));
         let valid = self.valid && flow.diagnostics.is_empty() && escapes.diagnostics.is_empty()
             && uses.diagnostics.is_empty();
-        (escapes, valid)
+        (escapes, uses, valid)
     }
 }
 
@@ -1973,9 +1973,11 @@ impl StageZeroCompiler {
                 .map(|flow| (staged.definition, crate::useflow::UseBody { body: &staged.core, flow })))
                 .collect::<crate::useflow::UseBodies<'_>>();
             let mut source_validity = BTreeMap::new();
+            let mut source_transfers = BTreeMap::new();
             for staged in &staged_bodies {
                 let Some(flow) = source_flows.get(&staged.definition) else { continue; };
-                let (escapes, valid) = staged.check_resources(&signatures, flow, &use_bodies, &mut diagnostics);
+                let (escapes, uses, valid) = staged.check_resources(&signatures, flow, &use_bodies, &mut diagnostics);
+                if valid && let Some(product) = uses.resumption_transfers { source_transfers.insert(staged.definition, product); }
                 if valid {
                     control_captures.include(staged.definition, &staged.core, &escapes).map_err(|error|
                         ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180", error)]))?;
@@ -1983,6 +1985,10 @@ impl StageZeroCompiler {
                 source_validity.insert(staged.definition, valid);
             }
             drop(use_bodies);
+            for (definition, product) in source_transfers {
+                source_flows.get_mut(&definition).expect("checked source flow").install_resumption_transfers(product)
+                    .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180", error)]))?;
+            }
             original_resources.extend(source_flows.into_iter().map(|(definition, flow)|
                 (definition, (flow, source_validity[&definition]))));
             let mut transformed = BTreeMap::new();
@@ -2051,14 +2057,20 @@ impl StageZeroCompiler {
                 .map(|flow| (staged.definition, crate::useflow::UseBody { body: &staged.core, flow })))
                 .collect::<crate::useflow::UseBodies<'_>>();
         let mut receiving_validity = BTreeMap::new();
+        let mut receiving_transfers = BTreeMap::new();
         for staged in &staged_bodies {
             if let Some(flow) = receiving_flows.get(&staged.definition) {
                 session.checkpoint_in(&staged.budget, 0)?;
-                let (_, valid) = staged.check_resources(&signatures, flow, &use_bodies, &mut diagnostics);
+                let (_, uses, valid) = staged.check_resources(&signatures, flow, &use_bodies, &mut diagnostics);
+                if valid && let Some(product) = uses.resumption_transfers { receiving_transfers.insert(staged.definition, product); }
                 receiving_validity.insert(staged.definition, valid);
             }
         }
         drop(use_bodies);
+        for (definition, product) in receiving_transfers {
+            receiving_flows.get_mut(&definition).expect("checked receiving flow").install_resumption_transfers(product)
+                .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180", error)]))?;
+        }
         let mut body_products = Vec::with_capacity(staged_bodies.len());
         for staged in staged_bodies {
             // Observe cancellation at the new phase boundary without

@@ -942,7 +942,7 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 reference: self.u32()?,
             }),
-            opcode @ (195 | 196) => {
+            opcode @ (195 | 196 | 217) => {
                 let dst = self.u32()?;
                 let base = self.u32()?;
                 let count = self.count("storage field projections", MAX_DECODE_TYPE_DEPTH)?;
@@ -950,7 +950,9 @@ impl<'a> Decoder<'a> {
                 for _ in 0..count {
                     fields.push(self.u32()?);
                 }
-                Ok(if opcode == 195 {
+                Ok(if opcode == 217 {
+                    VmInstruction::RetainResumption { dst, src: base, fields }
+                } else if opcode == 195 {
                     VmInstruction::TakeProjection { dst, base, fields }
                 } else {
                     VmInstruction::IsInitialized { dst, base, fields }

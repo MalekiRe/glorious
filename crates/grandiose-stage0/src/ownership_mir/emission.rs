@@ -30,7 +30,7 @@ fn emit_operand(
     locals: &mut Vec<MirLocalDecl>,
     instructions: &mut Vec<MirInstruction>,
 ) -> Option<MirLocal> {
-    if operand.mode != ValueTransfer::Move {
+    if !matches!(operand.mode, ValueTransfer::Move | ValueTransfer::RetainResumption) {
         return Some(source);
     }
     let dst = MirLocal(u32::try_from(locals.len()).ok()?);
@@ -38,7 +38,9 @@ fn emit_operand(
         source: CoreId(u32::MAX),
         ty: ty.clone(),
     });
-    instructions.push(MirInstruction::Move { dst, src: source });
+    instructions.push(if operand.mode == ValueTransfer::RetainResumption {
+        MirInstruction::RetainResumption { dst, src: source, fields: vec![] }
+    } else { MirInstruction::Move { dst, src: source } });
     Some(dst)
 }
 
@@ -57,7 +59,7 @@ fn edge_arguments(
         .zip(&target.parameters)
         .map(|(operand, parameter)| {
             let source = local(operand.value);
-            if operand.mode != ValueTransfer::Copy || source == local(*parameter) {
+            if !matches!(operand.mode, ValueTransfer::Copy | ValueTransfer::RetainResumption) || source == local(*parameter) {
                 return Some(source);
             }
             let destination = MirLocal(u32::try_from(locals.len()).ok()?);
@@ -65,10 +67,9 @@ fn edge_arguments(
                 source: CoreId(u32::MAX),
                 ty: values[operand.value.0 as usize].ty.clone(),
             });
-            instructions.push(MirInstruction::Copy {
-                dst: destination,
-                src: source,
-            });
+            instructions.push(if operand.mode == ValueTransfer::RetainResumption {
+                MirInstruction::RetainResumption { dst: destination, src: source, fields: vec![] }
+            } else { MirInstruction::Copy { dst: destination, src: source } });
             Some(destination)
         })
         .collect()
@@ -382,7 +383,9 @@ impl OwnershipMir {
                         continue;
                     }
                     OwnershipOperation::Transfer { value, mode } => {
-                        if *mode == ValueTransfer::Move {
+                        if *mode == ValueTransfer::RetainResumption {
+                            MirInstruction::RetainResumption { dst, src: local(*value), fields: vec![] }
+                        } else if *mode == ValueTransfer::Move {
                             MirInstruction::Move {
                                 dst,
                                 src: local(*value),
@@ -401,7 +404,9 @@ impl OwnershipMir {
                         ..
                     } => {
                         if !symbols.contains(&instruction.destination) {
-                            instructions.push(if *mode == ValueTransfer::Move {
+                            instructions.push(if *mode == ValueTransfer::RetainResumption {
+                                MirInstruction::RetainResumption { dst, src: local(*result), fields: vec![] }
+                            } else if *mode == ValueTransfer::Move {
                                 MirInstruction::Move {
                                     dst,
                                     src: local(*result),
@@ -441,7 +446,10 @@ impl OwnershipMir {
                     },
                     OwnershipOperation::ReadPlace { place, mode } => {
                         let (root, fields, reborrow) = place_path(place);
-                        if fields.is_empty() && !reborrow {
+                        if *mode == ValueTransfer::RetainResumption {
+                            if reborrow { return None; }
+                            MirInstruction::RetainResumption { dst, src: local(root), fields }
+                        } else if fields.is_empty() && !reborrow {
                             if *mode == ValueTransfer::Move {
                                 MirInstruction::Move {
                                     dst,
@@ -507,7 +515,10 @@ impl OwnershipMir {
                         mode,
                     } => {
                         let (root, fields, reborrow) = place_path(place);
-                        if *mode == ValueTransfer::Move && !reborrow {
+                        if *mode == ValueTransfer::RetainResumption {
+                            if reborrow { return None; }
+                            MirInstruction::RetainResumption { dst, src: local(root), fields }
+                        } else if *mode == ValueTransfer::Move && !reborrow {
                             MirInstruction::TakeProjection {
                                 dst,
                                 base: local(root),
@@ -915,16 +926,15 @@ impl OwnershipMir {
                 }
             }
             let returned = if let ControlTerminator::Return(value) = block.terminator.control {
-                if block.terminator.operands[0].mode == ValueTransfer::Copy {
+                if matches!(block.terminator.operands[0].mode, ValueTransfer::Copy | ValueTransfer::RetainResumption) {
                     let destination = MirLocal(u32::try_from(locals.len()).ok()?);
                     locals.push(MirLocalDecl {
                         source: CoreId(u32::MAX),
                         ty: self.values[value.0 as usize].ty.clone(),
                     });
-                    instructions.push(MirInstruction::Copy {
-                        dst: destination,
-                        src: local(value),
-                    });
+                    instructions.push(if block.terminator.operands[0].mode == ValueTransfer::RetainResumption {
+                        MirInstruction::RetainResumption { dst: destination, src: local(value), fields: vec![] }
+                    } else { MirInstruction::Copy { dst: destination, src: local(value) } });
                     Some(destination)
                 } else {
                     Some(local(value))

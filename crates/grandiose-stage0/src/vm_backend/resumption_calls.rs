@@ -143,7 +143,8 @@ pub(super) fn apply(function: &VmFunction, pc: usize, inputs: &[ResumptionValue]
             ResumptionValue::Token(id) => {
                 let frame = states.handlers.iter().find(|frame| frame.id == id)
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if frame.continuation != VmContinuationPolicy::Optional || frame.continuations.is_empty() {
+                if !frame.continuation.is_replay()
+                    && (frame.continuation != VmContinuationPolicy::Optional || frame.continuations.is_empty()) {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
             }
@@ -274,6 +275,9 @@ pub(super) fn cancel(value: &ResumptionValue, states: &mut VerifierState, observ
         ResumptionValue::Token(id) => {
             let frame = states.handlers.iter_mut().find(|frame| frame.id == *id)
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+            // Replay handles alias one delimiter-owned budget. Disposing a
+            // carrier never abandons that delimiter's remaining invocations.
+            if frame.continuation.is_replay() { return Ok(()); }
             if !frame.continuations.is_empty() && frame.continuation != VmContinuationPolicy::Optional {
                 return Err(VmArtifactError::HandlerResumeUnavailable);
             }
@@ -301,6 +305,35 @@ mod tests {
     }
     fn declaration() -> VmInstruction {
         VmInstruction::DeclareResult { result: VmType::I64, returns: true }
+    }
+
+    #[test]
+    fn resumption_transport_cannot_authenticate_an_ordinary_callable_input() {
+        let function = helper(vec![declaration(),
+            VmInstruction::RetainResumption { dst: 2, src: 0, fields: vec![] },
+            VmInstruction::Return { value: 1 }], vec![callable(), VmType::I64, callable()], 2);
+        assert!(verify_function_control(&function, false, false, &Default::default()).is_err());
+        assert!(proof(function).is_none());
+    }
+
+    #[test]
+    fn source_copy_cannot_duplicate_owned_resumption_inputs() {
+        let pair = VmType::Tuple(vec![VmType::I64, callable()]);
+        for (ty, copied, result) in [
+            (callable(), VmInstruction::Copy { dst: 2, src: 0 }, callable()),
+            (callable(), VmInstruction::MakeTuple { dst: 2, fields: vec![0] }, VmType::Tuple(vec![callable()])),
+            (pair.clone(), VmInstruction::ProjectTuple { dst: 2, base: 0, index: 1, field_count: 2, field_type: callable() }, callable()),
+            (pair.clone(), VmInstruction::Copy { dst: 2, src: 0 }, pair),
+        ] {
+            let function = helper(vec![declaration(), copied, VmInstruction::Return { value: 1 }],
+                vec![ty, VmType::I64, result], 2);
+            let mut proofs = tail_provenance::TransferProofs::default();
+            proofs.symbolic_resumption_inputs = true;
+            assert!(matches!(verify_function_control(&function, false, false, &proofs), Err(VmArtifactError::AffineValueCopy { .. })));
+        }
+        let reference = VmType::Reference { unique: false, referent: Box::new(callable()) };
+        assert!(ResumptionValue::Unknown.permits_source_copy(&reference, &[]));
+        assert!(ResumptionValue::product([ResumptionValue::Unknown]).permits_source_copy(&VmType::Tuple(vec![reference]), &[]));
     }
     fn proof(function: VmFunction) -> Option<Contract> {
         let key = function.definition;

@@ -22,6 +22,11 @@ impl OwnershipMir {
 
     fn validate_operand(&self, operand: OwnershipOperand) -> Result<(), OwnershipError> {
         let owner = self.checked_owner(operand.value)?;
+        if operand.mode == ValueTransfer::RetainResumption
+            && (!owner.retains_resumption || !matches!(self.checked_type(operand.value)?, Type::Callable { .. })
+                || !self.source_flow.retains_resumption(self.values[operand.value.0 as usize].source)) {
+            return Err(invalid("resumption carrier transport lacks checked quantity evidence"));
+        }
         if operand.mode == ValueTransfer::Copy && owner.quantity != Some(Quantity::UNRESTRICTED) {
             return Err(invalid("copy lacks generic Use authority"));
         }
@@ -287,6 +292,9 @@ impl OwnershipMir {
                     OwnershipOperation::ReadPlace { place, mode }
                     | OwnershipOperation::Project { place, mode, .. } => {
                         self.checked_place_type(place)?;
+                        if *mode == ValueTransfer::RetainResumption {
+                            self.validate_operand(OwnershipOperand { value: instruction.destination, mode: *mode })?;
+                        }
                         if *mode == ValueTransfer::Move && !self.writable_place(place)? {
                             return Err(OwnershipError(format!(
                                 "place move lacks mutable place authority in {:?} at {:?}: {place:?}",
@@ -553,6 +561,15 @@ mod tests {
             .unwrap();
         call.terminator.operands[1].mode = ValueTransfer::Copy;
         assert!(mir.validate().unwrap_err().0.contains("copy lacks"));
+    }
+
+    #[test]
+    fn resumption_transport_cannot_replace_an_ordinary_owned_transfer() {
+        let mut mir = fixture("fn take(value:i64) -> i64 { value } pub fn main(value:i64) -> i64 { take(value) }");
+        let call = mir.blocks.iter_mut().find(|block|
+            matches!(block.terminator.control, ControlTerminator::Invoke { .. })).unwrap();
+        call.terminator.operands[1].mode = ValueTransfer::RetainResumption;
+        assert!(mir.validate().unwrap_err().0.contains("resumption carrier transport lacks"));
     }
 
     #[test]

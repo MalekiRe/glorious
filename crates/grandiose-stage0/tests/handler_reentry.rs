@@ -38,7 +38,7 @@ fn request(source: &str) -> CompilationRequest {
 
 fn candidate(source: &str) -> CandidateVmProgram {
     let request = request(source);
-    let outcome = StageZeroCompiler::new().compile(request.clone()).unwrap();
+    let outcome = StageZeroCompiler::new().compile(request.clone()).unwrap_or_else(|error| panic!("{source}\n{error:#?}"));
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     assert_eq!(artifact.run_i64().unwrap(), 42);
@@ -105,10 +105,61 @@ fn ordinary_helpers_return_resumption_products_to_their_live_owner() {
 
 #[test]
 fn replay_resumptions_cross_multiple_ordinary_helper_calls() {
-    candidate("effect Ask { [2,2] ask() -> i64; }
+    let original = candidate("effect Ask { [2,2] ask() -> i64; }
         fn apply<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { task(value) }
         pub fn main() -> i64 { handle Ask::ask() {
             value => value + 1, Ask::ask() with k => apply(k,19) + apply(k,21)
+        } }");
+    for policy in [VmContinuationPolicy::Optional, VmContinuationPolicy::Consume] {
+        let mut malformed = original.clone();
+        let mut changed = false;
+        for function in malformed.functions.values_mut() {
+            for instruction in &mut function.instructions {
+                if let VmInstruction::InstallHandlerOwned { continuation, .. } = instruction
+                    && matches!(continuation, VmContinuationPolicy::Replay { .. }) {
+                    *continuation = policy;
+                    changed = true;
+                }
+            }
+        }
+        assert!(changed);
+        malformed.fingerprint = malformed.computed_fingerprint();
+        assert!(verify_vm_program(malformed.clone()).is_err());
+        assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&malformed)).is_err());
+    }
+    let mut malformed = original;
+    let retained = malformed.functions.values_mut().flat_map(|function| &mut function.instructions)
+        .find(|instruction| matches!(instruction, VmInstruction::RetainResumption { fields, .. } if fields.is_empty())).unwrap();
+    let VmInstruction::RetainResumption { dst, src, .. } = retained else { unreachable!() };
+    *retained = VmInstruction::Copy { dst: *dst, src: *src };
+    malformed.fingerprint = malformed.computed_fingerprint();
+    let copy_result = verify_vm_program(malformed.clone());
+    assert!(matches!(copy_result, Err(VmArtifactError::AffineValueCopy { .. })), "{copy_result:#?}");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&malformed)).is_err());
+}
+
+fn replay_transport_binding(binding: &str, callee: &str) {
+        candidate(&format!("effect Ask {{ [2,2] ask() -> i64; }}
+            fn keep<T>(value:T) -> T {{ value }}
+            fn apply<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={{}}> {{ task(value) }}
+            pub fn main() -> i64 {{ handle Ask::ask() {{
+                value => value + 1, Ask::ask() with k => {{ {binding} apply({callee},19) + apply({callee},21) }}
+            }} }}"));
+}
+
+#[test]
+fn replay_helper_transport_preserves_aliases() { replay_transport_binding("let saved = k;", "saved"); }
+#[test]
+fn replay_helper_transport_preserves_products() { replay_transport_binding("let saved = (7,k);", "saved.1"); }
+#[test]
+fn replay_helper_transport_preserves_returned_handles() { replay_transport_binding("let saved = keep(k);", "saved"); }
+
+#[test]
+fn one_ordinary_helper_can_perform_both_ordered_replays() {
+    candidate("effect Ask { [2,2] ask() -> i64; }
+        fn twice<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { task(19) + task(21) }
+        pub fn main() -> i64 { handle Ask::ask() {
+            value => value + 1, Ask::ask() with k => twice(k)
         } }");
 }
 

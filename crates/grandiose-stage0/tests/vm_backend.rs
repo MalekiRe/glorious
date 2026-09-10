@@ -6628,6 +6628,23 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
         Err(VmArtifactError::HandlerResumeUnavailable)
     ));
 
+    // A normal cancellation cannot erase the second required invocation.
+    let mut under_replay = function.clone();
+    under_replay.instructions[10] = VmInstruction::Copy { dst: 8, src: 7 };
+    let mut under = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        function: under_replay.clone(), fingerprint: Digest::of_bytes(b"replay-handler-under-use"),
+    };
+    under.fingerprint = under.computed_fingerprint();
+    assert!(matches!(verify_vm(under).unwrap().run_i64(), Err(VmArtifactError::HandlerResumeUnavailable)));
+    let mut under_program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None, host_capabilities: vec![],
+        entry: definition, functions: BTreeMap::from([(definition, under_replay)]),
+        callable_environments: BTreeMap::new(), fingerprint: Digest::of_bytes(b"replay-program-under-use"),
+    };
+    under_program.fingerprint = under_program.computed_fingerprint();
+    assert!(matches!(verify_vm_program(under_program).unwrap().run_i64(), Err(VmArtifactError::HandlerResumeUnavailable)));
+
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,

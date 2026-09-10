@@ -39,6 +39,8 @@ pub struct Owner {
     pub kind: OwnerKind,
     pub scope: Option<ControlScopeId>,
     pub quantity: Option<Quantity>,
+    /// Projection of the sealed quantity product, not a Copy permission.
+    pub(crate) retains_resumption: bool,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Loan {
@@ -52,6 +54,9 @@ pub enum ValueTransfer {
     Copy,
     Move,
     Reborrow,
+    /// Retain only a checked replay capability's carrier. Its continuation
+    /// and invocation budget stay with the same dynamic owner.
+    RetainResumption,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OwnershipOperand {
@@ -380,6 +385,7 @@ impl OwnershipMir {
                 Owner {
                     value,
                     kind,
+                    retains_resumption: flow.retains_resumption(decl.source),
                     scope: decl.scope.or_else(|| {
                         control
                             .parameters()
@@ -645,8 +651,11 @@ impl OwnershipMir {
             .iter()
             .map(|owner| owner.quantity)
             .collect::<Vec<_>>();
+        let retained_resumptions = owners.iter().map(|owner| owner.retains_resumption).collect::<Vec<_>>();
         let place_transfer = |value: ControlValue| {
-            if quantities[value.0 as usize] == Some(Quantity::UNRESTRICTED) {
+            if retained_resumptions[value.0 as usize] {
+                ValueTransfer::RetainResumption
+            } else if quantities[value.0 as usize] == Some(Quantity::UNRESTRICTED) {
                 ValueTransfer::Copy
             } else {
                 ValueTransfer::Move

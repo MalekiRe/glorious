@@ -1770,3 +1770,39 @@ Full replay transport and ordered multi-invocation helper proofs remain open.
 Arbitrary resumption-bearing destruction during abandonment, complete borrowed
 invocation, mandatory-tail handler fusion and zero-marshalling/performance
 acceptance also require further integration; these tests do not certify them.
+
+## Quantity-derived replay-handle transport
+
+UseFlow publishes replay-handle transport from its existing checked value and
+invocation execution. Every represented alternative at an occurrence must be
+a finite replay resumption; callable type compatibility is insufficient. The
+product binds the complete source body. Helper execution under one caller's
+inputs cannot publish universal permission for that helper's code. Staged source
+and receiving resource products retain this result rather than discarding it
+after diagnostics, and Ownership MIR consumes its occurrence projection.
+
+`RetainResumption` is an explicit ownership and executable operation, distinct
+from source Copy, moving an owner, or copying a suspended computation. It retains
+a carrier of the same dynamic delimiter and remaining invocation budget. Both
+runtime emitters preserve this operation through ordinary arguments, aliases,
+structural projections and result transfers. The independent executable verifier
+requires a matching exact live replay token; unknown, expired, merely callable,
+and one-shot values cannot acquire this authority. The shared native/VM control
+runtime transports the authenticated small handle without copying its branch.
+Ordinary copying constructors and projections enforce the same prohibition on
+duplicating owned resumption contents. Shared reference copying retains its
+separate handle permission and does not copy the referenced continuation.
+
+Resident control joins use the existing initialization facts. A positively empty
+uninitialized slot contributes no present nonresumption alternative, while a
+present ordinary value still destroys exact token agreement. Possible control
+taint survives even when readability is absent. Cleanup of a replay carrier
+does not cancel its delimiter-owned budget. Normal cancellation with remaining
+required uses fails at the runtime's existing hostile-bytecode accounting gate.
+
+Cache 142, verifier 45, bytecode 74/schema 118 and native ABI 16 record this
+boundary. Ordered multiple invocations within one helper remain an unsupported
+proof obligation, not an unordered invocation-count shortcut. Final replay must
+still be migrated to consume the original snapshot instead of copying every
+invocation. Borrowed invocation, mandatory-tail handler fusion and complete
+zero-marshalling/performance acceptance remain open.

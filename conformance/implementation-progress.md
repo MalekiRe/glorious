@@ -5,6 +5,44 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 142: quantity-derived replay-handle transport
+
+UseFlow's existing checked execution publishes body-bound occurrence permission
+for finite replay handles. Ownership MIR consumes that fact without broadening
+ordinary callable Copy. Specialization, cleanup and both executable emitters
+retain the explicit `RetainResumption` operation through arguments, aliases,
+product fields and returned handles. Independent executable verification requires
+an exact live replay token, not a compatible callable type or a caller-specific
+observation reused as a universal helper proof.
+
+Resident joins use their existing initialization facts: a positively empty slot
+does not introduce an ordinary callable alternative. Possible control taint is
+still retained independently of readability. Ordinary source copying, aggregate
+construction and copying projections cannot duplicate an owned resumption;
+shared reference handles retain their distinct copying permission. Releasing a
+replay carrier does not cancel the delimiter's budget. Both VM engines reject
+normal cancellation with required replay uses still outstanding.
+
+Six focused replay execution tests pass in fresh/decoded VM, all-native and both
+mixed partitions at O0/O2. They cover repeated ordinary helper calls, aliases,
+products, returned handles, completion order and three-shot aggregate snapshots.
+Altered Optional/Consume policies and replacement of retention with Copy reject
+in fresh/decoded verification. All 24 focused resumption unit tests pass,
+including stale source-proof rejection, nonresumption transport rejection,
+aggregate Copy/projection rejection and initialization-aware joins. The standalone
+and program VM replay policy test passes with both under-use and over-use checks.
+The subsequent handler integration check passes all 33 supported cases through
+the same engine matrix, including borrowed handle transport, helper cancellation,
+deep re-entry and forwarding. The one known unsupported case remains excluded.
+
+Cache 142, verifier 45, bytecode 74/schema 118 and native ABI 16 change. The
+preserved one-helper/two-invocation regression is still failing and was explicitly
+excluded from the six-test execution gate. Ordered multi-invocation contracts,
+final replay consuming the original snapshot, borrowed invocation, foreign-control
+admission, mandatory-tail handler fusion and complete zero-marshalling/performance
+acceptance remain open. This is a verified transport boundary, not full native
+handler conformance. Unrelated nominal-layout work is outside this checkpoint.
+
 ## Cache 141: optional helper disposal and shared cancellation ownership
 
 The source interval now projects through one producer into distinct optional,

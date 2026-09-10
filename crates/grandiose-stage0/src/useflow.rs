@@ -93,10 +93,26 @@ pub enum CallableEscapeBoundary {
 /// and later ownership refinements even when a diagnostic prevents lowering.
 #[derive(Clone, Debug, Default)]
 pub struct UseFlow {
+    pub(crate) resumption_transfers: Option<std::sync::Arc<ResumptionTransfers>>,
     pub callable_uses: Vec<CallableUseFact>,
     pub callable_escapes: Vec<CallableEscapeFact>,
     pub value_obligations: Vec<ValueUseFact>,
     pub diagnostics: Vec<UseDiagnostic>,
+}
+
+/// Published by the checked quantity execution, not inferred from callable
+/// types. Each recorded occurrence denotes only replay-resumption handles on
+/// every observed alternative in this exact source body. It grants carrier
+/// transport, never source Copy or an additional invocation budget.
+#[derive(Clone, Debug)]
+pub(crate) struct ResumptionTransfers {
+    input: crate::Digest,
+    values: BTreeSet<CoreId>,
+}
+
+impl ResumptionTransfers {
+    pub(crate) fn matches(&self, input: crate::Digest) -> bool { self.input == input }
+    pub(crate) fn retains(&self, value: CoreId) -> bool { self.values.contains(&value) }
 }
 
 impl UseFlow {
@@ -155,6 +171,7 @@ impl UseFlow {
             projected_contracts: BTreeMap::new(),
             closure_values: BTreeMap::new(),
             result_values: BTreeMap::new(),
+            resumption_transfers: BTreeMap::new(),
             escapes: EscapeSummary::default(),
             value_obligations: vec![],
             diagnostics: vec![],
@@ -491,6 +508,7 @@ struct Analyzer<'a> {
     /// resulting closure remains the owner of that capability.
     closure_values: BTreeMap<CoreId, ClosureValue>,
     result_values: BTreeMap<CoreId, Binding>,
+    resumption_transfers: BTreeMap<CoreId, bool>,
     escapes: EscapeSummary,
     value_obligations: Vec<ValueUseFact>,
     diagnostics: Vec<UseDiagnostic>,
@@ -1188,6 +1206,29 @@ impl Analyzer<'_> {
     }
 
     fn binding_for_value_at_place(
+        &mut self, id: CoreId, environment: &Environment, supplied_place: Option<MoveFact>,
+    ) -> Binding {
+        let binding = self.binding_for_value_inner(id, environment, supplied_place);
+        // A helper inspected under one caller's hypothetical inputs cannot
+        // publish universal transport permission for that helper's code.
+        if self.active_frames.is_empty() {
+            fn replay(binding: &Binding, contracts: &BTreeMap<ContractKey, Contract>) -> bool {
+                match binding {
+                    Binding::Contract(key) => contracts.get(key).is_some_and(|contract|
+                        contract.resumption && contract.declared.lower >= 2
+                            && contract.declared.upper == Some(contract.declared.lower)),
+                    Binding::Choice(choices) => !choices.is_empty() && choices.iter().all(|value| replay(value, contracts)),
+                    _ => false,
+                }
+            }
+            let retained = matches!(self.body.expression(id).ty, Type::Callable { .. })
+                && replay(&binding, &self.contracts);
+            self.resumption_transfers.entry(id).and_modify(|prior| *prior &= retained).or_insert(retained);
+        }
+        binding
+    }
+
+    fn binding_for_value_inner(
         &mut self,
         id: CoreId,
         environment: &Environment,
@@ -2318,6 +2359,10 @@ impl Analyzer<'_> {
         self.diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         UseFlow {
+            resumption_transfers: self.diagnostics.is_empty().then(|| std::sync::Arc::new(ResumptionTransfers {
+                input: self.body.semantic_fingerprint(),
+                values: self.resumption_transfers.into_iter().filter_map(|(value, retained)| retained.then_some(value)).collect(),
+            })),
             callable_uses,
             callable_escapes,
             value_obligations: self.value_obligations,
@@ -2392,6 +2437,29 @@ mod tests {
             effects: EffectRow::empty(),
             invocation,
         }
+    }
+
+    #[test]
+    fn resumption_transport_is_not_callable_type_evidence_and_binds_its_body() {
+        let ty = callable(Quantity::UNRESTRICTED);
+        let mut body = TypedBody {
+            safety: crate::Safety::Safe,
+            unsafe_scopes: Default::default(), unsafe_implementations: Default::default(),
+            body_regions: Default::default(),
+            parameters: vec![("task".into(), ty.clone())],
+            expressions: vec![CoreExpr { kind: CoreKind::Local("task".into()), ty, span: span() }],
+            root: CoreId(0), diagnostics: vec![], recovered: false,
+        };
+        let mut flow = PlaceFlow::analyze(&body);
+        let uses = UseFlow::analyze(&body, &flow);
+        assert!(uses.diagnostics.is_empty(), "{uses:?}");
+        let product = uses.resumption_transfers.unwrap();
+        assert!(!product.retains(CoreId(0)));
+        flow.install_resumption_transfers(product.clone()).unwrap();
+        body.parameters[0].0 = "changed".into();
+        body.expressions[0].kind = CoreKind::Local("changed".into());
+        let mut changed = PlaceFlow::analyze(&body);
+        assert!(changed.install_resumption_transfers(product).is_err());
     }
 
     #[test]

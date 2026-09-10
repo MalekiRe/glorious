@@ -114,6 +114,7 @@ impl RuntimeOperation {
             Self::SetDropFlag { flag, .. } => Some(*flag),
             Self::DestroyIf { .. } => None,
             Self::Copy { dst, .. } => Some(*dst),
+            Self::RetainResumption { dst, .. } => Some(*dst),
             Self::Store { dst, .. } => Some(*dst),
             Self::Move { dst, .. } => Some(*dst),
             Self::Borrow { dst, .. } => Some(*dst),
@@ -851,7 +852,7 @@ impl RuntimeOperation {
                 values.push(*flag);
                 values
             }
-            Self::Copy { dst, src, .. } => {
+            Self::Copy { dst, src, .. } | Self::RetainResumption { dst, src, .. } => {
                 let mut values = Vec::new();
                 values.push(*dst);
                 values.push(*src);
@@ -1900,6 +1901,7 @@ pub enum RuntimeOperation {
         dst: MirLocal,
         src: MirLocal,
     },
+    RetainResumption { dst: MirLocal, src: MirLocal, fields: Vec<u32> },
     Store {
         dst: MirLocal,
         src: MirLocal,
@@ -2629,6 +2631,7 @@ impl RuntimeOperation {
             crate::MirInstruction::SetDropFlag { flag, value } => Self::SetDropFlag { flag, value },
             crate::MirInstruction::DestroyIf { local, flag } => Self::DestroyIf { local, flag },
             crate::MirInstruction::Copy { dst, src } => Self::Copy { dst, src },
+            crate::MirInstruction::RetainResumption { dst, src, fields } => Self::RetainResumption { dst, src, fields },
             crate::MirInstruction::Store { dst, src } => Self::Store { dst, src },
             crate::MirInstruction::Move { dst, src } => Self::Move { dst, src },
             crate::MirInstruction::Borrow {
@@ -3220,6 +3223,7 @@ impl RuntimeOperation {
             Self::SetDropFlag { flag, value } => crate::MirInstruction::SetDropFlag { flag, value },
             Self::DestroyIf { local, flag } => crate::MirInstruction::DestroyIf { local, flag },
             Self::Copy { dst, src } => crate::MirInstruction::Copy { dst, src },
+            Self::RetainResumption { dst, src, fields } => crate::MirInstruction::RetainResumption { dst, src, fields },
             Self::Store { dst, src } => crate::MirInstruction::Store { dst, src },
             Self::Move { dst, src } => crate::MirInstruction::Move { dst, src },
             Self::Borrow {

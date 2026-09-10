@@ -1095,6 +1095,7 @@ pub enum MirInstruction {
         dst: MirLocal,
         src: MirLocal,
     },
+    RetainResumption { dst: MirLocal, src: MirLocal, fields: Vec<u32> },
     /// Mutate an existing addressable local after its value operand has been
     /// fully evaluated. Unlike `Copy`, this may overwrite initialized storage
     /// or reinitialize storage emptied by `Move`.
@@ -3171,6 +3172,7 @@ fn operation_input_mut(
         | MirInstruction::CompleteHandler { value }
         | MirInstruction::ResumeReturn { value, .. }
         | MirInstruction::Copy { src: value, .. }
+        | MirInstruction::RetainResumption { src: value, .. }
         | MirInstruction::Store { src: value, .. }
         | MirInstruction::Move { src: value, .. }
         | MirInstruction::Borrow { src: value, .. } => operation_input_slot(input, [value]),
@@ -4240,6 +4242,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::PatternTest { dst, .. }
         | MirInstruction::Perform { dst, .. }
         | MirInstruction::Copy { dst, .. }
+        | MirInstruction::RetainResumption { dst, .. }
         | MirInstruction::Store { dst, .. }
         | MirInstruction::Move { dst, .. }
         | MirInstruction::Borrow { dst, .. }
@@ -6536,6 +6539,7 @@ impl MirFunction {
         }
         match instruction {
             MirInstruction::IsInitialized { dst, base, fields }
+            | MirInstruction::RetainResumption { dst, src: base, fields }
             | MirInstruction::TakeProjection { dst, base, fields } => {
                 if dst == base {
                     return Err("MIR storage projection requires a distinct destination".into());
@@ -6568,7 +6572,11 @@ impl MirFunction {
                     candidates = projected;
                 }
                 let destination = self.local_type(*dst)?;
-                if if taking { !candidates.contains(destination) }
+                let retaining = matches!(instruction, MirInstruction::RetainResumption { .. });
+                if retaining && !matches!(destination, Type::Callable { .. }) {
+                    return Err("MIR resumption transport requires a callable destination".into());
+                }
+                if if taking || retaining { !candidates.contains(destination) }
                     else { destination != &Type::Scalar(crate::types::ScalarType::Bool) }
                 {
                     return Err("MIR storage projection destination type is inconsistent".into());
@@ -7995,6 +8003,7 @@ pub(crate) fn validate_instruction_semantic_types(instruction: &MirInstruction) 
         | MirInstruction::Drop { .. }
         | MirInstruction::DestroyCallable { .. }
         | MirInstruction::Copy { .. }
+        | MirInstruction::RetainResumption { .. }
         | MirInstruction::TakeProjection { .. }
         | MirInstruction::IsInitialized { .. }
         | MirInstruction::Store { .. }
@@ -8664,7 +8673,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::SetDropFlag { flag, .. } => vec![*flag],
         MirInstruction::DestroyIf { local, flag } => vec![*local, *flag],
         MirInstruction::Drop { local } => vec![*local],
-        MirInstruction::Copy { dst, src }
+        MirInstruction::RetainResumption { dst, src, .. }
+        | MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
         MirInstruction::Borrow { dst, src, .. } => vec![*dst, *src],

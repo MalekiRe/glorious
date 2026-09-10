@@ -249,6 +249,9 @@ impl SpecializedMir {
             {
                 return Err(invalid("specialization invented generic copy authority"));
             }
+            if operand.mode == ValueTransfer::RetainResumption && !owner.retains_resumption {
+                return Err(invalid("specialization invented resumption transport authority"));
+            }
             Ok(())
         };
         for block in &self.blocks {
@@ -448,9 +451,14 @@ impl SpecializedMir {
                         value: *value,
                         mode: *mode,
                     })?,
-                    SpecializedOperation::ReadPlace { place, .. }
-                    | SpecializedOperation::Project { place, .. }
-                    | SpecializedOperation::MovePlace(place) => {
+                    SpecializedOperation::ReadPlace { place, mode }
+                    | SpecializedOperation::Project { place, mode, .. } => {
+                        self.checked_place_type(place)?;
+                        if *mode == ValueTransfer::RetainResumption {
+                            check_operand(&OwnershipOperand { value: instruction.destination, mode: *mode })?;
+                        }
+                    }
+                    SpecializedOperation::MovePlace(place) => {
                         self.checked_place_type(place)?;
                     }
                     SpecializedOperation::Replace { place, value, mode } => {

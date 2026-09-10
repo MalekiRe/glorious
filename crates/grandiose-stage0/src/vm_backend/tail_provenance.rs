@@ -531,7 +531,7 @@ pub(super) fn before_instruction(
     let frame_proof = match instruction {
         // Its destruction is harmless, but the live label still depends on
         // this frame and can never be an independent tail carrier.
-        VmInstruction::MakeLabel { dst, .. } => Some((*dst, false)),
+        VmInstruction::MakeLabel { dst, .. } | VmInstruction::RetainResumption { dst, .. } => Some((*dst, false)),
         VmInstruction::Call { .. } | VmInstruction::CallOwned { .. } => result_proof,
         VmInstruction::Copy { dst, src } | VmInstruction::Move { dst, src }
         | VmInstruction::Store { dst, src } | VmInstruction::StoreOwned { dst, src } => Some((*dst, source(*src))),

@@ -38,7 +38,9 @@ fn emit_operand(
         source: CoreId(u32::MAX),
         ty: ty.clone(),
     });
-    instructions.push(if operand.mode == ValueTransfer::Copy {
+    instructions.push(if operand.mode == ValueTransfer::RetainResumption {
+        RuntimeOperation::RetainResumption { dst, src: source, fields: vec![] }
+    } else if operand.mode == ValueTransfer::Copy {
         RuntimeOperation::Copy { dst, src: source }
     } else {
         RuntimeOperation::Move { dst, src: source }
@@ -61,7 +63,7 @@ fn edge_arguments(
         .zip(&target.parameters)
         .map(|(operand, parameter)| {
             let source = local(operand.value);
-            if operand.mode != ValueTransfer::Copy || source == local(*parameter) {
+            if !matches!(operand.mode, ValueTransfer::Copy | ValueTransfer::RetainResumption) || source == local(*parameter) {
                 return Some(source);
             }
             let destination = MirLocal(u32::try_from(locals.len()).ok()?);
@@ -69,10 +71,9 @@ fn edge_arguments(
                 source: CoreId(u32::MAX),
                 ty: values[operand.value.0 as usize].ty.clone(),
             });
-            instructions.push(RuntimeOperation::Copy {
-                dst: destination,
-                src: source,
-            });
+            instructions.push(if operand.mode == ValueTransfer::RetainResumption {
+                RuntimeOperation::RetainResumption { dst: destination, src: source, fields: vec![] }
+            } else { RuntimeOperation::Copy { dst: destination, src: source } });
             Some(destination)
         })
         .collect()
@@ -258,7 +259,9 @@ impl CleanupMir {
                         continue;
                     }
                     CleanupOperation::Transfer { value, mode } => {
-                        if *mode == ValueTransfer::Move {
+                        if *mode == ValueTransfer::RetainResumption {
+                            RuntimeOperation::RetainResumption { dst, src: local(*value), fields: vec![] }
+                        } else if *mode == ValueTransfer::Move {
                             RuntimeOperation::Move {
                                 dst,
                                 src: local(*value),
@@ -274,7 +277,9 @@ impl CleanupMir {
                         result, mode, plan, ..
                     } => {
                         if !symbols.contains(&instruction.destination) {
-                            instructions.push(if *mode == ValueTransfer::Move {
+                            instructions.push(if *mode == ValueTransfer::RetainResumption {
+                                RuntimeOperation::RetainResumption { dst, src: local(*result), fields: vec![] }
+                            } else if *mode == ValueTransfer::Move {
                                 RuntimeOperation::Move {
                                     dst,
                                     src: local(*result),
@@ -312,7 +317,10 @@ impl CleanupMir {
                     },
                     CleanupOperation::ReadPlace { place, mode } => {
                         let (root, fields, reborrow) = place_path(place);
-                        if fields.is_empty() && !reborrow {
+                        if *mode == ValueTransfer::RetainResumption {
+                            if reborrow { return None; }
+                            RuntimeOperation::RetainResumption { dst, src: local(root), fields }
+                        } else if fields.is_empty() && !reborrow {
                             if *mode == ValueTransfer::Move {
                                 RuntimeOperation::Move {
                                     dst,
@@ -378,7 +386,10 @@ impl CleanupMir {
                         mode,
                     } => {
                         let (root, fields, reborrow) = place_path(place);
-                        if *mode == ValueTransfer::Move && !reborrow {
+                        if *mode == ValueTransfer::RetainResumption {
+                            if reborrow { return None; }
+                            RuntimeOperation::RetainResumption { dst, src: local(root), fields }
+                        } else if *mode == ValueTransfer::Move && !reborrow {
                             RuntimeOperation::TakeProjection {
                                 dst,
                                 base: local(root),
@@ -782,16 +793,15 @@ impl CleanupMir {
                 }
             }
             let returned = if let CleanupControl::Return(value) = block.terminator.control {
-                if block.terminator.operands[0].mode == ValueTransfer::Copy {
+                if matches!(block.terminator.operands[0].mode, ValueTransfer::Copy | ValueTransfer::RetainResumption) {
                     let destination = MirLocal(u32::try_from(locals.len()).ok()?);
                     locals.push(MirLocalDecl {
                         source: CoreId(u32::MAX),
                         ty: self.values[value.0 as usize].ty.clone(),
                     });
-                    instructions.push(RuntimeOperation::Copy {
-                        dst: destination,
-                        src: local(value),
-                    });
+                    instructions.push(if block.terminator.operands[0].mode == ValueTransfer::RetainResumption {
+                        RuntimeOperation::RetainResumption { dst: destination, src: local(value), fields: vec![] }
+                    } else { RuntimeOperation::Copy { dst: destination, src: local(value) } });
                     Some(destination)
                 } else {
                     Some(local(value))
