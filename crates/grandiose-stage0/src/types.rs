@@ -23,6 +23,44 @@ pub(crate) use universes::UniversalScope;
 pub struct InferVar(pub u32);
 
 #[cfg(test)]
+mod partial_substitution_tests {
+    use super::*;
+
+    #[test]
+    fn partial_substitution_traverses_every_kind_without_defaulting_unknowns() {
+        let mut inference = InferContext::for_body();
+        let ty = inference.fresh();
+        let unknown = inference.fresh();
+        inference.constrain_numeric(unknown.clone(), false).unwrap();
+        let region = inference.fresh_lifetime();
+        let width = inference.fresh_const(ConstKind::Usize);
+        let seven = GenericArgument::ConstInteger(integer_const::IntegerConst::from_literal(ScalarType::Usize, "7", false, 64).unwrap());
+        let row = inference.fresh_effects();
+        let definition = DefKey(Digest::of_bytes(b"partial-kind-substitution"));
+        let effect = |ty: Type, width: GenericArgument, region| EffectRow::closed_instances([EffectInstance {
+            definition, arguments: vec![GenericArgument::Type(ty), width, GenericArgument::Lifetime(region)],
+        }]);
+        inference.unify_effect_rows(row.clone(), effect(ty.clone(), width.clone(), region)).unwrap();
+        inference.unify(ty.clone(), Type::Scalar(ScalarType::I64)).unwrap();
+        inference.unify_generic_arguments(vec![width.clone()], vec![seven.clone()]).unwrap();
+        inference.unify_lifetimes(region, Lifetime::Static).unwrap();
+        let callable = |ty, width, region, effects| Type::Callable {
+            contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0,
+            parameters: vec![Type::Reference { lifetime: region, mutability: Mutability::Shared, referent: Box::new(ty) }],
+            result: Box::new(Type::FixedArray { element: Box::new(unknown.clone()), length: Box::new(width) }),
+            effects, invocation: Quantity::ONCE,
+        };
+        let input = callable(ty, width, region, row.clone());
+        let expected_row = effect(Type::Scalar(ScalarType::I64), seven.clone(), Lifetime::Static);
+        let expected = callable(Type::Scalar(ScalarType::I64), seven, Lifetime::Static, expected_row.clone());
+        assert_eq!(inference.resolve_type_structure(input), expected);
+        assert_eq!(inference.resolve_argument_structure(GenericArgument::EffectRow(row)), GenericArgument::EffectRow(expected_row));
+        assert_eq!(inference.resolve_type_structure(unknown.clone()), unknown);
+        assert!(matches!(inference.zonk(unknown), Err(TypeError::Unresolved(_))));
+    }
+}
+
+#[cfg(test)]
 mod numeric_constraint_tests {
     use super::*;
 
@@ -2040,7 +2078,7 @@ impl InferContext {
     /// This is not a persistence operation: `zonk` remains mandatory there.
     pub(crate) fn resolve_type_structure(&self, mut value: Type) -> Type {
         while let Type::Infer(variable) = value {
-            let Some(binding) = &self.bindings[variable.0 as usize] else { break; };
+            let Some(Some(binding)) = self.bindings.get(variable.0 as usize) else { break; };
             value = binding.clone();
         }
         match value {
@@ -2059,7 +2097,7 @@ impl InferContext {
                 element: Box::new(self.resolve_type_structure(*element)), length: Box::new(self.resolve_argument_structure(*length)),
             },
             Type::Reference { mutability, lifetime, referent } => Type::Reference {
-                mutability, lifetime, referent: Box::new(self.resolve_type_structure(*referent)),
+                mutability, lifetime: self.resolve_lifetime_structure(lifetime), referent: Box::new(self.resolve_type_structure(*referent)),
             },
             Type::RawPointer { mutability, pointee } => Type::RawPointer {
                 mutability, pointee: Box::new(self.resolve_type_structure(*pointee)),
@@ -2071,17 +2109,61 @@ impl InferContext {
                 contract: Box::new(contract.map_terms(|argument, _| self.resolve_argument_structure(argument))),
                 safety, lifetime_binders,
                 parameters: parameters.into_iter().map(|value| self.resolve_type_structure(value)).collect(),
-                result: Box::new(self.resolve_type_structure(*result)), effects, invocation,
+                result: Box::new(self.resolve_type_structure(*result)), effects: self.resolve_effect_structure(effects), invocation,
             },
             value => value,
         }
     }
 
-    fn resolve_argument_structure(&self, argument: GenericArgument) -> GenericArgument {
+    pub(crate) fn resolve_argument_structure(&self, mut argument: GenericArgument) -> GenericArgument {
+        while let GenericArgument::ConstInfer { variable, .. } = argument {
+            let Some(Some(binding)) = self.const_bindings.get(variable.0 as usize) else { break; };
+            argument = binding.clone();
+        }
         match argument {
             GenericArgument::Type(value) => GenericArgument::Type(self.resolve_type_structure(value)),
+            GenericArgument::Lifetime(value) => GenericArgument::Lifetime(self.resolve_lifetime_structure(value)),
+            GenericArgument::EffectRow(value) => GenericArgument::EffectRow(self.resolve_effect_structure(value)),
+            GenericArgument::ConstProjection { subject, trait_definition, trait_arguments, name, kind } =>
+                GenericArgument::ConstProjection {
+                    subject: Box::new(self.resolve_type_structure(*subject)), trait_definition,
+                    trait_arguments: trait_arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+                    name, kind,
+                },
             argument => argument,
         }
+    }
+
+    fn resolve_lifetime_structure(&self, mut value: Lifetime) -> Lifetime {
+        while let Lifetime::Infer(variable) = value {
+            let Some(Some(binding)) = self.lifetime_bindings.get(variable.0 as usize) else { break; };
+            value = *binding;
+        }
+        value
+    }
+
+    /// Substitute solved row cells without closing or defaulting any open
+    /// operand. Normalization and constraint generation consume this same
+    /// partial substitution; persistence still requires complete zonking.
+    pub(crate) fn resolve_effect_structure(&self, mut value: EffectRow) -> EffectRow {
+        value.substitute_tails(|tail| {
+            let EffectTail::Infer(variable) = tail else { return None; };
+            Some(self.resolve_effect_structure(self.effect_bindings.get(variable.0 as usize)?.clone()?))
+        });
+        EffectRow {
+            effects: value.effects.into_iter().map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect.arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+            }).collect(),
+            projections: value.projections.into_iter().map(|projection| EffectRowProjection {
+                subject: Box::new(self.resolve_type_structure(*projection.subject)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection.trait_arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+                name: projection.name, item_generic_kinds: projection.item_generic_kinds,
+                item_arguments: projection.item_arguments.into_iter().map(|argument| self.resolve_argument_structure(argument)).collect(),
+            }).collect(),
+            tails: value.tails,
+        }.canonicalized()
     }
 
     fn solve_effect_equalities(&mut self) -> Result<(), TypeError> {

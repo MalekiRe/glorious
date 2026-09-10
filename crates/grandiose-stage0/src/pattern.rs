@@ -1088,6 +1088,10 @@ impl Elaborator<'_> {
                         "G4157",
                         "nominal pattern associated type projection has no finite normal form",
                     ),
+                    TraitProjectionAnswer::NestedEffectRowProjection { .. } => (
+                        "G4152",
+                        "nominal pattern contains an effect-row projection that could not be normalized",
+                    ),
                     TraitProjectionAnswer::Normalized { .. } => {
                         unreachable!("normalization results are returned through Ok")
                     }

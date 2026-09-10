@@ -53,7 +53,7 @@ impl Elaborator<'_> {
             let callable = CallableId(self.next_callable);
             self.next_callable += 1;
             let parameters: Vec<_> = fields.into_iter().enumerate().map(|(index, field)| {
-                (format!("<tuple-constructor-{}-{index}>", callable.0), self.normalize_concrete_type_projections(field.ty))
+                (format!("<tuple-constructor-{}-{index}>", callable.0), self.normalize_type_projections(field.ty))
             }).collect();
             let callable_type = Type::Callable { contract: Default::default(),
                 safety: crate::Safety::Safe,
@@ -77,7 +77,7 @@ impl Elaborator<'_> {
         };
         let mut values = Vec::with_capacity(fields.len());
         for (value, field) in supplied.iter().zip(fields) {
-            let expected = self.normalize_concrete_type_projections(field.ty);
+            let expected = self.normalize_type_projections(field.ty);
             let value = self.expression_expected(*value, Some(expected.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
             if self.unify_rigid_lifetimes(expected, actual, span).is_err() {

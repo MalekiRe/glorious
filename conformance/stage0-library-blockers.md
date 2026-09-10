@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 115 verification below,
+Updated from the current source and cache 116 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,26 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 116 consolidates lexical, kinded projection normalization in the shared
+trait solver and migrates signature comparison/validation, Core and executable
+materialization to that authority. Partial substitution reads the existing
+inference cells before normalization; an inferred call argument can therefore
+unlock dependent projected parameters. The two graph `components_from` argument
+errors at line 201 are gone. The implementation-only permission flag and the
+duplicate consumer selection/normalization walkers are removed.
+
+The verified boundary has 589 distinct passing checks; one unchanged obsolete
+label-shape fixture also fails in the pre-change baseline and is not counted as
+passing. See `implementation-progress.md` for exact gate scope and logs.
+The full-library composition root still fails with 94 diagnostic records and no
+diagnostic-limit suppression marker (`target/projection-normalization-library-final-v17.log`).
+Remaining errors include Bytes/Slice and array-kind API mismatches, sorting
+callback inference, graph result/provenance checks, custom-Drop extraction,
+unsafe UTF-8 operations, tail provenance and minimum-use obligations. No new
+31-test source matrix or self-hosting acceptance result is claimed.
+
+The following cache 115 and earlier checkpoints are historical.
 
 Cache 115 / interface 21 retains and enforces effect-family and operation-local
 prerequisites through shared declaration signatures, row-domain checking,

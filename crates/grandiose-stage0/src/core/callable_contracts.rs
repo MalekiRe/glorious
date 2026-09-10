@@ -229,9 +229,9 @@ impl Elaborator<'_> {
         // this predicate is opened (for example an iterator's concrete Item).
         // Compare its selected semantic type, never the projection spelling.
         let inputs = self.inference.resolve_type_structure(Type::Tuple(inputs));
-        let inputs = self.normalize_selectable_type_projections(inputs);
+        let inputs = self.normalize_type_projections(inputs);
         let parameters = self.inference.resolve_type_structure(Type::Tuple(parameters));
-        let parameters = self.normalize_selectable_type_projections(parameters);
+        let parameters = self.normalize_type_projections(parameters);
         self.inference.unify(inputs, parameters)
             .map_err(|_| ("G4166", "callable inputs do not satisfy the required lifetime contract"))?;
         for binding in type_bindings {

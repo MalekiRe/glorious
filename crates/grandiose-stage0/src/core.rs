@@ -2944,73 +2944,6 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
     }
 }
 
-/// Effect-row selection may reveal an associated type whose own GAT argument
-/// is the row currently being selected.  Descending through that argument
-/// would turn a finite cyclic-row diagnostic into elaborator recursion.  We
-/// may still normalize ordinary associated type arguments embedded in a
-/// selected row, provided their type tree has no row argument to re-enter.
-fn generic_argument_contains_effect_row(argument: &GenericArgument) -> bool {
-    match argument {
-        GenericArgument::Type(value) => type_contains_effect_row_argument(value),
-        GenericArgument::EffectRow(_) => true,
-        GenericArgument::ConstProjection {
-            subject,
-            trait_arguments,
-            ..
-        } => {
-            type_contains_effect_row_argument(subject)
-                || trait_arguments
-                    .iter()
-                    .any(generic_argument_contains_effect_row)
-        }
-        GenericArgument::Lifetime(_)
-        | GenericArgument::ConstInteger(_)
-        | GenericArgument::ConstIntegerExpr(_)
-        | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. }
-        | GenericArgument::ConstInfer { .. } => false,
-    }
-}
-
-fn type_contains_effect_row_argument(value: &Type) -> bool {
-    match value {
-        Type::Nominal { arguments, .. } => arguments.iter().any(generic_argument_contains_effect_row),
-        Type::Projection {
-            subject,
-            trait_arguments,
-            item_arguments,
-            ..
-        } => {
-            type_contains_effect_row_argument(subject)
-                || trait_arguments
-                    .iter()
-                    .any(generic_argument_contains_effect_row)
-                || item_arguments
-                    .iter()
-                    .any(generic_argument_contains_effect_row)
-        }
-        Type::Tuple(values) => values.iter().any(type_contains_effect_row_argument),
-        Type::FixedArray { element, length } => type_contains_effect_row_argument(element)
-            || generic_argument_contains_effect_row(length),
-        Type::Array(value)
-        | Type::RawPointer { pointee: value, .. }
-        | Type::StaticData { element: value, .. }
-        | Type::Reference {
-            referent: value, ..
-        } => type_contains_effect_row_argument(value),
-        Type::Callable { .. } => true,
-        Type::Unit
-        | Type::Never
-        | Type::Scalar(_)
-        | Type::ConstInteger(_)
-        | Type::ConstQuantity(_)
-        | Type::ConstGeneric { .. }
-        | Type::Generic(_)
-        | Type::Infer(_)
-        | Type::Error => false,
-    }
-}
-
 fn effect_row_contains_inference(row: &EffectRow) -> bool {
     row.effects.iter().any(|effect| {
         effect
@@ -3312,7 +3245,6 @@ impl TypedBody {
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
-            allow_rigid_trait_arguments: false,
         };
         let expected_result = signatures
             .definitions
@@ -3329,7 +3261,7 @@ impl TypedBody {
         // clause supplies explicit evidence; only implementation bodies own
         // selected implementation evidence for rigid trait arguments.
         let expected_result = expected_result
-            .map(|result| elaborator.normalize_selectable_type_projections(result));
+            .map(|result| elaborator.normalize_type_projections(result));
         let mut parameters = vec![];
         if let Some(signature) = signatures
             .definitions
@@ -3343,7 +3275,7 @@ impl TypedBody {
                     // relation.  Keep that relation concrete in the body so
                     // calls through the parameter freeze the caller loan
                     // before escape analysis and VM lowering.
-                    let ty = elaborator.normalize_selectable_type_projections(ty.clone());
+                    let ty = elaborator.normalize_type_projections(ty.clone());
                     elaborator.locals.define(parameter.name.clone(), ty.clone());
                     parameters.push((parameter.name.clone(), ty));
                 }
@@ -3565,7 +3497,6 @@ impl TypedBody {
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
-            allow_rigid_trait_arguments: true,
         };
         elaborator.declared_effects =
             elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
@@ -3578,7 +3509,7 @@ impl TypedBody {
             .iter()
             .zip(context.signature.parameters.iter())
         {
-            let ty = elaborator.normalize_concrete_type_projections(ty.clone());
+            let ty = elaborator.normalize_type_projections(ty.clone());
             elaborator.locals.define(parameter.name.clone(), ty.clone());
             parameters.push((parameter.name.clone(), ty));
         }
@@ -3589,7 +3520,7 @@ impl TypedBody {
         // projection with an `i64` body merely because `U` is universally
         // quantified by the method.
         let expected_result =
-            elaborator.normalize_selectable_type_projections(context.signature.result.clone());
+            elaborator.normalize_type_projections(context.signature.result.clone());
         let root = elaborator.named_body(Some(&context.method.name), Some(expected_result.clone()), context.method.span);
         let actual = elaborator.expressions[root.0 as usize].ty.clone();
         if elaborator
@@ -3697,7 +3628,6 @@ impl TypedBody {
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
-            allow_rigid_trait_arguments: false,
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -3827,7 +3757,6 @@ impl TypedBody {
             pending_associated_checks: vec![],
             pending_rigid_equalities: vec![],
             pending_integer_defaults: vec![],
-            allow_rigid_trait_arguments: false,
         };
         let root = elaborator.expression_expected(body.root, None);
         // Generalization defaults numeric roots. Give delayed non-defaultable
@@ -4237,9 +4166,6 @@ struct Elaborator<'a> {
     pending_associated_checks: Vec<PendingAssociatedCheck>,
     pending_rigid_equalities: Vec<PendingRigidEquality>,
     pending_integer_defaults: Vec<PendingIntegerDefault>,
-    /// Only an implementation body may use its selected implementation
-    /// evidence to reduce projections carrying rigid trait arguments.
-    allow_rigid_trait_arguments: bool,
 }
 impl Elaborator<'_> {
     fn pattern_generic_scope(&self) -> PatternGenericScope {
@@ -4881,7 +4807,7 @@ impl Elaborator<'_> {
         let expected = expected.map(|ty| {
             let ty = self.inference.resolve_type_structure(ty);
             if type_has_unresolved_projection(&ty) {
-                self.normalize_selectable_type_projections(ty)
+                self.normalize_type_projections(ty)
             } else { ty }
         });
         let value = self.expression_expected_inner(id, expected.clone(), open_call_lifetimes);
@@ -6255,488 +6181,49 @@ impl Elaborator<'_> {
             },
         }
     }
-    /// Callable signatures retain symbolic projections so generic interfaces
-    /// do not guess evidence. At a concrete body boundary, however, every
-    /// selected associated definition must reduce recursively before ordinary
-    /// type unification compares the declared result with the body value.
-    fn normalize_concrete_type_projections(&mut self, value: Type) -> Type {
-        let value = match self.trait_query().normalize_type(value) {
+    /// Body normalization uses the same lexical query as signature comparison
+    /// and materialization. The solver owns eligibility, kinded recursion,
+    /// binder scopes and cycle limits; this layer only reports source errors.
+    fn normalize_type_projections(&mut self, value: Type) -> Type {
+        let value = self.inference.resolve_type_structure(value);
+        match self.trait_query().normalize_type(value) {
             Ok(value) => value,
             Err(answer) => self.projection_normalization_error(*answer),
-        };
-        self.normalize_nested_callable_effect_rows(value)
-    }
-
-    /// A method implementation owns its generic binders.  A projection whose
-    /// trait head has a known structural shape may therefore be selected with
-    /// those binders as rigid arguments: the selected implementation proves its result for
-    /// every possible instantiation, rather than asking this body to guess
-    /// caller evidence.  This is intentionally narrower than general
-    /// normalization; projections with an abstract subject remain symbolic,
-    /// and selection must still prove every implementation predicate using
-    /// only this declaration's lexical evidence.
-    fn normalize_selectable_type_projections(&mut self, value: Type) -> Type {
-        let value = self.normalize_concrete_type_projections(value);
-        self.normalize_selectable_type_projections_inner(
-            value,
-            &mut std::collections::BTreeSet::new(),
-            &[],
-        )
-    }
-
-    fn normalize_selectable_type_projections_inner(
-        &mut self,
-        value: Type,
-        active: &mut std::collections::BTreeSet<Digest>,
-        hrtb_binders: &[u32],
-    ) -> Type {
-        match value {
-            Type::Nominal {
-                definition,
-                arguments,
-            } => Type::Nominal {
-                definition,
-                arguments: arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
-                    .collect(),
-            },
-            Type::Projection {
-                subject,
-                trait_definition,
-                trait_arguments,
-                name,
-                item_generic_kinds,
-                item_arguments,
-            } => {
-                let subject = self.normalize_selectable_type_projections_inner(*subject, active, hrtb_binders);
-                let trait_arguments = trait_arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
-                    .collect::<Vec<_>>();
-                let item_arguments = item_arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
-                    .collect::<Vec<_>>();
-                let projection = Type::Projection {
-                    subject: Box::new(subject),
-                    trait_definition,
-                    trait_arguments,
-                    name,
-                    item_generic_kinds,
-                    item_arguments,
-                };
-                if !projection_is_selectable_type_projection(
-                    &projection,
-                    hrtb_binders,
-                    self.allow_rigid_trait_arguments,
-                ) {
-                    return projection;
-                }
-                let Type::Projection {
-                    subject,
-                    trait_definition,
-                    trait_arguments,
-                    name,
-                    item_arguments,
-                    ..
-                } = &projection
-                else {
-                    unreachable!("projection was just constructed")
-                };
-                let trait_arguments_encoding =
-                    canonical_generic_arguments_encoding(trait_arguments);
-                let subject_encoding = canonical_type_encoding(subject);
-                let item_arguments_encoding = canonical_generic_arguments_encoding(item_arguments);
-                let key = Digest::of_parts([
-                    b"grandiose-stage0-selectable-type-projection-v1".as_slice(),
-                    trait_definition.0.as_bytes().as_slice(),
-                    trait_arguments_encoding.as_slice(),
-                    subject_encoding.as_slice(),
-                    name.as_bytes(),
-                    item_arguments_encoding.as_slice(),
-                ]);
-                if !active.insert(key) {
-                    return projection;
-                }
-                let answer = self
-                    .trait_query()
-                    .normalize_associated_type_application_in_hrtb(
-                    TraitGoal {
-                        relation: crate::ElaboratedTraitReference {
-                            definition: *trait_definition,
-                            arguments: trait_arguments.clone(),
-                        },
-                        subject: *subject.clone(),
-                    },
-                    name,
-                    item_arguments,
-                    hrtb_binders,
-                );
-                let result = match answer {
-                    TraitProjectionAnswer::Normalized { ty, .. } => {
-                        self.normalize_selectable_type_projections_inner(ty, active, hrtb_binders)
-                    }
-                    _ => projection,
-                };
-                active.remove(&key);
-                result
-            }
-            Type::Tuple(values) => Type::Tuple(
-                values
-                    .into_iter()
-                    .map(|value| self.normalize_selectable_type_projections_inner(value, active, hrtb_binders))
-                    .collect(),
-            ),
-            Type::FixedArray { element, length } => Type::FixedArray {
-                element: Box::new(self.normalize_selectable_type_projections_inner(*element, active, hrtb_binders)),
-                length: Box::new(self.normalize_selectable_type_argument(*length, active, hrtb_binders)),
-            },
-            Type::Array(value) => Type::Array(Box::new(
-                self.normalize_selectable_type_projections_inner(*value, active, hrtb_binders),
-            )),
-            Type::RawPointer { mutability, pointee } => Type::RawPointer {
-                mutability,
-                pointee: Box::new(self.normalize_selectable_type_projections_inner(*pointee, active, hrtb_binders)),
-            },
-            Type::Reference {
-                mutability,
-                lifetime,
-                referent,
-            } => Type::Reference {
-                mutability,
-                lifetime,
-                referent: Box::new(
-                    self.normalize_selectable_type_projections_inner(*referent, active, hrtb_binders),
-                ),
-            },
-            Type::Callable { contract,
-                safety,
-                lifetime_binders,
-                parameters,
-                result,
-                effects,
-                invocation,
-            } => {
-                let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
-                nested_binders.push(lifetime_binders);
-                nested_binders.extend_from_slice(hrtb_binders);
-                let contract = contract.map_scoped_terms(|value, scopes| {
-                    let mut scopes = scopes.to_vec();
-                    scopes.extend_from_slice(&nested_binders);
-                    self.normalize_selectable_type_argument(value, active, &scopes)
-                });
-                Type::Callable { contract: Box::new(contract),
-                    safety,
-                    lifetime_binders,
-                    parameters: parameters
-                        .into_iter()
-                        .map(|parameter| {
-                            self.normalize_selectable_type_projections_inner(
-                                parameter,
-                                active,
-                                &nested_binders,
-                            )
-                        })
-                        .collect(),
-                    result: Box::new(self.normalize_selectable_type_projections_inner(
-                        *result,
-                        active,
-                        &nested_binders,
-                    )),
-                    effects: self.normalize_selectable_effect_row(effects),
-                    invocation,
-                }
-            }
-            value => value,
         }
     }
 
-    fn normalize_selectable_type_argument(
-        &mut self,
-        argument: GenericArgument,
-        active: &mut std::collections::BTreeSet<Digest>,
-        hrtb_binders: &[u32],
-    ) -> GenericArgument {
-        match argument {
-            GenericArgument::Type(value) => GenericArgument::Type(
-                self.normalize_selectable_type_projections_inner(value, active, hrtb_binders),
-            ),
-            GenericArgument::EffectRow(value) => {
-                GenericArgument::EffectRow(self.normalize_selectable_effect_row(value))
+    fn normalize_selectable_type_argument(&mut self, value: GenericArgument) -> GenericArgument {
+        let value = self.inference.resolve_argument_structure(value);
+        match self.trait_query().normalize_generic_argument(value.clone()) {
+            Ok(value) => value,
+            Err(answer) => {
+                self.projection_normalization_error(*answer);
+                value
             }
-            GenericArgument::ConstProjection {
-                subject,
-                trait_definition,
-                trait_arguments,
-                name,
-                kind,
-            } => GenericArgument::ConstProjection {
-                subject: Box::new(
-                    self.normalize_selectable_type_projections_inner(*subject, active, hrtb_binders),
-                ),
-                trait_definition,
-                trait_arguments: trait_arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
-                    .collect(),
-                name,
-                kind,
-            },
-            argument => argument,
         }
     }
 
-    /// Type projection normalization deliberately leaves effect rows opaque
-    /// because they have their own solver entry point. A callable parameter
-    /// is still an executable contract, though: normalize its nested row
-    /// before it becomes a direct-call expectation. This is especially
-    /// important for an imported `for<'a>` callback whose selected effect GAT
-    /// otherwise reaches argument checking as an opaque projection.
-    fn normalize_nested_callable_effect_rows(&mut self, value: Type) -> Type {
-        match value {
-            Type::Nominal {
-                definition,
-                arguments,
-            } => Type::Nominal {
-                definition,
-                arguments: arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
-                    .collect(),
-            },
-            Type::Projection {
-                subject,
-                trait_definition,
-                trait_arguments,
-                name,
-                item_generic_kinds,
-                item_arguments,
-            } => Type::Projection {
-                subject: Box::new(self.normalize_nested_callable_effect_rows(*subject)),
-                trait_definition,
-                trait_arguments: trait_arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
-                    .collect(),
-                name,
-                item_generic_kinds,
-                item_arguments: item_arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
-                    .collect(),
-            },
-            Type::Tuple(values) => Type::Tuple(
-                values
-                    .into_iter()
-                    .map(|value| self.normalize_nested_callable_effect_rows(value))
-                    .collect(),
-            ),
-            Type::Array(value) => {
-                Type::Array(Box::new(self.normalize_nested_callable_effect_rows(*value)))
-            }
-            Type::FixedArray { element, length } => Type::FixedArray {
-                element: Box::new(self.normalize_nested_callable_effect_rows(*element)),
-                length: Box::new(self.normalize_nested_callable_effect_argument(*length)),
-            },
-            Type::RawPointer { mutability, pointee } => Type::RawPointer {
-                mutability,
-                pointee: Box::new(self.normalize_nested_callable_effect_rows(*pointee)),
-            },
-            Type::Reference {
-                mutability,
-                lifetime,
-                referent,
-            } => Type::Reference {
-                mutability,
-                lifetime,
-                referent: Box::new(self.normalize_nested_callable_effect_rows(*referent)),
-            },
-            Type::Callable { contract,
-                safety,
-                lifetime_binders,
-                parameters,
-                result,
-                effects,
-                invocation,
-            } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| self.normalize_nested_callable_effect_argument(value))),
-                safety,
-                lifetime_binders,
-                parameters: parameters
-                    .into_iter()
-                    .map(|parameter| self.normalize_nested_callable_effect_rows(parameter))
-                    .collect(),
-                result: Box::new(self.normalize_nested_callable_effect_rows(*result)),
-                effects: if lifetime_binders == 0 {
-                    self.normalize_concrete_effect_row(effects)
-                } else {
-                    self.normalize_concrete_hrtb_effect_row(effects, lifetime_binders)
-                },
-                invocation,
-            },
-            value => value,
-        }
-    }
-
-    fn normalize_nested_callable_effect_argument(
-        &mut self,
-        argument: GenericArgument,
-    ) -> GenericArgument {
-        match argument {
-            GenericArgument::Type(value) => {
-                GenericArgument::Type(self.normalize_nested_callable_effect_rows(value))
-            }
-            GenericArgument::EffectRow(value) => {
-                GenericArgument::EffectRow(self.normalize_concrete_effect_row(value))
-            }
-            GenericArgument::ConstProjection {
-                subject,
-                trait_definition,
-                trait_arguments,
-                name,
-                kind,
-            } => GenericArgument::ConstProjection {
-                subject: Box::new(self.normalize_nested_callable_effect_rows(*subject)),
-                trait_definition,
-                trait_arguments: trait_arguments
-                    .into_iter()
-                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
-                    .collect(),
-                name,
-                kind,
-            },
-            argument => argument,
-        }
-    }
-
-    /// Effect rows follow the same boundary as type projections: concrete
-    /// selected rows are executable identities, while rows under declaration
-    /// binders remain symbolic for lexical forwarding.  Keep a failed
-    /// normalization intact so the ordinary effect checker can issue its
-    /// source diagnostic rather than silently dropping a forged projection.
+    // Unresolved rows remain obligations for effect checking; normalization
+    // failure never becomes an empty row or grants permission to perform.
     fn normalize_concrete_effect_row(&mut self, value: EffectRow) -> EffectRow {
-        self.trait_query()
-            .normalize_effect_row(value.clone())
-            .unwrap_or(value)
+        let value = self.inference.resolve_effect_structure(value);
+        self.trait_query().normalize_effect_row(value.clone()).unwrap_or(value)
     }
 
-    /// The HRTB counterpart retains the callable's binder while opening a
-    /// selected associated effect GAT. A plain normalization query correctly
-    /// rejects a raw `Bound` lifetime as escaped; a named higher-ranked
-    /// function value has already established the owning callable scope.
-    fn normalize_concrete_hrtb_effect_row(
-        &mut self,
-        value: EffectRow,
-        lifetime_binders: u32,
-    ) -> EffectRow {
-        self.trait_query()
-            .normalize_effect_row_in_hrtb(value.clone(), lifetime_binders)
-            .unwrap_or(value)
+    fn normalize_concrete_hrtb_effect_row(&mut self, value: EffectRow, lifetime_binders: u32) -> EffectRow {
+        let value = self.inference.resolve_effect_structure(value);
+        self.trait_query().normalize_effect_row_in_hrtb(value.clone(), lifetime_binders).unwrap_or(value)
     }
 
-    /// Reduce effect-row projections on known structural heads with rigid
-    /// declaration parameters, requiring the selected implementation's exact
-    /// lexical predicates. Keep abstract subjects symbolic so ordinary
-    /// lexical forwarding does not choose caller-owned implementation evidence.
     fn normalize_selectable_effect_row(&mut self, value: EffectRow) -> EffectRow {
-        let mut result = self.normalize_concrete_effect_row(value);
-        let mut projections = std::mem::take(&mut result.projections);
-        let mut unresolved = vec![];
-        let mut expanded = std::collections::BTreeSet::new();
-        while let Some(projection) = projections.pop() {
-            if !projection_subject_is_selectable(
-                &projection.subject, &[], self.allow_rigid_trait_arguments,
-            )
-                || !projection
-                    .trait_arguments
-                    .iter()
-                    .all(generic_argument_is_selectable_effect_projection)
-                || !projection
-                    .item_arguments
-                    .iter()
-                    .all(generic_argument_is_selectable_effect_projection)
-            {
-                unresolved.push(projection);
-                continue;
-            }
-            let trait_arguments = canonical_generic_arguments_encoding(&projection.trait_arguments);
-            let subject = canonical_type_encoding(&projection.subject);
-            let item_arguments = canonical_generic_arguments_encoding(&projection.item_arguments);
-            let key = Digest::of_parts([
-                b"grandiose-stage0-selectable-effect-projection-v1".as_slice(),
-                projection.trait_definition.0.as_bytes().as_slice(),
-                trait_arguments.as_slice(),
-                subject.as_slice(),
-                projection.name.as_bytes(),
-                item_arguments.as_slice(),
-            ]);
-            if !expanded.insert(key) {
-                // A selectable row may expand through another associated row.
-                // Retain a repeated projection as unresolved rather than
-                // re-opening a fresh solver query forever; ordinary effect
-                // validation then reports the recursive contract without
-                // manufacturing an empty executable row.
-                unresolved.push(projection);
-                continue;
-            }
-            match self
-                .trait_query()
-                .normalize_associated_effect_row_application(
-                    TraitGoal {
-                        relation: crate::ElaboratedTraitReference {
-                            definition: projection.trait_definition,
-                            arguments: projection.trait_arguments.clone(),
-                        },
-                        subject: (*projection.subject).clone(),
-                    },
-                    &projection.name,
-                    &projection.item_arguments,
-                ) {
-                TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
-                    result.effects.extend(row.effects);
-                    projections.extend(row.projections);
-                    result.tails.extend(row.tails);
-                }
-                answer => {
-                    // Concrete selected rows are no longer lexical
-                    // forwarding. Preserve why normalization failed so an
-                    // inherited ambiguity cannot be reported as the same
-                    // generic missing-row error as an unresolved facade.
-                    self.effect_projection_normalization_error(&answer);
-                    unresolved.push(projection);
-                }
+        let value = self.inference.resolve_effect_structure(value);
+        match self.trait_query().normalize_effect_row(value.clone()) {
+            Ok(value) => value,
+            Err(answer) => {
+                self.effect_projection_normalization_error(&answer);
+                value
             }
         }
-        result.projections = unresolved;
-        // A selected associated row can itself contain selected associated
-        // types.  Normalize those arguments before the row is retained as an
-        // executable callable contract; `Perform` normalizes its instance at
-        // the same boundary, so both sides retain the same closed protocol
-        // identity through MIR and VM lowering.
-        result.effects = result
-            .effects
-            .into_iter()
-            .map(|effect| {
-                EffectInstance {
-                    definition: effect.definition,
-                    arguments: effect
-                        .arguments
-                        .into_iter()
-                        .map(|argument| match argument {
-                            GenericArgument::Type(value)
-                                if !type_contains_effect_row_argument(&value) =>
-                            {
-                                GenericArgument::Type(
-                                    self.normalize_selectable_type_projections(value),
-                                )
-                            }
-                            argument => argument,
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
-        result
     }
 
     /// Every former `TraitSolver::new` call represented a fresh resource
@@ -6805,6 +6292,10 @@ impl Elaborator<'_> {
                     "G4157",
                     "associated type projection has no finite normal form",
                 );
+                Type::Error
+            }
+            TraitProjectionAnswer::NestedEffectRowProjection { answer } => {
+                self.effect_projection_normalization_error(&answer);
                 Type::Error
             }
             TraitProjectionAnswer::Normalized { .. } => {
@@ -8402,8 +7893,8 @@ impl Elaborator<'_> {
         for (expected, actual, span) in std::mem::take(&mut self.pending_callable_erasures) {
             let (Ok(expected), Ok(actual)) = (self.inference.zonk(expected), self.inference.zonk(actual)) else { continue; };
             if expected == actual { continue; }
-            let expected = self.normalize_selectable_type_projections(expected);
-            let actual = self.normalize_selectable_type_projections(actual);
+            let expected = self.normalize_type_projections(expected);
+            let actual = self.normalize_type_projections(actual);
             if !self.trait_query().callable_abi_erasure_proven(&expected, &actual) {
                 self.error(span, "G4143", "callable ABI would erase invocation predicates not established by this boundary");
                 self.recovered = true;
@@ -8761,7 +8252,7 @@ impl Elaborator<'_> {
     fn zonk_type(&mut self, ty: Type, span: Span) -> Type {
         let ty = self.joined_callable_value_type(ty);
         match self.inference.zonk(ty) {
-            Ok(ty) => self.normalize_concrete_type_projections(ty),
+            Ok(ty) => self.normalize_type_projections(ty),
             Err(_) => {
                 self.error(span, "G4116", "cannot infer a complete closure type");
                 self.recovered = true;
@@ -8827,8 +8318,8 @@ impl Elaborator<'_> {
         let actual = self.inference.zonk(actual.clone()).unwrap_or(actual);
         let expected = self.inference.resolve_type_structure(expected);
         let actual = self.inference.resolve_type_structure(actual);
-        let expected = self.normalize_concrete_type_projections(expected);
-        let actual = self.normalize_concrete_type_projections(actual);
+        let expected = self.normalize_type_projections(expected);
+        let actual = self.normalize_type_projections(actual);
         if defer && (type_has_unresolved_projection(&expected) || type_has_unresolved_projection(&actual)) {
             self.pending_rigid_equalities.push(PendingRigidEquality { expected, actual, span });
             return Ok(());
@@ -9262,9 +8753,9 @@ impl Elaborator<'_> {
                 let parameters = signature
                     .parameters
                     .into_iter()
-                    .map(|parameter| self.normalize_concrete_type_projections(parameter))
+                    .map(|parameter| self.normalize_type_projections(parameter))
                     .collect();
-                let result = self.normalize_concrete_type_projections(signature.result);
+                let result = self.normalize_type_projections(signature.result);
                 // A concrete associated effect-row projection is a
                 // selected callable contract, not deferred metadata.
                 // Retain symbolic projections under declaration
@@ -9419,7 +8910,7 @@ impl Elaborator<'_> {
             self.normalize_concrete_hrtb_effect_row(bound_signature.effects, lifetime_binders);
         let expected_effects =
             self.normalize_concrete_hrtb_effect_row(expected_effects, lifetime_binders);
-        let bound_callable = self.normalize_selectable_type_projections(Type::Callable { contract: Default::default(),
+        let bound_callable = self.normalize_type_projections(Type::Callable { contract: Default::default(),
             safety: bound_signature.safety,
             lifetime_binders,
             parameters: bound_signature.parameters,
@@ -9427,7 +8918,7 @@ impl Elaborator<'_> {
             effects: bound_effects,
             invocation: bound_signature.invocation,
         });
-        let expected = self.normalize_selectable_type_projections(Type::Callable { contract: Default::default(),
+        let expected = self.normalize_type_projections(Type::Callable { contract: Default::default(),
             safety,
             lifetime_binders,
             parameters: expected_parameters,
@@ -9567,9 +9058,9 @@ impl Elaborator<'_> {
         let parameters = signature
             .parameters
             .into_iter()
-            .map(|ty| self.normalize_concrete_type_projections(ty))
+            .map(|ty| self.normalize_type_projections(ty))
             .collect();
-        let result = self.normalize_concrete_type_projections(signature.result);
+        let result = self.normalize_type_projections(signature.result);
         let effects = self.normalize_concrete_effect_row(signature.effects);
         Some(self.alloc(
             CoreKind::Function {
@@ -9696,9 +9187,9 @@ impl Elaborator<'_> {
         let parameters = signature
             .parameters
             .into_iter()
-            .map(|parameter| self.normalize_concrete_type_projections(parameter))
+            .map(|parameter| self.normalize_type_projections(parameter))
             .collect();
-        let result = self.normalize_concrete_type_projections(signature.result);
+        let result = self.normalize_type_projections(signature.result);
         let effects = self.normalize_concrete_effect_row(signature.effects);
         self.alloc(
             CoreKind::Function {
@@ -10070,7 +9561,7 @@ impl Elaborator<'_> {
             // boundary.  Its field may contain a now-concrete associated
             // projection, so normalize it before handing the expectation to
             // body inference or freezing it into Core/MIR.
-            let field_ty = self.normalize_concrete_type_projections(field.ty);
+            let field_ty = self.normalize_type_projections(field.ty);
             let value = self.expression_expected(value, Some(field_ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
             if self.unify_rigid_lifetimes(field_ty, actual, span).is_err() {
@@ -10331,7 +9822,7 @@ impl Elaborator<'_> {
         // concrete goal. Normalize at the same field boundary as record
         // construction so Core and MIR never retain a projection whose
         // selected implementation is already known.
-        let field_ty = self.normalize_concrete_type_projections(field.ty);
+        let field_ty = self.normalize_type_projections(field.ty);
         self.alloc(
             CoreKind::Field {
                 base,
@@ -11091,7 +10582,7 @@ impl Elaborator<'_> {
         // same selected associated types, including recursive generic tails.
         // Normalizing only the result would leave a later invoke boundary
         // comparing Wrapper<I>::Item with the already selected I::Item.
-        let callable = self.normalize_selectable_type_projections(callable);
+        let callable = self.normalize_type_projections(callable);
         if matches!(callable, Type::Callable { .. }) {
             self.expressions[callee.0 as usize].ty = callable.clone();
         }
@@ -11292,7 +10783,7 @@ impl Elaborator<'_> {
         // subsequent scalar operator observes a stale inference variable and
         // incorrectly falls through to trait selection.
         let result = self.inference.zonk(result.clone()).unwrap_or(result);
-        let result = self.normalize_selectable_type_projections(result);
+        let result = self.normalize_type_projections(result);
         let strict_operands = std::iter::once(callee)
             .chain(arguments.iter().copied())
             .collect::<Vec<_>>();
@@ -11848,7 +11339,7 @@ impl Elaborator<'_> {
         } else {
             self.normalize_concrete_effect_row(signature.effects.clone())
         };
-        let callable = self.normalize_selectable_type_projections(Type::Callable { contract: Default::default(),
+        let callable = self.normalize_type_projections(Type::Callable { contract: Default::default(),
             safety: signature.safety,
             lifetime_binders: if hrtb_method_value {
                 expected_lifetime_binders
@@ -11886,7 +11377,7 @@ impl Elaborator<'_> {
         } else {
             expected
         };
-        let expected = self.normalize_selectable_type_projections(expected);
+        let expected = self.normalize_type_projections(expected);
         if self.inference.unify(expected, callable.clone()).is_err() {
             return Some(self.fail(
                 span,
@@ -12150,7 +11641,7 @@ impl Elaborator<'_> {
                     .parameters
                     .iter()
                     .cloned()
-                    .map(|parameter| self.normalize_concrete_type_projections(parameter))
+                    .map(|parameter| self.normalize_type_projections(parameter))
                     .collect::<Vec<_>>();
                 let receiver_offset = usize::from(receiver.is_some());
                 let mut values = receiver.into_iter().collect::<Vec<_>>();
@@ -12225,7 +11716,7 @@ impl Elaborator<'_> {
             .parameters
             .iter()
             .cloned()
-            .map(|parameter| self.normalize_concrete_type_projections(parameter))
+            .map(|parameter| self.normalize_type_projections(parameter))
             .collect::<Vec<_>>();
         if receiver.is_none() && !parameters.is_empty() {
             return Some(self.fail(
@@ -12364,9 +11855,9 @@ impl Elaborator<'_> {
             .signature.parameters
             .iter()
             .cloned()
-            .map(|parameter| self.normalize_selectable_type_projections(parameter))
+            .map(|parameter| self.normalize_type_projections(parameter))
             .collect::<Vec<_>>();
-        let result = self.normalize_selectable_type_projections(operation.signature.result.clone());
+        let result = self.normalize_type_projections(operation.signature.result.clone());
         let values = arguments
             .into_iter()
             .zip(&parameters)
@@ -12393,15 +11884,10 @@ impl Elaborator<'_> {
         // same boundary: retaining a selectable associated type only in the
         // effect argument would leave Core apparently clean while making the
         // corresponding MIR `Perform` impossible for the VM to encode.
-        let mut effect_projection_stack = std::collections::BTreeSet::new();
         let effect_arguments = effect_arguments
             .into_iter()
             .map(|argument| {
-                self.normalize_selectable_type_argument(
-                    argument,
-                    &mut effect_projection_stack,
-                    &[],
-                )
+                self.normalize_selectable_type_argument(argument)
             })
             .collect();
         let instance = EffectInstance {
@@ -12625,10 +12111,10 @@ impl Elaborator<'_> {
                 .signature.parameters
                 .iter()
                 .cloned()
-                .map(|parameter| self.normalize_selectable_type_projections(parameter))
+                .map(|parameter| self.normalize_type_projections(parameter))
                 .collect::<Vec<_>>();
             let operation_result =
-                self.normalize_selectable_type_projections(clause.operation.signature.result.clone());
+                self.normalize_type_projections(clause.operation.signature.result.clone());
             let resumption = if clause.operation.terminal {
                 if let Some(name) = &clause.source.resumption {
                     self.error(
@@ -13930,62 +13416,26 @@ impl Elaborator<'_> {
         {
             return;
         }
-        let mut projections = std::mem::take(&mut effects.projections);
-        while let Some(projection) = projections.pop() {
-            if !projection_is_concrete(&projection.subject)
-                || !projection
-                    .trait_arguments
-                    .iter()
-                    .all(generic_argument_is_concrete)
-                || !projection
-                    .item_arguments
-                    .iter()
-                    .all(generic_argument_is_selectable_effect_projection)
-            {
-                self.error(
-                    span,
-                    "G4155",
-                    "call has an unresolved associated effect-row projection",
-                );
+        effects = match self.trait_query().normalize_effect_row(effects) {
+            Ok(effects) => effects,
+            Err(answer) => {
+                self.effect_projection_normalization_error(&answer);
                 self.recovered = true;
                 return;
             }
-            match self
-                .trait_query()
-                .normalize_associated_effect_row_application(
-                    TraitGoal {
-                        relation: crate::ElaboratedTraitReference {
-                            definition: projection.trait_definition,
-                            arguments: projection.trait_arguments.clone(),
-                        },
-                        subject: *projection.subject,
-                    },
-                    &projection.name,
-                    &projection.item_arguments,
-                ) {
-                TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
-                    effects.effects.extend(row.effects);
-                    projections.extend(row.projections);
-                    effects.tails.extend(row.tails);
-                    if !self.inference
-                        .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
-                        .is_ok_and(|declared| effects.tails.is_subset(&declared.tails))
-                    {
-                        self.error(span, "G4155", "normalized effect row remains open");
-                        self.recovered = true;
-                        return;
-                    }
-                }
-                _ => {
-                    self.error(
-                        span,
-                        "G4155",
-                        "associated effect-row projection cannot be normalized",
-                    );
-                    self.recovered = true;
-                    return;
-                }
-            }
+        };
+        if !effects.projections.is_empty() {
+            self.error(span, "G4155", "call has an unresolved associated effect-row projection");
+            self.recovered = true;
+            return;
+        }
+        if !self.inference
+            .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
+            .is_ok_and(|declared| effects.tails.is_subset(&declared.tails))
+        {
+            self.error(span, "G4155", "normalized effect row remains open");
+            self.recovered = true;
+            return;
         }
         for effect in &effects.effects {
             self.check_effect_instance(effect, None, span);
@@ -16029,175 +15479,6 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
-    }
-}
-
-/// Whether an associated effect-row application may be selected while
-/// checking a body.  A callable's own lifetime parameter is a rigid,
-/// declaration-owned term: it is not an inference variable and selecting an
-/// implementation generic over that lifetime does not choose a lifetime for
-/// the caller.  Treat it as selectable here so signatures such as
-/// `<&'a T as Capability>::Effects<'a>` can normalize their concrete effect
-/// implementation.  Other symbolic arguments remain deliberately rejected.
-fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> bool {
-    generic_argument_is_concrete(value)
-        || matches!(value, GenericArgument::Lifetime(Lifetime::Generic(_)))
-        // The selected trait head is still required to be concrete. A type
-        // item argument owned by this declaration therefore cannot choose an
-        // implementation; it is merely substituted into the already selected
-        // associated row (for example `<i64 as Gate>::Effects<'a, T>`).
-        || matches!(value, GenericArgument::Type(Type::Generic(_)))
-        || matches!(
-            value,
-            GenericArgument::EffectRow(EffectRow {
-                effects,
-                projections,
-                tails,
-            }) if tails.iter().all(|tail| matches!(tail, crate::EffectTail::Generic(_)))
-                && projections.is_empty()
-                && effects.iter().all(|effect| {
-                    effect
-                        .arguments
-                        .iter()
-                        .all(generic_argument_is_selectable_effect_projection)
-                })
-        )
-}
-
-/// A selected associated type may carry declaration-owned generic arguments.
-/// A known structural subject can use those parameters rigidly: `Wrapper<I>`
-/// matches a generic wrapper implementation only when the lexical environment
-/// proves that implementation's predicates. Bare abstract subjects and
-/// unresolved projections cannot use this structural selection path.
-///
-/// Keep unresolved associated projections and inference variables out of this
-/// set.  Treating either as rigid would allow a concrete head to choose an
-/// implementation based on evidence that belongs to a caller or has not been
-/// inferred yet.
-fn projection_is_selectable_type_projection(
-    value: &Type,
-    hrtb_binders: &[u32],
-    allow_rigid_trait_arguments: bool,
-) -> bool {
-    let Type::Projection {
-        subject,
-        trait_arguments,
-        item_arguments,
-        ..
-    } = value
-    else {
-        return false;
-    };
-    projection_subject_is_selectable(subject, hrtb_binders, allow_rigid_trait_arguments)
-        // An implementation body owns its declaration generics. With a
-        // selectable subject, those rigid trait arguments select the same
-        // generic impl evidence for every instantiation; requiring them to
-        // be fully concrete leaves `<i64 as Parent<T>>::Item<'a>` opaque in
-        // precisely the body that establishes `Parent<T> for i64`.
-        && trait_arguments.iter().all(|argument| {
-            allow_rigid_trait_arguments
-                && generic_argument_is_selectable_type_projection(argument, hrtb_binders)
-                || generic_argument_is_concrete(argument)
-        })
-        && item_arguments
-            .iter()
-            .all(|argument| {
-                // The implementation is selected by the subject and trait
-                // arguments, not a GAT's lifetime argument. Preserve a
-                // caller-owned lifetime inference cell in the substituted
-                // result so its reference shape can constrain that cell.
-                // Selection still proves the item's instantiated domain;
-                // no unknown region is assumed to satisfy an outlives bound.
-                matches!(argument, GenericArgument::Lifetime(Lifetime::Infer(_)))
-                    || generic_argument_is_selectable_type_projection(argument, hrtb_binders)
-            })
-}
-
-fn projection_subject_is_selectable(
-    subject: &Type,
-    hrtb_binders: &[u32],
-    allow_rigid_arguments: bool,
-) -> bool {
-    projection_is_concrete(subject)
-        || allow_rigid_arguments
-            && !matches!(subject, Type::Generic(_) | Type::Projection { .. })
-            && type_is_selectable_type_projection_argument(subject, hrtb_binders)
-}
-
-fn generic_argument_is_selectable_type_projection(
-    value: &GenericArgument,
-    hrtb_binders: &[u32],
-) -> bool {
-    match value {
-        GenericArgument::Type(value) => {
-            type_is_selectable_type_projection_argument(value, hrtb_binders)
-        }
-        GenericArgument::EffectRow(value) => {
-            value.projections.is_empty()
-                && value.effects.iter().all(|effect| {
-                    effect
-                        .arguments
-                        .iter()
-                        .all(|argument| {
-                            generic_argument_is_selectable_type_projection(argument, hrtb_binders)
-                        })
-                })
-                && value.tails.iter().all(|tail| matches!(tail, crate::EffectTail::Generic(_)))
-        }
-        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
-        | GenericArgument::ConstInteger(_)
-        | GenericArgument::ConstIntegerExpr(_)
-        | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. } => true,
-        GenericArgument::Lifetime(Lifetime::Bound { depth, index }) => hrtb_binders
-            .get(*depth as usize)
-            .is_some_and(|count| *index < *count),
-        GenericArgument::Lifetime(Lifetime::Infer(_) | Lifetime::Placeholder(_))
-        | GenericArgument::ConstProjection { .. }
-        | GenericArgument::ConstInfer { .. } => false,
-    }
-}
-
-fn type_is_selectable_type_projection_argument(value: &Type, hrtb_binders: &[u32]) -> bool {
-    match value {
-        Type::FixedArray { element, length } => type_is_selectable_type_projection_argument(element, hrtb_binders)
-            && generic_argument_is_selectable_type_projection(length, hrtb_binders),
-        Type::Generic(_) | Type::ConstGeneric { .. } => true,
-        Type::Infer(_) | Type::Error => false,
-        Type::Nominal { arguments, .. } => arguments
-            .iter()
-            .all(|argument| generic_argument_is_selectable_type_projection(argument, hrtb_binders)),
-        Type::Tuple(values) => values
-            .iter()
-            .all(|value| type_is_selectable_type_projection_argument(value, hrtb_binders)),
-        // A nested projection is selectable only once it has been selected
-        // to a concrete type by the recursive normalizer above.
-        Type::Projection { .. } => projection_is_concrete(value),
-        Type::Array(value) | Type::StaticData { element: value, .. }
-        | Type::RawPointer { pointee: value, .. } => {
-            type_is_selectable_type_projection_argument(value, hrtb_binders)
-        }
-        Type::Reference {
-            lifetime, referent, ..
-        } => {
-            (matches!(lifetime, Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
-                || matches!(lifetime, Lifetime::Bound { depth, index }
-                    if hrtb_binders.get(*depth as usize).is_some_and(|count| *index < *count)))
-                && type_is_selectable_type_projection_argument(referent, hrtb_binders)
-        }
-        Type::Callable {
-            parameters, result, ..
-        } => {
-            parameters
-                .iter()
-                .all(|value| type_is_selectable_type_projection_argument(value, hrtb_binders))
-                && type_is_selectable_type_projection_argument(result, hrtb_binders)
-        }
-        Type::Unit
-        | Type::Never
-        | Type::Scalar(_)
-        | Type::ConstInteger(_)
-        | Type::ConstQuantity(_) => true,
     }
 }
 

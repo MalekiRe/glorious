@@ -10,7 +10,7 @@ use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
     ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout,
-    ElaboratedTrait, ElaboratedTraitReference, GenericArgument, Type, implementation_method_key,
+    ElaboratedTrait, ElaboratedTraitReference, GenericArgument, Lifetime, Type, implementation_method_key,
     signature::{
         TRAIT_SELF_GENERIC, is_intrinsic_callable_trait, is_intrinsic_label_trait,
         is_intrinsic_runs_in_trait,
@@ -165,6 +165,10 @@ pub enum TraitProjectionAnswer {
     /// so callers must report an error rather than preserving a misleading
     /// symbolic type in an executable interface.
     RecursiveProjection,
+    /// A row inside a callable or a kinded argument failed normalization.
+    NestedEffectRowProjection {
+        answer: Box<TraitEffectRowProjectionAnswer>,
+    },
 }
 
 /// The row-kinded counterpart of [`TraitProjectionAnswer`]. Keeping it
@@ -381,33 +385,41 @@ enum SupertraitLookup<T> {
     Ambiguous,
 }
 
-/// True only when `normalize_type` would return this exact type without
-/// selecting evidence. Keep this walk aligned with that normalizer: callable
-/// effect rows and static-data elements are intentionally opaque there.
+/// True only when the shared kinded normalizer cannot select a projection.
+/// This is a no-evidence fast path, not an alternative normalization rule.
 pub(crate) fn type_projection_normalization_is_identity(value: &Type) -> bool {
     match value {
-        Type::FixedArray { element, length } => type_projection_normalization_is_identity(element)
-            && !matches!(length.as_ref(), GenericArgument::ConstProjection { .. }),
         Type::Projection { .. } => false,
-        Type::Nominal { arguments, .. } => arguments.iter().all(|argument| match argument {
-            GenericArgument::Type(value) => type_projection_normalization_is_identity(value),
-            GenericArgument::ConstProjection { .. } => false,
-            GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
-            | GenericArgument::ConstInteger(_) | GenericArgument::ConstIntegerExpr(_)
-            | GenericArgument::ConstQuantity(_) | GenericArgument::ConstGeneric { .. }
-            | GenericArgument::ConstInfer { .. } => true,
-        }),
+        Type::FixedArray { element, length } => type_projection_normalization_is_identity(element)
+            && argument_projection_normalization_is_identity(length),
+        Type::Nominal { arguments, .. } => arguments.iter().all(argument_projection_normalization_is_identity),
         Type::Tuple(values) => values.iter().all(type_projection_normalization_is_identity),
         Type::Array(value) | Type::Reference { referent: value, .. }
-        | Type::RawPointer { pointee: value, .. } =>
+        | Type::RawPointer { pointee: value, .. } | Type::StaticData { element: value, .. } =>
             type_projection_normalization_is_identity(value),
-        Type::Callable { parameters, result, .. } =>
-            parameters.iter().all(type_projection_normalization_is_identity)
-                && type_projection_normalization_is_identity(result),
-        Type::Unit | Type::Never | Type::Scalar(_) | Type::StaticData { .. }
+        Type::Callable { contract, parameters, result, effects, .. } =>
+            contract.terms().iter().all(|(value, _)| argument_projection_normalization_is_identity(value))
+                && parameters.iter().all(type_projection_normalization_is_identity)
+                && type_projection_normalization_is_identity(result)
+                && row_projection_normalization_is_identity(effects),
+        Type::Unit | Type::Never | Type::Scalar(_)
         | Type::ConstInteger(_) | Type::ConstQuantity(_) | Type::ConstGeneric { .. }
         | Type::Generic(_) | Type::Infer(_) | Type::Error => true,
     }
+}
+
+fn argument_projection_normalization_is_identity(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => type_projection_normalization_is_identity(value),
+        GenericArgument::EffectRow(value) => row_projection_normalization_is_identity(value),
+        GenericArgument::ConstProjection { .. } => false,
+        _ => true,
+    }
+}
+
+fn row_projection_normalization_is_identity(value: &EffectRow) -> bool {
+    value.projections.is_empty() && value.effects.iter().all(|effect|
+        effect.arguments.iter().all(argument_projection_normalization_is_identity))
 }
 
 fn trait_declares_associated_item(
@@ -1400,16 +1412,16 @@ impl TraitSolver {
         self.normalize_associated_type_application(goal, name, &[])
     }
 
-    /// Normalize every concrete associated-type projection contained in a
-    /// type.  Declaration-owned generic projections remain symbolic, while
-    /// a concrete result is reduced to its recursive projection normal form.
+    /// Normalize projections throughout a kinded type under this query's
+    /// lexical evidence. Structural heads can select generic implementations
+    /// with rigid arguments only when every prerequisite is proved. Abstract
+    /// subjects and missing generic evidence remain symbolic obligations.
     pub fn normalize_type(&mut self, value: Type) -> Result<Type, Box<TraitProjectionAnswer>> {
         self.normalize_type_projections(value, &mut vec![])
     }
 
-    /// Normalize the type and associated-const projections carried by one
-    /// trait argument.  Effect rows deliberately remain opaque here: their
-    /// associated projections use the row-specific normalizer below.
+    /// Normalize a kinded argument through the same traversal and resource
+    /// budget, including rows nested inside types and types nested in rows.
     pub fn normalize_generic_argument(
         &mut self,
         argument: GenericArgument,
@@ -1417,9 +1429,9 @@ impl TraitSolver {
         self.normalize_trait_argument(argument, &mut vec![])
     }
 
-    /// Normalize concrete associated effect-row projections.  Like type
-    /// normalization, generic row projections stay symbolic so a declaration
-    /// cannot acquire implementation evidence before instantiation.
+    /// Normalize associated rows using exactly the same lexical selection
+    /// rule and kinded traversal as types. Missing generic evidence remains
+    /// an obligation, not an empty row or an invented implementation.
     pub fn normalize_effect_row(
         &mut self,
         value: EffectRow,
@@ -1526,6 +1538,11 @@ impl TraitSolver {
             relation: ElaboratedTraitReference { definition: goal.relation.definition, arguments: trait_arguments },
             subject,
         };
+        if !projection_type_is_known(&goal.subject, lifetime_binders, ProjectionPosition::Head)
+            || !goal.relation.arguments.iter().all(|argument| projection_argument_is_known(argument, lifetime_binders, ProjectionPosition::Head))
+            || !arguments.iter().all(|argument| projection_argument_is_known(argument, lifetime_binders, ProjectionPosition::Item)) {
+            return TraitProjectionAnswer::NoSolution;
+        }
         let root_key = associated_projection_key(&goal, name, &arguments);
         let answer = self.select_associated_type_application(goal, name, &arguments, true);
         let TraitProjectionAnswer::Normalized { evidence, ty } = answer else { return answer; };
@@ -1691,15 +1708,10 @@ impl TraitSolver {
         }
     }
 
-    /// Normalize concrete projections nested in a selected associated-type
-    /// value.  In particular, an implementation may define `Output` as
-    /// another associated projection, and that projection must not leak into
-    /// a concrete call site merely because it was introduced by substitution.
-    ///
-    /// Symbolic projections under declaration-owned generic binders are
-    /// retained. They are normalized later once instantiation supplies a
-    /// concrete trait head; attempting to select an implementation early
-    /// would guess evidence that a caller's where-clause may provide instead.
+    /// Selected definitions recurse through a single active stack across
+    /// types, rows and constants. Known structural heads may use rigid lexical
+    /// arguments; abstract subjects and unproved generic prerequisites remain
+    /// symbolic until actual evidence is available.
     fn normalize_type_projections(
         &mut self,
         value: Type,
@@ -1717,6 +1729,7 @@ impl TraitSolver {
         active: &mut Vec<Digest>,
         hrtb_binders: &[u32],
     ) -> Result<Type, Box<TraitProjectionAnswer>> {
+        if type_projection_normalization_is_identity(&value) { return Ok(value); }
         match value {
             Type::Nominal {
                 definition,
@@ -1770,9 +1783,12 @@ impl TraitSolver {
                     active.pop();
                     return normalized;
                 }
-                if !projection_is_concrete_in_hrtb_scope(&projection, hrtb_binders) {
+                let concrete = projection_is_concrete_in_hrtb_scope(&projection, hrtb_binders);
+                let Type::Projection { subject, trait_arguments, item_arguments, .. } = &projection else { unreachable!() };
+                if !concrete && !projection_application_is_selectable(subject, trait_arguments, item_arguments, hrtb_binders) {
                     return Ok(projection);
                 }
+                let residual = projection.clone();
                 let Type::Projection {
                     subject,
                     trait_definition,
@@ -1812,6 +1828,7 @@ impl TraitSolver {
                     TraitProjectionAnswer::Normalized { ty, .. } => {
                         self.normalize_type_projections_in_hrtb(ty, active, hrtb_binders)
                     }
+                    TraitProjectionAnswer::NoSolution if !concrete => Ok(residual),
                     answer => Err(Box::new(answer)),
                 };
                 active.pop();
@@ -1832,6 +1849,10 @@ impl TraitSolver {
             Type::Array(value) => Ok(Type::Array(Box::new(
                 self.normalize_type_projections_in_hrtb(*value, active, hrtb_binders)?,
             ))),
+            Type::StaticData { element, tag, alignment } => Ok(Type::StaticData {
+                element: Box::new(self.normalize_type_projections_in_hrtb(*element, active, hrtb_binders)?),
+                tag, alignment,
+            }),
             Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
                 mutability,
                 pointee: Box::new(self.normalize_type_projections_in_hrtb(*pointee, active, hrtb_binders)?),
@@ -1888,7 +1909,8 @@ impl TraitSolver {
                         active,
                         &nested_binders,
                     )?),
-                    effects,
+                    effects: self.normalize_effect_row_projections_in_hrtb(effects, active, &nested_binders)
+                        .map_err(|answer| Box::new(TraitProjectionAnswer::NestedEffectRowProjection { answer }))?,
                     invocation,
                 })
             }
@@ -1905,10 +1927,20 @@ impl TraitSolver {
         name: &str,
         expected: crate::ConstKind,
     ) -> TraitConstProjectionAnswer {
+        self.select_associated_const(goal, name, expected, false)
+    }
+
+    fn select_associated_const(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        expected: crate::ConstKind,
+        scoped_hrtb: bool,
+    ) -> TraitConstProjectionAnswer {
         // The requested trait must be selected before following the ancestor
         // that declares this inherited constant; Parent evidence alone is not
         // evidence for a Child-named projection.
-        match self.solve(goal.clone()) {
+        match if scoped_hrtb { self.solve_scoped_hrtb(goal.clone()) } else { self.solve(goal.clone()) } {
             TraitAnswer::Refuted { evidence } => {
                 return TraitConstProjectionAnswer::Refuted { evidence };
             }
@@ -1927,7 +1959,7 @@ impl TraitSolver {
             SupertraitLookup::Missing => goal,
             SupertraitLookup::Ambiguous => return TraitConstProjectionAnswer::Ambiguous,
         };
-        match self.solve_projection_implementation(goal.clone(), false) {
+        match self.solve_projection_implementation(goal.clone(), scoped_hrtb) {
             TraitAnswer::Proven { evidence } => {
                 let rules = Arc::clone(&self.rules);
                 let Some(rule) = rules.iter().find(|rule| rule.definition == evidence) else {
@@ -2188,11 +2220,8 @@ impl TraitSolver {
         }
     }
 
-    /// Normalize concrete associated effect-row projections introduced by an
-    /// implementation definition.  Symbolic projections remain intact: they
-    /// need lexical caller evidence and must never trigger a global impl
-    /// guess.  This mirrors `normalize_type_projections` for the row-kinded
-    /// projection family.
+    /// Row entry into the same kinded normalization query. Recursive calls
+    /// retain its active keys even while traversing a type-valued argument.
     fn normalize_effect_row_projections(
         &mut self,
         value: EffectRow,
@@ -2207,6 +2236,7 @@ impl TraitSolver {
         active: &mut Vec<Digest>,
         hrtb_binders: &[u32],
     ) -> Result<EffectRow, Box<TraitEffectRowProjectionAnswer>> {
+        if row_projection_normalization_is_identity(&value) { return Ok(value); }
         let effects = value
             .effects
             .into_iter()
@@ -2215,7 +2245,7 @@ impl TraitSolver {
                     .arguments
                     .into_iter()
                     .map(|argument| {
-                        self.normalize_trait_argument_in_hrtb(argument, &mut vec![], hrtb_binders)
+                        self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
                     })
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|answer| {
@@ -2234,7 +2264,7 @@ impl TraitSolver {
         };
         for projection in value.projections {
             let subject = self
-                .normalize_type_projections_in_hrtb(*projection.subject, &mut vec![], hrtb_binders)
+                .normalize_type_projections_in_hrtb(*projection.subject, active, hrtb_binders)
                 .map_err(|answer| {
                     Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
                 })?;
@@ -2242,7 +2272,7 @@ impl TraitSolver {
                 .trait_arguments
                 .into_iter()
                 .map(|argument| {
-                    self.normalize_trait_argument_in_hrtb(argument, &mut vec![], hrtb_binders)
+                    self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|answer| {
@@ -2252,7 +2282,7 @@ impl TraitSolver {
                 .item_arguments
                 .into_iter()
                 .map(|argument| {
-                    self.normalize_trait_argument_in_hrtb(argument, &mut vec![], hrtb_binders)
+                    self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|answer| {
@@ -2286,17 +2316,14 @@ impl TraitSolver {
                 result.tails.extend(normalized.tails);
                 continue;
             }
-            if !projection_is_concrete_in_hrtb_scope(&projection.subject, hrtb_binders)
-                || !projection.trait_arguments.iter().all(|argument| {
-                    generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
-                })
-                || !projection.item_arguments.iter().all(|argument| {
-                    generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
-                })
-            {
+            let concrete = projection_is_concrete_in_hrtb_scope(&projection.subject, hrtb_binders)
+                && projection.trait_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders))
+                && projection.item_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders));
+            if !concrete && !projection_application_is_selectable(&projection.subject, &projection.trait_arguments, &projection.item_arguments, hrtb_binders) {
                 result.projections.push(projection);
                 continue;
             }
+            let residual = projection.clone();
             let goal = TraitGoal {
                 relation: ElaboratedTraitReference {
                     definition: projection.trait_definition,
@@ -2329,6 +2356,9 @@ impl TraitSolver {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                     self.normalize_effect_row_projections_in_hrtb(row, active, hrtb_binders)
                 }
+                TraitEffectRowProjectionAnswer::NoSolution if !concrete => Ok(EffectRow {
+                    effects: Default::default(), projections: vec![residual], tails: Default::default(),
+                }),
                 answer => Err(Box::new(answer)),
             };
             active.pop();
@@ -2337,7 +2367,7 @@ impl TraitSolver {
             result.projections.extend(nested.projections);
             result.tails.extend(nested.tails);
         }
-        Ok(result)
+        Ok(result.canonicalized())
     }
 
     /// Select an implementation method and instantiate both the implementation
@@ -2730,6 +2760,7 @@ impl TraitSolver {
             match answer {
                 TraitProjectionAnswer::Ambiguous | TraitProjectionAnswer::RecursiveProjection => TraitAnswerIndex::Ambiguous,
                 TraitProjectionAnswer::Overflow => TraitAnswerIndex::Overflow,
+                TraitProjectionAnswer::NestedEffectRowProjection { answer } => row_failure(*answer),
                 _ => TraitAnswerIndex::NoSolution,
             }
         }
@@ -2858,7 +2889,7 @@ impl TraitSolver {
     /// one exception to exact quantity identity: a principal interval is
     /// evidence for every interval it contains. In particular,
     /// `Use<[0,*]>` proves the affine-erasure requirement `Use<[0,1]>`.
-    fn assumption_proves(&self, goal: &TraitGoal, assumptions: &[TraitGoal]) -> bool {
+    pub(crate) fn assumption_proves(&self, goal: &TraitGoal, assumptions: &[TraitGoal]) -> bool {
         let mut pending = assumptions.to_vec();
         let mut seen = Vec::<TraitGoal>::new();
         while let Some(candidate) = pending.pop() {
@@ -2980,11 +3011,9 @@ impl TraitSolver {
         )
     }
 
-    /// Reduce concrete associated projections in a trait goal before it is
-    /// keyed or matched against implementation heads.  Generic projections
-    /// are deliberately retained by `normalize_type_projections`, preserving
-    /// the caller's eventual lexical evidence rather than guessing a global
-    /// implementation.
+    /// Normalize a goal before keying or matching it. The normalizer and the
+    /// selector consume the same lexical environment, so declaration/body
+    /// consumers cannot invent a separate interpretation of generic heads.
     fn normalize_goal(&mut self, goal: TraitGoal) -> Result<TraitGoal, TraitAnswerIndex> {
         let mut active = vec![];
         let subject = self
@@ -3020,10 +3049,15 @@ impl TraitSolver {
         active: &mut Vec<Digest>,
         hrtb_binders: &[u32],
     ) -> Result<GenericArgument, Box<TraitProjectionAnswer>> {
+        if argument_projection_normalization_is_identity(&argument) { return Ok(argument); }
         match argument {
             GenericArgument::Type(value) => self
                 .normalize_type_projections_in_hrtb(value, active, hrtb_binders)
                 .map(GenericArgument::Type),
+            GenericArgument::EffectRow(value) => self
+                .normalize_effect_row_projections_in_hrtb(value, active, hrtb_binders)
+                .map(GenericArgument::EffectRow)
+                .map_err(|answer| Box::new(TraitProjectionAnswer::NestedEffectRowProjection { answer })),
             GenericArgument::ConstProjection {
                 subject,
                 trait_definition,
@@ -3046,6 +3080,7 @@ impl TraitSolver {
                     name,
                     kind,
                 };
+                let residual = projection.clone();
                 let GenericArgument::ConstProjection {
                     subject,
                     trait_definition,
@@ -3056,9 +3091,9 @@ impl TraitSolver {
                 else {
                     unreachable!("associated const projection was just constructed")
                 };
-                if !projection_is_concrete(&subject)
-                    || !trait_arguments.iter().all(generic_argument_is_concrete)
-                {
+                let concrete = projection_is_concrete_in_hrtb_scope(&subject, hrtb_binders)
+                    && trait_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders));
+                if !concrete && !projection_application_is_selectable(&subject, &trait_arguments, &[], hrtb_binders) {
                     return Ok(GenericArgument::ConstProjection {
                         subject,
                         trait_definition,
@@ -3082,7 +3117,7 @@ impl TraitSolver {
                     return Err(Box::new(TraitProjectionAnswer::Overflow));
                 }
                 active.push(key);
-                let answer = self.normalize_associated_const(goal, &name, kind);
+                let answer = self.select_associated_const(goal, &name, kind, !hrtb_binders.is_empty());
                 let result = match answer {
                     // An associated const may itself be specified through a
                     // second associated const. Keep reducing through the same
@@ -3092,6 +3127,7 @@ impl TraitSolver {
                     TraitConstProjectionAnswer::Normalized { value, .. } => {
                         self.normalize_trait_argument_in_hrtb(value, active, hrtb_binders)
                     }
+                    TraitConstProjectionAnswer::NoSolution if !concrete => Ok(residual),
                     TraitConstProjectionAnswer::Ambiguous => {
                         Err(Box::new(TraitProjectionAnswer::Ambiguous))
                     }
@@ -3108,9 +3144,7 @@ impl TraitSolver {
                 active.pop();
                 result
             }
-            // The runtime projection carriers are still type-only. Trait
-            // selection nevertheless preserves every other kind exactly;
-            // there is no type normalizer allowed to reinterpret it here.
+            // Projection-free arguments retain their original kind.
             argument => Ok(argument),
         }
     }
@@ -3136,6 +3170,12 @@ fn use_assumption_contains(candidate: &TraitGoal, goal: &TraitGoal) -> bool {
 /// a bounded solver failure; ambiguity remains ambiguity.
 fn projection_failure_answer(answer: TraitProjectionAnswer) -> TraitAnswerIndex {
     match answer {
+        TraitProjectionAnswer::NestedEffectRowProjection { answer } => match *answer {
+            TraitEffectRowProjectionAnswer::NestedTypeProjection { answer } => projection_failure_answer(*answer),
+            TraitEffectRowProjectionAnswer::Ambiguous => TraitAnswerIndex::Ambiguous,
+            TraitEffectRowProjectionAnswer::Overflow | TraitEffectRowProjectionAnswer::RecursiveProjection => TraitAnswerIndex::Overflow,
+            _ => TraitAnswerIndex::NoSolution,
+        },
         TraitProjectionAnswer::Ambiguous => TraitAnswerIndex::Ambiguous,
         TraitProjectionAnswer::Overflow | TraitProjectionAnswer::RecursiveProjection => {
             TraitAnswerIndex::Overflow
@@ -3269,8 +3309,9 @@ fn associated_effect_row_contract_matches(
 
 fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::GenericKind) -> bool {
     match kind {
-        crate::GenericKind::Const(kind) => !matches!(argument, GenericArgument::ConstInfer { .. })
-            && crate::types::generic_argument_matches_const_kind(argument, kind),
+        // These are method/GAT substitution slots, not implementation heads.
+        // An inference cell retains its kind and cannot prove a prerequisite.
+        crate::GenericKind::Const(kind) => crate::types::generic_argument_matches_const_kind(argument, kind),
         crate::GenericKind::Type => matches!(argument, GenericArgument::Type(_)),
         crate::GenericKind::EffectRow => matches!(argument, GenericArgument::EffectRow(_)),
         crate::GenericKind::Lifetime => matches!(argument, GenericArgument::Lifetime(_)),
@@ -3960,7 +4001,9 @@ fn substitute_generic_argument(
         GenericArgument::ConstGeneric { index, kind } => substitution
             .generic_arguments
             .get(index)
-            .filter(|argument| generic_argument_is_const_kind(argument, *kind))
+            // Substitution preserves kind, not head-selection rigidity. GAT
+            // and method slots can still contain caller-owned const cells.
+            .filter(|argument| crate::types::generic_argument_matches_const_kind(argument, *kind))
             .cloned()
             .unwrap_or_else(|| argument.clone()),
         GenericArgument::ConstIntegerExpr(value) => {
@@ -4388,10 +4431,86 @@ fn associated_const_projection_key(goal: &TraitGoal, name: &str, kind: crate::Co
     ])
 }
 
-/// A projection may be selected only after every part of its trait head is
-/// known. This mirrors the Core boundary: type parameters retain projections
-/// for their eventual lexical evidence environment instead of acquiring a
-/// global implementation by accident.
+/// Eligibility is not evidence: this only excludes unknown heads before the
+/// ordinary selector proves the implementation and associated-item domain.
+/// Bare generic subjects remain lexical abstractions; structural heads may
+/// contain rigid declaration parameters, never unresolved inference cells.
+/// Item arguments do not select an implementation: their inference cells may
+/// be substituted into its result, but never prove its declared domain.
+#[derive(Clone, Copy)]
+enum ProjectionPosition { Head, Item }
+
+impl ProjectionPosition {
+    fn permits_inference(self) -> bool { matches!(self, Self::Item) }
+}
+
+fn projection_application_is_selectable(
+    subject: &Type,
+    trait_arguments: &[GenericArgument],
+    item_arguments: &[GenericArgument],
+    binders: &[u32],
+) -> bool {
+    !matches!(subject, Type::Generic(_) | Type::Projection { .. })
+        && projection_type_is_known(subject, binders, ProjectionPosition::Head)
+        && trait_arguments.iter().all(|argument| projection_argument_is_known(argument, binders, ProjectionPosition::Head))
+        && item_arguments.iter().all(|argument|
+            projection_argument_is_known(argument, binders, ProjectionPosition::Item))
+}
+
+fn projection_argument_is_known(value: &GenericArgument, binders: &[u32], position: ProjectionPosition) -> bool {
+    match value {
+        GenericArgument::Type(value) => projection_type_is_known(value, binders, position),
+        GenericArgument::EffectRow(value) => projection_row_is_known(value, binders, position),
+        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
+        | GenericArgument::ConstInteger(_) | GenericArgument::ConstIntegerExpr(_)
+        | GenericArgument::ConstQuantity(_) | GenericArgument::ConstGeneric { .. } => true,
+        GenericArgument::Lifetime(Lifetime::Bound { depth, index }) =>
+            binders.get(*depth as usize).is_some_and(|count| *index < *count),
+        GenericArgument::Lifetime(Lifetime::Infer(_)) | GenericArgument::ConstInfer { .. } => position.permits_inference(),
+        GenericArgument::Lifetime(Lifetime::Placeholder(_)) | GenericArgument::ConstProjection { .. } => false,
+    }
+}
+
+fn projection_row_is_known(value: &EffectRow, binders: &[u32], position: ProjectionPosition) -> bool {
+    value.projections.is_empty()
+        && value.tails.iter().all(|tail| matches!(tail, crate::EffectTail::Generic(_)) || position.permits_inference() && matches!(tail, crate::EffectTail::Infer(_)))
+        && value.effects.iter().all(|effect| effect.arguments.iter()
+            .all(|argument| projection_argument_is_known(argument, binders, position)))
+}
+
+fn projection_type_is_known(value: &Type, binders: &[u32], position: ProjectionPosition) -> bool {
+    match value {
+        Type::Infer(_) => position.permits_inference(),
+        Type::Error | Type::Projection { .. } => false,
+        Type::Nominal { arguments, .. } => arguments.iter()
+            .all(|argument| projection_argument_is_known(argument, binders, position)),
+        Type::Tuple(values) => values.iter().all(|value| projection_type_is_known(value, binders, position)),
+        Type::FixedArray { element, length } => projection_type_is_known(element, binders, position)
+            && projection_argument_is_known(length, binders, position),
+        Type::Array(element) | Type::StaticData { element, .. }
+        | Type::RawPointer { pointee: element, .. } => projection_type_is_known(element, binders, position),
+        Type::Reference { lifetime, referent, .. } =>
+            projection_argument_is_known(&GenericArgument::Lifetime(*lifetime), binders, position)
+                && projection_type_is_known(referent, binders, position),
+        Type::Callable { contract, lifetime_binders, parameters, result, effects, .. } => {
+            let mut nested = vec![*lifetime_binders];
+            nested.extend_from_slice(binders);
+            let mut rigid = true;
+            contract.map_scoped_terms(|value, scopes| {
+                let mut scopes = scopes.to_vec();
+                scopes.extend_from_slice(&nested);
+                rigid &= projection_argument_is_known(&value, &scopes, position);
+                value
+            });
+            rigid && parameters.iter().all(|value| projection_type_is_known(value, &nested, position))
+                && projection_type_is_known(result, &nested, position)
+                && projection_row_is_known(effects, &nested, position)
+        }
+        Type::Generic(_) | Type::ConstGeneric { .. } | Type::Unit | Type::Never
+        | Type::Scalar(_) | Type::ConstInteger(_) | Type::ConstQuantity(_) => true,
+    }
+}
+
 fn projection_is_concrete(value: &Type) -> bool {
     match value {
         Type::FixedArray { element, length } => projection_is_concrete(element) && generic_argument_is_concrete(length),
@@ -4457,8 +4576,11 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
         Type::Array(element) | Type::StaticData { element, .. } => {
             projection_is_concrete_in_hrtb_scope(element, hrtb_binders)
         }
-        Type::Reference { referent, .. }
-        | Type::RawPointer { pointee: referent, .. } => {
+        Type::Reference { lifetime, referent, .. } => {
+            generic_argument_is_concrete_in_hrtb_scope(&GenericArgument::Lifetime(*lifetime), hrtb_binders)
+                && projection_is_concrete_in_hrtb_scope(referent, hrtb_binders)
+        }
+        Type::RawPointer { pointee: referent, .. } => {
             projection_is_concrete_in_hrtb_scope(referent, hrtb_binders)
         }
         Type::Callable {
@@ -4466,7 +4588,7 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
             lifetime_binders,
             parameters,
             result,
-            ..
+            effects, ..
         } => {
             let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
             nested_binders.push(*lifetime_binders);
@@ -4482,6 +4604,9 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
                 .iter()
                 .all(|parameter| projection_is_concrete_in_hrtb_scope(parameter, &nested_binders))
                 && projection_is_concrete_in_hrtb_scope(result, &nested_binders)
+                && effects.tails.is_empty() && effects.projections.is_empty()
+                && effects.effects.iter().all(|effect| effect.arguments.iter()
+                    .all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, &nested_binders)))
         }
         Type::Unit
         | Type::Never
@@ -4554,6 +4679,51 @@ mod tests {
     use crate::ScalarType;
 
     #[test]
+    fn structural_projection_normalization_uses_only_the_current_lexical_environment() {
+        let source = "trait Mark {} struct Wrapper<T> { value: T } trait Family { type Item; type Effects: EffectRow; const Width: u32; } impl<T> Family for Wrapper<T> where T: Mark { type Item = T; type Effects = {}; const Width = 7; }";
+        let package = crate::PackageKey("normalization@0.1.0".into());
+        let file = crate::FileKey::new(&package, "src/lib.glorious");
+        let lexed = crate::LexedFile::lex(file, source);
+        let scan = crate::DeclarationScan::scan(&lexed, source);
+        let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+        let key = |name: &str| interface.definitions.iter().find(|definition| definition.name.as_deref() == Some(name)).unwrap().key;
+        let projection = Type::Projection {
+            subject: Box::new(Type::Nominal { definition: key("Wrapper"), arguments: vec![GenericArgument::Type(Type::Generic(0))] }),
+            trait_definition: key("Family"), trait_arguments: vec![],
+            name: "Item".into(), item_generic_kinds: vec![], item_arguments: vec![],
+        };
+        let mut solver = TraitSolver::new(&signatures);
+        let subject = Type::Nominal { definition: key("Wrapper"), arguments: vec![GenericArgument::Type(Type::Generic(0))] };
+        let row = EffectRow { effects: Default::default(), tails: Default::default(), projections: vec![crate::EffectRowProjection {
+            subject: Box::new(subject.clone()), trait_definition: key("Family"), trait_arguments: vec![],
+            name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
+        }] };
+        let constant = GenericArgument::ConstProjection { subject: Box::new(subject), trait_definition: key("Family"),
+            trait_arguments: vec![], name: "Width".into(), kind: crate::ConstKind::U32 };
+        assert_eq!(solver.normalize_type(projection.clone()).unwrap(), projection);
+        assert_eq!(solver.normalize_effect_row(row.clone()).unwrap(), row);
+        assert_eq!(solver.normalize_generic_argument(constant.clone()).unwrap(), constant);
+        solver.set_lexical_assumptions(vec![TraitGoal { subject: Type::Generic(0), relation: ElaboratedTraitReference {
+            definition: key("Mark"), arguments: vec![],
+        } }]);
+        assert_eq!(solver.normalize_type(projection.clone()).unwrap(), Type::Generic(0));
+        assert_eq!(solver.normalize_effect_row(row.clone()).unwrap(), EffectRow::empty());
+        assert_eq!(solver.normalize_generic_argument(constant.clone()).unwrap(), GenericArgument::ConstInteger(7u32.into()));
+        solver.set_lexical_assumptions(vec![]);
+        assert_eq!(solver.normalize_type(projection.clone()).unwrap(), projection);
+        assert_eq!(solver.normalize_effect_row(row.clone()).unwrap(), row);
+        assert_eq!(solver.normalize_generic_argument(constant.clone()).unwrap(), constant);
+        solver.set_lexical_assumptions(vec![TraitGoal { subject: Type::Generic(1), relation: ElaboratedTraitReference {
+            definition: key("Mark"), arguments: vec![],
+        } }]);
+        assert_eq!(solver.normalize_type(projection.clone()).unwrap(), projection);
+        assert_eq!(solver.normalize_effect_row(row.clone()).unwrap(), row);
+        assert_eq!(solver.normalize_generic_argument(constant.clone()).unwrap(), constant);
+    }
+
+    #[test]
     fn projection_free_type_fast_path_matches_normalization_under_every_container() {
         let signatures = ElaboratedInterface::default();
         let definition = DefKey(Digest::of_bytes(b"normalization-container"));
@@ -4598,18 +4768,18 @@ mod tests {
                 assert!(TraitSolver::new(&ElaboratedInterface::default()).normalize_type(value).is_err());
             }
         }
-        // The type normalizer does not recurse into these carriers. Preserve
-        // that boundary, rather than silently broadening type normalization.
+        // All kinded carriers now use the same recursive query; the fast
+        // path must not conceal rows, callable contracts or static data.
         let row = EffectRow { effects: Default::default(), projections: vec![crate::EffectRowProjection {
             subject: Box::new(projection.clone()), trait_definition: definition, trait_arguments: vec![],
             name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
         }], tails: Default::default() };
-        let opaque = [Type::StaticData { element: Box::new(projection), tag: 1, alignment: 1 },
+        let nested = [Type::StaticData { element: Box::new(projection), tag: 1, alignment: 1 },
             Type::Callable { contract: Default::default(), safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
             Type::Nominal { definition, arguments: vec![GenericArgument::EffectRow(row)] }];
-        for value in opaque {
-            assert!(type_projection_normalization_is_identity(&value));
-            assert_eq!(TraitSolver::new(&ElaboratedInterface::default()).normalize_type(value.clone()).unwrap(), value);
+        for value in nested {
+            assert!(!type_projection_normalization_is_identity(&value));
+            assert!(TraitSolver::new(&ElaboratedInterface::default()).normalize_type(value).is_err());
         }
     }
 

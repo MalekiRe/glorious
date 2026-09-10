@@ -36,6 +36,7 @@ fn key(interface: &grandiose_stage0::PackageInterface, name: &str) -> DefKey {
         .key
 }
 
+
 #[test]
 fn associated_result_guarantees_are_available_to_generic_graph_consumers() {
     let (interface, signatures) = signatures("trait Eq {} trait Hash {} trait Graph { type Node: Eq + Hash + Use<[0,*]>; }");
@@ -50,6 +51,142 @@ fn associated_result_guarantees_are_available_to_generic_graph_consumers() {
     }
     assert_eq!(solver.principal_use_with_assumptions(&node, &[owner]), Some(Quantity::UNRESTRICTED));
     assert_eq!(solver.principal_use_with_assumptions(&node, &[]), None);
+}
+
+#[test]
+fn normalization_has_one_active_stack_across_type_and_effect_row_kinds() {
+    let (interface, signatures) = signatures(r#"
+        effect Carry<T> { carry(); }
+        trait Types { type Item; }
+        trait Rows { type Effects: EffectRow; }
+        impl Types for i64 { type Item = () -> () / {<i64 as Rows>::Effects}; }
+        impl Rows for i64 { type Effects = {Carry<<i64 as Types>::Item>}; }
+    "#);
+    let projection = Type::Projection { subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition: key(&interface, "Types"), trait_arguments: vec![], name: "Item".into(),
+        item_generic_kinds: vec![], item_arguments: vec![] };
+    let failure = TraitSolver::new(&signatures).normalize_type(projection).unwrap_err();
+    assert_eq!(*failure, TraitProjectionAnswer::NestedEffectRowProjection {
+        answer: Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection {
+            answer: Box::new(TraitProjectionAnswer::RecursiveProjection),
+        }),
+    });
+    let row = EffectRow { effects: Default::default(), tails: Default::default(),
+        projections: vec![grandiose_stage0::EffectRowProjection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)), trait_definition: key(&interface, "Rows"),
+            trait_arguments: vec![], name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
+        }] };
+    let failure = TraitSolver::new(&signatures).normalize_effect_row(row).unwrap_err();
+    assert_eq!(*failure, TraitEffectRowProjectionAnswer::NestedTypeProjection {
+        answer: Box::new(TraitProjectionAnswer::NestedEffectRowProjection {
+            answer: Box::new(TraitEffectRowProjectionAnswer::RecursiveProjection),
+        }),
+    });
+}
+
+#[test]
+fn nested_callable_normalization_preserves_outer_and_inner_gat_regions() {
+    let (interface, signatures) = signatures(r#"
+        effect Hold<'a> { hold(&'a i64); }
+        trait Family { type Item<'a>; type Effects<'a>: EffectRow; }
+        impl Family for i64 { type Item<'a> = &'a i64; type Effects<'a> = {Hold<'a>}; }
+    "#);
+    for depth in [0, 1, 2] {
+        let region = Lifetime::Bound { depth, index: 0 };
+        let row = EffectRow { effects: Default::default(), tails: Default::default(),
+            projections: vec![grandiose_stage0::EffectRowProjection {
+                subject: Box::new(Type::Scalar(ScalarType::I64)), trait_definition: key(&interface, "Family"),
+                trait_arguments: vec![], name: "Effects".into(),
+                item_generic_kinds: vec![grandiose_stage0::GenericKind::Lifetime],
+                item_arguments: vec![GenericArgument::Lifetime(region)],
+            }] };
+        let projection = Type::Projection { subject: Box::new(Type::Scalar(ScalarType::I64)),
+            trait_definition: key(&interface, "Family"), trait_arguments: vec![], name: "Item".into(),
+            item_generic_kinds: vec![grandiose_stage0::GenericKind::Lifetime], item_arguments: vec![GenericArgument::Lifetime(region)] };
+        let callable = |result, effects| Type::Callable { contract: Default::default(), safety: grandiose_stage0::Safety::Safe,
+            lifetime_binders: 1, parameters: vec![], result: Box::new(result), effects, invocation: Quantity::ONCE };
+        let input = callable(callable(projection.clone(), row.clone()), EffectRow::empty());
+        let expected = if depth < 2 {
+            callable(callable(Type::Reference { mutability: Mutability::Shared, lifetime: region,
+                referent: Box::new(Type::Scalar(ScalarType::I64)) }, EffectRow::closed_instances([
+                    grandiose_stage0::EffectInstance { definition: key(&interface, "Hold"), arguments: vec![GenericArgument::Lifetime(region)] }
+                ])), EffectRow::empty())
+        } else { input.clone() };
+        assert_eq!(TraitSolver::new(&signatures).normalize_type(input).unwrap(), expected);
+        assert_eq!(TraitSolver::new(&signatures).normalize_type(projection.clone()).unwrap(), projection,
+            "an unscoped query cannot borrow a callable's binder");
+        assert_eq!(TraitSolver::new(&signatures).normalize_effect_row(row.clone()).unwrap(), row);
+    }
+}
+
+#[test]
+fn gat_substitution_holes_do_not_select_heads_or_prove_item_domains() {
+    let (interface, signatures) = signatures(r#"
+        trait Mark {}
+        trait Family {
+            type Item<T>; type Effects<e: EffectRow>: EffectRow; type Array<n: usize>;
+            type Guarded<T> where T: Mark;
+        }
+        impl Family for i64 {
+            type Item<T> = T; type Effects<e: EffectRow> = {| e}; type Array<n: usize> = [i64; n];
+            type Guarded<T> = T where T: Mark;
+        }
+    "#);
+    let mut inference = grandiose_stage0::InferContext::default();
+    let ty = inference.fresh();
+    let row = inference.fresh_effects();
+    let width = inference.fresh_const(ConstKind::Usize);
+    let projection = |subject, name: &str, kind, argument| Type::Projection {
+        subject: Box::new(subject), trait_definition: key(&interface, "Family"), trait_arguments: vec![],
+        name: name.into(), item_generic_kinds: vec![kind], item_arguments: vec![argument],
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert_eq!(solver.normalize_type(projection(Type::Scalar(ScalarType::I64), "Item", grandiose_stage0::GenericKind::Type,
+        GenericArgument::Type(ty.clone()))).unwrap(), ty);
+    assert_eq!(solver.normalize_type(projection(Type::Scalar(ScalarType::I64), "Array", grandiose_stage0::GenericKind::Const(ConstKind::Usize),
+        width.clone())).unwrap(), Type::FixedArray { element: Box::new(Type::Scalar(ScalarType::I64)), length: Box::new(width) });
+    let projected_row = EffectRow { effects: Default::default(), tails: Default::default(), projections: vec![grandiose_stage0::EffectRowProjection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)), trait_definition: key(&interface, "Family"), trait_arguments: vec![],
+        name: "Effects".into(), item_generic_kinds: vec![grandiose_stage0::GenericKind::EffectRow], item_arguments: vec![GenericArgument::EffectRow(row.clone())],
+    }] };
+    assert_eq!(solver.normalize_effect_row(projected_row).unwrap(), row);
+    for residual in [
+        projection(ty.clone(), "Item", grandiose_stage0::GenericKind::Type, GenericArgument::Type(Type::Scalar(ScalarType::I64))),
+        projection(Type::Scalar(ScalarType::I64), "Guarded", grandiose_stage0::GenericKind::Type, GenericArgument::Type(ty)),
+    ] {
+        assert_eq!(solver.normalize_type(residual.clone()).unwrap(), residual);
+    }
+    // A lifetime hidden inside a type item still belongs to its real binder.
+    let escaped = projection(Type::Scalar(ScalarType::I64), "Item", grandiose_stage0::GenericKind::Type,
+        GenericArgument::Type(Type::Reference { mutability: Mutability::Shared,
+            lifetime: Lifetime::Bound { depth: 1, index: 0 }, referent: Box::new(Type::Scalar(ScalarType::I64)) }));
+    let callable = Type::Callable { contract: Default::default(), safety: grandiose_stage0::Safety::Safe,
+        lifetime_binders: 1, parameters: vec![], result: Box::new(escaped), effects: EffectRow::empty(), invocation: Quantity::ONCE };
+    assert_eq!(solver.normalize_type(callable.clone()).unwrap(), callable);
+}
+
+#[test]
+fn associated_const_heads_use_the_containing_callable_region_scope() {
+    let (interface, signatures) = signatures(
+        "trait Width<'a> { const N: usize; } impl<'a> Width<'a> for i64 { const N = 2; }",
+    );
+    for depth in [0, 1] {
+        let constant = GenericArgument::ConstProjection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)), trait_definition: key(&interface, "Width"),
+            trait_arguments: vec![GenericArgument::Lifetime(Lifetime::Bound { depth, index: 0 })],
+            name: "N".into(), kind: ConstKind::Usize,
+        };
+        let callable = |length| Type::Callable { contract: Default::default(), safety: grandiose_stage0::Safety::Safe,
+            lifetime_binders: 1, parameters: vec![], result: Box::new(Type::FixedArray {
+                element: Box::new(Type::Scalar(ScalarType::I64)), length: Box::new(length),
+            }), effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let input = callable(constant.clone());
+        let expected = if depth == 0 { callable(GenericArgument::ConstInteger(
+            grandiose_stage0::IntegerConst::from_literal(ScalarType::Usize, "2", false, 64).unwrap(),
+        )) } else { input.clone() };
+        assert_eq!(TraitSolver::new(&signatures).normalize_type(input).unwrap(), expected);
+        assert_eq!(TraitSolver::new(&signatures).normalize_generic_argument(constant.clone()).unwrap(), constant);
+    }
 }
 
 #[test]
@@ -75,7 +212,7 @@ fn imported_defaulted_gat_domains_require_exact_outlives_evidence() {
 #[test]
 fn gat_item_lifetime_holes_are_substitutions_not_domain_evidence() {
     let (interface, signatures) = signatures(
-        "trait View { type Item<'a>; type StaticItem<'a> where 'a: 'static; } impl View for i64 { type Item<'a> = &'a i64; type StaticItem<'a> = &'a i64 where 'a: 'static; }",
+        "trait View { type Owner; type Item<'a>; type StaticItem<'a> where 'a: 'static; } impl View for i64 { type Owner = i64; type Item<'a> = &'a i64; type StaticItem<'a> = &'a i64 where 'a: 'static; }",
     );
     let goal = TraitGoal { subject: Type::Scalar(ScalarType::I64),
         relation: ElaboratedTraitReference { definition: key(&interface, "View"), arguments: vec![] } };
@@ -86,6 +223,12 @@ fn gat_item_lifetime_holes_are_substitutions_not_domain_evidence() {
         TraitProjectionAnswer::Normalized { ty: Type::Reference { lifetime, .. }, .. } if lifetime == region));
     assert_eq!(solver.normalize_associated_type_application_in_hrtb(
         goal.clone(), "StaticItem", &[GenericArgument::Lifetime(region)], &[]), TraitProjectionAnswer::NoSolution);
+    let mut nested = goal.clone();
+    nested.subject = Type::Projection { subject: Box::new(goal.subject.clone()), trait_definition: goal.relation.definition,
+        trait_arguments: vec![], name: "Owner".into(), item_generic_kinds: vec![], item_arguments: vec![] };
+    assert!(matches!(solver.normalize_associated_type_application_in_hrtb(
+        nested, "Item", &[GenericArgument::Lifetime(region)], &[]),
+        TraitProjectionAnswer::Normalized { ty: Type::Reference { lifetime, .. }, .. } if lifetime == region));
     assert!(matches!(solver.normalize_associated_type_application_in_hrtb(
         goal, "StaticItem", &[GenericArgument::Lifetime(Lifetime::Static)], &[]),
         TraitProjectionAnswer::Normalized { ty: Type::Reference { lifetime: Lifetime::Static, .. }, .. }));

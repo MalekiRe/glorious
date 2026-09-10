@@ -21,7 +21,7 @@ use crate::{
     LogicalPath, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow,
     PrimitiveRole, PrimitiveSelector,
     PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId,
-    RuntimeManifestInput, SourceInput, SourceSpan, TraitConstProjectionAnswer, TraitGoal,
+    RuntimeManifestInput, SourceInput, SourceSpan,
     TraitSolver, TrustedRuntimeManifest,
     PersistentArtifactCache, Type, TypedBody, UseFlow, VerifiedVmProgram, implementation_method_key,
     verify_vm_program,
@@ -2407,7 +2407,7 @@ fn finalize_materialized_instances(
                 {
                     let mut solver = TraitSolver::new(signatures);
                     match solver.select_method(
-                        TraitGoal {
+                        crate::TraitGoal {
                             relation: deferred.relation,
                             subject: deferred.subject,
                         },
@@ -3536,90 +3536,8 @@ fn normalize_materialized_associated_projections(
 }
 
 pub(crate) fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result<Type, String> {
-    Ok(match value {
-        Type::FixedArray { element, length } => Type::FixedArray {
-            element: Box::new(normalize_materialized_type(element, solver)?),
-            length: Box::new(normalize_materialized_generic_argument(length, solver)?),
-        },
-        Type::Tuple(fields) => Type::Tuple(
-            fields
-                .iter()
-                .map(|field| normalize_materialized_type(field, solver))
-                .collect::<Result<_, _>>()?,
-        ),
-        Type::Array(element) => {
-            Type::Array(Box::new(normalize_materialized_type(element, solver)?))
-        }
-        Type::RawPointer { mutability, pointee } => Type::RawPointer {
-            mutability: *mutability,
-            pointee: Box::new(normalize_materialized_type(pointee, solver)?),
-        },
-        Type::Reference {
-            mutability,
-            lifetime,
-            referent,
-        } => Type::Reference {
-            mutability: *mutability,
-            lifetime: *lifetime,
-            referent: Box::new(normalize_materialized_type(referent, solver)?),
-        },
-        Type::Projection {
-            subject,
-            trait_definition,
-            trait_arguments,
-            name,
-            item_generic_kinds,
-            item_arguments,
-        } => Type::Projection {
-            subject: Box::new(normalize_materialized_type(subject, solver)?),
-            trait_definition: *trait_definition,
-            trait_arguments: trait_arguments
-                .iter()
-                .map(|argument| normalize_materialized_generic_argument(argument, solver))
-                .collect::<Result<_, _>>()?,
-            name: name.clone(),
-            item_generic_kinds: item_generic_kinds.clone(),
-            item_arguments: item_arguments
-                .iter()
-                .map(|argument| normalize_materialized_generic_argument(argument, solver))
-                .collect::<Result<_, _>>()?,
-        },
-        Type::Nominal {
-            definition,
-            arguments,
-        } => Type::Nominal {
-            definition: *definition,
-            arguments: arguments
-                .iter()
-                .map(|argument| normalize_materialized_generic_argument(argument, solver))
-                .collect::<Result<_, _>>()?,
-        },
-        Type::Callable { contract,
-            safety,
-            lifetime_binders,
-            parameters,
-            result,
-            effects,
-            invocation,
-        } => Type::Callable { contract: Box::new(contract.try_map_terms(|value, _| normalize_materialized_generic_argument(&value, solver))?),
-            safety: *safety,
-            lifetime_binders: *lifetime_binders,
-            parameters: parameters
-                .iter()
-                .map(|parameter| normalize_materialized_type(parameter, solver))
-                .collect::<Result<_, _>>()?,
-            result: Box::new(normalize_materialized_type(result, solver)?),
-            // A materialized callable is an executable signature, rather
-            // than a declaration-owned symbolic contract.  In particular a
-            // GAT effect row selected for a `for<'a>` callback must be
-            // reduced while that callback's binder is live; otherwise the
-            // VM sees the projection in the function header but the selected
-            // row in its MakeCallable witness.
-            effects: normalize_materialized_effect_row(effects, solver, *lifetime_binders)?,
-            invocation: *invocation,
-        },
-        value => value.clone(),
-    })
+    solver.normalize_type(value.clone())
+        .map_err(|answer| format!("materialized type could not be normalized: {answer:?}"))
 }
 
 pub(crate) fn normalize_materialized_effect_row(
@@ -3627,117 +3545,17 @@ pub(crate) fn normalize_materialized_effect_row(
     solver: &mut TraitSolver,
     lifetime_binders: u32,
 ) -> Result<crate::EffectRow, String> {
-    let row = crate::EffectRow {
-        effects: value
-            .effects
-            .iter()
-            .map(|effect| {
-                Ok(crate::EffectInstance {
-                    definition: effect.definition,
-                    arguments: effect
-                        .arguments
-                        .iter()
-                        .map(|argument| normalize_materialized_generic_argument(argument, solver))
-                        .collect::<Result<_, _>>()?,
-                })
-            })
-            .collect::<Result<_, String>>()?,
-        projections: value
-            .projections
-            .iter()
-            .map(|projection| {
-                Ok(crate::EffectRowProjection {
-                    subject: Box::new(normalize_materialized_type(&projection.subject, solver)?),
-                    trait_definition: projection.trait_definition,
-                    trait_arguments: projection
-                        .trait_arguments
-                        .iter()
-                        .map(|argument| normalize_materialized_generic_argument(argument, solver))
-                        .collect::<Result<_, _>>()?,
-                    name: projection.name.clone(),
-                    item_generic_kinds: projection.item_generic_kinds.clone(),
-                    item_arguments: projection
-                        .item_arguments
-                        .iter()
-                        .map(|argument| normalize_materialized_generic_argument(argument, solver))
-                        .collect::<Result<_, _>>()?,
-                })
-            })
-            .collect::<Result<_, String>>()?,
-        tails: value.tails.clone(),
-    }
-    .canonicalized();
-    // Keep an unresolved row symbolic so the source checker remains the
-    // authority for diagnostics. Materialized concrete selections, however,
-    // must agree with their lowered callable witnesses.
-    Ok(if lifetime_binders == 0 {
-        solver.normalize_effect_row(row.clone()).unwrap_or(row)
+    let result = if lifetime_binders == 0 {
+        solver.normalize_effect_row(value.clone())
     } else {
-        solver
-            .normalize_effect_row_in_hrtb(row.clone(), lifetime_binders)
-            .unwrap_or(row)
-    })
+        solver.normalize_effect_row_in_hrtb(value.clone(), lifetime_binders)
+    };
+    result.map_err(|answer| format!("materialized effect row could not be normalized: {answer:?}"))
 }
 
-pub(crate) fn normalize_materialized_generic_argument(
-    value: &GenericArgument,
-    solver: &mut TraitSolver,
-) -> Result<GenericArgument, String> {
-    match value {
-        GenericArgument::Type(value) => Ok(GenericArgument::Type(normalize_materialized_type(
-            value, solver,
-        )?)),
-        GenericArgument::EffectRow(value) => Ok(GenericArgument::EffectRow(
-            normalize_materialized_effect_row(value, solver, 0)?,
-        )),
-        GenericArgument::ConstProjection { .. } => {
-            normalize_materialized_const_projection(value.clone(), solver)
-        }
-        value => Ok(value.clone()),
-    }
-}
-
-/// Follow an implementation's associated-const value through another
-/// concrete projection (for example `First::Value = Second::Value`) while
-/// preserving a finite, deterministic failure boundary for malformed cycles.
-fn normalize_materialized_const_projection(
-    mut value: GenericArgument,
-    solver: &mut TraitSolver,
-) -> Result<GenericArgument, String> {
-    const MAX_PROJECTION_CHAIN: u32 = 128;
-    for _ in 0..MAX_PROJECTION_CHAIN {
-        let GenericArgument::ConstProjection {
-            subject,
-            trait_definition,
-            trait_arguments,
-            name,
-            kind,
-        } = value
-        else {
-            return normalize_materialized_generic_argument(&value, solver);
-        };
-        let subject = normalize_materialized_type(&subject, solver)?;
-        let trait_arguments = trait_arguments
-            .iter()
-            .map(|argument| normalize_materialized_generic_argument(argument, solver))
-            .collect::<Result<Vec<_>, _>>()?;
-        let goal = TraitGoal {
-            relation: crate::ElaboratedTraitReference {
-                definition: trait_definition,
-                arguments: trait_arguments,
-            },
-            subject,
-        };
-        value = match solver.normalize_associated_const(goal, &name, kind) {
-            TraitConstProjectionAnswer::Normalized { value, .. } => value,
-            answer => {
-                return Err(format!(
-                    "materialized associated const `{name}` could not be normalized: {answer:?}"
-                ));
-            }
-        };
-    }
-    Err("materialized associated-const projection chain exceeded its limit".into())
+pub(crate) fn normalize_materialized_generic_argument(value: &GenericArgument, solver: &mut TraitSolver) -> Result<GenericArgument, String> {
+    solver.normalize_generic_argument(value.clone())
+        .map_err(|answer| format!("materialized generic argument could not be normalized: {answer:?}"))
 }
 
 #[cfg(test)]

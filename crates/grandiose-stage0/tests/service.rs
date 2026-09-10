@@ -7300,7 +7300,7 @@ fn service_rejects_recursive_selected_hrtb_effect_gat_callbacks_canonically() {
     let root = "pub mod provider; use provider::Callback; pub fn apply(callback: Callback) -> i64 { let value = 41; callback(&value) } pub fn main() -> i64 { apply(provider::relay) }";
     let provider = "pub trait Gate { type Effects<'a>: EffectRow; } pub type Callback = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a> }; impl Gate for i64 { type Effects<'a> = { <i64 as Gate>::Effects<'a> }; } pub fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a> } { *value }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request_with_logical_sources(root, &[("src/provider/provider.glorious", provider)])) else { panic!("recursive selected effect callback entered an artifact"); };
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "missing bounded recursive selected-effect rejection: {diagnostics:#?}");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing finite-normal-form rejection for recursive selected effects: {diagnostics:#?}");
 }
 
 #[test]
@@ -7326,7 +7326,7 @@ fn service_rejects_mutual_selected_hrtb_effect_gat_callbacks_canonically() {
     request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::relay; pub type Callback = provider::Callback;".as_slice()));
     request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub trait First { type Effects<'a>: EffectRow; } pub trait Second { type Effects<'a>: EffectRow; } pub type Callback = for<'a> (&'a i64) -> i64 / { <i64 as First>::Effects<'a> }; impl First for i64 { type Effects<'a> = { <i64 as Second>::Effects<'a> }; } impl Second for i64 { type Effects<'a> = { <i64 as First>::Effects<'a> }; } pub fn relay<'a>(value: &'a i64) -> i64 / { <i64 as First>::Effects<'a> } { *value }".as_slice()));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request) else { panic!("mutual selected effect callback entered an artifact"); };
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "missing mutual selected-effect rejection: {diagnostics:#?}");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing mutual selected-effect finite-normal-form rejection: {diagnostics:#?}");
 }
 
 #[test]
@@ -7347,7 +7347,7 @@ fn service_rejects_cross_kind_selected_hrtb_projection_cycles_canonically() {
     request.sources.reverse();
     let Err(grandiose_stage0::ServiceError::Failed(second)) = StageZeroCompiler::new().compile(request) else { panic!("source reordering must not admit a cross-kind recursive selected callback"); };
     for diagnostics in [&first, &second] {
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "missing canonical selected-effect rejection: {diagnostics:#?}");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing shared finite-normal-form rejection: {diagnostics:#?}");
     }
 }
 
@@ -7475,15 +7475,24 @@ fn service_closes_generic_supertrait_selected_items_across_facade_revisions() {
 }
 
 #[test]
-fn service_rejects_external_generic_selected_hrtb_projection_facades() {
+fn service_normalizes_external_generic_selected_hrtb_projection_facades() {
     let mut request = request("use facade::{Callback, Parent}; pub type External<T> = Callback<T>; pub fn relay<T, 'a>(value: &'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> } { *value } pub fn accept<T>(callback: External<T>) -> i64 { let value = 41; callback(&value); 0 } pub fn main() -> i64 { 0 }");
     request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Parent};".as_slice()));
     request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub type Callback<T> = for<'a> (&'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> }; impl<T> Parent<T> for i64 { type Item<'a> = i64; type Effects<'a> = {}; }".as_slice()));
-    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request.clone()) else { panic!("external generic selected projection facade unexpectedly normalized"); };
-    request.sources.reverse();
-    let Err(grandiose_stage0::ServiceError::Failed(second)) = StageZeroCompiler::new().compile(request) else { panic!("source reordering must not normalize an external generic selected projection facade"); };
-    assert!(first.iter().any(|diagnostic| diagnostic.code == "G4110"), "external generic projection must remain opaque at the body boundary: {first:#?}");
-    assert_eq!(first, second, "external generic facade diagnostics must be canonical");
+    // This source was a preserved limitation regression: the blanket impl
+    // proves the same associated values for every rigid T, including in an
+    // ordinary external function. Keep the source and now require execution.
+    for level in ["0", "2"] {
+        request.codegen_options.insert("optimization-level".into(), level.into());
+        let first = StageZeroCompiler::new().compile(request.clone()).expect("lexically proved external projection must normalize").artifact.unwrap();
+        let mut reordered = request.clone();
+        reordered.sources.reverse();
+        let second = StageZeroCompiler::new().compile(reordered).expect("normalization must be source-order independent").artifact.unwrap();
+        assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+        assert_eq!(first.run_i64().unwrap(), 0);
+        assert_eq!(decode_and_verify_program(&first.canonical_bytes()).unwrap().run_i64().unwrap(), 0);
+    }
+
 }
 
 #[test]

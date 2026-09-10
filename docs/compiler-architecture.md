@@ -830,3 +830,48 @@ resumption ABI, and the VM requires all senders/handlers for an exact family and
 operation to agree. General operation specialization and retained task-registration
 contracts remain open, as do native handlers. Parsing and validating the standard
 task declarations does not establish a complete task provider or library.
+
+## Lexical, kinded projection normalization
+
+`TraitSolver` owns projection selection and recursive normalization for value
+types, effect rows and structural constants. Its inputs are the immutable rule
+snapshot and the current lexical trait, associated-equality, outlives and
+quantified assumptions. A known structural head may contain rigid declaration
+parameters: reducing `Wrapper<T>::Item` requires proving the selected
+implementation's predicates in that exact environment. Ordinary functions and
+implementation bodies use the same rule. A bare abstract subject or missing
+generic evidence remains a symbolic obligation, never evidence or permission.
+
+Implementation-head inference and associated-item substitution are distinct.
+Unknown head arguments cannot select an implementation. A well-kinded GAT or
+method argument can retain an inference cell in the substituted result because
+it does not choose the implementation; it still cannot prove an item-domain
+requirement. Kind checks and substitutions must preserve const cells as const
+cells, rather than retaining a declaration binder or converting them to types.
+
+The normalizer traverses every kinded carrier, including callable prerequisites,
+parameters, results, effects and static-data element types. Nested callable and
+quantified binders retain their actual region scopes. Type/row/const expansion
+uses one active-key stack and the existing depth budget across kind boundaries;
+cycles, ambiguity, refutation and exhausted limits are not successful symbolic
+normal forms. Nested failures preserve their cause for source diagnostics.
+
+Core supplies a partial substitution from its existing inference cells before
+requesting normalization. This read-only substitution resolves solved type,
+lifetime, const and row cells throughout the same structural terms without
+defaulting unknowns. In particular, a generic argument learned from an earlier
+call operand must be visible when reducing a later dependent parameter. Complete
+zonking remains mandatory at persistence boundaries.
+
+Signature comparison, signature/frozen projection validation, Core call/effect
+checking and executable materialization consume this authority. The former
+implementation-only permission flag, Core projection walkers and cycle guard,
+signature-local selection walkers and materialization const-chain loop are
+removed. Exact lexical identity retains its no-snapshot validation fast path;
+structural and supertrait entailment use the solver. Failed normalization is
+either reported or retained for an independently checked obligation, never
+reinterpreted as an empty row or successful contract.
+
+This is a repaired semantic boundary, not a complete compiler or library. The
+full-library root still fails, and no GSC-2 bootstrap or native-handler readiness
+follows from these normalization checks.

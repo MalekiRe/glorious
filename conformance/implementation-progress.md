@@ -5,6 +5,76 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 116: shared lexical and kinded projection normalization
+
+Ordinary generic functions could not reduce structural associated projections
+using their own bounds, although implementation bodies had a separate path that
+could. Signature validation also discarded the lexical environment when trying
+structural evidence. These decisions now belong to the shared trait normalizer,
+with the same assumptions used by signature/domain checking, Core and executable
+materialization. The implementation-only flag and the duplicate Core, signature
+and materialization walkers are removed.
+
+Type, effect-row and const projections recurse through the same active stack,
+including callback contracts, nested higher-ranked binders and cross-kind cycles.
+Unknown implementation heads remain unresolved. Well-kinded GAT/method arguments
+can preserve inference cells during substitution, but cannot establish missing
+domain predicates. Const argument substitution no longer leaves the original
+declaration slot behind when its argument is a const inference cell.
+
+Core normalization first applies the existing inference context's read-only
+partial substitution across types, rows, lifetimes and constants. It does not
+invent or default arguments. This repairs the preserved ordinary-call case where
+an earlier argument determines `G`, but a later mutable parameter still contains
+`<G as Family>::Item`. Both graph `components_from` argument errors at line 201
+are absent from the current full-library root.
+
+Verification covers **589 distinct passing checks**:
+
+- 367 unit, 8 effect-contract, 22 higher-ranked, 17 lifetime-inference,
+  12 nominal-contract, 6 new projection-source and 22 request checks
+  (`target/projection-normalization-integration-v13.log`: 454 total).
+- 72 trait-solver checks, including exact lexical isolation, all kinded GAT
+  substitution holes, nested callable scopes and mixed type/row cycles
+  (`target/projection-normalization-solver-v14.log`). The final source/solver
+  gate is `target/projection-normalization-source-solver-final-v18.log`.
+- 20 Core, 22 service and 15 signature projection checks
+  (`target/projection-normalization-boundary-v15.log`), plus 9 selected-HRTB
+  service checks, 6 additional distinct tests
+  (`target/projection-normalization-hrtb-service-v16.log`).
+
+The source positives execute fresh and decoded VM artifacts at O0/O2. Missing
+bounds, unrelated lexical scopes, a concrete-only implementation and an unproved
+GAT lifetime domain still reject. The former external-generic facade limitation
+fixture keeps its original source and now requires successful canonical,
+source-order-independent execution. Recursive row fixtures keep their source
+and rejection requirement, and now require the shared `G4157` finite-normal-form
+diagnostic instead of the old generic effect error.
+
+The unchanged trait-solver fixture
+`intrinsic_label_evidence_requires_an_escaping_callable_not_a_spelled_trait`
+still fails: it expects an ordinary never-returning callable to supply nominal
+label evidence. An isolated checkout of the pre-change commit `12658777` fails
+the same assertion (`target/projection-normalization-label-baseline.log`). It
+was excluded from the focused passing solver gate, not edited, ignored or
+counted as passing; the whole trait-solver target is not claimed green.
+
+The exact full-library composition root **still fails**, reporting 94 diagnostic
+records, now without a diagnostic-limit suppression marker
+(`target/projection-normalization-library-final-v17.log`). Remaining failures
+include Bytes/Slice and array-kind API mismatches, sorting callback inference,
+graph result/provenance checks, custom-Drop extraction, unsafe character
+operations, tail provenance and minimum-use obligations. The same-run isolated
+baseline still reaches the unchanged 100-error limit with 22 additional errors
+suppressed; its test time is 26.74 seconds versus 27.43 seconds currently
+(`target/projection-normalization-library-baseline.log`). These are diagnostic
+root probes, not successful library executions or stable performance benchmarks.
+
+No new full source matrix was run: cache 114's 16 passing / 15 failing tests
+remain the latest matrix. Interface 21, native ABI 12, bytecode 72, verifier 38
+and schema 116 are unchanged. Task-provider execution, general polymorphic
+handlers, full conformance and the self-hosted compiler remain open.
+
 ## Cache 115 / interface 21: effect declaration and application prerequisites
 
 The standard task declarations exposed a missing semantic path: effect-family

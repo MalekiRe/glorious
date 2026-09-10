@@ -2442,7 +2442,6 @@ impl ElaboratedInterface {
         solver: &crate::TraitSolver,
         diagnostics: &mut Vec<SignatureDiagnostic>,
     ) {
-        let projection_solver = &ProjectionSolver::from(solver.fresh_query());
         ambient.extend(signature.where_bounds.clone());
         if signature.where_outlives.iter().any(OutlivesPredicate::has_escaped_regions) {
             diagnostics.push(SignatureDiagnostic { code: "G4306", message: "callable contains an out-of-scope outlives predicate".into() });
@@ -2455,6 +2454,7 @@ impl ElaboratedInterface {
             subject: subject.clone(), relation: relation.clone() }).collect());
         domain_solver.set_outlives_assumptions(outlives);
         domain_solver.set_associated_bindings(signature.where_associated_type_bindings.clone(), signature.where_associated_effect_bindings.clone());
+        let projection_solver = &ProjectionSolver::from(domain_solver.fresh_query());
         if !signature.parameters.iter().chain(std::iter::once(&signature.result)).all(|ty| domain_solver.type_domains_proven(ty))
             || !domain_solver.row_domains_proven(&signature.effects)
             || !domain_solver.contract_domains_proven(&signature.prerequisites()) {
@@ -2912,7 +2912,9 @@ impl ElaboratedInterface {
             relation: relation.clone(),
             subject: subject.clone(),
         };
-        if self.ambient_projection_goal_proves(&goal, ambient) {
+        // Exact lexical identity needs no rule snapshot. Structural and
+        // supertrait entailment still belong exclusively to the shared solver.
+        if ambient.iter().any(|(subject, relation)| subject == &goal.subject && relation == &goal.relation) {
             return;
         }
         // Declaration signatures own the `for<'a>` binders that produced
@@ -2936,7 +2938,11 @@ impl ElaboratedInterface {
             });
             return;
         }
-        let outcome = solver.fresh_query().solve_scoped_hrtb(goal);
+        let mut query = solver.fresh_query();
+        query.set_lexical_assumptions(ambient.iter().map(|(subject, relation)| crate::TraitGoal {
+            subject: subject.clone(), relation: relation.clone(),
+        }).collect());
+        let outcome = query.solve_scoped_hrtb(goal);
         let (code, reason) = match outcome {
             crate::TraitAnswer::Proven { .. } => return,
             crate::TraitAnswer::Refuted { .. } => {
@@ -2958,37 +2964,6 @@ impl ElaboratedInterface {
         });
     }
 
-    fn ambient_projection_goal_proves(
-        &self,
-        goal: &crate::TraitGoal,
-        ambient: &[(Type, ElaboratedTraitReference)],
-    ) -> bool {
-        let mut pending = ambient.to_vec();
-        let mut seen = Vec::<(Type, ElaboratedTraitReference)>::new();
-        while let Some((subject, relation)) = pending.pop() {
-            if seen.iter().any(|(known_subject, known_relation)| {
-                known_subject == &subject && known_relation == &relation
-            }) {
-                continue;
-            }
-            if subject == goal.subject && relation == goal.relation {
-                return true;
-            }
-            seen.push((subject.clone(), relation.clone()));
-            let Some(ElaboratedHeader::Trait(trait_header)) =
-                self.definitions.get(&relation.definition)
-            else {
-                continue;
-            };
-            for supertrait in &trait_header.supertraits {
-                pending.push((
-                    subject.clone(),
-                    substitute_trait_reference(supertrait, &relation.arguments),
-                ));
-            }
-        }
-        false
-    }
 
     /// Supertrait edges are a declaration-level entailment graph.  A cycle
     /// has no finite inherited-item owner and must be rejected before a body
@@ -3882,291 +3857,53 @@ fn normalize_instantiated_trait_method_contract(
 ) -> CallableSignature {
     solver.assume_callable_contract(&signature);
     signature.where_outlives = signature.where_outlives.iter().map(|bound| bound.map_terms(|argument|
-        normalize_selected_contract_generic_argument(argument, &mut solver, 64))).collect();
+        normalize_selected_contract_generic_argument(argument, &mut solver))).collect();
     // Substitution can turn a declared requirement into a tautology, such
     // as `T: 'a` becoming `i64: 'a`. The implementation need not restate it.
     // Use no lexical assumptions here: assuming this contract and then
     // proving its own predicates would incorrectly erase real requirements.
     signature.where_outlives.retain(|bound| bound.has_escaped_regions() || !bound.proven_by(&[]));
     signature.universal_bounds = signature.universal_bounds.iter().map(|bound| {
-        bound.map_terms(|value| normalize_selected_contract_generic_argument(value, &mut solver, 64))
+        bound.map_terms(|value| normalize_selected_contract_generic_argument(value, &mut solver))
     }).collect();
     signature.parameters = signature
         .parameters
         .into_iter()
-        .map(|value| normalize_selected_contract_type(value, &mut solver, 64))
+        .map(|value| normalize_selected_contract_type(value, &mut solver))
         .collect();
-    signature.result = normalize_selected_contract_type(signature.result, &mut solver, 64);
-    signature.effects = normalize_selected_contract_effect_row(signature.effects, &mut solver, 64);
+    signature.result = normalize_selected_contract_type(signature.result, &mut solver);
+    signature.effects = normalize_selected_contract_effect_row(signature.effects, &mut solver);
     signature.where_bounds = signature
         .where_bounds
         .into_iter()
         .map(|(subject, relation)| {
             (
-                normalize_selected_contract_type(subject, &mut solver, 64),
-                normalize_selected_contract_trait_reference(relation, &mut solver, 64),
+                normalize_selected_contract_type(subject, &mut solver),
+                normalize_selected_contract_trait_reference(relation, &mut solver),
             )
         })
         .collect();
     signature
 }
 
-fn normalize_selected_contract_type(
-    value: Type,
-    solver: &mut crate::TraitSolver,
-    fuel: u32,
-) -> Type {
-    if fuel == 0 {
-        return value;
-    }
-    let value = solver.normalize_type(value.clone()).unwrap_or(value);
-    match value {
-        Type::Projection {
-            subject,
-            trait_definition,
-            trait_arguments,
-            name,
-            item_generic_kinds,
-            item_arguments,
-        } => {
-            let subject = normalize_selected_contract_type(*subject, solver, fuel - 1);
-            let trait_arguments = trait_arguments
-                .into_iter()
-                .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
-                .collect::<Vec<_>>();
-            let item_arguments = item_arguments
-                .into_iter()
-                .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
-                .collect::<Vec<_>>();
-            let projection = Type::Projection {
-                subject: Box::new(subject.clone()),
-                trait_definition,
-                trait_arguments: trait_arguments.clone(),
-                name: name.clone(),
-                item_generic_kinds,
-                item_arguments: item_arguments.clone(),
-            };
-            match solver.normalize_associated_type_application(
-                crate::TraitGoal {
-                    relation: ElaboratedTraitReference {
-                        definition: trait_definition,
-                        arguments: trait_arguments,
-                    },
-                    subject,
-                },
-                &name,
-                &item_arguments,
-            ) {
-                crate::TraitProjectionAnswer::Normalized { ty, .. } => {
-                    normalize_selected_contract_type(ty, solver, fuel - 1)
-                }
-                _ => projection,
-            }
-        }
-        Type::Nominal {
-            definition,
-            arguments,
-        } => Type::Nominal {
-            definition,
-            arguments: arguments
-                .into_iter()
-                .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
-                .collect(),
-        },
-        Type::Tuple(values) => Type::Tuple(
-            values
-                .into_iter()
-                .map(|value| normalize_selected_contract_type(value, solver, fuel - 1))
-                .collect(),
-        ),
-        Type::FixedArray { element, length } => Type::FixedArray {
-            element: Box::new(normalize_selected_contract_type(*element, solver, fuel - 1)),
-            length: Box::new(normalize_selected_contract_generic_argument(*length, solver, fuel - 1)),
-        },
-        Type::Array(value) => Type::Array(Box::new(normalize_selected_contract_type(
-            *value,
-            solver,
-            fuel - 1,
-        ))),
-        Type::RawPointer { mutability, pointee } => Type::RawPointer {
-            mutability,
-            pointee: Box::new(normalize_selected_contract_type(*pointee, solver, fuel - 1)),
-        },
-        Type::Reference {
-            mutability,
-            lifetime,
-            referent,
-        } => Type::Reference {
-            mutability,
-            lifetime,
-            referent: Box::new(normalize_selected_contract_type(*referent, solver, fuel - 1)),
-        },
-        Type::Callable { contract,
-            safety,
-            lifetime_binders,
-            parameters,
-            result,
-            effects,
-            invocation,
-        } => Type::Callable { contract: Box::new(contract.map_terms(|value, _| normalize_selected_contract_generic_argument(value, solver, fuel - 1))),
-            safety,
-            lifetime_binders,
-            parameters: parameters
-                .into_iter()
-                .map(|value| normalize_selected_contract_type(value, solver, fuel - 1))
-                .collect(),
-            result: Box::new(normalize_selected_contract_type(*result, solver, fuel - 1)),
-            effects: normalize_selected_contract_effect_row(effects, solver, fuel - 1),
-            invocation,
-        },
-        value => value,
-    }
+fn normalize_selected_contract_type(value: Type, solver: &mut crate::TraitSolver) -> Type {
+    solver.normalize_type(value.clone()).unwrap_or(value)
 }
 
-fn normalize_selected_contract_generic_argument(
-    value: GenericArgument,
-    solver: &mut crate::TraitSolver,
-    fuel: u32,
-) -> GenericArgument {
-    // Contract equality runs after the implementation head has selected its
-    // trait evidence.  Normalize a concrete associated-const argument before
-    // recursing, just as the type/effect paths above do; failed or ambiguous
-    // selection deliberately retains the original identity for rejection by
-    // the ordinary signature comparison.
-    let value = solver.normalize_generic_argument(value.clone()).unwrap_or(value);
-    match value {
-        GenericArgument::Type(value) => {
-            GenericArgument::Type(normalize_selected_contract_type(value, solver, fuel))
-        }
-        GenericArgument::EffectRow(value) => {
-            GenericArgument::EffectRow(normalize_selected_contract_effect_row(value, solver, fuel))
-        }
-        GenericArgument::ConstProjection {
-            subject,
-            trait_definition,
-            trait_arguments,
-            name,
-            kind,
-        } if fuel > 0 => {
-            let subject = normalize_selected_contract_type(*subject, solver, fuel - 1);
-            let trait_arguments = trait_arguments
-                .into_iter()
-                .map(|argument| {
-                    normalize_selected_contract_generic_argument(argument, solver, fuel - 1)
-                })
-                .collect::<Vec<_>>();
-            let projection = GenericArgument::ConstProjection {
-                subject: Box::new(subject.clone()),
-                trait_definition,
-                trait_arguments: trait_arguments.clone(),
-                name: name.clone(),
-                kind,
-            };
-            // This normalizer is only reached after an implementation head
-            // has instantiated its trait contract. Its rigid trait arguments
-            // are therefore backed by the selected implementation, even
-            // though the general declaration normalizer must keep them
-            // symbolic. Try the selected const query here, retaining the
-            // projection on missing, ambiguous, or recursive evidence.
-            match solver.normalize_associated_const(
-                crate::TraitGoal {
-                    relation: ElaboratedTraitReference {
-                        definition: trait_definition,
-                        arguments: trait_arguments,
-                    },
-                    subject,
-                },
-                &name,
-                kind,
-            ) {
-                crate::TraitConstProjectionAnswer::Normalized { value, .. } => {
-                    normalize_selected_contract_generic_argument(value, solver, fuel - 1)
-                }
-                _ => projection,
-            }
-        }
-        value => value,
-    }
+fn normalize_selected_contract_generic_argument(value: GenericArgument, solver: &mut crate::TraitSolver) -> GenericArgument {
+    solver.normalize_generic_argument(value.clone()).unwrap_or(value)
 }
 
-fn normalize_selected_contract_trait_reference(
-    relation: ElaboratedTraitReference,
-    solver: &mut crate::TraitSolver,
-    fuel: u32,
-) -> ElaboratedTraitReference {
+fn normalize_selected_contract_trait_reference(relation: ElaboratedTraitReference, solver: &mut crate::TraitSolver) -> ElaboratedTraitReference {
     ElaboratedTraitReference {
         definition: relation.definition,
-        arguments: relation
-            .arguments
-            .into_iter()
-            .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel))
-            .collect(),
+        arguments: relation.arguments.into_iter()
+            .map(|value| normalize_selected_contract_generic_argument(value, solver)).collect(),
     }
 }
 
-fn normalize_selected_contract_effect_row(
-    value: EffectRow,
-    solver: &mut crate::TraitSolver,
-    fuel: u32,
-) -> EffectRow {
-    if fuel == 0 {
-        return value;
-    }
-    let value = solver.normalize_effect_row(value.clone()).unwrap_or(value);
-    let mut result = EffectRow {
-        effects: value
-            .effects
-            .into_iter()
-            .map(|effect| EffectInstance {
-                definition: effect.definition,
-                arguments: effect
-                    .arguments
-                    .into_iter()
-                    .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
-                    .collect(),
-            })
-            .collect(),
-        projections: vec![],
-        tails: value.tails.clone(),
-    };
-    let mut projections = value.projections;
-    while let Some(projection) = projections.pop() {
-        let original = projection.clone();
-        let subject = normalize_selected_contract_type(*projection.subject, solver, fuel - 1);
-        let trait_arguments = projection
-            .trait_arguments
-            .into_iter()
-            .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
-            .collect::<Vec<_>>();
-        let item_arguments = projection
-            .item_arguments
-            .into_iter()
-            .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
-            .collect::<Vec<_>>();
-        match solver.normalize_associated_effect_row_application(
-            crate::TraitGoal {
-                relation: ElaboratedTraitReference {
-                    definition: projection.trait_definition,
-                    arguments: trait_arguments,
-                },
-                subject,
-            },
-            &projection.name,
-            &item_arguments,
-        ) {
-            crate::TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
-                let row = normalize_selected_contract_effect_row(row, solver, fuel - 1);
-                result.effects.extend(row.effects);
-                result.tails.extend(row.tails);
-                // This recursive result has already spent its fuel. Keep
-                // symbolic/cyclic residuals; requeueing them here would
-                // restart expansion with the same outer budget forever.
-                result.projections.extend(row.projections);
-            }
-            _ => result.projections.push(original),
-        }
-    }
-    result.canonicalized()
+fn normalize_selected_contract_effect_row(value: EffectRow, solver: &mut crate::TraitSolver) -> EffectRow {
+    solver.normalize_effect_row(value.clone()).unwrap_or(value).canonicalized()
 }
 
 /// Substitute the trait-owned implicit receiver after ordinary declaration

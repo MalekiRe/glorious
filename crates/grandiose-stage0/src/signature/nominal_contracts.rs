@@ -104,7 +104,6 @@ impl ElaboratedInterface {
         &self, layout: &ElaboratedNominalLayout, contract: &AssociatedItemContract,
         universal: &[QuantifiedWhereBound], base_solver: &crate::TraitSolver, diagnostics: &mut Vec<SignatureDiagnostic>,
     ) {
-        let projection_solver = &ProjectionSolver::from(base_solver.fresh_query());
         let fields: Vec<&Type> = match layout {
             ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields) =>
                 fields.iter().map(|field| &field.ty).collect(),
@@ -117,18 +116,20 @@ impl ElaboratedInterface {
         };
         let ambient = &contract.where_bounds;
         let mut solver = base_solver.fresh_query();
-        solver.set_lexical_assumptions(ambient.iter().map(|(subject, relation)| crate::TraitGoal {
-            subject: subject.clone(), relation: relation.clone() }).collect());
+        let assumptions = ambient.iter().map(|(subject, relation)| crate::TraitGoal {
+            subject: subject.clone(), relation: relation.clone() }).collect::<Vec<_>>();
+        solver.set_lexical_assumptions(assumptions.clone());
         solver.set_associated_bindings(contract.type_bindings.clone(), contract.effect_bindings.clone());
         solver.set_universal_assumptions(universal.to_vec());
         solver.set_outlives_assumptions(contract.where_outlives.iter().cloned()
             .chain(solver.implied_outlives(fields.iter().map(|field| (*field).clone()))).collect());
+        let projection_solver = &ProjectionSolver::from(solver.fresh_query());
         self.validate_quantified_projection_obligations(projection_solver, universal, ambient, diagnostics);
         self.validate_associated_binding_projection_obligations(projection_solver, &contract.type_bindings, &contract.effect_bindings, ambient, diagnostics);
         if contract.type_bindings.iter().map(|binding| (&binding.subject, &binding.relation))
             .chain(contract.effect_bindings.iter().map(|binding| (&binding.subject, &binding.relation)))
-            .any(|(subject, relation)| !self.ambient_projection_goal_proves(&crate::TraitGoal {
-                subject: subject.clone(), relation: relation.clone() }, ambient)) {
+            .any(|(subject, relation)| !solver.assumption_proves(&crate::TraitGoal {
+                subject: subject.clone(), relation: relation.clone() }, &assumptions)) {
             diagnostics.push(SignatureDiagnostic { code: "G4199", message: "nominal associated equality is detached from its declared trait predicate".into() });
         }
         for (subject, relation) in ambient {
