@@ -1896,3 +1896,25 @@ failure in cleanup lowering. Both source regressions remain active. General
 borrowed resumption invocation, executable replay-count admission, foreign-control
 admission, mandatory-tail handler fusion and full zero-marshalling/performance
 acceptance remain open.
+
+## Structural resident quantities at ownership lowering
+
+Ownership MIR derives a tuple or array owner's quantity from its evaluated
+field owners in the existing quantity fixed point. A known callable environment's
+Copy permission is distinct from its invocation interval and survives these
+structural wrappers, ordinary forwarding and capture formation. Nominal values
+retain their selected Use contract instead of inheriting physical field authority.
+
+Replacement constraints include structural field writes as well as whole-slot
+assignment. Unique borrowing or capture exposure limits initializer refinements
+to the declared resident contract; an unknown writer cannot leave stale Copy
+permission. Local storage and a reference carrier's referent remain distinct.
+The receiving ownership validator independently bounds constructor and replacement
+quantities by their input permissions. Cleanup replay consumes this same owner
+inventory; it gains no callable-type exception or separate replay quantity rule.
+
+Cache 146 records this source-to-ownership correction. The protected callable
+aggregate with a prepared receiver and an argument performance now passes the
+fresh/decoded VM and native/mixed execution matrix. This does not resolve receiver
+lifetime across argument replacement or the remaining general native-handler
+acceptance obligations. Runtime, verifier and portable formats are unchanged.

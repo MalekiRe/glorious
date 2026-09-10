@@ -5,6 +5,34 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 146: structural resident owner quantities
+
+Ownership MIR's existing quantity fixed point now intersects evaluated field
+permissions for tuple and array constructors. Local forwarding and closure
+capture formation consume that same inventory. A callable's known environment
+Copy permission therefore survives a structural wrapper instead of reverting
+to its per-invocation quantity. Nominal constructors retain their selected Use
+rule; physical fields cannot override a nominal contract.
+
+Whole-slot and structural field replacements constrain the containing storage's
+permission. Unique exposure, including unique capture formation, retains only
+the declared storage contract because an unknown writer may replace its resident.
+Reference-carrier slots are not mistaken for their referents. Independent
+Ownership MIR validation checks structural constructor and replacement bounds,
+including rejection of forged aggregate Copy permission and stale permission
+after field replacement.
+
+The 32 focused ownership-validator tests pass. The previously active argument
+performance regression now passes fresh/decoded VM, all-native and both mixed
+partitions at O0/O2, exercising the prepared receiver's replay rebasing through
+a real protected aggregate owner. Receiver replacement during argument evaluation
+remains an active native lifetime failure; it is not repaired by quantity
+propagation. General receiver access, borrowed resumption invocation, helper-local
+delimiters, executable replay-count admission, foreign-control admission,
+mandatory-tail fusion and full zero-marshalling/performance acceptance remain
+open. Cache 146 changes; verifier 47, bytecode 75/schema 119 and native ABI 18
+are unchanged.
+
 ## Cache 145: evaluated invocation receivers
 
 Evaluation, Control, Ownership, Specialized, Cleanup and Runtime MIR now preserve

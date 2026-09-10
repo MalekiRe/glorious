@@ -246,7 +246,14 @@ impl OwnershipMir {
                     return Err(invalid("instruction has unknown scope"));
                 }
                 match &instruction.operation {
-                    OwnershipOperation::Construct { fields, .. } => {
+                    OwnershipOperation::Construct { aggregate, fields } => {
+                        if matches!(aggregate, OwnershipAggregate::Tuple | OwnershipAggregate::Array) {
+                            let declared = self.checked_owner(instruction.destination)?.quantity;
+                            let available = product_quantity(fields.iter().map(|field| field.value), &self.owners);
+                            if !quantity_is_supported(declared, available) {
+                                return Err(invalid("structural owner quantity exceeds its field permissions"));
+                            }
+                        }
                         for operand in fields {
                             self.validate_operand(*operand)?;
                             if operand.mode == ValueTransfer::Reborrow {
@@ -329,6 +336,10 @@ impl OwnershipMir {
                         }
                         if !crate::control_mir::call_type_matches(self.checked_place_type(place)?, self.checked_type(*value)?) {
                             return Err(invalid("replacement type disagrees with place"));
+                        }
+                        if let Some(destination) = structural_storage_root(place, &self.values)
+                            && !quantity_is_supported(self.checked_owner(destination)?.quantity, self.checked_owner(*value)?.quantity) {
+                            return Err(invalid("storage quantity exceeds a replacement resident's permissions"));
                         }
                         self.validate_operand(OwnershipOperand {
                             value: *value,
@@ -515,6 +526,54 @@ mod tests {
                 _ => None,
             }).unwrap();
         assert_eq!(mir.owners[replaced.0 as usize].quantity, Some(Quantity::AFFINE));
+    }
+
+    #[test]
+    fn structural_owners_retain_evaluated_callable_environment_permissions() {
+        for source in [
+            "fn answer() -> i64 { 42 } pub fn main() -> i64 { let callback:() -> i64 = answer; let saved = ((callback,),); saved.0.0() }",
+            "fn answer() -> i64 { 42 } pub fn main() -> i64 { let callback:() -> i64 = answer; let saved = [callback]; 42 }",
+        ] {
+            let mir = fixture(source);
+            let mut count = 0;
+            for instruction in mir.blocks.iter().flat_map(|block| &block.instructions) {
+                if matches!(instruction.operation, OwnershipOperation::Construct { aggregate: OwnershipAggregate::Tuple | OwnershipAggregate::Array, .. }) {
+                    count += 1;
+                    assert_eq!(mir.owners[instruction.destination.0 as usize].quantity, Some(Quantity::UNRESTRICTED));
+                }
+            }
+            assert!(count > 0);
+        }
+    }
+
+    #[test]
+    fn structural_owners_cannot_forge_copy_permission_for_affine_fields() {
+        let mut mir = fixture("pub fn main(value: &mut i64) -> i64 { let saved = (value,); 42 }");
+        let destination = mir.blocks.iter().flat_map(|block| &block.instructions)
+            .find(|instruction| matches!(instruction.operation, OwnershipOperation::Construct { aggregate: OwnershipAggregate::Tuple, .. })).unwrap().destination;
+        assert_eq!(mir.owners[destination.0 as usize].quantity, Some(Quantity::AFFINE));
+        mir.owners[destination.0 as usize].quantity = Some(Quantity::UNRESTRICTED);
+        assert!(mir.validate().unwrap_err().0.contains("field permissions"));
+    }
+
+    #[test]
+    fn replacing_a_callable_field_revokes_its_containers_initial_copy_permission() {
+        let mut mir = fixture("pub fn main(value: &mut i64) -> i64 { let mut saved = (() -> i64 { 42 },); saved.0 = () -> i64 { let taken = move value; 42 }; saved.0() }");
+        let replaced = mir.blocks.iter().flat_map(|block| &block.instructions)
+            .find_map(|instruction| match &instruction.operation {
+                OwnershipOperation::Replace { place: ControlPlace::Field { base, .. }, .. } => Some(base.root()),
+                _ => None,
+            }).unwrap();
+        assert_eq!(mir.owners[replaced.0 as usize].quantity, Some(Quantity::AFFINE));
+        mir.owners[replaced.0 as usize].quantity = Some(Quantity::UNRESTRICTED);
+        assert!(mir.validate().unwrap_err().0.contains("replacement resident"));
+    }
+
+    #[test]
+    fn writable_exposure_cannot_keep_an_initializers_structural_copy_permission() {
+        let mir = fixture("fn expose<T>(value: &mut T) {} pub fn main() -> i64 { let mut saved = (() -> i64 { 42 },); expose(&mut saved); 42 }");
+        let root = local_storage_root(&mir.loans.iter().find(|loan| loan.unique).unwrap().place).unwrap();
+        assert_ne!(mir.owners[root.0 as usize].quantity, Some(Quantity::UNRESTRICTED));
     }
 
     #[test]

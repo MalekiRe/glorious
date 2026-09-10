@@ -79,6 +79,50 @@ fn environment_quantity(
         quantity.intersection(capture).ok()
     })
 }
+
+fn product_quantity(
+    fields: impl IntoIterator<Item = ControlValue>,
+    owners: &[Owner],
+) -> Option<Quantity> {
+    fields.into_iter().try_fold(Quantity::UNRESTRICTED, |quantity, value| {
+        quantity.intersection(owners.get(value.0 as usize)?.quantity?).ok()
+    })
+}
+
+fn quantity_is_supported(published: Option<Quantity>, available: Option<Quantity>) -> bool {
+    published.is_none_or(|published| available.is_some_and(|available|
+        available.intersection(published).ok() == Some(published)))
+}
+
+/// Reference carriers are not the storage reached through them.
+fn local_storage_root(mut place: &ControlPlace) -> Option<ControlValue> {
+    loop {
+        match place {
+            ControlPlace::Field { base, .. } => place = base,
+            ControlPlace::Local(value) | ControlPlace::Temporary(value) => return Some(*value),
+            ControlPlace::Deref { .. } => return None,
+        }
+    }
+}
+
+/// Only structural products inherit each physical field's Use restriction.
+/// A nominal's selected Use implementation governs its entire resident.
+fn structural_storage_root(mut place: &ControlPlace, values: &[ControlValueDecl]) -> Option<ControlValue> {
+    loop {
+        match place {
+            ControlPlace::Field { base, .. } => {
+                let ty = match base.as_ref() {
+                    ControlPlace::Local(value) | ControlPlace::Temporary(value) => &values.get(value.0 as usize)?.ty,
+                    ControlPlace::Field { ty, .. } | ControlPlace::Deref { ty, .. } => ty,
+                };
+                if !matches!(ty, Type::Tuple(_) | Type::Array(_) | Type::FixedArray { .. }) { return None; }
+                place = base;
+            }
+            ControlPlace::Local(value) | ControlPlace::Temporary(value) => return Some(*value),
+            ControlPlace::Deref { .. } => return None,
+        }
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OwnershipAggregate {
     Tuple,
@@ -594,11 +638,35 @@ impl OwnershipMir {
             value_places.insert(instruction.destination, place);
         }
         let mut replacements = BTreeMap::<ControlValue, Vec<ControlValue>>::new();
+        let mut exposed_quantities = BTreeMap::new();
+        // Resolve only actual local storage, never the slot holding a reference.
+        // An unknown write through an exposed reference must use the declared
+        // resident contract instead of retaining its initializer's refinement.
         for instruction in control.blocks().iter().flat_map(|block| &block.instructions) {
-            if let ControlOperation::Capability(ControlCapabilityOperation::Assign {
-                place: ControlPlace::Local(destination) | ControlPlace::Temporary(destination), value,
-            }) = &instruction.operation {
-                replacements.entry(*destination).or_default().push(*value);
+            match &instruction.operation {
+                ControlOperation::Capability(ControlCapabilityOperation::Assign { place, value }) => {
+                    let place = resolve_place(place.clone(), &value_places);
+                    if let Some(destination) = structural_storage_root(&place, control.values()) {
+                        replacements.entry(destination).or_default().push(*value);
+                    }
+                }
+                ControlOperation::Capability(ControlCapabilityOperation::Borrow { place, unique: true }) => {
+                    let place = resolve_place(place.clone(), &value_places);
+                    if let Some(destination) = local_storage_root(&place) {
+                        exposed_quantities.insert(destination, owners[destination.0 as usize].quantity);
+                    }
+                }
+                ControlOperation::Capability(ControlCapabilityOperation::Closure { closure, captures }) => {
+                    for (value, capture) in captures.iter().zip(&control.closures()[closure.0 as usize].environment.captures) {
+                        if capture.mode == crate::CaptureMode::UniqueBorrow {
+                            let place = value_places.get(value).cloned().unwrap_or(ControlPlace::Local(*value));
+                            if let Some(destination) = local_storage_root(&place) {
+                                exposed_quantities.insert(destination, owners[destination.0 as usize].quantity);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         loop {
@@ -609,6 +677,11 @@ impl OwnershipMir {
                 .flat_map(|block| &block.instructions)
             {
                 let quantity = match &instruction.operation {
+                    // Tuple and array Use is structural. Nominal constructors
+                    // retain the declaration-selected Use rule, which may not
+                    // be the intersection of their physical payloads.
+                    ControlOperation::Tuple(fields) | ControlOperation::Array(fields) =>
+                        Some(product_quantity(fields.iter().copied(), &owners)),
                     ControlOperation::Read(source)
                     | ControlOperation::Forward(source)
                     | ControlOperation::EndScope { value: source, .. } => Some(owners[source.0 as usize].quantity),
@@ -631,6 +704,10 @@ impl OwnershipMir {
                 quantities[destination.0 as usize] = quantities[destination.0 as usize].and_then(|quantity|
                     values.iter().try_fold(quantity, |quantity, value|
                         quantity.intersection(owners[value.0 as usize].quantity?).ok()));
+            }
+            for (destination, declared) in &exposed_quantities {
+                quantities[destination.0 as usize] = quantities[destination.0 as usize]
+                    .and_then(|quantity| quantity.intersection((*declared)?).ok());
             }
             if owners.iter().zip(&quantities).all(|(owner, quantity)| owner.quantity == *quantity) {
                 break;

@@ -361,8 +361,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 142 consumes sealed quantity-derived replay-handle transports.
 // Cache 143 consumes the original continuation on the final exact replay.
 // Cache 144 composes ordered capability execution paths through checked helpers.
-// Cache 145 prepares invocation receivers without moving or copying owners.
-pub const STAGE0_CACHE_GENERATION: u32 = 145;
+// Cache 146 preserves resident field quantities in structural owners.
+pub const STAGE0_CACHE_GENERATION: u32 = 146;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
