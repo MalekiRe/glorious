@@ -6212,11 +6212,8 @@ struct VerifierPerformed {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
-    disposed_resumption_inputs: BTreeSet<resumption_values::InputPath>,
-    /// May history prevents a loop or later alias from hiding a second use.
-    may_invoked_resumption_inputs: BTreeSet<resumption_values::InputPath>,
-    /// Caller capabilities invoked on every path reaching this point.
-    invoked_resumption_inputs: BTreeSet<resumption_values::InputPath>,
+    /// Ordered capability executions retain separate normal alternatives.
+    resumption_paths: resumption_calls::Paths,
     /// Addresses exposed on any executed predecessor. Unlike resident
     /// initialization this history cannot be reset by moving or killing a slot.
     address_exposed: Vec<bool>,
@@ -6506,9 +6503,6 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
 ) -> Result<VerifiedFunctionControl, VmArtifactError> {
     let mut call_input_behaviors = BTreeMap::new();
     let mut resumption_contract = resumption_calls::Contract::default();
-    let mut returned_resumptions = None::<ResumptionValue>;
-    let mut required_resumptions = None::<BTreeSet<resumption_values::InputPath>>;
-    let mut disposed_resumptions = None::<BTreeSet<resumption_values::InputPath>>;
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -6598,9 +6592,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     let mut incoming: VerifierIncoming = vec![BTreeMap::new(); function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
         entry.insert(VerifierContext::default(), VerifierState {
-            disposed_resumption_inputs: BTreeSet::new(),
-            may_invoked_resumption_inputs: BTreeSet::new(),
-            invoked_resumption_inputs: BTreeSet::new(),
+            resumption_paths: resumption_calls::Paths::entry(),
             // Captures lend existing environment slots. Explicit arguments
             // establish the callee's owned parameter slots; references they
             // contain expose their referents, not these new handle locations.
@@ -7980,9 +7972,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
-                        disposed_resumption_inputs: states.disposed_resumption_inputs.clone(),
-                        may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
-                        invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
+                        resumption_paths: states.resumption_paths.clone(),
                         last_instruction: Some(pc),
                         may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
@@ -8035,7 +8025,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     states.registers[*value as usize] = Some(false);
                 }
                 resumption_calls::resume(function, pc, index, &resumption_calls::Invocation { parameter: found, result },
-                    true, &mut states, &mut incoming, &mut worklist)?;
+                    &mut states, &mut incoming, &mut worklist)?;
                 write(&mut states, *dst)?;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -8141,9 +8131,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
-                        disposed_resumption_inputs: states.disposed_resumption_inputs.clone(),
-                        may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
-                        invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
+                        resumption_paths: states.resumption_paths.clone(),
                         last_instruction: Some(pc),
                         may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
@@ -8770,9 +8758,11 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                     resumption_calls::apply(function, pc, &values, contract, &mut states,
                         &mut resumption_contract, &mut incoming, &mut worklist)?
-                } else { ResumptionValue::None };
-                write(&mut states, *dst)?;
-                states.resumptions[*dst as usize] = result;
+                } else { Some(ResumptionValue::None) };
+                if let Some(result) = result {
+                    write(&mut states, *dst)?;
+                    states.resumptions[*dst as usize] = result;
+                } else { advances = false; trapped = true; }
             }
             VmInstruction::HostCallOwned { dst, capability, symbol, parameters, result, arguments, .. }
             | VmInstruction::HostCall {
@@ -8854,14 +8844,11 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     let contract = transfer_proofs.resumption_calls.get(callee).ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                     resumption_calls::apply(function, pc, &inputs, contract, &mut states,
                         &mut resumption_contract, &mut incoming, &mut worklist)?
-                } else { ResumptionValue::None };
-                if outgoing.has_local_or_unknown() { return Err(VmArtifactError::HandlerResumeUnavailable); }
-                if returns {
+                } else { Some(ResumptionValue::None) };
+                if outgoing.as_ref().is_some_and(ResumptionValue::has_local_or_unknown) { return Err(VmArtifactError::HandlerResumeUnavailable); }
+                if returns && let Some(outgoing) = outgoing {
                     returned = Some(result.clone());
-                    returned_resumptions = Some(returned_resumptions.map_or_else(|| outgoing.clone(), |previous| previous.join(&outgoing)));
-                    disposed_resumptions = Some(disposed_resumptions.map_or_else(|| states.disposed_resumption_inputs.clone(), |previous| previous.intersection(&states.disposed_resumption_inputs).cloned().collect()));
-                    required_resumptions = Some(required_resumptions.map_or_else(|| states.invoked_resumption_inputs.clone(), |previous|
-                        previous.intersection(&states.invoked_resumption_inputs).cloned().collect()));
+                    resumption_contract.returned(&states.resumption_paths, &outgoing)?;
                     result_independent &= transfer_proofs.independent_results.contains(callee)
                         && arguments.iter().all(|argument| tail_provenance::independent(function, &states, *argument)
                             && tail_provenance::destruction_preserving(function, &states, *argument));
@@ -8979,15 +8966,10 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 let symbolic = matches!(states.resumptions[*callee as usize], ResumptionValue::Input(_));
                 if let ResumptionValue::Input(path) = &states.resumptions[*callee as usize] {
-                    if !states.handlers.is_empty() || !states.may_invoked_resumption_inputs.insert(path.clone()) {
-                        return Err(VmArtifactError::HandlerResumeUnavailable);
-                    }
                     let [parameter] = parameters.as_slice() else { return Err(VmArtifactError::HandlerResumeUnavailable); };
-                    resumption_calls::record(path, &resumption_calls::Invocation {
+                    resumption_calls::record(resumption_calls::Event::Invoke { input: path.clone(), invocation: resumption_calls::Invocation {
                         parameter: parameter.clone(), result: (**result).clone(),
-                    }, &mut resumption_contract)?;
-                    states.invoked_resumption_inputs.insert(path.clone());
-                    states.disposed_resumption_inputs.insert(path.clone());
+                    } }, &mut states, &mut resumption_contract)?;
                 }
                 write(&mut states, *dst)?;
                 if symbolic && resumption_calls::may_contain(result, &function.nominal_copy_descriptors) {
@@ -9131,10 +9113,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     return Err(VmArtifactError::HandlerStillActive);
                 }
                 let result = &states.resumptions[*value as usize];
-                returned_resumptions = Some(returned_resumptions.map_or_else(|| result.clone(), |previous| previous.join(result)));
-                disposed_resumptions = Some(disposed_resumptions.map_or_else(|| states.disposed_resumption_inputs.clone(), |previous| previous.intersection(&states.disposed_resumption_inputs).cloned().collect()));
-                required_resumptions = Some(required_resumptions.map_or_else(|| states.invoked_resumption_inputs.clone(), |previous|
-                    previous.intersection(&states.invoked_resumption_inputs).cloned().collect()));
+                resumption_contract.returned(&states.resumption_paths, result)?;
                 result_independent &= tail_provenance::independent(function, &states, *value);
                 result_destruction_preserving &= tail_provenance::destruction_preserving(function, &states, *value);
                 let found = register_type(function, *value)?;
@@ -9195,9 +9174,6 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     }
     if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
-        resumption_contract.result = returned_resumptions.unwrap_or_default();
-        resumption_contract.required = required_resumptions.unwrap_or_default();
-        resumption_contract.disposed = disposed_resumptions.unwrap_or_default();
         Ok(VerifiedFunctionControl { resumption_contract, call_input_behaviors, returns: returned.is_some(), result_independent,
             result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
             captures_intact_at_boundaries })
@@ -9591,13 +9567,7 @@ fn propagate_state(
             // Labels/resumptions are capability may-taints, not readability.
             // An arm cannot erase authority carried on another predecessor.
             changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
-            let required = existing.invoked_resumption_inputs.intersection(&state.invoked_resumption_inputs).cloned().collect();
-            let disposed = existing.disposed_resumption_inputs.intersection(&state.disposed_resumption_inputs).cloned().collect();
-            if existing.disposed_resumption_inputs != disposed { existing.disposed_resumption_inputs = disposed; changed = true; }
-            if existing.invoked_resumption_inputs != required { existing.invoked_resumption_inputs = required; changed = true; }
-            let previous = existing.may_invoked_resumption_inputs.len();
-            existing.may_invoked_resumption_inputs.extend(state.may_invoked_resumption_inputs.iter().cloned());
-            changed |= previous != existing.may_invoked_resumption_inputs.len();
+            changed |= existing.resumption_paths.join(&state.resumption_paths)?;
             if existing.pending_leave != state.pending_leave && existing.pending_leave.take().is_some() {
                 changed = true;
             }

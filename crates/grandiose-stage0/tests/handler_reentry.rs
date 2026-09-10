@@ -164,6 +164,57 @@ fn one_ordinary_helper_can_perform_both_ordered_replays() {
 }
 
 #[test]
+fn ordered_replay_helpers_compose_with_forwarded_product_aliases() {
+    candidate("effect Ask { [2,2] ask() -> i64; }
+        fn keep<T>(value:T) -> T { value }
+        fn twice<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            let saved = (keep(task),); saved.0(19) + saved.0(21)
+        }
+        fn relay<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { twice(task) }
+        pub fn main() -> i64 { handle Ask::ask() {
+            value => value + 1, Ask::ask() with k => relay(k)
+        } }");
+}
+
+#[test]
+fn ordered_replay_helpers_compose_with_forwarded_handles() {
+    candidate("effect Ask { [2,2] ask() -> i64; }
+        fn keep<T>(value:T) -> T { value }
+        fn twice<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            let saved = keep(task); saved(19) + saved(21)
+        }
+        fn relay<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { twice(task) }
+        pub fn main() -> i64 { handle Ask::ask() {
+            value => value + 1, Ask::ask() with k => relay(k)
+        } }");
+}
+
+#[test]
+fn ordered_helper_inputs_can_alias_the_same_replay_budget() {
+    candidate("effect Ask { [2,2] ask() -> i64; }
+        fn both<A,B>(first:A, second:B) -> i64
+            where A:Fn<(i64,),Output=i64,Effects={}>, B:Fn<(i64,),Output=i64,Effects={}> {
+            second(19) + first(21)
+        }
+        pub fn main() -> i64 { handle Ask::ask() {
+            value => value + 1, Ask::ask() with k => both(k,k)
+        } }");
+}
+
+#[test]
+fn ordered_replay_helper_branches_remain_distinct_execution_alternatives() {
+    for choice in ["0", "1"] {
+        candidate(&format!("effect Ask {{ [2,2] ask() -> i64; }}
+            fn choose<F>(task:F, choice:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={{}}> {{
+                handle choice {{ 0 => task(19) + task(21), _ => task(21) + task(19) }}
+            }}
+            pub fn main() -> i64 {{ handle Ask::ask() {{
+                value => value + 1, Ask::ask() with k => choose(k,{choice})
+            }} }}"));
+    }
+}
+
+#[test]
 fn optional_resumption_cancellation_inside_an_ordinary_helper() {
     let source = "effect Ask { [0,1] ask() -> i64; }
         fn choose<F>(task:F, choice:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {

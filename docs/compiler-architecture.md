@@ -1828,3 +1828,35 @@ Cache 143 and native ABI 17 record the runtime change; verifier 45 and bytecode
 74/schema 118 are unchanged. Ordered multi-invocation helper proofs, general
 borrowed invocation, foreign-control admission, mandatory-tail handler fusion
 and complete zero-marshalling/performance acceptance remain open.
+
+## Ordered executable helper capability histories
+
+The executable control verifier carries finite ordered invocation/disposal
+histories in its existing state. CFG joins union complete path alternatives;
+events within a path do not commute. Normal-return histories and reachable
+event prefixes are separate parts of the published helper contract. Prefixes
+cover non-returning executions without discharging a caller's normal-return
+obligation. Empty coverage is distinct from one known empty execution.
+
+Ordinary calls instantiate explicit and structural input paths against the
+actual capabilities. Each alternative runs its events through the existing
+resumption and disposal transitions in order, then only normal alternatives
+rejoin the caller's control state. Multiple helper inputs may name one dynamic
+delimiter. Disposal after invocation releases a spent handle; it is not another
+invocation or permission to cancel an uninvoked exact one-shot continuation.
+Return transport retains the existing structural resident relation.
+
+The previous unordered invocation map, may-invocation set and guaranteed-use
+sets are removed, together with the single-input/single-invocation admission
+restriction. Final whole-program revalidation still checks the complete contract.
+Growing traces, recursive capability loops and exhausted finite bounds reject
+without publishing a truncated result. Helper-local active delimiters around
+symbolic invocation remain unsupported rather than disappearing from a trace.
+
+Cache 144 and verifier 46 record this proof change. Runtime and serialized
+formats remain at native ABI 17 and bytecode 74/schema 118. General callable
+field invocation still exposes an independent projection-ownership failure:
+moving a generic callable field for its first call makes a second call fail at
+runtime. Its regression remains active. Complete borrowed invocation, executable
+replay-count admission, foreign-control admission, mandatory-tail handler fusion
+and zero-marshalling/performance acceptance remain open.

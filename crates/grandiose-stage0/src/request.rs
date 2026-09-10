@@ -360,7 +360,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // bytecode 73/schema 117 retain the common continuation ownership partition.
 // Cache 142 consumes sealed quantity-derived replay-handle transports.
 // Cache 143 consumes the original continuation on the final exact replay.
-pub const STAGE0_CACHE_GENERATION: u32 = 143;
+// Cache 144 composes ordered capability execution paths through checked helpers.
+pub const STAGE0_CACHE_GENERATION: u32 = 144;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 74;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -386,7 +387,8 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 74;
 // explicit parameter slots independently of lent capture storage.
 // Verifier 45 authenticates retained replay handles and joins absent residents
 // without inventing present nonresumption alternatives.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 45;
+// Verifier 46 preserves ordered normal histories and non-returning prefixes.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 46;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

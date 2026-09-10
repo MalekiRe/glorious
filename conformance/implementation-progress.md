@@ -5,6 +5,40 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 144: ordered helper capability histories
+
+The executable control verifier now carries finite ordered invocation/disposal
+histories through CFG joins and checked helper calls. Normal-return alternatives
+remain distinct from reachable event prefixes, including non-returning paths.
+Each actual input instantiation runs through the existing control transition in
+order; only normal alternatives rejoin the caller. Multiple inputs can alias one
+delimiter. The old unordered map and may/must-use sets, and the one-input/one-use
+restriction they required, are removed. Exhausted finite path/event bounds and
+growing recursive histories reject without publishing partial permission.
+
+All 11 helper-proof unit tests pass, covering repeated uses versus one-shot
+authority, distinct input order, non-returning prefixes, invocation versus
+disposal, conditional owned-slot cleanup, forged final contracts, unknown layouts,
+source Copy rejection and trace bounds. The repeated-use fixture now has distinct
+SSA result slots: its former destination overwrite was independently invalid and
+could not demonstrate a quantity rejection. Its two-use obligation is retained
+and explicitly rejects instantiation with a one-shot continuation.
+
+The handler integration gate passes 37 cases through fresh/decoded VM, all-native
+and both mixed partitions at O0/O2. This includes the formerly failing helper
+that performs both replays, transitive forwarding and returned handles, two helper
+parameters sharing one budget, and both branch alternatives. A new composition
+regression remains failing and is excluded explicitly: invoking a generic callable
+field twice moves that field out at its first projection and fails with
+`UseAfterMove` at runtime. This is a receiving ownership/projection bug, not a
+reason to discard the regression or permit ordinary Copy of resumptions.
+
+Cache 144 and verifier 46 change; native ABI 17 and bytecode 74/schema 118 remain.
+Generic callable field invocation, helper-local active delimiters around symbolic
+invocation, general borrowed invocation, executable replay-count admission,
+foreign-control admission, mandatory-tail handler fusion and complete
+zero-marshalling/performance acceptance remain open.
+
 ## Cache 143: final replay consumes the original continuation
 
 The shared runtime frame now distinguishes active protected execution, a pending
