@@ -331,7 +331,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // literals supply u8 evidence to the ordinary Slice element inference cell.
 // Cache 127 preserves trailing statement disposal and generated borrowed
 // capture storage instead of copying its resident into a new owner.
-pub const STAGE0_CACHE_GENERATION: u32 = 127;
+// Cache 128 preserves empty and cyclic logical-region evidence and rigid
+// generic result independence without fabricating reference validity.
+pub const STAGE0_CACHE_GENERATION: u32 = 128;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

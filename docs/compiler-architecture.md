@@ -1262,3 +1262,33 @@ This repairs statement-result loss and generated borrowed-capture copying,
 including nested and mixed invocation. It does not discharge the full library's
 remaining quantity and mandatory-tail obligations, complete guarded storage,
 native handlers or self-hosted acceptance.
+
+## Logical dependency absence, projections and cyclic joins
+
+EscapeFlow's existing value snapshot distinguishes a constructed value's empty
+additional logical debt from unknown physical provenance. Evaluated fields still
+retain their own loans. Opaque incoming carriers use the existing projected-value
+fallback when logical regions are installed beneath fields, preserving untouched
+caller-owned contents instead of manufacturing a sparse unknown alternative.
+
+Region resolution consumes the existing graph's edges and per-node contents.
+A dependency backedge contributes no new union member; it is not an unknown
+runtime value. A cycle needs grounded evidence, and a missing node remains
+unknown even when another connected node is known. Later local loans, control
+brands and unresolved replacements remain in the same snapshot queried by
+return, store, suspension and mandatory-tail checks. No second Core traversal
+or independently populated provenance graph is introduced.
+
+For a checked expression in the current body's rigid generic namespace, the
+type parameter was fixed outside that activation. Its result snapshot may
+therefore retain frame independence without claiming reference absence, validity
+or an exact referent. Inference cells and explicit reference types do not receive
+that proof. An unknown payload from a different callable's abstract namespace
+still requires its existing input projection or independent closed-type proof.
+
+This repairs the library's source-level tail-provenance failures, not all tail
+execution. The generic callback regression now reaches the executable verifier's
+missing preservation proof after indirect invocation. The branch-joined vector
+regression reaches unresolved nested getter storage. Their original execution
+assertions remain acceptance obligations; source admission does not waive either
+receiving boundary or the library's remaining minimum-use requirements.

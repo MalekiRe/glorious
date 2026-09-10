@@ -310,6 +310,22 @@ enum Capture {
     },
 }
 
+/// A rigid type parameter was fixed outside this activation. A checked value
+/// of that type cannot acquire this activation's local region by constructing
+/// a new reference or closure: doing so would require changing the rigid type.
+/// It can still contain unknown references and control capabilities belonging
+/// to its caller. This is boundary independence, not reference absence,
+/// referent identity, addressability or permission to discard the value.
+fn type_proven_value(signatures: &crate::ElaboratedInterface, ty: &Type) -> Option<Value> {
+    if matches!(ty, Type::Generic(_)) {
+        Some(Value::FrameIndependent)
+    } else if crate::core::tail::tail_owned_type(signatures, ty, &mut vec![]) {
+        Some(Value::ReferenceFree)
+    } else {
+        None
+    }
+}
+
 struct Analyzer<'a> {
     closure_flows: &'a BTreeMap<EnvironmentBrand, PlaceFlow>,
     body: &'a TypedBody,
@@ -360,34 +376,49 @@ impl Analyzer<'_> {
     }
 
     fn resolved_value_in(value: &Value, values: &ValueEnvironment) -> Value {
-        fn resolve(value: &Value, graph: &crate::placeflow::regions::RegionGraph<Value>, active: &mut BTreeSet<crate::placeflow::regions::Region>) -> Value {
-            match value {
+        // None here denotes a dependency backedge, not an unknown value. A
+        // cyclic union must retain its grounded evidence exactly once; using
+        // Value::None for the backedge invents an unresolved alternative.
+        // A cycle with no grounded evidence still resolves to unknown below.
+        fn resolve(value: &Value, graph: &crate::placeflow::regions::RegionGraph<Value>, active: &mut BTreeSet<crate::placeflow::regions::Region>) -> Option<Value> {
+            Some(match value {
                 Value::Region(regions) => {
                     let fresh = graph.reachable(regions).difference(active).cloned().collect::<BTreeSet<_>>();
+                    if fresh.is_empty() { return None; }
                     active.extend(fresh.iter().cloned());
-                    let value = join(graph.contents(&fresh).iter().map(|value| resolve(value, graph, active)).collect());
+                    let values = fresh.iter().filter_map(|region| match graph.get(region) {
+                        Some(value) => resolve(value, graph, active),
+                        // Missing input is unknown even if a different node
+                        // in the same connected component has known contents.
+                        None => Some(Value::None),
+                    }).collect::<Vec<_>>();
                     for region in fresh { active.remove(&region); }
-                    value
+                    if values.is_empty() { return None; }
+                    join(values)
                 }
-                Value::Aggregate(values) => Value::Aggregate(values.iter().map(|value| resolve(value, graph, active)).collect()),
-                Value::Variant(values) => Value::Variant(values.iter().map(|value| resolve(value, graph, active)).collect()),
-                Value::Alternatives(values) => Value::Alternatives(values.iter().map(|value| resolve(value, graph, active)).collect()),
-                Value::Joined(values) => join(values.iter().map(|value| resolve(value, graph, active)).collect()),
+                Value::Aggregate(values) => Value::Aggregate(values.iter().map(|value| resolve(value, graph, active).unwrap_or(Value::None)).collect()),
+                Value::Variant(values) => Value::Variant(values.iter().map(|value| resolve(value, graph, active).unwrap_or(Value::None)).collect()),
+                Value::Alternatives(values) => Value::Alternatives(values.iter().map(|value| resolve(value, graph, active).unwrap_or(Value::None)).collect()),
+                Value::Joined(values) => {
+                    let values = values.iter().filter_map(|value| resolve(value, graph, active)).collect::<Vec<_>>();
+                    if values.is_empty() { return None; }
+                    join(values)
+                }
                 Value::Reference { dependencies, targets, authenticated } => Value::Reference {
-                    dependencies: Box::new(resolve(dependencies, graph, active)),
-                    targets: targets.as_ref().map(|targets| Box::new(resolve(targets, graph, active))),
+                    dependencies: Box::new(resolve(dependencies, graph, active).unwrap_or(Value::None)),
+                    targets: targets.as_ref().map(|targets| Box::new(resolve(targets, graph, active).unwrap_or(Value::None))),
                     authenticated: *authenticated,
                 },
                 Value::Array { length, element, fields } => Value::Array { length: *length,
-                    element: Box::new(resolve(element, graph, active)),
-                    fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
+                    element: Box::new(resolve(element, graph, active).unwrap_or(Value::None)),
+                    fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active).unwrap_or(Value::None))).collect() },
                 Value::Projected { fallback, fields } => Value::Projected {
-                    fallback: Box::new(resolve(fallback, graph, active)),
-                    fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
-                Value::Logical { physical, arguments } => Value::Logical { physical: Box::new(resolve(physical, graph, active)),
-                    arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
+                    fallback: Box::new(resolve(fallback, graph, active).unwrap_or(Value::None)),
+                    fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active).unwrap_or(Value::None))).collect() },
+                Value::Logical { physical, arguments } => Value::Logical { physical: Box::new(resolve(physical, graph, active).unwrap_or(Value::None)),
+                    arguments: arguments.iter().map(|(index, value)| (*index, resolve(value, graph, active).unwrap_or(Value::None))).collect() },
                 Value::Closure { environment, captures, resident_captures, frame_independent, regions, controls } => {
-                    let possible = resolve(&Value::Region(regions.clone()), graph, active);
+                    let possible = resolve(&Value::Region(regions.clone()), graph, active).unwrap_or(Value::None);
                     let roots = capture_dependency_roots(&possible);
                     let mut captures = captures.clone();
                     captures.extend(roots.iter().cloned().map(|root| Capture::Borrowed { root, environment: *environment }));
@@ -398,12 +429,12 @@ impl Analyzer<'_> {
                         regions: BTreeSet::new(), controls }
                 }
                 Value::CallableResident { footprint, resident_captures } => Value::CallableResident {
-                    footprint: Box::new(resolve(footprint, graph, active)), resident_captures: resident_captures.clone(),
+                    footprint: Box::new(resolve(footprint, graph, active).unwrap_or(Value::None)), resident_captures: resident_captures.clone(),
                 },
                 value => value.clone(),
-            }
+            })
         }
-        resolve(value, &values.regions, &mut BTreeSet::new())
+        resolve(value, &values.regions, &mut BTreeSet::new()).unwrap_or(Value::None)
     }
 
     fn value(&mut self, id: CoreId) -> Value {
@@ -809,8 +840,8 @@ impl Analyzer<'_> {
                 self.join_exits(&incoming, exits)
             }
         };
-        let value = if matches!(value, Value::None) && crate::core::tail::tail_owned_type(self.signatures, &expression.ty, &mut vec![]) {
-            Value::ReferenceFree
+        let value = if matches!(value, Value::None) {
+            type_proven_value(self.signatures, &expression.ty).unwrap_or(value)
         } else { value };
         self.seed_logical_value(format!("<expression-{}>", id.0), &expression.ty, value)
     }
@@ -850,7 +881,7 @@ impl Analyzer<'_> {
             self.error(span, "G5023", format!("reference-valued {boundary} has no complete frozen caller-region provenance"));
         }
         match origin {
-            CallReferenceOrigin::None => Value::None,
+            CallReferenceOrigin::None => type_proven_value(self.signatures, result_ty).unwrap_or(Value::None),
             CallReferenceOrigin::External => Value::ExternalBorrowed,
             // The raw-reference contract supplies validity independently of
             // local loans. Its selected lifetime is still checked by Core.
@@ -895,7 +926,7 @@ impl Analyzer<'_> {
                 seal_array_extents(self.signatures, result_ty, &mut result);
                 result
             }
-            CallReferenceOrigin::Opaque => Value::None,
+            CallReferenceOrigin::Opaque => type_proven_value(self.signatures, result_ty).unwrap_or(Value::None),
         }
     }
 
@@ -1605,6 +1636,15 @@ fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -
         return replace_resident_path(physical, path, replacement);
     }
     if matches!(*field, crate::core::REFERENCE_PATH_ARRAY_ELEMENT | crate::core::REFERENCE_PATH_DEREF) { return false; }
+    if matches!(target, Value::ExternalBorrowed | Value::FrameIndependent) {
+        // A typed projection of an opaque incoming carrier must preserve the
+        // provenance of its untouched fields. Do not create a second sparse
+        // alternative whose invented holes contaminate the same parameter.
+        *target = Value::Projected {
+            fallback: Box::new(std::mem::replace(target, Value::None)),
+            fields: BTreeMap::new(),
+        };
+    }
     if let Value::Projected { fallback, fields } = target {
         return replace_resident_path(fields.entry(*field).or_insert_with(|| (**fallback).clone()), tail, replacement);
     }
@@ -1706,13 +1746,20 @@ fn value_at_variant_path(value: &Value, path: &[u32], known_variant: bool) -> Op
         }
         return value_at_variant_path(physical, path, known_variant);
     }
-    // A constructor with no initialized logical resident contributes an
-    // empty provenance set, not external authority. This also covers a
-    // successful call such as an empty generic owner constructor.
+    // A represented constructor has no extra logical debt before its region
+    // is connected to incoming residents. Its evaluated physical fields still
+    // carry every borrow. Keep that empty contribution distinct from unknown
+    // provenance; neither establishes a reference's validity or referent.
+    // An independently frame-owned generic carrier preserves only that weaker
+    // boundary proof. An unresolved value still contributes unknown evidence.
     if crate::core::reference_path_is_logical(path)
         && (matches!(value, Value::None | Value::FrameIndependent)
             || *field == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT) {
-        return Some(Value::None);
+        return Some(match value {
+            Value::Aggregate(_) | Value::Variant(_) => Value::ReferenceFree,
+            Value::FrameIndependent => Value::FrameIndependent,
+            _ => Value::None,
+        });
     }
     if let Value::Projected { fallback, fields } = value {
         if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
@@ -2188,6 +2235,96 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn logical_region_cycles_retain_grounded_evidence_and_reject_missing_contents() {
+        use super::*;
+        let region = |index| crate::placeflow::regions::Region { site: "cycle".into(), path: vec![index] };
+        let first = region(0);
+        let second = region(1);
+        let missing = region(2);
+        let reference = |region: &crate::placeflow::regions::Region| Value::Region([region.clone()].into());
+        let mut values = ValueEnvironment::default();
+        values.regions.connect(&[first.clone(), second.clone()].into());
+        values.regions.insert(first.clone(), reference(&second), merge_region_values);
+        values.regions.insert(second.clone(), reference(&first), merge_region_values);
+        assert_eq!(Analyzer::resolved_value_in(&reference(&first), &values), Value::None,
+            "a cycle without grounded contents cannot prove absence or independence");
+        values.regions.insert(first.clone(), Value::ExternalBorrowed, merge_region_values);
+        assert_eq!(Analyzer::resolved_value_in(&reference(&second), &values), Value::ExternalBorrowed);
+
+        let mut incomplete = values.clone();
+        incomplete.regions.connect(&[first.clone(), missing].into());
+        let incomplete = Analyzer::resolved_value_in(&reference(&first), &incomplete);
+        assert!(!frame_independent_value(&incomplete));
+        assert!(!invocations::reference_is_known(&incomplete));
+
+        let local = Value::Borrowed { root: "later".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        values.regions.insert(second, local, merge_region_values);
+        let resolved = Analyzer::resolved_value_in(&reference(&first), &values);
+        assert!(!frame_independent_value(&resolved));
+        assert_eq!(borrowed_roots(&resolved), BTreeSet::from(["later".into()]));
+    }
+
+    #[test]
+    fn logical_constructor_debt_is_empty_without_erasing_physical_or_later_loans() {
+        use super::*;
+        let path = [crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT, 0];
+        let local = Value::Borrowed { root: "local".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let constructed = Value::Variant(vec![local.clone()]);
+        let empty = value_at_path(&constructed, &path).unwrap();
+        assert_eq!(empty, Value::ReferenceFree);
+        assert!(!invocations::reference_is_known(&empty));
+        assert!(!frame_independent_value(&constructed));
+        assert_eq!(borrowed_roots(&constructed), BTreeSet::from(["local".into()]));
+        assert_eq!(value_at_path(&Value::None, &path), Some(Value::None));
+        assert_eq!(value_at_path(&Value::FrameIndependent, &path), Some(Value::FrameIndependent));
+
+        let region = crate::placeflow::regions::Region { site: "constructor".into(), path: path.to_vec() };
+        let mut values = ValueEnvironment::default();
+        values.regions.insert(region.clone(), empty, merge_region_values);
+        let debt = Value::Region([region.clone()].into());
+        assert!(frame_independent_value(&Analyzer::resolved_value_in(&debt, &values)));
+        values.regions.insert(region, local, merge_region_values);
+        let debt = Analyzer::resolved_value_in(&debt, &values);
+        assert!(!frame_independent_value(&debt));
+        assert_eq!(borrowed_roots(&debt), BTreeSet::from(["local".into()]));
+    }
+
+    #[test]
+    fn projected_incoming_carriers_keep_their_fallback_and_logical_replacements() {
+        use super::*;
+        let logical = crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT;
+        let local = Value::Borrowed { root: "local".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let mut value = Value::ExternalBorrowed;
+        assert!(replace_resident_path(&mut value, &[2, 3, logical, 0], Value::ExternalBorrowed));
+        assert!(frame_independent_value(&value));
+        assert_eq!(value_at_path(&value, &[2, 0]), Some(Value::ExternalBorrowed));
+        assert_eq!(value_at_path(&value, &[4]), Some(Value::ExternalBorrowed));
+        assert!(replace_resident_path(&mut value, &[2, 3, logical, 0], local));
+        assert!(!frame_independent_value(&value));
+        assert_eq!(borrowed_roots(&value), BTreeSet::from(["local".into()]));
+        assert_eq!(value_at_path(&value, &[2, 0]), Some(Value::ExternalBorrowed));
+        assert!(replace_resident_path(&mut value, &[2, 3, logical, 0], Value::None));
+        assert!(!frame_independent_value(&value), "unknown replacement cannot retain the earlier proof");
+    }
+
+    #[test]
+    fn rigid_generic_independence_does_not_authenticate_reference_contents() {
+        use super::*;
+        let signatures = crate::ElaboratedInterface::default();
+        let generic = type_proven_value(&signatures, &Type::Generic(0)).unwrap();
+        assert_eq!(generic, Value::FrameIndependent);
+        assert!(frame_independent_value(&generic));
+        assert!(!invocations::reference_is_empty(&generic));
+        assert!(!invocations::reference_is_known(&generic));
+        assert!(reference_targets(&generic).is_none());
+        assert!(type_proven_value(&signatures, &Type::Infer(crate::types::InferVar(0))).is_none());
+        let reference = Type::Reference { mutability: crate::Mutability::Shared,
+            lifetime: crate::Lifetime::Generic(0), referent: Box::new(Type::Generic(1)) };
+        assert!(type_proven_value(&signatures, &reference).is_none());
+        assert!(!frame_independent_value(&join(vec![generic, Value::None])));
+    }
+
     #[test]
     fn reborrow_projection_retains_logical_debt_and_future_region_contents() {
         use super::*;

@@ -13,8 +13,12 @@ fn compile_at(
     source: &str,
     optimization: &str,
 ) -> Result<grandiose_stage0::CompilationOutcome, grandiose_stage0::ServiceError> {
+    StageZeroCompiler::new().compile(request_at(source, optimization))
+}
+
+fn request_at(source: &str, optimization: &str) -> CompilationRequest {
     let package = PackageKey("mandatory-tail@0.1.0".into());
-    StageZeroCompiler::new().compile(CompilationRequest {
+    CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"mandatory-tail")),
         mode: CompilationMode::Build,
         root_package: package.clone(),
@@ -30,7 +34,145 @@ fn compile_at(
             .collect(),
         capability_manifest: vec![],
         runtime_manifest: None,
-    })
+    }
+}
+
+fn run_native(source: &str, optimization: u8) -> i64 {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let ir = StageZeroCompiler::new().compile_llvm(request_at(source, &optimization.to_string()), LlvmTarget::host().unwrap())
+        .unwrap_or_else(|error| panic!("native O{optimization}: {error:#?}"));
+    // SAFETY: execute only the locally checked source in this test.
+    let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+    unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0
+}
+
+#[test]
+fn mandatory_tail_transfers_generic_callback_results_from_incoming_storage() {
+    let source = r#"
+        fn fold<'a,T,A,F>(item: &'a T, state: A, step: &mut F, remaining: i64) -> A
+        where for<'call> &'call mut F: Fn<(A,&'a T),Output=A,Effects={}> {
+            handle remaining {
+                0 => state,
+                _ => { let next = step(state, item); tail fold(item, next, step, remaining - 1) },
+            }
+        }
+        pub fn main() -> i64 {
+            let item = 1;
+            let mut step = (state: i64, item: &i64) -> i64 { state + *item };
+            fold(&item, 40, &mut step, 2)
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let artifact = compile_at(source, optimization)
+            .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn mandatory_tail_transfers_constructed_optional_incoming_references() {
+    let source = r#"
+        fn walk<'a,T>(item: &'a T, first: Option<&'a T>, remaining: i64) -> &'a T {
+            handle remaining {
+                0 => item,
+                _ => handle first {
+                    Result::Ok(value) => value,
+                    Result::Err(_) => tail walk(item, Some(item), remaining - 1),
+                },
+            }
+        }
+        pub fn main() -> i64 { let item = 42; *walk(&item, None, 2) }
+    "#;
+    for optimization in ["0", "2"] {
+        let artifact = compile_at(source, optimization)
+            .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        assert_eq!(run_native(source, optimization.parse().unwrap()), 42);
+    }
+}
+
+#[test]
+fn mandatory_tail_retains_nested_incoming_carriers_when_seeding_logical_regions() {
+    let source = r#"
+        use std::PhantomData;
+        struct Inner<T> { value: T }
+        struct Outer<T> { value: Inner<T>, marker: PhantomData<T> }
+        fn walk<'a,T>(value: Outer<&'a T>, remaining: i64) -> Outer<&'a T> {
+            handle remaining { 0 => value, _ => tail walk(value, remaining - 1) }
+        }
+        pub fn main() -> i64 {
+            let item = 42;
+            let result = walk(Outer { value: Inner { value: &item }, marker: PhantomData {} }, 2);
+            *result.value.value
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let artifact = compile_at(source, optimization)
+            .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        assert_eq!(run_native(source, optimization.parse().unwrap()), 42);
+    }
+}
+
+#[test]
+fn mandatory_tail_keeps_branch_joined_incoming_logical_residents() {
+    let source = r#"
+        use std::*;
+        fn finish<'a,T>(yes: Vec<&'a T>, no: Vec<&'a T>) -> (Vec<&'a T>,Vec<&'a T>) { (yes,no) }
+        fn partition<'a,T>(item: &'a T, yes: Vec<&'a T>, no: Vec<&'a T>, flag: Bool)
+            -> (Vec<&'a T>,Vec<&'a T>) {
+            let mut yes = yes;
+            let mut no = no;
+            handle flag { true => Vec::push(&mut yes, item), false => Vec::push(&mut no, item) };
+            tail finish(yes,no)
+        }
+        pub fn main() -> i64 {
+            let item = 42;
+            let (yes,no) = partition(&item, Vec::new(), Vec::new(), false);
+            *(*Vec::get_unchecked(&no,0))
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let artifact = compile_at(source, optimization)
+            .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn source_tail_proofs_do_not_treat_local_generic_or_logical_loans_as_incoming() {
+    for source in [
+        "fn keep<T>(value:T) -> T { value } fn finish(value:&i64) -> i64 { *value } pub fn main() -> i64 { let local=42; let result=keep(&local); tail finish(result) }",
+        "fn finish(value:Option<&i64>) -> i64 { handle value { Result::Ok(value) => *value, Result::Err(_) => 0 } } pub fn main() -> i64 { let local=42; tail finish(Some(&local)) }",
+        "struct Inner<T> { value:T } struct Outer<T> { value:Inner<T> } fn finish(value:Outer<&i64>) -> i64 { *value.value.value } pub fn main() -> i64 { let local=42; tail finish(Outer { value:Inner { value:&local } }) }",
+        "fn finish(value:&i64) -> i64 { *value } fn make<'a>(value:&'a i64) -> () -> &'a i64 { move(value) { value } } pub fn main() -> i64 { let local=42; let callback=make(&local); tail finish(callback()) }",
+    ] {
+        for optimization in ["0", "2"] {
+            let error = compile_at(source, optimization).expect_err("local backing must survive neither generic forwarding nor a logical wrapper");
+            assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G4403" | "G5017" | "G5013")),
+                "{source}\n{error:#?}");
+        }
+    }
+}
+
+#[test]
+fn source_tail_checks_accept_rigid_callback_results_before_runtime_materialization() {
+    let source = r#"
+        fn relay<T,F>(value:T, body:&F) -> T where for<'a> &'a F:Fn<(T,),Output=T,Effects={}> {
+            let value=body(value); tail finish(value)
+        }
+        fn finish<T>(value:T) -> T { value }
+        pub fn main() -> i64 { let body=(value:i64)->i64 { value+1 }; relay(41,&body) }
+    "#;
+    let mut request = request_at(source, "0");
+    request.mode = CompilationMode::Check;
+    let outcome = StageZeroCompiler::new().compile(request).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    assert!(outcome.artifact.is_none());
 }
 
 #[test]

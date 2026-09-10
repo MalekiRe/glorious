@@ -36,6 +36,11 @@ impl<T: Clone> RegionGraph<T> {
         self.reachable(roots).iter().filter_map(|region| self.values.get(region).cloned()).collect()
     }
 
+    /// Query an already selected node without traversing its edges again.
+    /// Absence remains explicit for consumers deriving a complete boundary
+    /// proof; the positive may-loan `contents` projection above may omit it.
+    pub fn get(&self, region: &Region) -> Option<&T> { self.values.get(region) }
+
     pub fn insert(&mut self, region: Region, value: T, merge: impl FnOnce(&mut T, T)) {
         match self.values.entry(region) {
             std::collections::btree_map::Entry::Vacant(entry) => { entry.insert(value); }

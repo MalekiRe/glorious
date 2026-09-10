@@ -5,6 +5,64 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 128: logical dependency evidence at source escape boundaries
+
+The unchanged full-library root now has **11 diagnostics**, all G5024 minimum-use
+obligations; its previous mandatory-tail provenance failures are gone
+(`target/tail-library-root-v4.log`). This remains a failing library gate, not
+library acceptance or self-hosted readiness.
+
+The source value producer now retains three distinctions that those failures
+exposed: a constructor's empty additional logical debt versus unknown contents;
+the known untouched fields of an opaque incoming carrier versus fabricated
+sparse holes; and a cyclic dependency backedge versus an unknown alternative.
+Region resolution keeps grounded contents and later writes, rejects ungrounded
+cycles and missing nodes, and uses the existing graph rather than a new analysis.
+Checked rigid generic expression results retain frame independence, separately
+from reference validity, absence and referent identity. Abstract callee payloads
+do not acquire that caller-body proof from an unbound generic index.
+
+Verification:
+
+- Optional reference construction and nested incoming carriers pass fresh and
+  decoded VM plus generated native O0/O2 (`target/tail-library-optional-native-v1.log`,
+  `target/tail-library-nested-native-v1.log`). Both have failing pre-fix evidence
+  (`target/tail-library-boundary-baseline-v1.log`,
+  `target/tail-library-nested-baseline-v1.log`).
+- All 20 escape-domain unit tests pass, including grounded/ungrounded cycles,
+  missing contents, later local debt, replacement and reference-proof separation
+  (`target/tail-library-escape-units-v4.log`).
+- Both source-tail groups pass: rigid callback result admission in Check mode
+  and rejection of local backing through generic, optional, nested and captured
+  result paths (`target/tail-library-source-positive-negative-v2.log`).
+- The existing unsafe callback mutation rejection group passes
+  (`target/tail-library-raw-negative-v1.log`); all 22 revision/cache tests pass
+  (`target/tail-library-revision-v1.log`).
+- Full Core integration remains 276 passing and the same 9 known failing tests
+  (`target/tail-library-core-integration-v1.log`).
+- Final mandatory-tail integration is 19 passing and 4 failing tests: the two
+  new positive execution obligations and two existing failures detailed below
+  (`target/tail-library-tail-integration-final-v1.log`).
+
+Two new positive execution regressions remain open, with their original sources
+and success assertions intact. Generic callback-result tail forwarding passes
+source analysis but reaches G7042, missing executable tail-carrier preservation
+after an indirect invocation (`target/tail-library-callback-v2.log`). Branch-joined
+vectors pass their tail-provenance checks but the final nested getter reaches
+G5023 unresolved referent storage (`target/tail-library-branch-v1.log`), alongside
+the earlier Box getter regression. The older tail ABI failure remains open, and
+the old local-borrow diagnostic assertion still expects G4403 instead of the
+earlier G5017; restoring the pre-change escape implementation reproduces that
+assertion failure (`target/tail-library-existing-negative-baseline-v1.log`). No
+existing source or assertion was changed to hide these failures.
+
+The 11 library errors concern cancellation and minimum-use contracts in array,
+iterator, iterator callbacks, traversal, parse and io. No affine bounds or
+cleanup exemptions were added. Full guarded resource contracts, native handlers,
+compiler/library conformance and self-hosting remain unfinished. Cache generation
+is 128; interface 22, native ABI 13, bytecode 72, verifier 38 and VM schema 116 are
+unchanged.
+
 ## Cache 127: statement results and generated borrowed-capture storage
 
 Trailing semicolons now preserve statement discard through an explicit unit
