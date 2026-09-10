@@ -605,10 +605,54 @@ a moved callable receiver or incomplete source Copy cannot read uninitialized
 storage. Capture homes and the trampoline's bounded activation/sidecar storage
 share the existing memory and instruction budgets.
 
-This supplies ordinary captured-callable execution in an all-native closed
-graph. It does not yet supply mixed-engine capture loans: generated host wrappers
-and VM callback entry still need explicit capture restoration and initialization
-contracts. Those graphs remain rejected, including the preserved mixed captured-
-callable regression. Public external callback/result authority is unchanged.
+Generated VM/native bindings now retain an explicit slot contract from those same
+published layouts. The implicit capture prefix is lent storage; explicit inputs
+are transferred arguments. Public native registration cannot install this private
+contract. Generated callable parameters/results use authenticated resident slots,
+not the external callback trampoline ABI. The interpreter retires transferred
+inputs at the binding boundary and returns captured slots to their environment.
+VM frame planning obtains these resident demands from the linked private binding.
+It must not allocate callable/capture homes merely because an external public
+callback has a Callable type; scalar-only public callbacks retain their existing
+zero-native-byte contract. Generated machine entry requires its bound allocation
+and resident runtime before executing even a scalar body.
+
+VM re-entry borrows the actual capture homes from the existing execution-domain
+owner registry. It must not introduce a second owned external view: retiring that
+view would revoke callable leases still owned by the enclosing environment. Both
+engines write initialization changes back through the checked input sidecars.
+Zero-byte inputs keep their logical identity through the capture position and
+sidecar, not an invented unique address. Missing nonzero owners reject.
+
+The generated adapter binds the original verified source invocation contracts,
+environment producers and capture-access proofs as well as tail summaries.
+Adapter instructions still receive ordinary graph/ABI validation; their host-call
+transport is not treated as the source body's capture consumption. This private
+semantic witness is neither exposed nor serialized as portable verified bytecode.
+Callback failures retain their original runtime error through native dispatch.
+Public external callback/result authority is unchanged.
+
+This supplies tested ordinary captured-callable execution in all-native and mixed
+closed graphs. General borrowed-referent initialization still needs an explicit
+generated storage contract; a reference handle's flags are not its referent's.
+The positive factory-produced callable returning a captured reference also remains
+rejected at source result-provenance freezing, before either runtime is selected.
 Native owned handlers, borrowed/cross-frame resumption transfer, full helper-family
 fusion and mandatory-tail activation fusion remain separate open obligations.
+
+## Pattern inspection and resident initialization
+
+The executable pattern product declares its read requirement. A wildcard reads
+no payload. Tuple/nominal shells require their root; literal and fixed-array
+inspection require a complete value. Explicit nominal fields additionally require
+their complete declared value, even when their nested pattern is a wildcard.
+The materialized and resident VM matchers consume those same rules. Runtime value
+validation now requires complete resident initialization, while storage-layout
+validation preserves holes without turning them into readable values.
+
+Generated direct and captured resident patterns use the frame's published logical
+paths, including ancestor initialization. Control flow checks the required flags
+before any payload load. Masking a result after an uninitialized LLVM load would
+not be safe. Enum tag-only cleanup continues to inspect partially consumed shells;
+it does not demand unselected payloads. Borrowed pattern auto-dereference retains
+its existing ABI and is not evidence of complete referent-sidecar support.

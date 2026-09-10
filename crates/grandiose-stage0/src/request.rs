@@ -297,7 +297,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // identities through shared invocation results and value-based control fusion.
 // Cache 110 binds generated callable residents to the checked native frame
 // layouts and the existing execution-domain capture environment protocol.
-pub const STAGE0_CACHE_GENERATION: u32 = 110;
+// Cache 111 shares pattern inspection requirements and restores capture loans
+// through the generated VM/native invocation contract and resident homes.
+pub const STAGE0_CACHE_GENERATION: u32 = 111;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

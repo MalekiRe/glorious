@@ -35,6 +35,59 @@ fn compile(source: &str) -> LlvmIrProgram {
 }
 
 #[test]
+fn mixed_callable_capture_loans_preserve_storage_and_partial_cleanup() {
+    for source in [
+        "pub fn main() -> i64 { let empty = (); let task = move (empty) { let observed = empty; 42 }; task() }",
+        "pub fn main() -> i64 { let mut seed = 20; let mut first = move (seed) { seed = seed + 1; seed }; let mut second = first; (&mut first)() + (&mut second)() }",
+        "pub fn main() -> i64 { let mut seed = 19; let mut task = move (seed) { seed = seed + 1; seed }; let first = (&mut task)(); let second = (&mut task)(); first + second + 1 }",
+        "fn keep<T>(value:T) -> T { value } fn make(value:i64) -> () -> i64 { move (value) { value } } pub fn main() -> i64 { let (task,) = keep((make(42),)); task() }",
+        "fn make<'a>(value:&'a i64) -> () -> i64 { let inner = move (value) { *value }; move (inner) { inner() } } pub fn main() -> i64 { let value = 42; make(&value)() }",
+        "struct Probe<'a> { counter:&'a mut i64 } impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.counter = *self.counter + 1; } } pub fn main() -> i64 { let mut left = 20; let mut right = 20; { let pair = (Probe { counter:&mut left }, Probe { counter:&mut right }); let task = move (pair) { let first = pair.0; () }; task() }; left + right }",
+    ] {
+        check_mixed_capture_source(source);
+    }
+}
+
+#[test]
+fn mixed_returned_capture_references_preserve_their_backing_loan() {
+    check_mixed_capture_source("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let value = 42; let task = make(&value); *task() }");
+}
+
+fn check_mixed_capture_source(source: &str) {
+    let ir = compile(source);
+    assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
+    assert_eq!(grandiose_stage0::decode_and_verify_program(&ir.vm_program().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    for partition in 0..3 {
+        let selected = ir.function_keys().iter().copied().filter(|key| {
+            let captured = ir.function(*key).unwrap().captures != 0;
+            match partition { 0 => *key == ir.entry_key(), 1 => captured, _ => !captured }
+        }).collect::<Vec<_>>();
+        assert!(!selected.is_empty() && selected.len() < ir.function_keys().len());
+        let mixed = ir.with_vm_functions(selected).unwrap_or_else(|error| panic!("partition {partition}: {source}: {error:#?}"));
+        for optimization in [0, 2] {
+            let native = unsafe { mixed.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap_or_else(|error|
+                panic!("partition {partition}, O{optimization}: {source}: {error:#?}")), 42);
+        }
+    }
+}
+
+#[test]
+fn mixed_capture_faults_preserve_the_original_runtime_error() {
+    let ir = compile("pub fn main() -> i64 { let value = 42; let task = move (value) { value / 0 }; task() }");
+    for vm_captures in [false, true] {
+        let selected = ir.function_keys().iter().copied().filter(|key|
+            (ir.function(*key).unwrap().captures != 0) == vm_captures).collect::<Vec<_>>();
+        let mixed = ir.with_vm_functions(selected).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe { mixed.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            let failure = native.run_i64_with_limits(Default::default());
+            assert!(matches!(failure, Err(LlvmError::Runtime(VmArtifactError::DivisionByZero))), "{failure:?}");
+        }
+    }
+}
+
+#[test]
 fn ordinary_native_callable_environments_execute_and_return_through_products() {
     for source in [
         "pub fn main() -> i64 { let value = 42; let reader = move (value) { value }; reader() }",

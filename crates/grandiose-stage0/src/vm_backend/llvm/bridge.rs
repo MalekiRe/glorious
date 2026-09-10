@@ -14,6 +14,18 @@ use std::mem::MaybeUninit;
 const GENERATED_CAPABILITY: &str = "grandiose.compiler.generated.llvm";
 const GENERATED_REENTRY_LIMIT: u32 = 8;
 
+/// Installed only by the exact generated-code linker. The implicit input
+/// prefix is lent storage; explicit inputs are ordinary ownership transfers.
+pub(super) struct SlotContract {
+    pub(super) captures: usize,
+    pub(super) parameters: Vec<Arc<NativeLayout>>,
+    pub(super) result: Arc<NativeLayout>,
+}
+
+pub(super) fn resident(ty: &VmType) -> bool {
+    owned_resident(ty) || matches!(ty, VmType::Callable { .. })
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 struct ScalarSlot([MaybeUninit<u8>; 16]);
@@ -79,10 +91,9 @@ fn resident_types(
                     _ => None,
                 }));
             }
-            VmType::Callable { .. } => {
-                return Err(super::error(
-                    "generated native callable slot ABI is not implemented",
-                ));
+            VmType::Callable { parameters, result, .. } => {
+                pending.extend(parameters);
+                pending.push(*result);
             }
             _ => {}
         }
@@ -202,7 +213,7 @@ impl GeneratedPlans {
             callbacks.insert(
                 *definition,
                 Arc::new(CallbackPlan {
-                    parameters,
+                    parameters: parameters[function.captures as usize..].to_vec(),
                     result: frame.result.clone(),
                 }),
             );
@@ -274,7 +285,11 @@ unsafe fn run_local_with_float_environment(module: LlvmNativeModule, limits: VmE
             .bindings
             .get_mut(&(contract.capability.clone(), contract.symbol.clone()))
             .expect("just installed compiler-owned binding")
-            .initialization_sidecars = true;
+            .generated = Some(Arc::new(SlotContract {
+                captures: module.plan().program.program.functions[&module.plan().functions[index]].captures as usize,
+                parameters: plans.parameters[&module.plan().functions[index]].clone(),
+                result: module.plan().frame_layouts[index].result.clone(),
+            }));
     }
     let linked = imports.link_contracts(contracts)?;
     let mut native_memory = NativeMemory::default();
@@ -305,13 +320,14 @@ fn invoke_native(
     index: usize,
 ) -> Result<(), VmArtifactError> {
     let count = call.binding.parameters.len();
+    let captures = call.binding.generated.as_ref().expect("compiler-owned binding").captures;
     let initialization = &plans.initialization[&module.plan().functions[index]];
     let flag_bytes = call
         .binding
         .parameters
         .iter()
         .enumerate()
-        .filter(|(_, plan)| matches!(plan, ArgumentPlan::Owned(_)))
+        .filter(|(_, plan)| matches!(plan, ArgumentPlan::Owned(_) | ArgumentPlan::Capture(_)))
         .map(|(index, _)| initialization[index].len())
         .sum::<usize>();
     let transport_bytes = count
@@ -357,7 +373,7 @@ fn invoke_native(
     let mut arguments = Vec::with_capacity(2 * count);
     for (index, slot) in values.iter_mut().enumerate() {
         let pointer = match &call.binding.parameters[index] {
-            ArgumentPlan::Owned(layout) => {
+            ArgumentPlan::Owned(layout) | ArgumentPlan::Capture(layout) => {
                 let register = call.arguments[index];
                 let Some(VmValue::Resident(home)) = call.registers[register as usize].as_ref()
                 else {
@@ -365,7 +381,8 @@ fn invoke_native(
                         "generated owned argument has no resident home",
                     ));
                 };
-                if home.ty() != &layout.ty || !home.is_initialized(&[]) {
+                let capture = matches!(&call.binding.parameters[index], ArgumentPlan::Capture(_));
+                if home.ty() != &layout.ty || (!capture && !home.is_initialized(&[])) {
                     return Err(super::error(
                         "generated owned argument has invalid root initialization",
                     ));
@@ -376,8 +393,8 @@ fn invoke_native(
                     flags[index].push(u8::from(home.is_initialized(path)));
                 }
                 home.expose_address();
-                let pointer = home.project(&[])?.0;
-                call.registers[register as usize] = None;
+                let pointer = home.pointer();
+                if !capture { call.registers[register as usize] = None; }
                 pointer
             }
             ArgumentPlan::Value(_) => {
@@ -431,14 +448,24 @@ fn invoke_native(
     // slot plan, with owned arguments retaining their original backing address.
     let status = unsafe { module.invoke_native(index, &mut context, arguments.as_ptr(), result) };
     invocation.call.budget.instructions = context.instructions;
-    if let Some(error) = allocation.failure {
-        return Err(error);
+    // Generated capture parameters alias their incoming flags. Re-adopt that
+    // same storage before either successful return or propagation of a fault.
+    for index in 0..captures {
+        let register = invocation.call.arguments[index];
+        let Some(VmValue::Resident(home)) = invocation.call.registers[register as usize].as_ref() else {
+            return Err(super::error("generated capture loan lost its resident"));
+        };
+        let holes = unsafe { read_initialization(flags[index].as_ptr(), &initialization[index], invocation.call.budget, true)? };
+        unsafe { home.initialize_native_with_holes(invocation.call.budget, Some(&holes))?; }
     }
-    if let Some(error) = callables.failure.borrow_mut().take() {
+    if let Some(error) = allocation.failure {
         return Err(error);
     }
     if let Some(failure) = invocation.failure {
         return Err(failure);
+    }
+    if let Some(error) = callables.failure.borrow_mut().take() {
+        return Err(error);
     }
     context
         .result(status)
@@ -530,6 +557,7 @@ unsafe fn invoke_vm_checked(
         .ok_or_else(|| super::error("generated callback target is not in the VM partition"))?
         .clone();
     let paths = &invocation.plans.initialization[definition];
+    let captures = invocation.module.plan().program.program.functions[definition].captures as usize;
     invocation
         .call
         .budget
@@ -539,8 +567,19 @@ unsafe fn invoke_vm_checked(
     for (index, paths) in paths.iter().enumerate() {
         arguments.push(unsafe { slots.add(2 * index).read() });
         let flags = unsafe { slots.add(2 * index + 1).read() };
-        holes.push(unsafe { read_initialization(flags, paths, invocation.call.budget)? });
+        if index < captures && flags.is_null() {
+            return Err(super::error("generated capture loan lacks writable initialization state"));
+        }
+        holes.push(unsafe { read_initialization(flags, paths, invocation.call.budget, index < captures)? });
     }
+    let mut captured = Vec::with_capacity(captures);
+    for index in 0..captures {
+        let layout = invocation.plans.parameters[definition][index].clone();
+        let home = unsafe { super::super::native_storage::NativeHome::capture_loan(
+            layout, arguments[index].cast_mut(), invocation.call.budget, &holes[index])? };
+        captured.push(VmValue::Resident(home));
+    }
+    let captures_environment = RuntimeCaptureEnvironment::with_ownership(captured, vec![false; captures]);
     if invocation.call.budget.native_memory.callback_depth >= GENERATED_REENTRY_LIMIT {
         return Err(super::error("generated mixed-engine re-entry limit"));
     }
@@ -554,10 +593,10 @@ unsafe fn invoke_vm_checked(
     let mut callback = CallbackContext {
         call: invocation.call,
         callee: *definition,
-        captures: RuntimeCaptureEnvironment::new(vec![]),
+        captures: captures_environment.clone(),
         plan: plan.clone(),
         additional_depth: context.depth,
-        argument_holes: Some(&holes),
+        argument_holes: Some(&holes[captures..]),
     };
     let mut boundary = GeneratedTailBoundary {
         module: invocation.module,
@@ -568,13 +607,27 @@ unsafe fn invoke_vm_checked(
     };
     let outcome = unsafe {
         callback.invoke_with_tail_boundary(
-            arguments.as_ptr(),
+            arguments[captures..].as_ptr(),
             plan.parameters.len(),
             result,
             Some(&mut boundary),
         )
     };
     invocation.call.budget.limits.max_native_bytes = native_limit;
+    // The VM releases its ordinary capture loan into these same external
+    // homes. Publish its actual post-state to the generated caller's sidecars.
+    for (index, value) in captures_environment.values.borrow().iter().enumerate() {
+        let flags = unsafe { slots.add(2 * index + 1).read() }.cast_mut();
+        if flags.is_null() { return Err(super::error("generated capture loan lacks writable initialization state")); }
+        for (offset, path) in paths[index].iter().enumerate() {
+            let initialized = match value {
+                VmValue::Resident(home) => home.is_initialized(path),
+                VmValue::Uninitialized(_) => false,
+                _ => return Err(super::error("generated capture loan lost its external storage")),
+            };
+            unsafe { flags.add(offset).write(u8::from(initialized)); }
+        }
+    }
     context.instructions = invocation.call.budget.instructions;
     context.byte_limit = native_limit
         .saturating_sub(invocation.call.budget.native_memory.live_native_bytes() as u64)
@@ -679,6 +732,7 @@ unsafe fn read_initialization(
     flags: *const u8,
     paths: &[Vec<u32>],
     budget: &mut ExecutionBudget,
+    allow_absent_root: bool,
 ) -> Result<BTreeSet<Vec<u32>>, VmArtifactError> {
     if flags.is_null() {
         return Ok(BTreeSet::new());
@@ -689,7 +743,7 @@ unsafe fn read_initialization(
     for (path, flag) in paths.iter().zip(flags) {
         budget.tick()?;
         match *flag {
-            0 if !path.is_empty() => {
+            0 if !path.is_empty() || allow_absent_root => {
                 holes.insert(path.clone());
             }
             1 if !(0..path.len()).any(|length| holes.contains(&path[..length])) => {}
@@ -794,23 +848,26 @@ mod tests {
         let paths = vec![vec![], vec![0], vec![0, 0], vec![1]];
         for flags in [[0, 0, 0, 0], [1, 2, 1, 1], [1, 0, 1, 1]] {
             assert!(
-                unsafe { read_initialization(flags.as_ptr(), &paths, &mut budget()) }.is_err(),
+                unsafe { read_initialization(flags.as_ptr(), &paths, &mut budget(), false) }.is_err(),
                 "{flags:?}"
             );
         }
         assert_eq!(
-            unsafe { read_initialization([1, 0, 0, 1].as_ptr(), &paths, &mut budget()) }.unwrap(),
+            unsafe { read_initialization([1, 0, 0, 1].as_ptr(), &paths, &mut budget(), false) }.unwrap(),
             BTreeSet::from([vec![0], vec![0, 0]])
         );
+        assert_eq!(unsafe { read_initialization([0, 0, 0, 0].as_ptr(), &paths, &mut budget(), true) }.unwrap(),
+            paths.iter().cloned().collect());
+        assert!(unsafe { read_initialization([0, 1, 0, 0].as_ptr(), &paths, &mut budget(), true) }.is_err());
         assert!(
-            unsafe { read_initialization(std::ptr::null(), &paths, &mut budget()) }
+            unsafe { read_initialization(std::ptr::null(), &paths, &mut budget(), false) }
                 .unwrap()
                 .is_empty()
         );
         let mut limited = budget();
         limited.limits.max_instructions = 0;
         assert!(matches!(
-            unsafe { read_initialization([1, 1, 1, 1].as_ptr(), &paths, &mut limited) },
+            unsafe { read_initialization([1, 1, 1, 1].as_ptr(), &paths, &mut limited, false) },
             Err(VmArtifactError::InstructionLimit { limit: 0 })
         ));
     }
@@ -831,8 +888,8 @@ mod tests {
         unsafe { imports.insert(contract.clone(), |_| Ok(())) }.unwrap();
         let linked = imports.link_contracts(vec![contract]).unwrap();
         assert!(
-            !linked.imports[GENERATED_CAPABILITY]["spoofed-generated-entry"]
-                .initialization_sidecars
+            linked.imports[GENERATED_CAPABILITY]["spoofed-generated-entry"]
+                .generated.is_none()
         );
     }
 }

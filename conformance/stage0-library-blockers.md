@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-09 from the current source and cache 110 verification below,
+Updated from the current source and cache 111 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,23 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 111 / native ABI 10 implements typed generated capture loans across VM/native
+entry. Both engines share actual capture homes and initialization state; public
+native callback permissions and zero-byte scalar budgets are unchanged. The old
+mixed captured-callable regression now passes. Pattern inspection also consults
+the authoritative initialization state before reading direct/captured payloads.
+
+The final native target has 32 passes and one newly preserved source failure:
+a factory-produced callable returning its captured reference lacks frozen result
+provenance (G5023), before runtime selection. The final unit target passes 352,
+and the public native bridge passes 29. Existing native owned handlers still fail;
+general borrowed-referent sidecars, source result provenance, full helper-family
+and mandatory-tail activation fusion, cross-frame resumptions and guarded storage
+remain open. Exact failed/intermediate and final gates are recorded in
+`implementation-progress.md`; no broad source-library sweep was repeated.
+
+The following cache 110 and earlier checkpoints are historical.
 
 Cache 110 / native ABI 9 integrates ordinary callable environments into generated
 execution. Native construction, invocation, copying and destruction share the

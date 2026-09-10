@@ -331,6 +331,12 @@ fn native_float_conversion_matrix_matches_vm_bits_and_checked_errors() {
             })
         }
         .unwrap();
+        let mut unbound = NativeContext::new(Default::default());
+        let mut untouched = Slot([0xa5; 16]);
+        let rejected = unsafe { native.invoke_native(0, &mut unbound, std::ptr::null(), untouched.0.as_mut_ptr()) };
+        assert!(matches!(unbound.result(rejected), Err(LlvmError::Runtime(VmArtifactError::NativeAbi { message }))
+            if message.contains("bound execution-domain")));
+        assert_eq!(untouched.0, [0xa5; 16]);
         for (rounding, denormals) in [0, 0x2000, 0x4000, 0x6000]
             .into_iter()
             .flat_map(|rounding| [0, 0x8040].map(|denormals| (rounding, denormals)))
@@ -342,6 +348,10 @@ fn native_float_conversion_matrix_matches_vm_bits_and_checked_errors() {
                     .position(|key| *key == function.definition)
                     .unwrap();
                 let mut context = NativeContext::new(Default::default());
+                let mut execution = budget();
+                let mut allocation = super::memory::AllocationContext::new(&mut execution.native_memory, execution.limits.max_native_bytes);
+                let callables = super::callables::CallableContext::new(&native, &mut execution);
+                unsafe { allocation.install(&mut context); callables.install(&mut context); }
                 let mut actual = Slot([0; 16]);
                 let status = {
                     #[cfg(target_arch = "x86_64")]

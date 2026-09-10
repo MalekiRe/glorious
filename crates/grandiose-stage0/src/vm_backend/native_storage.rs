@@ -618,14 +618,11 @@ pub(super) struct NativeFramePlan {
 }
 
 impl NativeFramePlan {
-    pub(super) fn new(function: &VmFunction, descriptors: &Arc<[VmNominalCopyDescriptor]>) -> Self {
-        Self::with_native_return(function, descriptors, false)
-    }
-
-    pub(super) fn with_native_return(
+    pub(super) fn with_native_bindings(
         function: &VmFunction,
         descriptors: &Arc<[VmNominalCopyDescriptor]>,
         native_return: bool,
+        imports: Option<&super::native_bridge::BoundNativeImports>,
     ) -> Self {
         let mut layouts = vec![None; function.registers.len()];
         fn owns_callable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor], active: &mut Vec<VmType>) -> bool {
@@ -677,7 +674,18 @@ impl NativeFramePlan {
                     layouts[*src as usize] = Some(Arc::new(layout));
                 }
             }
-            if let VmInstruction::HostCall { dst, arguments, .. } | VmInstruction::HostCallOwned { dst, arguments, .. } = instruction {
+            if let VmInstruction::HostCall { dst, arguments, capability, symbol, .. }
+                | VmInstruction::HostCallOwned { dst, arguments, capability, symbol, .. } = instruction {
+                if let Some(imports) = imports {
+                    for (index, local) in arguments.iter().enumerate().map(|(index, local)| (Some(index), *local))
+                        .chain(std::iter::once((None, *dst))) {
+                        if let Some(layout) = imports.generated_resident_slot(capability, symbol, index) {
+                            layouts[local as usize] = Some(layout);
+                            resident_demands.push(local);
+                            if index.is_none() { native_results.push(local); }
+                        }
+                    }
+                }
                 for &local in arguments.iter().chain(std::iter::once(dst)) {
                     if matches!(
                         function.registers[local as usize],
@@ -729,7 +737,7 @@ impl NativeFramePlan {
                 continue;
             }
             let ty = &function.registers[local as usize];
-            if !matches!(ty, VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. }) {
+            if !matches!(ty, VmType::Tuple(_) | VmType::FixedArray { .. } | VmType::Nominal { .. } | VmType::Callable { .. }) {
                 continue;
             }
             if let Ok(layout) = super::native_memory::native_layout(ty, descriptors, &mut vec![])
@@ -930,6 +938,25 @@ impl NativeHome {
 
     pub(super) fn is_external(&self) -> bool {
         self.external
+    }
+
+    /// Generated callable invocation lends the existing capture home. An
+    /// external *owned* view would retire its callable leases at callback exit
+    /// while the enclosing environment still owns those bytes.
+    pub(super) unsafe fn capture_loan(
+        layout: Arc<NativeLayout>, pointer: *mut u8, budget: &mut ExecutionBudget,
+        holes: &BTreeSet<Vec<u32>>,
+    ) -> Result<Arc<Self>, VmArtifactError> {
+        if layout.memory.size() == 0 {
+            // There are no bytes/address leases to alias. The checked input
+            // position and its sidecar retain the distinct logical ZST owner.
+            return unsafe { Self::external_argument_with_holes(layout, pointer, budget, Some(holes)) };
+        }
+        let home = budget.native_memory.homes.borrow().get(&pointer.addr()).and_then(Weak::upgrade)
+            .ok_or_else(|| error("generated capture input has no live resident owner"))?;
+        if home.ty() != &layout.ty { return Err(error("generated capture input has a different owner layout")); }
+        unsafe { home.initialize_native_with_holes(budget, Some(holes))?; }
+        Ok(home)
     }
 
     /// Adopt a value constructed directly in this uninitialized native slot.
@@ -1673,12 +1700,12 @@ impl NativeHome {
         pattern: &super::VmPattern,
         budget: &mut ExecutionBudget,
     ) -> Result<bool, VmArtifactError> {
-        use super::VmPattern;
-        if !self.is_initialized(path) {
-            return Ok(false);
-        }
-        if matches!(pattern, VmPattern::Any) {
-            return Ok(true);
+        use super::{PatternRead, VmPattern};
+        match pattern.read_requirement() {
+            PatternRead::None => return Ok(true),
+            PatternRead::Root if !self.is_initialized(path) => return Ok(false),
+            PatternRead::Value if !self.is_fully_initialized(path) => return Ok(false),
+            _ => {}
         }
         if matches!(pattern, VmPattern::Literal(_)) {
             return Ok(super::matches_pattern(&self.load(path, budget)?, pattern));
@@ -1756,6 +1783,7 @@ impl NativeHome {
             path.push(field.index);
             let (_, actual) = self.project(path)?;
             let matched = super::vm_type_matches(&actual.ty, &field.ty)
+                && self.is_fully_initialized(path)
                 && self.matches_pattern(path, &field.pattern, budget)?;
             path.pop();
             if !matched {
@@ -1781,6 +1809,69 @@ mod tests {
             },
             instructions: 0,
             allocated_elements: 0,
+        }
+    }
+
+    #[test]
+    fn generated_capture_loans_reuse_the_authoritative_owner_and_reject_unknown_slots() {
+        let mut budget = budget(1024);
+        let ty = VmType::Tuple(vec![VmType::I64, VmType::I64]);
+        let layout = Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
+        let home = NativeHome::new(layout.clone(), &mut budget).unwrap();
+        home.store(&[], &VmValue::Tuple(Arc::from([VmValue::I64(17), VmValue::I64(42)])), &mut budget).unwrap();
+        let holes = BTreeSet::from([vec![0]]);
+        let loan = unsafe { NativeHome::capture_loan(layout.clone(), home.pointer(), &mut budget, &holes) }.unwrap();
+        assert!(Arc::ptr_eq(&home, &loan));
+        assert!(!home.is_initialized(&[0]));
+        loan.store(&[1], &VmValue::I64(43), &mut budget).unwrap();
+        drop(loan);
+        assert_eq!(super::super::expect_i64(home.load(&[1], &mut budget).unwrap()).unwrap(), 43);
+        let mut unrelated = [17i64, 42];
+        assert!(unsafe { NativeHome::capture_loan(layout, unrelated.as_mut_ptr().cast(), &mut budget, &BTreeSet::new()) }.is_err());
+        let wrong = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        assert!(unsafe { NativeHome::capture_loan(wrong, home.pointer(), &mut budget, &BTreeSet::new()) }.is_err());
+    }
+
+    #[test]
+    fn resident_patterns_share_materialized_inspection_requirements() {
+        use super::super::{VmPattern as P, VmPatternField};
+        let nominal = crate::DefKey(crate::Digest::of_bytes(b"pattern-partial-record"));
+        let tuple = VmType::Tuple(vec![VmType::I64, VmType::I64]);
+        let descriptor = super::super::VmNominalCopyDescriptor {
+            definition: nominal, source_contract: crate::Digest::of_bytes(b"pattern-record-contract"),
+            is_enum: false, arguments: vec![], variants: vec![vec![tuple.clone()]],
+        };
+        let cases = [
+            (tuple.clone(), VmValue::Tuple(Arc::from([VmValue::I64(17), VmValue::I64(42)])), vec![0],
+                vec![(P::Tuple(vec![P::Any, P::Any]), true),
+                    (P::Tuple(vec![P::Literal("17".into()), P::Any]), false)]),
+            (VmType::FixedArray { element: Box::new(VmType::I64), length: 2 },
+                VmValue::Array { values: Arc::from([VmValue::I64(17), VmValue::I64(42)]) }, vec![0],
+                vec![(P::Array { element: VmType::I64, elements: vec![P::Literal("42".into())],
+                    rest: Some(crate::pattern::ArrayPatternRest { prefix: 0, omitted: 1 }) }, false)]),
+            (VmType::Nominal { definition: nominal, arguments: vec![] },
+                VmValue::Record { definition: nominal, signature: VmType::Nominal { definition: nominal, arguments: vec![] }, fields: Arc::from([
+                    VmValue::Tuple(Arc::from([VmValue::I64(17), VmValue::I64(42)]))]) }, vec![0,0],
+                vec![(P::Record { definition: nominal, field_count: 1, field_types: vec![tuple.clone()], fields: vec![] }, true),
+                    (P::Record { definition: nominal, field_count: 1, field_types: vec![tuple.clone()],
+                        fields: vec![VmPatternField { index: 0, ty: tuple, pattern: P::Any }] }, false)]),
+        ];
+        for (ty, value, hole, patterns) in cases {
+            let mut budget = budget(1024);
+            let layout = Arc::new(super::super::native_memory::native_layout(
+                &ty, &Arc::from([descriptor.clone()]), &mut vec![]).unwrap());
+            let home = NativeHome::new(layout, &mut budget).unwrap();
+            home.store(&[], &value, &mut budget).unwrap();
+            home.take(&hole, &mut budget).unwrap();
+            let materialized = home.load(&[], &mut budget).unwrap();
+            assert!(!super::super::value_matches_vm_type(&VmValue::Resident(home.clone()), &ty));
+            assert!(super::super::value_matches_vm_layout(&VmValue::Resident(home.clone()), &ty,
+                super::super::Initialization::Storage));
+            for (pattern, expected) in patterns {
+                assert_eq!(super::super::matches_pattern(&materialized, &pattern), expected, "materialized {pattern:?}");
+                assert_eq!(home.matches_pattern(&mut vec![], &pattern, &mut budget).unwrap(), expected, "resident {pattern:?}");
+            }
+            assert!(home.matches_pattern(&mut hole.clone(), &P::Any, &mut budget).unwrap());
         }
     }
 
@@ -2042,7 +2133,7 @@ mod tests {
         };
         let descriptors = Arc::from([]);
         assert_eq!(
-            NativeFramePlan::new(&function, &descriptors).read_projections[0],
+            NativeFramePlan::with_native_bindings(&function, &descriptors, false, None).read_projections[0],
             Some((2, 0))
         );
         // Delimited completion is an additional consumer even though it does
@@ -2051,7 +2142,7 @@ mod tests {
             .instructions
             .insert(2, VmInstruction::CompleteHandler { value: 1 });
         assert_eq!(
-            NativeFramePlan::new(&function, &descriptors).read_projections[0],
+            NativeFramePlan::with_native_bindings(&function, &descriptors, false, None).read_projections[0],
             None
         );
     }

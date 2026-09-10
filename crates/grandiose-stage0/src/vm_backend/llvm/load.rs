@@ -269,6 +269,17 @@ impl LlvmNativeModule {
         arguments: *const *const u8,
         result: *mut u8,
     ) -> u32 {
+        // Every generated body uses the resident scope protocol, including
+        // scalar-only leaves. Reject an unbound internal context before any
+        // machine instruction can call a missing runtime entry.
+        if index >= self.entries.len() || context.callable_context.is_null()
+            || context.callable.is_none() || context.residents.is_none()
+            || context.allocation_context.is_null() || context.allocate.is_none()
+            || (!self.plan.vm_functions.is_empty()
+                && (context.mixed_context.is_null() || context.invoke_vm.is_none())) {
+            context.fault = 17;
+            return 1;
+        }
         let Ok(environment) = crate::vm_backend::float_env::FloatEnvironment::enter() else {
             context.fault = 16;
             return 1;

@@ -81,14 +81,14 @@ impl NativeMemory {
     pub(super) fn storage_plan(&mut self, function: &VmFunction) -> Arc<super::native_storage::NativeFramePlan> {
         if let Some(plan) = self.storage_plans.get(&function.definition) { return plan.clone(); }
         let descriptors = self.layout_descriptors(function);
-        let plan = Arc::new(super::native_storage::NativeFramePlan::new(function, &descriptors));
+        let plan = Arc::new(super::native_storage::NativeFramePlan::with_native_bindings(function, &descriptors, false, self.imports.as_deref()));
         self.storage_plans.insert(function.definition, plan.clone()); plan
     }
 
     pub(super) fn native_return_plan(&mut self, function: &VmFunction) -> Arc<super::native_storage::NativeFramePlan> {
         if let Some(plan) = self.native_return_plans.get(&function.definition) { return plan.clone(); }
         let descriptors = self.layout_descriptors(function);
-        let plan = Arc::new(super::native_storage::NativeFramePlan::with_native_return(function, &descriptors, true));
+        let plan = Arc::new(super::native_storage::NativeFramePlan::with_native_bindings(function, &descriptors, true, self.imports.as_deref()));
         self.native_return_plans.insert(function.definition, plan.clone()); plan
     }
 

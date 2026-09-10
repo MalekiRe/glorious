@@ -428,7 +428,7 @@ struct Binding {
     contract: VmNativeImport,
     function: Arc<NativeFunction>,
     /// Private compiler-owned slot extension. Public registration cannot opt in.
-    initialization_sidecars: bool,
+    generated: Option<Arc<generated::SlotContract>>,
 }
 
 /// Explicit native authority. Registration does not grant execution to any
@@ -466,7 +466,7 @@ impl VmNativeImports {
             Binding {
                 contract,
                 function: Arc::new(function),
-                initialization_sidecars: false,
+                generated: None,
             },
         );
         Ok(())
@@ -495,12 +495,24 @@ impl VmNativeImports {
                 ));
             }
             let descriptors: Arc<[VmNominalCopyDescriptor]> = contract.nominals.clone().into();
-            let parameters = contract
+            let parameters = if let Some(slots) = &binding.generated {
+                if slots.parameters.iter().map(|layout| &layout.ty).ne(contract.parameters.iter())
+                    || slots.result.ty != contract.result || slots.captures > contract.parameters.len() {
+                    return Err(error("generated slot contract differs from its bound source ABI"));
+                }
+                slots.parameters.iter().enumerate().map(|(index, layout)| {
+                    if index < slots.captures { ArgumentPlan::Capture(layout.clone()) }
+                    else if generated::resident(&layout.ty) {
+                        ArgumentPlan::Owned(layout.clone())
+                    } else { ArgumentPlan::Value(layout.clone()) }
+                }).collect()
+            } else { contract
                 .parameters
                 .iter()
                 .map(|ty| argument_plan(ty, &descriptors))
-                .collect::<Result<Vec<_>, _>>()?;
-            let result = value_plan(&contract.result, &descriptors)?;
+                .collect::<Result<Vec<_>, _>>()? };
+            let result = if let Some(slots) = &binding.generated { slots.result.clone() }
+                else { value_plan(&contract.result, &descriptors)? };
             let destructors = contract
                 .residents
                 .iter()
@@ -530,7 +542,7 @@ impl VmNativeImports {
                     parameters,
                     result,
                     destructors,
-                    initialization_sidecars: binding.initialization_sidecars,
+                    generated: binding.generated.clone(),
                 }),
             );
         }
@@ -541,6 +553,7 @@ impl VmNativeImports {
 enum ArgumentPlan {
     Value(Arc<NativeLayout>),
     Owned(Arc<NativeLayout>),
+    Capture(Arc<NativeLayout>),
     Callback(Arc<CallbackPlan>),
 }
 struct CallbackPlan {
@@ -552,10 +565,26 @@ struct BoundImport {
     parameters: Vec<ArgumentPlan>,
     result: Arc<NativeLayout>,
     destructors: Vec<Option<(DefKey, Arc<CallbackPlan>)>>,
-    initialization_sidecars: bool,
+    generated: Option<Arc<generated::SlotContract>>,
 }
 pub(super) struct BoundNativeImports {
     imports: BTreeMap<String, BTreeMap<String, Arc<BoundImport>>>,
+}
+
+impl BoundNativeImports {
+    /// Published generated binding requirements, never inferred from a host
+    /// symbol or from a Callable type used by the public callback ABI.
+    pub(super) fn generated_resident_slot(&self, capability: &str, symbol: &str, parameter: Option<usize>) -> Option<Arc<NativeLayout>> {
+        let binding = self.imports.get(capability)?.get(symbol)?;
+        binding.generated.as_ref()?;
+        match parameter {
+            Some(index) => match binding.parameters.get(index)? {
+                ArgumentPlan::Owned(layout) | ArgumentPlan::Capture(layout) => Some(layout.clone()),
+                _ => None,
+            },
+            None => generated::resident(&binding.result.ty).then(|| binding.result.clone()),
+        }
+    }
 }
 
 fn value_plan(
@@ -957,7 +986,8 @@ impl CallbackContext<'_, '_> {
         arguments.extend(self.captures.lend_to_invocation());
         for (index, layout) in self.plan.parameters.iter().enumerate() {
             let slot = unsafe { slots.add(index).read() };
-            arguments.push(if owned_resident(&layout.ty) {
+            arguments.push(if owned_resident(&layout.ty)
+                || (self.argument_holes.is_some() && generated::resident(&layout.ty)) {
                 VmValue::Resident(unsafe {
                     if let Some(holes) = self.argument_holes {
                         super::native_storage::NativeHome::external_argument_with_holes(
@@ -980,7 +1010,8 @@ impl CallbackContext<'_, '_> {
             self.call.budget,
             &mut None,
             None,
-            owned_resident(&self.plan.result.ty),
+            owned_resident(&self.plan.result.ty)
+                || (self.argument_holes.is_some() && generated::resident(&self.plan.result.ty)),
             (self.captures.len() != 0).then(|| self.captures.clone()),
             None,
             tail_boundary,
@@ -990,7 +1021,9 @@ impl CallbackContext<'_, '_> {
             super::RuntimeExecutionOutcome::Returned(value) => value,
             super::RuntimeExecutionOutcome::TailTransferred => return Ok(true),
         };
-        if owned_resident(&self.plan.result.ty) && !matches!(&value, VmValue::Resident(_)) {
+        if (owned_resident(&self.plan.result.ty)
+            || (self.argument_holes.is_some() && generated::resident(&self.plan.result.ty)))
+            && !matches!(&value, VmValue::Resident(_)) {
             return Err(error(
                 "owned callback result lacks its native producer storage",
             ));
@@ -1036,6 +1069,7 @@ pub(super) fn execute(
     destination: u32,
     budget: &mut ExecutionBudget,
     depth: u32,
+    consumes_arguments: bool,
 ) -> Result<VmValue, VmArtifactError> {
     let binding = imports
         .imports
@@ -1055,21 +1089,22 @@ pub(super) fn execute(
             .as_ref()
             .ok_or_else(|| error("native argument is not initialized"))?;
         match (plan, value) {
-            (ArgumentPlan::Owned(layout), VmValue::Resident(home)) => {
-                let initialized = if binding.initialization_sidecars { home.is_initialized(&[]) }
+            (ArgumentPlan::Owned(layout) | ArgumentPlan::Capture(layout), VmValue::Resident(home)) => {
+                let initialized = if matches!(plan, ArgumentPlan::Capture(_)) { true }
+                    else if binding.generated.is_some() { home.is_initialized(&[]) }
                     else { home.is_fully_initialized(&[]) };
                 if home.ty() != &layout.ty || !initialized {
                     return Err(error(
                         "owned native argument has an invalid resident layout or initialization",
                     ));
                 }
-                if !owned_arguments.insert(*register) {
+                if matches!(plan, ArgumentPlan::Owned(_)) && !owned_arguments.insert(*register) {
                     return Err(error(
                         "owned native arguments require distinct resident slots",
                     ));
                 }
             }
-            (ArgumentPlan::Owned(_), _) => {
+            (ArgumentPlan::Owned(_) | ArgumentPlan::Capture(_), _) => {
                 return Err(error(
                     "owned native argument requires an existing native home",
                 ));
@@ -1097,7 +1132,8 @@ pub(super) fn execute(
             _ => {}
         }
     }
-    let result_home = if owned_resident(&binding.result.ty) {
+    let result_home = if owned_resident(&binding.result.ty)
+        || (binding.generated.is_some() && generated::resident(&binding.result.ty)) {
         let home = registers
             .native_homes
             .get(&destination)
@@ -1139,6 +1175,13 @@ pub(super) fn execute(
         }
         if let Some(home) = call.registers.native_homes.get(&register) {
             home.clear(&[]);
+        }
+    }
+    if consumes_arguments {
+        for (register, plan) in arguments.iter().zip(&binding.parameters) {
+            if !matches!(plan, ArgumentPlan::Capture(_)) {
+                call.registers.retire_call_arguments(&[*register]);
+            }
         }
     }
     match call.result {

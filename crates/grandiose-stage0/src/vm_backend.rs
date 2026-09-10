@@ -340,6 +340,22 @@ pub enum VmPattern {
         fields: Vec<VmPatternField>,
     },
 }
+
+/// Inspection is not a whole-owner read. Wildcards inspect no bytes; structural
+/// shells can survive moved fields, while array matching validates every element.
+/// Explicit nominal fields additionally require their complete declared value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PatternRead { None, Root, Value }
+
+impl VmPattern {
+    pub(super) fn read_requirement(&self) -> PatternRead {
+        match self {
+            Self::Any => PatternRead::None,
+            Self::Literal(_) | Self::Array { .. } => PatternRead::Value,
+            Self::Tuple(_) | Self::Record { .. } | Self::Enum { .. } => PatternRead::Root,
+        }
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmPatternField {
     pub index: u32,
@@ -3761,6 +3777,19 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
 // The optional source is used only by the private compiler-generated native
 // execution adapter, never to produce a portable VerifiedVmProgram.
 fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&VerifiedVmProgram>) -> Result<(), VmArtifactError> {
+    let semantics = native_semantics.map_or(program, |source| &source.program);
+    if native_semantics.is_some() && (program.functions.keys().ne(semantics.functions.keys())
+        || program.callable_environments != semantics.callable_environments
+        || program.functions.iter().any(|(key, adapter)| {
+            let source = &semantics.functions[key];
+            adapter.captures != source.captures || adapter.parameters != source.parameters
+                || adapter.registers.get(..adapter.parameters as usize) != source.registers.get(..source.parameters as usize)
+                || adapter.instructions.first() != source.instructions.first()
+                || adapter.nominal_copy_descriptors != source.nominal_copy_descriptors
+                || adapter.safety != source.safety
+        })) {
+        return Err(VmArtifactError::MalformedEncoding { message: "generated adapter differs from its source invocation contract" });
+    }
     if program.schema != STAGE0_VM_SCHEMA {
         return Err(VmArtifactError::UnsupportedSchema {
             found: program.schema,
@@ -3844,7 +3873,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
     // artifact cannot carry orphaned callable authority or two conflicting
     // layouts for one lifted target.
     let mut produced_environments = BTreeMap::new();
-    for function in program.functions.values() {
+    for function in semantics.functions.values() {
         for instruction in &function.instructions {
             let VmInstruction::MakeCallable {
                 callee,
@@ -3915,11 +3944,14 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
         }
     }
     let transfer_proofs = tail_provenance::summaries(
-        &native_semantics.map_or(program, |source| &source.program).functions)?;
+        &semantics.functions)?;
     let mut intact_captures = BTreeMap::new();
     for function in program.functions.values() {
         let control = verify_function_control(function, true, false, &transfer_proofs)?;
-        intact_captures.insert(function.definition, control.captures_intact_at_boundaries);
+        let intact = if native_semantics.is_some() && function.captures != 0 {
+            verify_function_control(&semantics.functions[&function.definition], true, false, &transfer_proofs)?.captures_intact_at_boundaries
+        } else { control.captures_intact_at_boundaries };
+        intact_captures.insert(function.definition, intact);
         for action in declared_frame_cleanup(function)? {
             let target = program.functions.get(&action.destructor)
                 .ok_or(VmArtifactError::MissingFunction { definition: action.destructor })?;
@@ -4098,7 +4130,7 @@ fn validate_program(program: &CandidateVmProgram, native_semantics: Option<&Veri
                         message: "callable value safety does not match its target",
                     });
                 }
-                callable_access::verify_claim(target, shared_receiver, unique_receiver,
+                callable_access::verify_claim(&semantics.functions[callee], shared_receiver, unique_receiver,
                     intact_captures.get(callee) == Some(&true))?;
                 if target.parameters != target.captures + parameters.len() as u32 {
                     return Err(VmArtifactError::CallArity {
@@ -12381,6 +12413,8 @@ fn compare_char_values(left: char, right: char, op: VmCompare) -> bool {
     }
 }
 fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
+    if pattern.read_requirement() != PatternRead::None
+        && matches!(value, VmValue::Uninitialized(_)) { return false; }
     match pattern {
         VmPattern::Any => true,
         VmPattern::Literal(literal) => literal_matches(value, literal),
@@ -12496,7 +12530,12 @@ fn value_matches_vm_layout(value: &VmValue, expected: &VmType, initialization: I
         return initialization == Initialization::Storage && vm_type_matches(actual, expected);
     }
     if matches!(value, VmValue::SuspendedReference(_)) { return false; }
-    if let VmValue::Resident(home) = value { return home.is_initialized(&[]) && vm_type_matches(home.ty(), expected); }
+    if let VmValue::Resident(home) = value {
+        return (match initialization {
+            Initialization::Value => home.is_fully_initialized(&[]),
+            Initialization::Storage => home.is_initialized(&[]),
+        }) && vm_type_matches(home.ty(), expected);
+    }
     match expected {
         VmType::Generic(_) => true,
         // Structural constants inhabit nominal identity only; no standalone
@@ -17401,9 +17440,8 @@ fn execute_program_in_float_profile(
                 if let Some(imports) = budget.native_memory.imports.clone() {
                     let current_depth = depth.saturating_add(callers.len() as u32).saturating_add(1);
                     registers[*dst as usize] = Some(native_bridge::execute(
-                        program, imports, capability, symbol, &mut registers, arguments, *dst, budget, current_depth,
+                        program, imports, capability, symbol, &mut registers, arguments, *dst, budget, current_depth, consumes_arguments,
                     )?);
-                    if consumes_arguments { registers.retire_call_arguments(arguments); }
                     pc += 1;
                     continue;
                 }

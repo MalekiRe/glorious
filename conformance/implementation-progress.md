@@ -5,6 +5,84 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 111 / native ABI 10: mixed capture loans and initialized inspection
+
+Generated bindings now publish a typed capture/owned/value slot contract using
+the emitter's retained layouts. Capture inputs are restored to their environment;
+explicit arguments are retired by the invocation boundary. VM callbacks borrow
+the actual capture homes and return their modified initialization state. They do
+not create external owner views that revoke a still-owned nested callable's
+resident lease on callback exit. Zero-byte captures retain logical sidecars.
+
+The private adapter uses the original verified environment producers and
+capture-access proofs, alongside the existing tail summaries, with exact source
+invocation/layout checks and independent adapter validation. Public native imports
+cannot request this extension by name. VM frame storage demands now come from
+the linked generated binding, not from treating every public callback as a native
+callable resident. The unchanged public scalar callback fixtures retain their
+zero-native-byte limits. Original callback failures survive generated dispatch.
+
+The final native integration gate has **32 passes and one active source failure**,
+none ignored (`target/mixed-capture-native-final-v17.log`). The formerly failing
+captured-callable native/mixed regression passes unchanged. Six new composition
+sources exercise zero-byte captures, independent source copies, repeated mutable
+receivers, generic callable products, nested captures and partial-capture Drop.
+Each executes fresh/decoded VM and three genuine mixed partitions at native O0/O2.
+A separate fault group checks division-by-zero through both capture partitions.
+Existing native/mixed arrays, references, allocations, tails, scalar/float policy,
+ownership and resource limits pass in this target.
+
+The new positive `mixed_returned_capture_references_preserve_their_backing_loan`
+remains failing at source G5023: invoking a factory-produced callable that returns
+its captured reference lacks frozen caller-region result provenance. Its original
+source and success expectation are preserved in a separate test; neither runtime
+is reached. This is not counted as a mixed-runtime pass or a completed result-loan
+contract. Earlier v12 exposed it inside the composition group before separation.
+
+Executable patterns now share explicit no-read/root/full-value requirements across
+materialized and resident VM matching and generated direct/captured storage.
+Generated control flow checks the existing initialization flags before payload
+loads. Tag-only enum cleanup retains partial shells; selected nominal fields and
+fixed-array patterns cannot treat holes as complete values. Runtime resident type
+validation distinguishes complete values from partially initialized storage.
+
+The final library-unit gate passes **352 tests**, none failed or ignored
+(`target/mixed-capture-runtime-units-v16.log`). It includes the preserved native
+moved-field mismatch, wildcard/array/nominal resident parity, exact capture-home
+identity and unknown-slot rejection, generated adapter/sidecar admission and the
+complete machine float-conversion matrix. The latter revealed an old unbound
+internal invocation context calling a null resident-runtime entry. Generated entry
+now rejects missing runtime bindings before execution; its harness installs the
+required runtime without changing numerical or ambient-float assertions.
+
+The public native bridge passes all **29 tests** with unchanged resource budgets
+(`target/mixed-capture-public-authority-v11.log`). The build identity target passes
+all **22 tests** in `target/mixed-capture-runtime-contract-v10.log`. That earlier
+combined run was not green: its unit process crashed at the unbound float harness,
+and five bridge fixtures exposed overly broad native-storage demands. Those
+failures led to the entry guard and binding-derived frame planning above.
+
+The source-boundary run has **25 borrowed-callable passes**, then **27 fusion passes
+and one existing native-owned-handler failure**, no ignores
+(`target/mixed-capture-source-boundary-v9.log`). This run preceded the final private
+storage-demand refinement. The unchanged handler failure is unsupported native
+`InstallHandlerOwned`, not a successful gate. An unoptimized Rust native-target
+attempt also aborted on host stack overflow; it is not a completed native gate.
+The final native/unit commands use the same repository optimized development
+profile as cache 110. Earlier focused failures also exposed missing adapter
+capture semantics, premature nested-lease retirement and masked callback faults;
+the current execution checks cover those corrections. One new mutable-factory
+fixture used an erased owned-only callable type with a borrowed receiver; the
+composition test uses the already-established direct mutable receiver source.
+
+General borrowed-referent sidecars, the new source result-provenance regression,
+native owned handlers, borrowed/cross-frame resumptions, full helper-family fusion,
+mandatory-tail activation fusion and guard-correlated storage analysis remain open.
+No broad source-library matrix was repeated; cache 105's 16 passes/15 failures
+remain its latest complete evidence. Source cache is 111, native ABI is 10;
+verifier 38, bytecode 72 and schema 116 are unchanged. This is not compiler/library
+completion or self-hosting acceptance.
+
 ## Cache 110 / native ABI 9: generated ordinary callable environments
 
 The native callable ABI now uses the VM's existing execution-domain resident

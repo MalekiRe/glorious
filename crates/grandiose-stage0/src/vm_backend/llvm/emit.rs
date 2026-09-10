@@ -3,7 +3,7 @@ use super::{
     VmType, layout,
 };
 use crate::vm_backend::{
-    VmCompare, VmFunction, VmInstruction as I, VmPattern,
+    PatternRead, VmCompare, VmFunction, VmInstruction as I, VmPattern,
     native_memory::{NativeFields, NativeLayout, NativeShape},
 };
 use grandiose_runtime::memory::MemoryLayout;
@@ -70,9 +70,6 @@ impl<'a> Plan<'a> {
                 instruction,
                 reason: reason.into(),
             };
-            if !vm_functions.is_empty() && function.captures != 0 {
-                return Err(unsupported(0, "mixed-engine capture loans are not implemented"));
-            }
             let descriptors = function.nominal_copy_descriptors.clone().into();
             let mut layouts = vec![];
             let mut paths: Vec<Vec<Vec<u32>>> = vec![];
@@ -206,12 +203,9 @@ impl<'a> Plan<'a> {
                             | I::ResumeReturn { .. }
                             | I::ResumeSnapshot { .. }
                             | I::MakeLabel { .. }
-                            | I::CallIndirect { .. }
-                            | I::CallIndirectOwned { .. }
                             | I::HostCall { .. }
                             | I::HostCallOwned { .. }
-                    ) || matches!(instruction, I::MakeCallable { captures, environment, .. }
-                            if !captures.is_empty() || environment.is_some())
+                    )
                     {
                         return Err(LlvmError::Unsupported { function: *key, instruction: pc,
                             reason: "VM partition contains unsupported mixed control or external authority".into() });
@@ -1038,6 +1032,8 @@ impl<'a, 'p> Body<'a, 'p> {
                     self.pointer(*subject),
                     self.data.layouts[*subject as usize].clone(),
                     pattern,
+                    Some((*subject, vec![])),
+                    pattern.read_requirement(),
                 )?;
                 let value = self.value(format!("zext i1 {matched} to i8"));
                 self.store_scalar(*dst, &value)?;
@@ -1216,6 +1212,47 @@ impl<'a, 'p> Body<'a, 'p> {
         pointer: String,
         layout: Arc<NativeLayout>,
         pattern: &VmPattern,
+        storage: Option<(u32, Vec<u32>)>,
+        requirement: PatternRead,
+    ) -> Result<String, LlvmError> {
+        // Use the frame's published logical paths, including captured input
+        // sidecars. Branch before generating any payload read: masking a result
+        // after an uninitialized LLVM load would still be undefined behavior.
+        if requirement != PatternRead::None && let Some((register, path)) = &storage {
+            let paths = self.data.paths[*register as usize].clone();
+            let mut present = "true".to_owned();
+            for candidate in paths.iter().filter(|candidate|
+                path.starts_with(candidate.as_slice())
+                    || (requirement == PatternRead::Value && candidate.starts_with(path))) {
+                let flag = self.flag(*register, candidate);
+                let flag = self.value(format!("load i8, ptr {flag}, align 1"));
+                let initialized = self.value(format!("icmp eq i8 {flag}, 1"));
+                present = self.value(format!("and i1 {present}, {initialized}"));
+            }
+            let yes = self.label();
+            let no = self.label();
+            let end = self.label();
+            let join = self.label();
+            self.line(format!("br i1 {present}, label %{yes}, label %{no}"));
+            self.block(&no);
+            self.line(format!("br label %{join}"));
+            self.block(&yes);
+            let matched = self.pattern_initialized(pointer, layout, pattern, storage)?;
+            self.line(format!("br label %{end}"));
+            self.block(&end);
+            self.line(format!("br label %{join}"));
+            self.block(&join);
+            return Ok(self.value(format!("phi i1 [ false, %{no} ], [ {matched}, %{end} ]")));
+        }
+        self.pattern_initialized(pointer, layout, pattern, storage)
+    }
+
+    fn pattern_initialized(
+        &mut self,
+        pointer: String,
+        layout: Arc<NativeLayout>,
+        pattern: &VmPattern,
+        storage: Option<(u32, Vec<u32>)>,
     ) -> Result<String, LlvmError> {
         if !matches!(pattern, VmPattern::Any)
             && let NativeShape::Reference {
@@ -1226,7 +1263,10 @@ impl<'a, 'p> Body<'a, 'p> {
         {
             let target = layout::concrete_layout(referent, descriptors)?;
             let pointer = self.value(format!("load ptr, ptr {pointer}, align 8"));
-            return self.pattern(pointer, target, pattern);
+            // Reference bytes describe the handle, not its referent. The
+            // existing borrowed-value ABI does not transport referent sidecars;
+            // do not misapply the handle's logical paths to the target storage.
+            return self.pattern(pointer, target, pattern, None, pattern.read_requirement());
         }
         match pattern {
             VmPattern::Any => Ok("true".into()),
@@ -1257,7 +1297,8 @@ impl<'a, 'p> Body<'a, 'p> {
                 for (index, pattern) in patterns.iter().enumerate() {
                     let (field, layout) =
                         self.projection(pointer.clone(), layout.clone(), &[index as u32])?;
-                    let item = self.pattern(field, layout, pattern)?;
+                    let item = self.pattern(field, layout, pattern,
+                        pattern_field_storage(&storage, index as u32), pattern.read_requirement())?;
                     matched = self.value(format!("and i1 {matched}, {item}"));
                 }
                 Ok(matched)
@@ -1278,7 +1319,8 @@ impl<'a, 'p> Body<'a, 'p> {
                     let index = crate::pattern::ArrayPatternRest::index(*rest, index);
                     let (field, layout) =
                         self.projection(pointer.clone(), layout.clone(), &[index as u32])?;
-                    let item = self.pattern(field, layout, pattern)?;
+                    let item = self.pattern(field, layout, pattern,
+                        pattern_field_storage(&storage, index as u32), pattern.read_requirement())?;
                     matched = self.value(format!("and i1 {matched}, {item}"));
                 }
                 Ok(matched)
@@ -1288,7 +1330,8 @@ impl<'a, 'p> Body<'a, 'p> {
                 for field in fields {
                     let (pointer, layout) =
                         self.projection(pointer.clone(), layout.clone(), &[field.index])?;
-                    let item = self.pattern(pointer, layout, &field.pattern)?;
+                    let item = self.pattern(pointer, layout, &field.pattern,
+                        pattern_field_storage(&storage, field.index), PatternRead::Value)?;
                     matched = self.value(format!("and i1 {matched}, {item}"));
                 }
                 Ok(matched)
@@ -1324,7 +1367,8 @@ impl<'a, 'p> Body<'a, 'p> {
                         "getelementptr i8, ptr {pointer}, i64 {}",
                         offset + field_layout.offset
                     ));
-                    let item = self.pattern(field_pointer, field_layout.layout, &field.pattern)?;
+                    let item = self.pattern(field_pointer, field_layout.layout, &field.pattern,
+                        pattern_field_storage(&storage, field.index), PatternRead::Value)?;
                     matched = self.value(format!("and i1 {matched}, {item}"));
                 }
                 self.line(format!("br label %{matched_end}"));
@@ -1337,4 +1381,12 @@ impl<'a, 'p> Body<'a, 'p> {
             }
         }
     }
+}
+
+fn pattern_field_storage(storage: &Option<(u32, Vec<u32>)>, index: u32) -> Option<(u32, Vec<u32>)> {
+    storage.as_ref().map(|(register, path)| {
+        let mut path = path.clone();
+        path.push(index);
+        (*register, path)
+    })
 }

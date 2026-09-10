@@ -21,8 +21,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 9;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:resident-callables-v6";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 10;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:native-slot-dispatch:resident-capture-loans-v7";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
@@ -386,6 +386,9 @@ impl NativeContext {
             16 => VmArtifactError::NativeAbi {
                 message: "cannot establish or restore the native floating-point environment",
             },
+            17 => VmArtifactError::NativeAbi {
+                message: "generated invocation lacks its bound execution-domain runtime",
+            },
             6 => VmArtifactError::NativeAbi {
                 message: "native execution reached a verified terminal trap",
             },
@@ -446,6 +449,60 @@ mod tests {
         for optimization in [0,2] {
             let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
             assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+        }
+    }
+
+    #[test]
+    fn native_patterns_observe_initialization_before_reading_moved_payloads() {
+        use super::super::{VmPattern, VmPatternField};
+        for case in 0..5 {
+            let entry = DefKey(Digest::of_bytes(format!("native-pattern-holes-{case}").as_bytes()));
+            let nominal = DefKey(Digest::of_bytes(b"native-pattern-hole-enum"));
+            let is_tuple = matches!(case, 0 | 3);
+            let is_array = case == 4;
+            let expected = matches!(case, 1 | 3);
+            let product = if is_tuple { VmType::Tuple(vec![VmType::I64,VmType::I64]) }
+                else if is_array { VmType::FixedArray { element: Box::new(VmType::I64), length: 2 } }
+                else { VmType::Nominal { definition: nominal, arguments: vec![] } };
+            let descriptor = VmNominalCopyDescriptor { definition: nominal,
+                source_contract: Digest::of_bytes(b"native-pattern-hole-descriptor"), is_enum: true,
+                arguments: vec![], variants: vec![vec![VmType::I64,VmType::I64]] };
+            let pattern = if case == 0 { VmPattern::Tuple(vec![VmPattern::Literal("17".into()),VmPattern::Any]) }
+                else if case == 3 { VmPattern::Tuple(vec![VmPattern::Any,VmPattern::Any]) }
+                else if is_array { VmPattern::Array { element: VmType::I64, elements: vec![VmPattern::Literal("42".into())],
+                    rest: Some(crate::pattern::ArrayPatternRest { prefix: 0, omitted: 1 }) } }
+                else { VmPattern::Enum { definition: nominal, variant: 0, field_count: 2,
+                    field_types: vec![VmType::I64,VmType::I64],
+                    fields: if case == 1 { vec![] } else { vec![VmPatternField { index: 0, ty: VmType::I64, pattern: VmPattern::Any }] } } };
+            let function = VmFunction { definition: entry, safety: crate::Safety::Safe, unsafe_execution: false,
+                nominal_copy_descriptors: if is_tuple || is_array { vec![] } else { vec![descriptor] },
+                captures: 0, parameters: 0,
+                registers: vec![VmType::I64,VmType::I64,product,VmType::I64,VmType::Bool,VmType::I64],
+                instructions: vec![I::DeclareResult { result: VmType::I64, returns: true },
+                    I::ConstI64 { dst: 0, value: 17 }, I::ConstI64 { dst: 1, value: 42 },
+                    if is_tuple { I::MakeTupleOwned { dst: 2, fields: vec![0,1] } }
+                    else if is_array { I::MakeArrayOwned { dst: 2, element_type: VmType::I64, fields: vec![0,1] } }
+                    else { I::MakeEnumOwned { dst: 2, definition: nominal, variant: 0,
+                        field_types: vec![VmType::I64,VmType::I64], fields: vec![0,1] } },
+                    I::TakeProjection { dst: 3, base: 2, fields: vec![0] },
+                    I::PatternTest { dst: 4, subject: 2, pattern },
+                    I::BranchBool { condition: 4, then_target: if expected { 8 } else { 7 },
+                        else_target: if expected { 7 } else { 8 } },
+                    I::Trap, I::TakeProjection { dst: 5, base: 2, fields: vec![1] }, I::Return { value: 5 }],
+            };
+            let mut candidate = CandidateVmProgram { schema: crate::STAGE0_VM_SCHEMA,
+                runtime_manifest: None, host_capabilities: vec![], entry, functions: [(entry,function)].into(),
+                callable_environments: Default::default(), fingerprint: Digest::of_bytes(b"unsealed") };
+            candidate.fingerprint = candidate.computed_fingerprint();
+            let verified = verify_program(candidate).unwrap();
+            assert_eq!(verified.run_i64().unwrap(), 42, "VM case {case}");
+            assert_eq!(super::super::decode_and_verify_program(&verified.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+            let ir = LlvmIrProgram::lower_partitioned(verified, Digest::of_bytes(b"native-pattern-initialization-test"),
+                LlvmTarget::host().unwrap(), Default::default()).unwrap();
+            for optimization in [0,2] {
+                let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42, "native case {case}, O{optimization}");
+            }
         }
     }
 
