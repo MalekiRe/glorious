@@ -5,6 +5,38 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 147: executable delimiter invocation budgets
+
+The executable control state now retains a captured operation's remaining
+invocation bounds on its handler frame, independently of its aliases and saved
+audit continuations. Joins retain the minimum and maximum remaining counts.
+Every represented path must admit a further invocation, and every exact replay
+path must be spent before normal cancellation. Direct returning resumptions and
+ordered helper histories consume the same budget transition. A non-returning
+snapshot transfer must be the final invocation.
+
+Active protected execution is distinct from a captured or spent clause even
+when a one-shot continuation vector has been cleared. Deep resumption and
+forwarding explicitly restore active execution; a spent serviced clause cannot
+be selected as a fresh delimiter. Capture and handle retention require remaining
+invocation authority. These are verifier facts; the existing shared runtime
+counter and final-original-continuation transition are unchanged.
+
+All 15 helper-proof tests pass, including budget joins, and 42 handler integration
+tests pass the fresh/decoded VM and native/mixed O0/O2 matrix. New decoded-policy
+mutations reject both underuse and overuse of an ordered three-call helper.
+Two preserved source regressions are excluded from that checkpoint: receiver
+replacement during its argument still fails native lifetime validation, and a
+new decoded-count regression exposes that resumptive performances in ordinary
+callees do not yet seed their caller's handler-clause audit. The original valid
+callee-performance program runs correctly, but its forged replay count is still
+accepted. Neither remaining regression is converted to an expected failure.
+
+Cache 147 and verifier 48 change; bytecode 75/schema 119 and native ABI 18 do not.
+Cross-frame effect admission, receiver access, borrowed resumption invocation,
+helper-local delimiters, foreign-control admission, mandatory-tail fusion and
+full zero-marshalling/performance acceptance remain open.
+
 ## Cache 146: structural resident owner quantities
 
 Ownership MIR's existing quantity fixed point now intersects evaluated field

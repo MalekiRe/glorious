@@ -11,6 +11,43 @@
 use super::*;
 use super::resumption_values::InputPath;
 
+/// Remaining invocations of one captured operation, not a count attached to
+/// each alias. Joins retain the extrema of every represented execution: the
+/// next invocation must be available on all paths and closure must leave no
+/// required invocation on any path. None on a frame denotes active execution,
+/// independently of whether a spent clause still retains audit snapshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct Budget { minimum: u32, maximum: u32 }
+
+impl Budget {
+    pub(super) fn captured(policy: VmContinuationPolicy) -> Self {
+        let uses = match policy {
+            VmContinuationPolicy::Terminal => 0,
+            VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => 1,
+            VmContinuationPolicy::Replay { uses } => uses,
+        };
+        Self { minimum: uses, maximum: uses }
+    }
+
+    pub(super) fn available(self) -> bool { self.minimum > 0 }
+    pub(super) fn spent(self) -> bool { self.maximum == 0 }
+    pub(super) fn final_invocation(self) -> bool { self.minimum == 1 && self.maximum == 1 }
+
+    pub(super) fn consume(&mut self) -> Result<(), VmArtifactError> {
+        if !self.available() { return Err(VmArtifactError::HandlerResumeUnavailable); }
+        self.minimum -= 1;
+        self.maximum -= 1;
+        Ok(())
+    }
+
+    pub(super) fn join(&mut self, other: Self) -> bool {
+        let joined = Self { minimum: self.minimum.min(other.minimum), maximum: self.maximum.max(other.maximum) };
+        let changed = *self != joined;
+        *self = joined;
+        changed
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct Invocation {
     pub(super) parameter: VmType,
@@ -216,7 +253,7 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
     incoming: &mut VerifierIncoming, worklist: &mut VerifierWorklist,
 ) -> Result<(), VmArtifactError> {
     let frame = states.handlers.get(index).ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-    if frame.continuation == VmContinuationPolicy::Terminal || frame.continuations.is_empty() {
+    if !frame.can_resume() {
         return Err(VmArtifactError::HandlerResumeUnavailable);
     }
     if invocation.parameter != frame.resume_type {
@@ -228,6 +265,7 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
     resumed_handlers.extend_from_slice(&states.handlers[index + 1..]);
     resumed_handlers.push(frame.clone());
     let active = resumed_handlers.last_mut().expect("checked resumable handler");
+    active.invocations = None;
     active.payload_claim = None;
     active.continuations.clear();
     for continuation in continuations {
@@ -262,6 +300,7 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
         write(&mut resumed, continuation.dst)?;
         propagate_state(incoming, worklist, continuation.target, &resumed)?;
     }
+    states.handlers[index].invocations.as_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?.consume()?;
     if matches!(states.handlers[index].continuation, VmContinuationPolicy::Optional | VmContinuationPolicy::Consume) {
         states.handlers[index].continuations.clear();
     }
@@ -285,6 +324,7 @@ pub(super) fn cancel(value: &ResumptionValue, states: &mut VerifierState, observ
                 return Err(VmArtifactError::HandlerResumeUnavailable);
             }
             frame.continuations.clear();
+            frame.invocations = Some(Budget { minimum: 0, maximum: 0 });
             Ok(())
         }
         _ => Err(VmArtifactError::HandlerResumeUnavailable),
@@ -294,6 +334,25 @@ pub(super) fn cancel(value: &ResumptionValue, states: &mut VerifierState, observ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joined_replay_budgets_require_every_path_to_admit_the_next_invocation() {
+        let mut two = Budget::captured(VmContinuationPolicy::Replay { uses: 2 });
+        let mut one = two;
+        one.consume().unwrap();
+        assert!(two.join(one));
+        assert!(two.available());
+        assert!(!two.final_invocation());
+        two.consume().unwrap();
+        assert!(!two.spent());
+        assert!(two.consume().is_err());
+        let mut exact = Budget::captured(VmContinuationPolicy::Replay { uses: 2 });
+        exact.consume().unwrap();
+        assert!(exact.final_invocation());
+        exact.consume().unwrap();
+        assert!(exact.spent());
+        assert!(exact.consume().is_err());
+    }
 
     fn helper(instructions: Vec<VmInstruction>, registers: Vec<VmType>, parameters: u32) -> VmFunction {
         VmFunction {

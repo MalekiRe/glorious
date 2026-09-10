@@ -1918,3 +1918,27 @@ aggregate with a prepared receiver and an argument performance now passes the
 fresh/decoded VM and native/mixed execution matrix. This does not resolve receiver
 lifetime across argument replacement or the remaining general native-handler
 acceptance obligations. Runtime, verifier and portable formats are unchanged.
+
+## Delimiter-wide executable invocation budgets
+
+The existing executable handler frame carries the remaining invocation bounds
+of its captured operation. Aliases do not receive new budgets. CFG joins retain
+the extrema of all represented remaining counts; invocation requires authority
+on every path and exact normal cancellation requires every path to be spent.
+Direct resumption and ordered helper histories use the same decrement transition.
+Non-returning snapshot transfer must consume the final invocation rather than
+abandon required future replay.
+
+Active protected execution is represented separately from a captured or spent
+clause, independently of retained audit snapshots. Deep resumption and forwarding
+restore the active state explicitly; clearing a one-shot snapshot cannot make
+its serviced clause an active effect delimiter. Capture and handle retention
+continue to require a live pending invocation. Runtime counters, continuation
+ownership and final-original consumption remain unchanged.
+
+Cache 147 and verifier 48 record this proof boundary. Local performances and
+ordered helper use reject edited under/over-count policies before execution.
+Cross-frame performance audit coverage is still incomplete: an ordinary callee's
+resumptive performance does not yet seed its caller's clause, and the preserved
+decoded mutation exposes that missing edge. This is not full executable replay
+admission or completion of the remaining native-handler obligations.

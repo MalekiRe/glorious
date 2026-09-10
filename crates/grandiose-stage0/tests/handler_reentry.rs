@@ -163,6 +163,44 @@ fn one_ordinary_helper_can_perform_both_ordered_replays() {
         } }");
 }
 
+fn reject_changed_replay_counts(original: &CandidateVmProgram, counts: &[u32]) {
+    for &uses in counts {
+        let mut malformed = original.clone();
+        let mut changed = false;
+        for instruction in malformed.functions.values_mut().flat_map(|function| &mut function.instructions) {
+            if let VmInstruction::InstallHandlerOwned { continuation, .. } = instruction
+                && matches!(continuation, VmContinuationPolicy::Replay { .. }) {
+                *continuation = VmContinuationPolicy::Replay { uses };
+                changed = true;
+            }
+        }
+        assert!(changed);
+        malformed.fingerprint = malformed.computed_fingerprint();
+        assert!(verify_vm_program(malformed.clone()).is_err(), "accepted exact replay count {uses}");
+        assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&malformed)).is_err());
+    }
+}
+
+#[test]
+fn decoded_replay_policy_cannot_under_or_over_count_ordered_helper_uses() {
+    let original = candidate("effect Ask { [3,3] ask() -> i64; }
+        fn thrice<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { task(12) + task(14) + task(16) }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => thrice(k) } }");
+    reject_changed_replay_counts(&original, &[2, 4]);
+}
+
+#[test]
+fn decoded_replay_counts_are_checked_for_performances_in_an_ordinary_callee() {
+    let source = "effect Ask { [3,3] ask() -> i64; }
+        fn leaf() -> i64 / Ask { Ask::ask() }
+        pub fn main() -> i64 { handle leaf() { Ask::ask() with k => k(12) + k(14) + k(16) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    reject_changed_replay_counts(&decode_program(&artifact.canonical_bytes()).unwrap(), &[2, 4]);
+}
+
 #[test]
 fn ordered_replay_helpers_compose_with_forwarded_product_aliases() {
     candidate("effect Ask { [2,2] ask() -> i64; }

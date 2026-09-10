@@ -6167,6 +6167,9 @@ struct VerifierHandlerFrame {
     payload_destinations: Vec<u32>,
     resume_type: VmType,
     continuation: VmContinuationPolicy,
+    /// None while the protected computation is active. A captured or spent
+    /// clause retains its own delimiter-wide count independently of aliases.
+    invocations: Option<resumption_calls::Budget>,
     target: u32,
     owned_payloads: bool,
     /// None while active, false while testing a packet, true after its claim.
@@ -6176,6 +6179,15 @@ struct VerifierHandlerFrame {
     /// A verifier join can represent several concrete one-shot suspensions
     /// reaching one shared handler body. Runtime execution has exactly one.
     continuations: Vec<VerifierContinuation>,
+}
+
+impl VerifierHandlerFrame {
+    fn active(&self) -> bool { self.invocations.is_none() }
+    fn can_resume(&self) -> bool {
+        self.continuation != VmContinuationPolicy::Terminal
+            && !self.continuations.is_empty()
+            && self.invocations.is_some_and(resumption_calls::Budget::available)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7554,7 +7566,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let token = states.resumptions[*src as usize].project(fields);
                 let id = token.frame().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 if !states.handlers.iter().any(|frame| frame.id == id && frame.continuation.is_replay()
-                    && !frame.continuations.is_empty()) {
+                    && frame.can_resume()) {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 write(&mut states, *dst)?;
@@ -7785,7 +7797,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     (states.reference_origins[index].clone(), states.labels[index], states.resumptions[index].clone())
                 }).collect::<Vec<_>>();
                 if let Some(index) = states.handlers.iter().rposition(|frame| {
-                    frame.continuations.is_empty()
+                    frame.active()
                         && frame.effect == *effect
                         && frame.effect_arguments == *effect_arguments
                         && frame.operation == *operation
@@ -7822,6 +7834,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     states.handlers[index].payload_claim = owned_payloads.then_some(false);
                     states.handlers[index].payload_domain = if owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
                     states.handlers[index].payload_probe = None;
+                    states.handlers[index].invocations = Some(resumption_calls::Budget::captured(frame.continuation));
                     states.handlers[index].continuations = vec![VerifierContinuation {
                         may_initialized: states.may_initialized.clone(),
                         target: (pc + 1) as u32,
@@ -7941,6 +7954,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     payload_destinations: payload_destinations.clone(),
                     resume_type: resume_type.clone(),
                     continuation: *continuation,
+                    invocations: None,
                     target: *target,
                     owned_payloads: matches!(instruction, VmInstruction::InstallHandlerOwned { .. }),
                     payload_claim: None,
@@ -7958,6 +7972,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     audit.handlers.last_mut().unwrap().payload_claim =
                         matches!(instruction, VmInstruction::InstallHandlerOwned { .. }).then_some(false);
+                    audit.handlers.last_mut().unwrap().invocations = Some(resumption_calls::Budget::captured(*continuation));
                     audit.handlers.last_mut().unwrap().payload_domain =
                         if matches!(instruction, VmInstruction::InstallHandlerOwned { .. }) { coverage::packet(function, payload_destinations) } else { None };
                     if !terminal_audits.iter().any(|(entry, state)| entry == target && state == &audit) {
@@ -7995,9 +8010,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let Some(frame) = states.handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation == VmContinuationPolicy::Terminal
-                    || frame.continuations.is_empty()
-                {
+                if !frame.can_resume() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if frame.continuation.is_replay() {
@@ -8021,6 +8034,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
                 };
+                frame.invocations.as_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?.consume()?;
                 let replaying = frame.continuation.is_replay();
                 if frame.owned_payloads {
                     states.registers[*value as usize] = Some(false);
@@ -8028,6 +8042,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 for continuation in continuations {
                     let mut resumed_handlers = states.handlers.clone();
                     resumed_handlers.last_mut().unwrap().payload_claim = None;
+                    resumed_handlers.last_mut().unwrap().invocations = None;
                     if replaying {
                         resumed_handlers
                             .last_mut()
@@ -8070,9 +8085,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let Some(frame) = states.handlers.get(index) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation == VmContinuationPolicy::Terminal
-                    || frame.continuations.is_empty()
-                {
+                if !frame.can_resume() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let found = register_type(function, *value)?;
@@ -8097,9 +8110,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let Some(frame) = states.handlers.last() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation == VmContinuationPolicy::Terminal
-                    || frame.continuations.is_empty()
-                {
+                if !frame.can_resume() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let found = register_type(function, *dst)?;
@@ -8152,9 +8163,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let frame = &mut states.handlers[index];
-                if frame.continuation == VmContinuationPolicy::Terminal
-                    || frame.continuations.is_empty()
-                {
+                if !frame.can_resume() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let VmType::Callable { parameters, .. } = register_type(function, *snapshot)?
@@ -8175,6 +8184,12 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
                 };
+                // A non-returning transfer cannot leave a required future
+                // replay in the clause it abandons.
+                if !frame.invocations.is_some_and(resumption_calls::Budget::final_invocation) {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                frame.invocations.as_mut().ok_or(VmArtifactError::HandlerResumeUnavailable)?.consume()?;
                 let replaying = frame.continuation.is_replay();
                 // A non-local snapshot transfer abandons frames installed
                 // after the captured frame, then reinstates precisely the
@@ -8187,6 +8202,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 for continuation in continuations {
                     let mut resumed_handlers = prefix.clone();
                     resumed_handlers.last_mut().unwrap().payload_claim = None;
+                    resumed_handlers.last_mut().unwrap().invocations = None;
                     if replaying {
                         resumed_handlers
                             .last_mut()
@@ -8229,14 +8245,18 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if declined.continuations.is_empty() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
+                if declined.invocations != Some(resumption_calls::Budget::captured(declined.continuation)) {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 if declined.owned_payloads && declined.payload_claim != Some(false) {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 declined.payload_claim = None;
+                declined.invocations = None;
                 let continuations = std::mem::take(&mut declined.continuations);
                 for continuation in continuations {
                     let Some(index) = states.handlers.iter().rposition(|frame| {
-                        frame.continuations.is_empty()
+                        frame.active()
                             && frame.effect == continuation.performed.effect
                             && frame.effect_arguments == continuation.performed.effect_arguments
                             && frame.operation == continuation.performed.operation
@@ -8290,6 +8310,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     let declined_active = declined.clone();
                     crossed.push(declined_active);
                     crossed.extend(continuation.above.clone());
+                    forwarded.handlers[index].invocations = Some(resumption_calls::Budget::captured(outer.continuation));
                     forwarded.handlers[index].continuations = vec![VerifierContinuation {
                         may_initialized: states.may_initialized.clone(),
                         target: continuation.target,
@@ -8318,6 +8339,10 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 if frame.continuation == VmContinuationPolicy::Consume {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                if frame.continuation.is_replay()
+                    && !frame.invocations.is_some_and(resumption_calls::Budget::spent) {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if frame.continuations.is_empty()
@@ -9651,7 +9676,7 @@ fn seed_terminal_call_handlers(
 ) -> Result<(), VmArtifactError> {
     let mut seen = Vec::new();
     for (index, frame) in states.handlers.iter().enumerate().rev() {
-        if !frame.continuations.is_empty() { continue; }
+        if !frame.active() { continue; }
         let key = (frame.effect, frame.effect_arguments.clone(), frame.operation);
         if seen.contains(&key) { continue; }
         seen.push(key);
@@ -9675,6 +9700,7 @@ fn seed_terminal_call_handlers(
         terminal.handlers[index].payload_claim = frame.owned_payloads.then_some(false);
         terminal.handlers[index].payload_domain = if frame.owned_payloads { coverage::packet(function, &frame.payload_destinations) } else { None };
         terminal.handlers[index].payload_probe = None;
+        terminal.handlers[index].invocations = Some(resumption_calls::Budget::captured(frame.continuation));
         terminal.handlers[index].continuations = vec![VerifierContinuation {
             may_initialized: terminal.may_initialized.clone(),
             target: (pc + 1) as u32, dst, registers: terminal.registers.clone(),
@@ -9710,11 +9736,17 @@ fn merge_handler_states(
             || left.operation != right.operation
             || left.payload_destinations != right.payload_destinations
             || left.resume_type != right.resume_type
+            || left.continuation != right.continuation
             || left.target != right.target
             || left.owned_payloads != right.owned_payloads
             || left.payload_claim != right.payload_claim
         {
             return None;
+        }
+        match (&mut left.invocations, right.invocations) {
+            (None, None) => {}
+            (Some(left), Some(right)) => changed |= left.join(right),
+            _ => return None,
         }
         for continuation in &right.continuations {
             if !left.continuations.contains(continuation) {
