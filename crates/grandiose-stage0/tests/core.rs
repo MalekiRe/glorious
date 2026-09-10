@@ -6139,6 +6139,31 @@ fn forged_perform_effect_row_inference_cannot_cross_the_core_boundary() {
 }
 
 #[test]
+fn frozen_effect_operation_applications_cannot_erase_phantom_prerequisites() {
+    let (core, signatures) = core_and_signatures_for("frozen-operation-prerequisites@0.1.0", r#"
+        trait Mark {} impl Mark for i64 {}
+        effect Gate { gate<T, n: u32>() -> i64 where T: Mark; }
+        pub fn main() -> i64 { handle Gate::gate<i64,7>() { Gate::gate<i64,7>() => 42 } }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate_projection_obligations(&signatures, &[]).is_empty(), "{:?}", core.validate_projection_obligations(&signatures, &[]));
+    for handler in [false, true] {
+        for erase in [false, true] {
+            let mut forged = core.clone();
+            let arguments = forged.expressions.iter_mut().find_map(|expression| match &mut expression.kind {
+                CoreKind::Perform { operation_arguments, .. } if !handler => Some(operation_arguments),
+                CoreKind::Handle { clauses, .. } if handler => Some(&mut clauses[0].operation_arguments),
+                _ => None,
+            }).unwrap();
+            if erase { arguments.clear(); } else { arguments[0] = GenericArgument::Type(Type::Scalar(ScalarType::U8)); }
+            assert_ne!(core.semantic_fingerprint(), forged.semantic_fingerprint());
+            assert!(forged.validate_projection_obligations(&signatures, &[]).iter().any(|diagnostic| diagnostic.code == "G4199"),
+                "handler={handler} erase={erase}: {:?}", forged.validate_projection_obligations(&signatures, &[]));
+        }
+    }
+}
+
+#[test]
 fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking() {
     let package = PackageKey("core-perform-payload-quantity@0.1.0".into());
     let span = Span {
@@ -6174,6 +6199,7 @@ fn performed_operations_freeze_payload_callable_contracts_for_quantity_checking(
                             arguments: vec![],
                         },
                         operation: 0,
+                        operation_arguments: vec![],
                         payload_types: vec![callback.clone()],
                         arguments: vec![CoreId(0)],
                         terminal: false,

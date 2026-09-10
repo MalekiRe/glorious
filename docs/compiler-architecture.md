@@ -793,3 +793,40 @@ retirement for every runtime home/borrowed-slot formation path still needs a
 lifecycle audit; returned handles must not be treated as source ownership.
 Native handlers, general resumption transfer, full fusion and complete library
 and self-hosted-compiler acceptance remain open.
+
+## Effect declaration prerequisites and selected operation applications
+
+Effect headers retain family and operation `where` clauses. A family publishes
+the same predicate-domain product used by nominal declarations. Each operation
+publishes an ordinary complete declaration signature, with family binders before
+operation binders and inherited prerequisites included. Alias normalization,
+kind-preserving instantiation, projection-domain checking and invocation checking
+consume those products. The former payload/result-only operation substitution
+and empty-scope effect signature validator are removed.
+
+The shared trait solver retains effect declarations in its immutable snapshot.
+Effect-family applications, including phantom arguments and unused outward rows,
+use the same bounded domain-proof rule as nominal applications. Intrinsic callable
+associated items have compiler-owned declaration identities even without source
+trait headers; lexical equalities use ordinary associated-owner lookup. Predicate
+conjunctions register their existing branded callable inputs before checking
+environment prerequisites, independently of source order. Unresolved body-region
+cells defer outlives checking until sealing; successful partial zonking is not
+evidence that a region is already rigid.
+
+Performances and monomorphic handler applications retain their operation's own
+mixed-kind arguments in Typed Core. Generic transformation, sealing, canonicality,
+scope validation and body fingerprints include those arguments. Independent Core
+validation selects the declaration again, proves its prerequisites in the caller's
+lexical environment, and checks payload/result compatibility using the shared
+region and type relations. A payload-free operation cannot erase a phantom bound.
+Operation arguments never become part of the nominal effect-family identity.
+
+This repairs declaration and selected-application checking, not polymorphic
+handler compilation or task-provider execution. Handler applications currently
+require monomorphic evidence; unresolved binders do not introduce universal
+assumptions. Executable lowering still transports the established payload and
+resumption ABI, and the VM requires all senders/handlers for an exact family and
+operation to agree. General operation specialization and retained task-registration
+contracts remain open, as do native handlers. Parsing and validating the standard
+task declarations does not establish a complete task provider or library.

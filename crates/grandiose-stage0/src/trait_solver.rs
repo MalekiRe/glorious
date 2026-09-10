@@ -494,10 +494,11 @@ impl TraitSolver {
             rules: Arc::new(rules),
             manual_use_nominals: Arc::new(manual_use_nominals),
             traits: Arc::new(traits),
-            // Queries need nominal field layouts, not source callable/value
-            // headers. Rules and trait declarations are already frozen above.
+            // Queries need nominal layouts and effect-family domains, not
+            // ordinary source callable/value headers. Rules and traits are
+            // already frozen above.
             definitions: Arc::new(signatures.definitions.iter().filter_map(|(key, header)| {
-                matches!(header, ElaboratedHeader::Nominal { .. })
+                matches!(header, ElaboratedHeader::Nominal { .. } | ElaboratedHeader::Effect(_))
                     .then(|| (*key, header.clone()))
             }).collect()),
             tables: BTreeMap::new(),
@@ -1140,6 +1141,20 @@ impl TraitSolver {
         kind: AssociatedItemKind,
         active: &mut Vec<Digest>,
     ) -> SupertraitLookup<TraitGoal> {
+        // Compiler-owned callable traits have no source trait header. Their
+        // associated items still have an exact declaration owner, including
+        // when the subject is a generic with lexical equality evidence.
+        // Looking only in source headers made that evidence disappear at
+        // ordinary projection normalization and frozen-contract validation.
+        let callable = is_intrinsic_callable_trait(&goal.relation);
+        let runs_in = is_intrinsic_runs_in_trait(&goal.relation);
+        if callable || runs_in {
+            return if matches!((kind, name), (AssociatedItemKind::Type, "Output")
+                | (AssociatedItemKind::EffectRow, "Effects"))
+                || (runs_in && matches!((kind, name), (AssociatedItemKind::Type, "After"))) {
+                SupertraitLookup::Found(goal.clone())
+            } else { SupertraitLookup::Missing };
+        }
         let key = goal_key(goal);
         if active.contains(&key) {
             return SupertraitLookup::Ambiguous;

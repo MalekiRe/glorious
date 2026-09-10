@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 114 verification below,
+Updated from the current source and cache 115 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -8,12 +8,30 @@ authoritative. Self-hosting is deferred while Stage0 and the library are the
 active focus.
 
 The latest completed main-tree source matrix is **16 passing / 15 failing tests**, none
-ignored (`target/cache112-library-source-matrix-v1.log`, cache 112). This includes a source
+ignored (`target/cache114-library-source-matrix-v1.log`, cache 114). This includes a source
 embedding check, so it is not a count of 31 execution roots. Passing a root is
 not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 115 / interface 21 retains and enforces effect-family and operation-local
+prerequisites through shared declaration signatures, row-domain checking,
+invocation checking and frozen Core application validation. Phantom operation
+arguments, quantified bounds, exact callback equalities and capture lifetimes
+are no longer dropped at those source boundaries. The eight new source groups
+and the 446-test integration plus 171-test effect-boundary gates pass; see `implementation-progress.md` for
+the exact scope and logs.
+
+The full-library composition root now reaches body checking beyond the previously
+rejected task declarations, but still reaches its unchanged 100-error diagnostic
+limit. Its current errors include Bytes/Slice API mismatches, generic graph
+projection checking, custom-Drop extraction, unsafe UTF-8 operations, tail
+provenance and minimum-use obligations (`target/effect-contracts-library-v14.log`).
+General polymorphic operation handlers and task-provider registration remain
+unimplemented; this checkpoint is not task execution or library completion.
+
+The following cache 114 and earlier checkpoints are historical.
 
 Cache 114 / native ABI 12 supplies returned borrows of callable-owned capture
 storage through the shared invocation input relation and the existing runtime
@@ -39,8 +57,8 @@ in `implementation-progress.md`.
 Type-grouped capture updates remain conservative rather than exact storage joins.
 Guard-correlated storage, cross-owner generic contract selection, and explicit
 environment-death retirement across every runtime capture-home formation path
-remain open. The broad source-library matrix above has not been rerun after these
-changes. Native handlers, general resumption transfer, full fusion, library
+remain open. The fresh cache-114 source matrix above retains the earlier root
+counts. Native handlers, general resumption transfer, full fusion, library
 completion and self-hosted compiler acceptance are still outstanding.
 
 The following cache 113 and earlier checkpoints are historical.

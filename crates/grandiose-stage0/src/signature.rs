@@ -141,6 +141,14 @@ pub struct CallableSignature {
 }
 
 impl CallableSignature {
+    pub(crate) fn prerequisites(&self) -> AssociatedItemContract {
+        AssociatedItemContract {
+            where_bounds: self.where_bounds.clone(),
+            where_outlives: self.where_outlives.clone(),
+            type_bindings: self.where_associated_type_bindings.clone(),
+            effect_bindings: self.where_associated_effect_bindings.clone(),
+        }
+    }
     /// Apply one checked, kind-preserving declaration substitution. Ordinary
     /// functions and selected implementation methods share this operation.
     pub(crate) fn instantiate_generic(&self, arguments: &[GenericArgument]) -> Result<Self, InstantiationError> {
@@ -444,16 +452,11 @@ pub struct ElaboratedAssociatedConstDefinition {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedEffectOperation {
     pub name: String,
-    /// Declaration and operation binders share this namespace.  The first
-    /// `effect_generics` slots belong to the protocol declaration.
-    pub generics: u32,
-    /// Full declaration-plus-operation generic kinds in the same slot order
-    /// as `generics`. Effect instantiation must retain quantity, region, and
-    /// row identity rather than forcing every protocol argument through a
-    /// type-only substitution boundary.
-    pub generic_kinds: Vec<GenericKind>,
-    pub parameters: Vec<Type>,
-    pub result: Type,
+    /// The ordinary declaration contract, including family prerequisites.
+    /// Family binders precede operation binders. Performing an operation is
+    /// not an ordinary function call: terminality and continuation quantity
+    /// remain separate, and only family arguments identify the effect.
+    pub signature: CallableSignature,
     pub terminal: bool,
     pub resumption: Quantity,
 }
@@ -464,6 +467,8 @@ pub struct ElaboratedEffect {
     /// Source-slot kinds are retained even though operation value signatures
     /// use only their type-valued subset.
     pub generic_kinds: Vec<GenericKind>,
+    pub contract: AssociatedItemContract,
+    pub universal_bounds: Vec<QuantifiedWhereBound>,
     pub operations: Vec<ElaboratedEffectOperation>,
 }
 
@@ -2354,18 +2359,13 @@ impl ElaboratedInterface {
                     }
                 }
                 ElaboratedHeader::Effect(effect) => {
+                    self.validate_nominal_projection_obligations(
+                        &ElaboratedNominalLayout::Opaque, &effect.contract,
+                        &effect.universal_bounds, &domain_solver, &mut diagnostics,
+                    );
                     for operation in &effect.operations {
-                        for parameter in &operation.parameters {
-                            self.validate_type_projection_obligations(projection_solver,
-                                parameter,
-                                &[],
-                                &mut diagnostics,
-                            );
-                        }
-                        self.validate_type_projection_obligations(projection_solver,
-                            &operation.result,
-                            &[],
-                            &mut diagnostics,
+                        self.validate_callable_projection_obligations(
+                            &operation.signature, vec![], vec![], &domain_solver, &mut diagnostics,
                         );
                     }
                 }
@@ -2457,9 +2457,7 @@ impl ElaboratedInterface {
         domain_solver.set_associated_bindings(signature.where_associated_type_bindings.clone(), signature.where_associated_effect_bindings.clone());
         if !signature.parameters.iter().chain(std::iter::once(&signature.result)).all(|ty| domain_solver.type_domains_proven(ty))
             || !domain_solver.row_domains_proven(&signature.effects)
-            || !domain_solver.contract_domains_proven(&AssociatedItemContract { where_bounds: signature.where_bounds.clone(),
-                where_outlives: signature.where_outlives.clone(), type_bindings: signature.where_associated_type_bindings.clone(),
-                effect_bindings: signature.where_associated_effect_bindings.clone() }) {
+            || !domain_solver.contract_domains_proven(&signature.prerequisites()) {
             diagnostics.push(SignatureDiagnostic { code: "G4303", message: "associated projection does not establish its declared domain requirements".into() });
         }
         self.validate_quantified_projection_obligations(projection_solver, &signature.universal_bounds, &ambient, diagnostics);
@@ -3199,38 +3197,38 @@ impl ElaboratedInterface {
         else {
             return Err(InstantiationError::WrongLayout);
         };
-        validate_generic_arguments(&effect.generic_kinds, arguments)?;
-        let operation = effect
+        let index = effect
             .operations
             .iter()
-            .find(|operation| operation.name == name)
+            .position(|operation| operation.name == name)
             .ok_or(InstantiationError::MissingMember)?;
-        let operation_kinds = operation
-            .generic_kinds
-            .get(effect.generics as usize..)
-            .ok_or(InstantiationError::WrongLayout)?;
-        validate_generic_arguments(operation_kinds, operation_arguments)?;
+        self.instantiate_effect_operation_at(definition, arguments, operation_arguments, index as u32)
+    }
+
+    pub(crate) fn instantiate_effect_operation_at(
+        &self, definition: DefKey, arguments: &[GenericArgument], operation_arguments: &[GenericArgument], index: u32,
+    ) -> Result<(u32, ElaboratedEffectOperation), InstantiationError> {
+        let Some(ElaboratedHeader::Effect(effect)) = self.definitions.get(&definition) else {
+            return Err(InstantiationError::MissingDefinition);
+        };
+        validate_generic_arguments(&effect.generic_kinds, arguments)?;
+        let operation = effect.operations.get(index as usize).ok_or(InstantiationError::MissingMember)?;
+        let signature = &operation.signature;
+        if effect.generics as usize != effect.generic_kinds.len()
+            || signature.generics as usize != signature.generic_kinds.len()
+            || signature.generic_kinds.get(..effect.generics as usize) != Some(effect.generic_kinds.as_slice())
+            || signature.safety != crate::Safety::Safe || signature.effects != EffectRow::empty()
+            || signature.invocation != Quantity::ONCE
+            || (operation.terminal && signature.result != Type::Never)
+        { return Err(InstantiationError::WrongLayout); }
+        validate_generic_arguments(&signature.generic_kinds[effect.generics as usize..], operation_arguments)?;
         let mut substitutions = arguments.to_vec();
         substitutions.extend_from_slice(operation_arguments);
-        let (index, operation) = effect
-            .operations
-            .iter()
-            .enumerate()
-            .find(|(_, operation)| operation.name == name)
-            .ok_or(InstantiationError::MissingMember)?;
         Ok((
-            index as u32,
+            index,
             ElaboratedEffectOperation {
                 name: operation.name.clone(),
-                generics: 0,
-                generic_kinds: vec![],
-                parameters: operation
-                    .parameters
-                    .iter()
-                    .cloned()
-                    .map(|ty| substitute_alias_generic_identity(ty, &substitutions))
-                    .collect(),
-                result: substitute_alias_generic_identity(operation.result.clone(), &substitutions),
+                signature: operation.signature.instantiate_generic(&substitutions)?,
                 terminal: operation.terminal,
                 resumption: operation.resumption,
             },
@@ -3244,40 +3242,12 @@ impl ElaboratedInterface {
         operation_arguments: &[Type],
         name: &str,
     ) -> Option<(u32, ElaboratedEffectOperation)> {
-        let ElaboratedHeader::Effect(effect) = self.definitions.get(&definition)? else {
-            return None;
-        };
-        if effect.generics as usize != arguments.len() {
-            return None;
-        }
-        let (index, operation) = effect
-            .operations
-            .iter()
-            .enumerate()
-            .find(|(_, operation)| operation.name == name)?;
-        let operation_generics = operation.generics.checked_sub(effect.generics)?;
-        if operation_generics as usize != operation_arguments.len() {
-            return None;
-        }
-        let mut substitutions = arguments.to_vec();
-        substitutions.extend_from_slice(operation_arguments);
-        Some((
-            index as u32,
-            ElaboratedEffectOperation {
-                name: operation.name.clone(),
-                generics: 0,
-                generic_kinds: vec![],
-                parameters: operation
-                    .parameters
-                    .iter()
-                    .cloned()
-                    .map(|ty| substitute_alias_generics(ty, &substitutions))
-                    .collect(),
-                result: substitute_alias_generics(operation.result.clone(), &substitutions),
-                terminal: operation.terminal,
-                resumption: operation.resumption,
-            },
-        ))
+        self.instantiate_effect_operation_generic(
+            definition,
+            &arguments.iter().cloned().map(GenericArgument::Type).collect::<Vec<_>>(),
+            &operation_arguments.iter().cloned().map(GenericArgument::Type).collect::<Vec<_>>(),
+            name,
+        ).ok()
     }
 
     /// Resolve a unit or tuple enum variant at one concrete nominal
@@ -3649,21 +3619,12 @@ impl ElaboratedInterface {
                     }
                 }
                 ElaboratedHeader::Effect(effect) => {
+                    effect.contract = effect.contract.map_terms(|argument|
+                        normalize_alias_generic_argument(argument, &aliases, &mut vec![], &mut diagnostics));
+                    effect.universal_bounds = effect.universal_bounds.iter().map(|bound|
+                        bound.map_terms(|argument| normalize_alias_generic_argument(argument, &aliases, &mut vec![], &mut diagnostics))).collect();
                     for operation in &mut effect.operations {
-                        operation.parameters = operation
-                            .parameters
-                            .clone()
-                            .into_iter()
-                            .map(|ty| {
-                                normalize_alias_type(ty, &aliases, &mut vec![], &mut diagnostics)
-                            })
-                            .collect();
-                        operation.result = normalize_alias_type(
-                            operation.result.clone(),
-                            &aliases,
-                            &mut vec![],
-                            &mut diagnostics,
-                        );
+                        normalize_callable_signature(&mut operation.signature, &aliases, &mut diagnostics);
                     }
                 }
                 ElaboratedHeader::Constant(None)
@@ -5115,6 +5076,10 @@ impl Elaborator<'_> {
     fn effect_header(&mut self, header: &EffectHeader) -> ElaboratedEffect {
         self.bind_generics(&header.generics);
         self.bound_generic_defaults(&header.generics, 0);
+        let (where_bounds, type_bindings, effect_bindings, universal_bounds) =
+            self.callable_where_bounds(&header.where_bounds);
+        let contract = AssociatedItemContract { where_bounds, type_bindings, effect_bindings,
+            where_outlives: self.outlives_bounds(&header.where_bounds) };
         let declaration_generics = self.generics.clone();
         let declaration_effect_row_generics = self.effect_row_generics.clone();
         let declaration_lifetime_generics = self.lifetime_generics.clone();
@@ -5134,28 +5099,35 @@ impl Elaborator<'_> {
                     "G3301",
                     "effect operation generic shadows a declaration generic",
                 );
+                let (mut where_bounds, mut type_bindings, mut effect_bindings, mut operation_universal) =
+                    self.callable_where_bounds(&operation.where_bounds);
+                where_bounds.splice(0..0, contract.where_bounds.clone());
+                type_bindings.splice(0..0, contract.type_bindings.clone());
+                effect_bindings.splice(0..0, contract.effect_bindings.clone());
+                operation_universal.splice(0..0, universal_bounds.clone());
+                let mut where_outlives = contract.where_outlives.clone();
+                where_outlives.extend(self.outlives_bounds(&operation.where_bounds));
                 ElaboratedEffectOperation {
                     name: operation.name.clone(),
-                    generics: base + operation.generics.len() as u32,
-                    generic_kinds: header
-                        .generics
-                        .kinds()
-                        .into_iter()
-                        .chain(operation.generics.kinds())
-                        .collect(),
-                    parameters: operation
-                        .parameters
-                        .iter()
-                        .map(|parameter| self.ty(&parameter.ty))
-                        .collect(),
-                    result: if operation.terminal {
-                        Type::Never
-                    } else {
-                        operation
-                            .result
-                            .as_ref()
-                            .map(|value| self.ty(value))
-                            .unwrap_or(Type::Unit)
+                    signature: CallableSignature {
+                        safety: crate::Safety::Safe,
+                        generics: base + operation.generics.len() as u32,
+                        generic_kinds: header.generics.kinds().into_iter()
+                            .chain(operation.generics.kinds()).collect(),
+                        parameters: operation.parameters.iter()
+                            .map(|parameter| self.ty(&parameter.ty)).collect(),
+                        result: if operation.terminal {
+                            Type::Never
+                        } else {
+                            operation.result.as_ref().map(|value| self.ty(value)).unwrap_or(Type::Unit)
+                        },
+                        effects: EffectRow::empty(),
+                        invocation: Quantity::ONCE,
+                        where_bounds,
+                        where_outlives,
+                        where_associated_type_bindings: type_bindings,
+                        where_associated_effect_bindings: effect_bindings,
+                        universal_bounds: operation_universal,
                     },
                     terminal: operation.terminal,
                     resumption: operation.resumption,
@@ -5169,6 +5141,8 @@ impl Elaborator<'_> {
         ElaboratedEffect {
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
+            contract,
+            universal_bounds,
             operations,
         }
     }

@@ -275,22 +275,9 @@ impl ElaboratedInterface {
             // Nominal fields are checked with their declaration contract by
             // validate_nominal_projection_obligations, not an empty scope.
             ElaboratedHeader::Nominal { .. } => return,
-            ElaboratedHeader::Effect(effect) => {
-                for operation in &effect.operations {
-                    let mut scoped = solver.fresh_query();
-                    scoped.set_outlives_assumptions(
-                        scoped.implied_outlives(operation.parameters.clone()),
-                    );
-                    if !operation
-                        .parameters
-                        .iter()
-                        .chain(std::iter::once(&operation.result))
-                        .all(|ty| scoped.type_domains_proven(ty))
-                    {
-                        diagnostics.push(SignatureDiagnostic { code: "G4303", message: "effect operation projection does not establish its declared domain requirements".into() });
-                    }
-                }
-            }
+            // Effect operations use the same declaration validator as
+            // callables, under their complete family/operation predicates.
+            ElaboratedHeader::Effect(_) => return,
             _ => {}
         }
         if types.is_empty() {

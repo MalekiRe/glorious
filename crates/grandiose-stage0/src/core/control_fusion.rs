@@ -634,8 +634,9 @@ impl Fusion<'_> {
                 let result = self.alloc(CoreKind::Completion { computation, clauses: output, refinement_test, handles_operations }, physical, span);
                 return Ok(self.with_contract(result, semantic));
             }
-            CoreKind::Perform { effect, operation, payload_types, arguments, terminal, reference_contract, reference_origin, reference_shape } => CoreKind::Perform {
+            CoreKind::Perform { effect, operation, operation_arguments, payload_types, arguments, terminal, reference_contract, reference_origin, reference_shape } => CoreKind::Perform {
                 effect: self.effect(effect, frame), operation, payload_types: payload_types.into_iter().map(|ty| self.ty(frame, ty)).collect(),
+                operation_arguments: operation_arguments.into_iter().map(|argument| self.argument(frame, argument)).collect(),
                 arguments: self.expressions(arguments, frame)?, terminal, reference_contract, reference_origin, reference_shape,
             },
             CoreKind::Handle { computation, clauses } => {
@@ -650,6 +651,7 @@ impl Fusion<'_> {
                     let mut child = frame.clone();
                     clause.brand = CallableBrand::HandlerClause { owner: self.owner, handler, clause: index as u32 };
                     clause.effect = self.effect(clause.effect, &child);
+                    clause.operation_arguments = clause.operation_arguments.into_iter().map(|argument| self.argument(&child, argument)).collect();
                     clause.payload_types = clause.payload_types.into_iter().map(|ty| self.ty(&child, ty)).collect();
                     clause.patterns = clause.patterns.into_iter().map(|pattern| self.pattern(pattern, &mut child, None)).collect();
                     clause.bindings = self.bindings(clause.bindings, &mut child);

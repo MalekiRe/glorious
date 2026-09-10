@@ -5,6 +5,64 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 115 / interface 21: effect declaration and application prerequisites
+
+The standard task declarations exposed a missing semantic path: effect-family
+`where` clauses were discarded, operation-local clauses were parsed as another
+operation, and the elaborated operation retained only payload/result types.
+Family predicates now use the existing declaration-domain product; operations
+use complete callable signatures, including inherited family bounds, associated
+type/row equalities, outlives predicates and universals. Normalization and checked
+mixed-kind substitution consume that product. The legacy type-only operation
+instantiator delegates to the same checked instantiation rule.
+
+Performances use the ordinary invocation-prerequisite checker after payload
+inference. Monomorphic handler applications must establish the same conditions;
+unresolved generic arguments are not assumed to satisfy them. Typed Core retains
+the operation arguments separately from family identity, substitutes and seals
+them, fingerprints them, and independently validates selection, prerequisites
+and payload/result compatibility. Tests corrupt phantom arguments on both sides
+without changing any runtime payload and require rejection.
+
+The shared solver now retains effect declarations and applies the nominal domain
+proof rule to effect-family applications, including unused rows. Intrinsic `Fn`
+and `RunsIn` associated items have compiler-owned declaration owners, allowing
+ordinary lexical-equality normalization without source trait headers. Environment
+prerequisites consume the existing branded-callable evidence independently of
+predicate order. Pending body-lifetime cells defer outlives proof until sealing
+instead of being mistaken for fully resolved terms.
+
+The eight source regression groups pass at O0/O2. Executed positives pass both
+fresh and decoded VM; negative cases cover missing traits, wrong callback result
+and row equalities, imported same-spelled traits, static-only evidence for a
+universal, and illegally lengthened reference/capture lifetimes. The task-shaped
+captured-callback case checks a declared body's environment contract; it does not
+execute a task provider or prove generic handler specialization. The integration
+gate passes 365 unit, 8 effect-contract, 22 higher-ranked-bound, 17 lifetime,
+12 nominal-contract and 22 request tests (446 total, none ignored;
+`target/effect-contracts-integration-v17.log`).
+The final effect-boundary regression gate passes 37 Core, 15 header, 2 interface,
+99 service and 18 signature tests (171 total;
+`target/effect-contracts-boundary-final-v18.log`). These two gates contain 617
+distinct passing checks. The unchanged source audit still reports 100 locked
+Glorious files and all 11,455 self-hosted acceptance contracts open.
+
+The fresh cache-114 full source matrix was 16 passing / 15 failing tests, unchanged
+from cache 112 (`target/cache114-library-source-matrix-v1.log`). With this effect
+correction, the exact `full_composition` root progresses past the former ten
+task-declaration errors into body checking. It still fails at the unchanged
+100-diagnostic limit, with 22 further errors suppressed
+(`target/effect-contracts-library-v14.log`). Reported categories include library
+Bytes/Slice mismatches, generic graph projections, custom-Drop deconstruction,
+unsafe UTF-8 operations, mandatory-tail provenance and minimum-use obligations.
+This is stronger integration evidence, not a passing library root.
+
+General polymorphic handlers, operation/task-registration specialization and
+native handlers remain open. Executable dispatch still requires a common
+payload/resumption ABI for each exact family and operation; the new source
+application proof is not a runtime generic-provider implementation. Library and
+self-hosted compiler completion remain unproved.
+
 ## Cache 114 / native ABI 12: loans of owned capture storage
 
 The previously failing positive that returns `&value` from a closure owning

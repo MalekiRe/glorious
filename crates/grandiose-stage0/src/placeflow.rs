@@ -3621,7 +3621,7 @@ impl Analyzer<'_> {
                 effect.definition, &effect.arguments, &[], &operation.name,
             ) else { return vec![]; };
             let origin = crate::core::callable_reference_origin_from_contract(
-                signatures, parameters, &Type::Tuple(operation.parameters),
+                signatures, parameters, &Type::Tuple(operation.signature.parameters),
             );
             match origin {
                 CallReferenceOrigin::Paths(incoming) => paths.extend(incoming),

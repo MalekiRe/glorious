@@ -457,6 +457,7 @@ pub struct EffectOperationHeader {
     /// Omitted result syntax is the unit type; terminality is represented
     /// separately so `!` can never be mistaken for a resumptive result.
     pub result: Option<HeaderType>,
+    pub where_bounds: Vec<WhereBoundHeader>,
     pub terminal: bool,
     pub resumption: Quantity,
     pub span: Span,
@@ -465,6 +466,7 @@ pub struct EffectOperationHeader {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectHeader {
     pub generics: GenericParameters,
+    pub where_bounds: Vec<WhereBoundHeader>,
     pub operations: Vec<EffectOperationHeader>,
 }
 
@@ -732,6 +734,7 @@ impl HeaderParse {
             DeclarationKind::Effect => {
                 parser.identifier();
                 let generics = parser.generics();
+                let where_bounds = parser.where_bounds();
                 let lexed = parser.lexed;
                 let source = parser.source;
                 let mut body_parser = Parser {
@@ -746,7 +749,7 @@ impl HeaderParse {
                     diagnostics: vec![],
                     recovered: false,
                 };
-                let value = body_parser.effect_header(generics);
+                let value = body_parser.effect_header(generics, where_bounds);
                 parser.diagnostics.extend(body_parser.diagnostics);
                 parser.recovered |= body_parser.recovered;
                 ParsedHeader::Effect(value)
@@ -1220,13 +1223,14 @@ impl Parser<'_> {
             methods,
         })
     }
-    fn effect_header(&mut self, generics: GenericParameters) -> EffectHeader {
+    fn effect_header(&mut self, generics: GenericParameters, where_bounds: Vec<WhereBoundHeader>) -> EffectHeader {
         let mut operations = vec![];
         let mut names = BTreeSet::new();
         if !self.punctuation('{') {
             self.error("G3248", "expected `{` after effect declaration");
             return EffectHeader {
                 generics,
+                where_bounds,
                 operations,
             };
         }
@@ -1250,6 +1254,7 @@ impl Parser<'_> {
             } else {
                 (None, false)
             };
+            let operation_bounds = self.where_bounds();
             if terminal && has_quantity {
                 self.error(
                     "G3250",
@@ -1288,6 +1293,7 @@ impl Parser<'_> {
                 generics: operation_generics,
                 parameters,
                 result,
+                where_bounds: operation_bounds,
                 terminal,
                 resumption,
                 span: self.span(start, end),
@@ -1298,6 +1304,7 @@ impl Parser<'_> {
         }
         EffectHeader {
             generics,
+            where_bounds,
             operations,
         }
     }

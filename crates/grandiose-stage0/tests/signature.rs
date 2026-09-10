@@ -2201,7 +2201,7 @@ fn trait_impl_and_effect_contracts_elaborate_with_stable_declaration_identity() 
     };
     assert_eq!(console.operations[1].resumption, Quantity::AFFINE);
     assert!(console.operations[2].terminal);
-    assert_eq!(console.operations[1].result, Type::Generic(0));
+    assert_eq!(console.operations[1].signature.result, Type::Generic(0));
 }
 
 #[test]

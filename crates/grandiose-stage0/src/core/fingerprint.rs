@@ -421,6 +421,7 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Perform {
                 effect,
                 operation,
+                operation_arguments,
                 payload_types,
                 arguments,
                 terminal,
@@ -431,6 +432,7 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(b"perform");
                 self.effect(effect);
                 self.bytes(&operation.to_le_bytes());
+                self.generic_arguments(operation_arguments);
                 self.bytes(&[*terminal as u8]);
                 self.types(payload_types);
                 self.ids(arguments);
@@ -449,6 +451,7 @@ impl CoreFingerprintEncoder<'_> {
                     self.callable_brand(clause.brand);
                     self.effect(&clause.effect);
                     self.bytes(&clause.operation.to_le_bytes());
+                    self.generic_arguments(&clause.operation_arguments);
                     self.types(&clause.payload_types);
                     self.bytes(&(clause.patterns.len() as u64).to_le_bytes());
                     for pattern in &clause.patterns {

@@ -68,6 +68,21 @@ fn named_definition_identity_and_public_interface_ignore_body_only_edits() {
 }
 
 #[test]
+fn effect_family_and_operation_bounds_seal_public_contracts() {
+    let base = collect("pub effect Gate<T> { gate<U>(U) -> U; }");
+    let family = collect("pub effect Gate<T> where T: Mark { gate<U>(U) -> U; }");
+    let operation = collect("pub effect Gate<T> { gate<U>(U) -> U where U: Mark; }");
+    for changed in [&family, &operation] {
+        assert!(changed.diagnostics.is_empty(), "{:?}", changed.diagnostics);
+        assert_ne!(base.interface.public_fingerprint, changed.interface.public_fingerprint);
+        // Named declaration identity is stable across revisions; its public
+        // contract fingerprint, not its DefKey, invalidates old consumers.
+        assert_eq!(base.interface.definitions[0].key, changed.interface.definitions[0].key);
+    }
+    assert_ne!(family.interface.public_fingerprint, operation.interface.public_fingerprint);
+}
+
+#[test]
 fn duplicate_names_in_one_namespace_are_structured_interface_errors() {
     let interface = collect("pub fn answer() { () } fn answer() { () }");
     assert_eq!(interface.diagnostics.len(), 1);

@@ -2,6 +2,7 @@
 
 mod fingerprint;
 mod callable_contracts;
+mod effect_contracts;
 mod control_bindings;
 pub(crate) mod control_fusion;
 pub(crate) mod label_dependencies;
@@ -318,6 +319,7 @@ pub struct CoreHandlerClause {
     pub brand: CallableBrand,
     pub effect: EffectInstance,
     pub operation: u32,
+    pub operation_arguments: Vec<GenericArgument>,
     /// Exact operation payload signature retained after body elaboration.
     /// MIR needs it when materializing a lexical frame for a sibling operation
     /// that is not the immediately visible `Perform` site.
@@ -746,6 +748,9 @@ pub enum CoreKind {
     Perform {
         effect: EffectInstance,
         operation: u32,
+        /// Checked application of the operation's own binders. These are
+        /// not part of the family identity, even when absent from payloads.
+        operation_arguments: Vec<GenericArgument>,
         /// The fully instantiated operation payload contract selected during
         /// body elaboration.  Keeping it beside the actual argument nodes
         /// makes effect performance an independently checkable callable
@@ -1360,7 +1365,7 @@ impl TypedBody {
         let mut outlives = outlives.to_vec();
         for (_, parameter) in &self.parameters { crate::OutlivesPredicate::implied_by_type(parameter, &mut outlives); }
         outlives.extend(scoped.implied_outlives(self.parameters.iter().map(|(_, ty)| ty.clone())));
-        scoped.set_outlives_assumptions(outlives);
+        scoped.set_outlives_assumptions(outlives.clone());
         let invalid_domain = terms.types.iter().find(|ty| !scoped.type_domains_proven(ty)).map(|ty| format!("type {ty:?}"))
             .or_else(|| terms.arguments.iter().find(|argument| !scoped.argument_domains_proven(argument)).map(|argument| format!("argument {argument:?}")))
             .or_else(|| terms.effect_rows.iter().find(|row| !scoped.row_domains_proven(row)).map(|row| format!("effect row {row:?}")));
@@ -1383,6 +1388,9 @@ impl TypedBody {
             .collect::<Vec<_>>();
         if let Some(invalid) = invalid_domain {
             diagnostics.push(CoreDiagnostic { code: "G4303", span, message: format!("Typed Core projection does not establish its declared domain requirements: {invalid}") });
+        }
+        for expression in &self.expressions {
+            effect_contracts::validate_application(expression, signatures, &scoped, &outlives, &mut diagnostics);
         }
         diagnostics
     }
@@ -1429,10 +1437,12 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
             .extend(trait_arguments.iter().chain(method_arguments)),
         CoreKind::Perform {
             effect,
+            operation_arguments,
             payload_types,
             ..
         } => {
             terms.arguments.extend(&effect.arguments);
+            terms.arguments.extend(operation_arguments);
             terms.types.extend(payload_types);
         }
         CoreKind::PatternTest {
@@ -1448,6 +1458,7 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         CoreKind::Handle { clauses, .. } => {
             for clause in clauses {
                 terms.arguments.extend(&clause.effect.arguments);
+                terms.arguments.extend(&clause.operation_arguments);
                 terms.types.extend(&clause.payload_types);
                 for pattern in &clause.patterns {
                     collect_pattern_projection_terms(pattern, terms);
@@ -2586,12 +2597,14 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
             .any(generic_argument_contains_inference),
         CoreKind::Perform {
             effect,
+            operation_arguments,
             payload_types,
             ..
         } => {
             effect
                 .arguments
                 .iter()
+                .chain(operation_arguments)
                 .any(generic_argument_contains_inference)
                 || payload_types.iter().any(type_contains_inference)
         }
@@ -2601,6 +2614,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
                 .effect
                 .arguments
                 .iter()
+                .chain(&clause.operation_arguments)
                 .any(generic_argument_contains_inference)
                 || clause.payload_types.iter().any(type_contains_inference)
                 || clause.patterns.iter().any(pattern_contains_inference)
@@ -2688,12 +2702,14 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
             .any(|argument| !is_canonical_generic_argument_identity(argument)),
         CoreKind::Perform {
             effect,
+            operation_arguments,
             payload_types,
             ..
         } => {
             effect
                 .arguments
                 .iter()
+                .chain(operation_arguments)
                 .any(|argument| !is_canonical_generic_argument_identity(argument))
                 || payload_types
                     .iter()
@@ -2715,6 +2731,7 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
                 .effect
                 .arguments
                 .iter()
+                .chain(&clause.operation_arguments)
                 .any(|argument| !is_canonical_generic_argument_identity(argument))
                 || clause
                     .payload_types
@@ -2852,10 +2869,11 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
             .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
         CoreKind::Perform {
             effect,
+            operation_arguments,
             payload_types,
             ..
         } => {
-            effect.arguments.iter().any(|argument| {
+            effect.arguments.iter().chain(operation_arguments).any(|argument| {
                 generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])
             }) || payload_types
                 .iter()
@@ -2865,7 +2883,7 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
             pattern_contains_out_of_scope_bound_lifetime(pattern)
         }
         CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
-            clause.effect.arguments.iter().any(|argument| {
+            clause.effect.arguments.iter().chain(&clause.operation_arguments).any(|argument| {
                 generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])
             }) || clause
                 .payload_types
@@ -4022,6 +4040,7 @@ struct ResolvedHandlerClause {
     source: HandlerClause,
     effect: EffectInstance,
     operation_index: u32,
+    operation_arguments: Vec<GenericArgument>,
     operation: crate::signature::ElaboratedEffectOperation,
     patterns: Vec<crate::pattern::PatternElaboration>,
     failed: bool,
@@ -4035,12 +4054,23 @@ impl ResolvedHandlerClause {
                 arguments: vec![],
             },
             operation_index: 0,
+            operation_arguments: vec![],
             operation: crate::signature::ElaboratedEffectOperation {
                 name: "<error>".into(),
-                generics: 0,
-                generic_kinds: vec![],
-                parameters: vec![],
-                result: Type::Error,
+                signature: CallableSignature {
+                    safety: crate::Safety::Safe,
+                    generics: 0,
+                    generic_kinds: vec![],
+                    parameters: vec![],
+                    result: Type::Error,
+                    effects: EffectRow::empty(),
+                    invocation: crate::Quantity::ONCE,
+                    where_bounds: vec![],
+                    where_outlives: vec![],
+                    where_associated_type_bindings: vec![],
+                    where_associated_effect_bindings: vec![],
+                    universal_bounds: vec![],
+                },
                 terminal: false,
                 resumption: crate::quantity::Quantity::ONCE,
             },
@@ -8528,6 +8558,7 @@ impl Elaborator<'_> {
             }
             CoreKind::Perform {
                 effect,
+                operation_arguments,
                 arguments,
                 payload_types,
                 reference_contract,
@@ -8541,6 +8572,8 @@ impl Elaborator<'_> {
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
+                *operation_arguments = operation_arguments.iter().cloned()
+                    .map(|argument| self.zonk_generic_argument(argument, span)).collect();
                 for payload_type in payload_types {
                     *payload_type = self.zonk_type(payload_type.clone(), span);
                 }
@@ -8595,6 +8628,8 @@ impl Elaborator<'_> {
             }
             CoreKind::Handle { clauses, .. } => {
                 for clause in clauses {
+                    clause.operation_arguments = clause.operation_arguments.iter().cloned()
+                        .map(|argument| self.zonk_generic_argument(argument, span)).collect();
                     clause.effect.arguments = clause
                         .effect
                         .arguments
@@ -12313,7 +12348,7 @@ impl Elaborator<'_> {
                 "effect operation generic arguments do not satisfy its declaration contract",
             ));
         };
-        if operation.parameters.len() != arguments.len() {
+        if operation.signature.parameters.len() != arguments.len() {
             return Some(self.fail(
                 span,
                 "G4153",
@@ -12326,12 +12361,12 @@ impl Elaborator<'_> {
         // constructed as `Packet<i64>` cannot satisfy the equivalent frozen
         // `Packet<<i64 as FacadedTrait>::Item>` operation parameter.
         let parameters = operation
-            .parameters
+            .signature.parameters
             .iter()
             .cloned()
             .map(|parameter| self.normalize_selectable_type_projections(parameter))
             .collect::<Vec<_>>();
-        let result = self.normalize_selectable_type_projections(operation.result.clone());
+        let result = self.normalize_selectable_type_projections(operation.signature.result.clone());
         let values = arguments
             .into_iter()
             .zip(&parameters)
@@ -12352,6 +12387,7 @@ impl Elaborator<'_> {
                 argument
             })
             .collect::<Vec<_>>();
+        self.check_callable_contract_bounds(operation.signature.clone(), Some(&values), span);
         // The selected operation payload/result contracts above are already
         // normalized before unification. Its protocol identity must cross the
         // same boundary: retaining a selectable associated type only in the
@@ -12392,6 +12428,7 @@ impl Elaborator<'_> {
             CoreKind::Perform {
                 effect: instance,
                 operation: operation_index,
+                operation_arguments,
                 payload_types,
                 arguments: values,
                 terminal: operation.terminal,
@@ -12418,23 +12455,18 @@ impl Elaborator<'_> {
             .operations
             .iter()
             .find(|operation| operation.name == name)?;
-        let kinds = operation.generic_kinds.get(effect.generics as usize..)?;
+        let kinds = operation.signature.generic_kinds.get(effect.generics as usize..)?;
         if supplied.is_empty() && !kinds.is_empty() {
             return Some(
                 kinds
                     .iter()
-                    .enumerate()
-                    .map(|(offset, kind)| match kind {
+                    .map(|kind| match kind {
                         crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
                         crate::GenericKind::EffectRow => {
                             GenericArgument::EffectRow(self.inference.fresh_effects())
                         }
-                        // The declaration-owned operation slot remains rigid
-                        // until the selected operation contract opens it at
-                        // the perform/handler boundary.
-                        crate::GenericKind::Lifetime => GenericArgument::Lifetime(
-                            Lifetime::Generic(effect.generics + offset as u32),
-                        ),
+                        crate::GenericKind::Lifetime =>
+                            GenericArgument::Lifetime(self.inference.fresh_lifetime()),
                         crate::GenericKind::Const(kind) => self.inference.fresh_const(*kind),
                     })
                     .collect(),
@@ -12590,13 +12622,13 @@ impl Elaborator<'_> {
             // contract than its dispatcher.
             let operation_parameters = clause
                 .operation
-                .parameters
+                .signature.parameters
                 .iter()
                 .cloned()
                 .map(|parameter| self.normalize_selectable_type_projections(parameter))
                 .collect::<Vec<_>>();
             let operation_result =
-                self.normalize_selectable_type_projections(clause.operation.result.clone());
+                self.normalize_selectable_type_projections(clause.operation.signature.result.clone());
             let resumption = if clause.operation.terminal {
                 if let Some(name) = &clause.source.resumption {
                     self.error(
@@ -12792,6 +12824,7 @@ impl Elaborator<'_> {
                 },
                 effect: clause.effect,
                 operation: clause.operation_index,
+                operation_arguments: clause.operation_arguments,
                 payload_types: operation_parameters,
                 patterns,
                 bindings,
@@ -13487,7 +13520,7 @@ impl Elaborator<'_> {
         // beyond the operation payload is the full-control continuation slot;
         // normalize it into the migration-era field so the typed Core below
         // has one canonical representation regardless of source spelling.
-        if source.resumption.is_none() && source.patterns.len() == operation.parameters.len() + 1 {
+        if source.resumption.is_none() && source.patterns.len() == operation.signature.parameters.len() + 1 {
             let continuation = source.patterns.pop().expect("length established above");
             match &self.body.pattern(continuation).kind {
                 crate::body::PatternKind::Binding(name) => {
@@ -13506,7 +13539,7 @@ impl Elaborator<'_> {
                 }
             }
         }
-        if operation.parameters.len() != source.patterns.len() {
+        if operation.signature.parameters.len() != source.patterns.len() {
             self.error(
                 source.span,
                 "G4165",
@@ -13518,7 +13551,7 @@ impl Elaborator<'_> {
             .patterns
             .iter()
             .copied()
-            .zip(operation.parameters.iter().cloned())
+            .zip(operation.signature.parameters.iter().cloned())
             .map(|(pattern, subject)| {
                 let scope = self.pattern_generic_scope();
                 let elaboration = elaborate_pattern_in_context(
@@ -13562,6 +13595,10 @@ impl Elaborator<'_> {
             );
             self.recovered = true;
         }
+        // This handler application is monomorphic. Its selected predicates
+        // must be established just like the corresponding performance; they
+        // are not fresh assumptions about unconstrained inference variables.
+        self.check_callable_contract_bounds(operation.signature.clone(), None, source.span);
         ResolvedHandlerClause {
             source,
             effect: EffectInstance {
@@ -13569,6 +13606,7 @@ impl Elaborator<'_> {
                 arguments: effect_arguments,
             },
             operation_index,
+            operation_arguments,
             operation,
             patterns,
             failed: false,
@@ -14164,7 +14202,13 @@ impl Elaborator<'_> {
     fn check_outlives_bound(&mut self, bound: crate::OutlivesPredicate, span: Span, defer: bool) {
         let mut unresolved = false;
         let bound = bound.map_terms(|argument| match self.inference.zonk_generic_argument(argument.clone()) {
-            Ok(argument) => argument,
+            Ok(argument) => {
+                // Pending body-region cells are valid inference terms, so
+                // zonking deliberately preserves them before sealing. They
+                // are not yet rigid inputs to an outlives proof.
+                unresolved |= generic_argument_contains_inference(&argument);
+                argument
+            }
             Err(_) => { unresolved = true; argument },
         });
         if unresolved && defer { self.pending_outlives.push((bound, span)); return; }

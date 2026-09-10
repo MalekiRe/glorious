@@ -2,6 +2,12 @@ use super::*;
 use crate::AssociatedItemContract;
 
 impl TraitSolver {
+    pub(crate) fn callable_prerequisites_proven(&mut self, signature: &crate::CallableSignature) -> bool {
+        let contract = signature.prerequisites();
+        self.contract_domains_proven(&contract)
+            && self.contract_proven(&contract, &Arc::clone(&self.lexical_assumptions), 0)
+            && signature.universal_bounds.iter().all(|bound| self.proves_universal(bound))
+    }
     pub(crate) fn outlives_proven(&mut self, predicate: &crate::OutlivesPredicate) -> bool {
         if predicate.proven_by(&self.lexical_outlives) {
             return true;
@@ -203,16 +209,7 @@ impl TraitSolver {
                 let universal = universal_bounds.iter().map(|bound| bound.instantiate(arguments)).collect::<Vec<_>>();
                 let mut bytes = b"nominal-domain-v1".to_vec();
                 bytes.extend_from_slice(&canonical_type_encoding(ty));
-                let key = Digest::of_bytes(&bytes);
-                if self.steps >= self.limits.max_steps || self.active_domains.contains(&key)
-                    || self.active_domains.len() >= self.limits.max_depth as usize { return false; }
-                self.steps += 1;
-                self.active_domains.push(key);
-                let proven = self.contract_domains_proven(&contract)
-                    && self.contract_proven(&contract, &Arc::clone(&self.lexical_assumptions), self.active_domains.len() as u32)
-                    && universal.iter().all(|bound| self.proves_universal(bound));
-                self.active_domains.pop();
-                proven
+                self.instantiated_domain_proven(Digest::of_bytes(&bytes), &contract, &universal)
             }
             Type::Tuple(types) => types.iter().all(|ty| self.type_domains_proven(ty)),
             Type::Array(ty)
@@ -257,12 +254,7 @@ impl TraitSolver {
     }
 
     pub(crate) fn row_domains_proven(&mut self, row: &EffectRow) -> bool {
-        row.effects.iter().all(|effect| {
-            effect
-                .arguments
-                .iter()
-                .all(|argument| self.argument_domains_proven(argument))
-        }) && row.projections.iter().all(|projection| {
+        row.effects.iter().all(|effect| self.effect_domain_proven(effect)) && row.projections.iter().all(|projection| {
             self.type_domains_proven(&projection.subject)
                 && projection
                     .trait_arguments
@@ -281,6 +273,36 @@ impl TraitSolver {
                     &projection.item_arguments,
                 )
         })
+    }
+
+    pub(crate) fn effect_domain_proven(&mut self, effect: &crate::EffectInstance) -> bool {
+        if !effect.arguments.iter().all(|argument| self.argument_domains_proven(argument)) { return false; }
+        let Some(ElaboratedHeader::Effect(declaration)) = self.definitions.get(&effect.definition) else {
+            return false;
+        };
+        if !generic_arguments_match_kinds(&effect.arguments, &declaration.generic_kinds) { return false; }
+        if declaration.contract == AssociatedItemContract::default() && declaration.universal_bounds.is_empty() { return true; }
+        let contract = declaration.contract.instantiate(&effect.arguments, &Type::Unit);
+        let universal = declaration.universal_bounds.iter().map(|bound| bound.instantiate(&effect.arguments)).collect::<Vec<_>>();
+        let mut bytes = b"effect-domain-v1".to_vec();
+        bytes.extend_from_slice(&effect.definition.0.as_bytes());
+        bytes.extend_from_slice(&canonical_generic_arguments_encoding(&effect.arguments));
+        self.instantiated_domain_proven(Digest::of_bytes(&bytes), &contract, &universal)
+    }
+
+    /// Nominal values and effect families admit applications under the same
+    /// predicate rule. Recursive domain obligations consume the same query
+    /// budget and never establish their own prerequisites.
+    fn instantiated_domain_proven(&mut self, key: Digest, contract: &AssociatedItemContract, universal: &[crate::QuantifiedWhereBound]) -> bool {
+        if self.steps >= self.limits.max_steps || self.active_domains.contains(&key)
+            || self.active_domains.len() >= self.limits.max_depth as usize { return false; }
+        self.steps += 1;
+        self.active_domains.push(key);
+        let proven = self.contract_domains_proven(contract)
+            && self.contract_proven(contract, &Arc::clone(&self.lexical_assumptions), self.active_domains.len() as u32)
+            && universal.iter().all(|bound| self.proves_universal(bound));
+        self.active_domains.pop();
+        proven
     }
 
     pub(crate) fn associated_contract(
@@ -344,6 +366,13 @@ impl TraitSolver {
     ) -> bool {
         if depth >= self.limits.max_depth {
             return false;
+        }
+        // A conjunction has no source-order dependency. Register the
+        // compiler-branded callable subjects through the existing evidence
+        // producer before asking an Environment prerequisite, even when
+        // that prerequisite was written before Fn/RunsIn.
+        for (subject, _) in &domain.where_bounds {
+            self.remember_callable_environments(subject);
         }
         if domain
             .where_outlives

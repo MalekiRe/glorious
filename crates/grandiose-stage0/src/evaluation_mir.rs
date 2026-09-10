@@ -1132,6 +1132,7 @@ impl Builder<'_> {
             CoreKind::Perform {
                 effect,
                 operation,
+                operation_arguments: _,
                 payload_types,
                 arguments,
                 terminal,
