@@ -6191,6 +6191,50 @@ struct VerifierState {
     resumption_return_result: Vec<(u32, VmType)>,
 }
 
+/// Facts owned by a resident value, as distinct from its register's storage
+/// lifetime. Parallel ownership edges snapshot these before retiring any
+/// source or overwriting a destination.
+struct VerifierValue {
+    references: ReferenceOriginSet,
+    independent: bool,
+    referent_independent: bool,
+    label: Option<label_dispatch::LocalLabel>,
+    destruction_preserves: bool,
+    invocation_preserves: bool,
+    labels: bool,
+    resumptions: ResumptionValue,
+}
+
+impl VerifierValue {
+    fn snapshot(function: &VmFunction, states: &VerifierState, register: u32) -> Self {
+        let index = register as usize;
+        Self {
+            references: states.reference_origins[index].clone(),
+            independent: tail_provenance::independent(function, states, register),
+            referent_independent: tail_provenance::referent_independent(function, states, register),
+            label: states.local_labels[index],
+            destruction_preserves: tail_provenance::destruction_preserving(function, states, register),
+            invocation_preserves: tail_provenance::invocation_preserving(function, states, register),
+            labels: states.labels[index],
+            resumptions: states.resumptions[index].clone(),
+        }
+    }
+
+    fn install(self, function: &VmFunction, states: &mut VerifierState, register: u32) -> Result<(), VmArtifactError> {
+        write(states, register)?;
+        let index = register as usize;
+        states.reference_origins[index] = self.references;
+        states.frame_independent[index] = self.independent;
+        states.referent_independent[index] = self.referent_independent;
+        states.local_labels[index] = label_dispatch::retain_at(function, register, self.label);
+        states.destruction_preserves_frames[index] = self.destruction_preserves;
+        states.invocation_preserves_frames[index] = self.invocation_preserves;
+        states.labels[index] = self.labels;
+        states.resumptions[index] = self.resumptions;
+        Ok(())
+    }
+}
+
 /// A handler dispatch PC can be entered both initially and by a deep
 /// resumption. These are separate return contexts, not an ordinary CFG join.
 /// Within each context all register, ownership and handler-stack joins remain
@@ -6202,6 +6246,20 @@ struct VerifierContext {
 }
 
 impl VerifierState {
+    fn retire_value(&mut self, register: u32) {
+        let index = register as usize;
+        self.registers[index] = Some(false);
+        self.may_initialized[index] = false;
+        self.reference_origins[index].clear();
+        self.frame_independent[index] = false;
+        self.referent_independent[index] = false;
+        self.local_labels[index] = None;
+        self.destruction_preserves_frames[index] = false;
+        self.invocation_preserves_frames[index] = false;
+        self.labels[index] = false;
+        self.resumptions[index] = ResumptionValue::None;
+    }
+
     fn context(&self) -> VerifierContext {
         VerifierContext {
             resuming: self.resuming,
@@ -8228,17 +8286,9 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
             VmInstruction::Move { dst, src } => {
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
-                states[*src as usize] = Some(false);
-                states.labels[*dst as usize] = states.labels[*src as usize];
-                states.labels[*src as usize] = false;
-                let resumptions = states.resumptions[*src as usize].clone();
-                states.resumptions[*src as usize] = ResumptionValue::None;
-                write(&mut states, *dst)?;
-                states.resumptions[*dst as usize] = resumptions;
-                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize].clone();
-                }
-                states.reference_origins[*src as usize].clear();
+                let value = VerifierValue::snapshot(function, &states, *src);
+                states.retire_value(*src);
+                value.install(function, &mut states, *dst)?;
             }
             VmInstruction::Borrow {
                 dst,
@@ -8824,9 +8874,13 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                     });
                 }
                 let mut written = BTreeSet::new();
+                let mut consumed = BTreeSet::new();
                 for (&argument, &destination) in arguments.iter().zip(destinations) {
                     read(&states, argument)?;
                     same_type(function, destination, argument)?;
+                    if !consumed.insert(argument) {
+                        return Err(VmArtifactError::MalformedEncoding { message: "label transfer repeats an owned payload carrier" });
+                    }
                     if !written.insert(destination) {
                         return Err(VmArtifactError::InvalidRegister {
                             register: destination,
@@ -8842,18 +8896,16 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 }
                 states.handlers.truncate(handler_depth);
                 for value in &mut states.resumptions { *value = value.opaque(); }
-                let transferred_proofs = arguments.iter().map(|argument| (
-                    tail_provenance::independent(function, &states, *argument),
-                    tail_provenance::referent_independent(function, &states, *argument),
-                    tail_provenance::destruction_preserving(function, &states, *argument),
-                    tail_provenance::invocation_preserving(function, &states, *argument),
-                )).collect::<Vec<_>>();
-                for (&destination, (independent, referent_independent, destruction_preserves, invocation_preserves)) in destinations.iter().zip(transferred_proofs) {
-                    write(&mut states, destination)?;
-                    states.frame_independent[destination as usize] = independent;
-                    states.referent_independent[destination as usize] = referent_independent;
-                    states.destruction_preserves_frames[destination as usize] = destruction_preserves;
-                    states.invocation_preserves_frames[destination as usize] = invocation_preserves;
+                let transferred = arguments.iter().map(|argument| VerifierValue::snapshot(function, &states, *argument)).collect::<Vec<_>>();
+                for argument in arguments { states.retire_value(*argument); }
+                for (&destination, value) in destinations.iter().zip(transferred) {
+                    // A parallel phi edge may rotate or retain one of its
+                    // consumed carriers. Its old resident was already moved;
+                    // this is not permission to overwrite an unrelated owner.
+                    if consumed.contains(&destination) && !states.source_storage[destination as usize] {
+                        states.registers[destination as usize] = None;
+                    }
+                    value.install(function, &mut states, destination)?;
                 }
                 propagate_state(&mut incoming, &mut worklist, *target, &states)?;
                 advances = false;
@@ -8972,15 +9024,7 @@ fn verify_function_control_with_reference_inputs(function: &VmFunction, check_re
                 if !seen.insert(argument) {
                     return Err(VmArtifactError::MalformedEncoding { message: "consuming call repeats an argument carrier" });
                 }
-                states.registers[argument as usize] = Some(false);
-                states.reference_origins[argument as usize].clear();
-                states.frame_independent[argument as usize] = false;
-                states.referent_independent[argument as usize] = false;
-                states.local_labels[argument as usize] = None;
-                states.destruction_preserves_frames[argument as usize] = false;
-                states.invocation_preserves_frames[argument as usize] = false;
-                states.labels[argument as usize] = false;
-                states.resumptions[argument as usize] = ResumptionValue::None;
+                states.retire_value(argument);
             }
         }
         if advances {
@@ -14797,11 +14841,26 @@ fn complete_pending_leave(
     {
         return Err(VmArtifactError::HandlerStateMismatch);
     }
+    let handler_depth = leave.handler_depth as usize;
+    if handler_depth > handlers.len() {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    let mut consumed = BTreeSet::new();
+    for argument in &leave.arguments {
+        if !consumed.insert(*argument) {
+            return Err(VmArtifactError::MalformedEncoding { message: "label transfer repeats an owned payload carrier" });
+        }
+    }
     let values = leave
         .arguments
         .iter()
         .map(|argument| registers.copy_value(*argument, budget))
         .collect::<Result<Vec<_>, _>>()?;
+    // Materialization above is a parallel transport snapshot, not source
+    // Copy. Retire all predecessor carriers before installing any successor
+    // value, including cycles and identity edges. Cleanup must not destroy a
+    // second owner of the same callable environment after the rejoin.
+    for argument in &leave.arguments { registers.clear_value(*argument); }
     for (&destination, value) in leave.destinations.iter().zip(values) {
         let slot =
             registers
@@ -14815,10 +14874,6 @@ fn complete_pending_leave(
     // A leave has crossed every active lexical handler. Any captured one-shot
     // continuation was abandoned by the source control transfer, so no frame
     // survives that could later re-authorize a stale snapshot.
-    let handler_depth = leave.handler_depth as usize;
-    if handler_depth > handlers.len() {
-        return Err(VmArtifactError::HandlerStateMismatch);
-    }
     handlers.truncate(handler_depth);
     Ok(leave.target as usize)
 }

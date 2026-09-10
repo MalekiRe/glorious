@@ -56,6 +56,9 @@ impl Inputs for Analyzer<'_> {
 }
 
 impl crate::callable_control::PayloadInputs for Analyzer<'_> {
+    type Value = Value;
+    fn project(&self, value: &Value, path: &[u32]) -> Option<Value> { Inputs::project(self, value, path) }
+    fn captures(&self, callable: &Operand<Value>) -> CapturedInputs<Value> { Inputs::captures(self, callable) }
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         fn project(value: Value, fields: &[u32]) -> Value {
             match value {
@@ -181,6 +184,13 @@ impl Analyzer<'_> {
                     .map(|field| self.materialize_payload(field, span))
                     .collect(),
             ),
+            value @ ResolvedPayload::Callable { .. } => {
+                let value = control::known_payload(value, &self.values, &mut self.control_captures, self.signatures).expect("represented constructor");
+                if control::unrepresented_capture(&value) {
+                    self.error(span, "G5023", "callable payload has an unrepresented capture provenance");
+                }
+                value
+            }
             ResolvedPayload::Unknown(ty) => {
                 if crate::core::tail::tail_owned_type(self.signatures, &ty, &mut vec![]) {
                     Value::FrameIndependent

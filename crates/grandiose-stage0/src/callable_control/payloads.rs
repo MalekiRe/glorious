@@ -21,6 +21,9 @@ pub(crate) enum PayloadSource {
         path: Vec<u32>,
     },
     Aggregate(Vec<InvocationPayload>),
+    /// A returned constructor retains typed capture inputs, not addressable
+    /// aggregate fields. Its code authority is sealed to the defining body.
+    Callable { constructor: ClosureControl, captures: Vec<InvocationPayload> },
     /// Address-preserving projection of an existing input loan, distinct
     /// from reading the reference's contents or borrowing an owned input.
     Reborrow { input: Box<InvocationPayload>, fields: Vec<u32> },
@@ -30,6 +33,21 @@ pub(crate) enum PayloadSource {
 }
 
 impl InvocationPayload {
+    /// Constructor identities positively retained by this result relation.
+    /// Absence here is not proof that an unknown result has no environment.
+    pub(crate) fn constructors(&self, result: &mut std::collections::BTreeSet<EnvironmentBrand>) {
+        match &self.source {
+            PayloadSource::Callable { constructor, captures } => {
+                result.insert(constructor.brand());
+                for capture in captures { capture.constructors(result); }
+            }
+            PayloadSource::Aggregate(fields) => {
+                for field in fields { field.constructors(result); }
+            }
+            PayloadSource::Reborrow { input, .. } => input.constructors(result),
+            _ => {}
+        }
+    }
     pub(super) fn unknown(ty: Type) -> Self {
         Self {
             ty,
@@ -45,7 +63,7 @@ impl InvocationPayload {
             unreachable!("payload type substitution");
         };
         self.ty = ty;
-        if let PayloadSource::Aggregate(fields) = &mut self.source {
+        if let PayloadSource::Aggregate(fields) | PayloadSource::Callable { captures: fields, .. } = &mut self.source {
             for field in fields {
                 field.instantiate_types(arguments);
             }
@@ -59,10 +77,15 @@ impl InvocationPayload {
 pub(crate) enum ResolvedPayload<V> {
     Inputs { ty: Type, values: Vec<V> },
     Aggregate(Vec<ResolvedPayload<V>>),
+    Callable { ty: Type, constructor: ClosureControl, captures: Vec<(Type, ResolvedPayload<V>)> },
     Unknown(Type),
 }
 
-pub(crate) trait PayloadInputs: crate::resident_invocations::Inputs {
+pub(crate) trait PayloadInputs {
+    type Value: Clone;
+    fn project(&self, value: &Self::Value, path: &[u32]) -> Option<Self::Value>;
+    fn captures(&self, callable: &crate::resident_invocations::Operand<Self::Value>)
+        -> crate::resident_invocations::CapturedInputs<Self::Value>;
     /// Project the referent of a frozen reference snapshot without reading
     /// that referent's contents or creating a new caller-owned storage slot.
     fn reborrow(&self, reference: &Self::Value, fields: &[u32]) -> Option<Self::Value>;
@@ -119,6 +142,10 @@ pub(crate) fn resolve_payload<D: PayloadInputs>(
                     .map(|value| domain.reborrow(value, fields)).collect::<Option<Vec<_>>>(),
                 _ => None,
             }
+        }
+        PayloadSource::Callable { constructor, captures } => {
+            return ResolvedPayload::Callable { ty: payload.ty.clone(), constructor: constructor.clone(),
+                captures: captures.iter().map(|capture| (capture.ty.clone(), resolve_payload(capture, callable, arguments, domain))).collect() };
         }
         PayloadSource::Unknown => None,
     };
@@ -214,24 +241,35 @@ fn reborrow_path(value: &ControlValue, input: &ControlValue) -> Option<(Vec<u32>
     None
 }
 
-fn construct(
-    value: &ControlValue,
-    derive: &impl Fn(&ControlValue) -> InvocationPayload,
-) -> InvocationPayload {
-    InvocationPayload {
-        ty: value.ty.clone(),
-        source: match &value.shape {
-            ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields) => {
-                PayloadSource::Aggregate(fields.iter().map(derive).collect())
+impl BoundControlSummaries<'_> {
+fn construct_payload(&self, value: &ControlValue,
+    derive: &impl Fn(&ControlValue) -> InvocationPayload) -> InvocationPayload {
+    let source = match &value.shape {
+        ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields) =>
+            PayloadSource::Aggregate(fields.iter().map(derive).collect()),
+        ControlValueShape::Callable { brand: CallableBrand::Closure(brand), .. } => {
+            let selected = self.staged_body(brand.owner).and_then(|body|
+                body.expressions.iter().enumerate().find(|(_, expression)|
+                    matches!(&expression.kind, CoreKind::Closure { environment, .. } if environment.brand == *brand)));
+            match selected.and_then(|(index, _)| self.closure_constructor(brand.owner, CoreId(index as u32)))
+                .zip(self.capture_inputs(value)) {
+                Some((constructor, captures)) => PayloadSource::Callable { constructor,
+                    captures: captures.into_iter().map(|capture| {
+                        // Borrowed formation retains the factory's own slot;
+                        // its address is not an incoming caller reference.
+                        if capture.contents.is_empty() { derive(&capture.value) }
+                        else { InvocationPayload::unknown(capture.resident_ty) }
+                    }).collect() },
+                None => PayloadSource::Unknown,
             }
-            // A nominal owner's logical residents need not be represented by
-            // its physical fields. Do not reconstruct that proof from layout.
-            _ => PayloadSource::Unknown,
-        },
-    }
+        }
+        // Nominal logical residents need not equal physical fields.
+        _ => PayloadSource::Unknown,
+    };
+    InvocationPayload { ty: value.ty.clone(), source }
 }
 
-pub(super) fn declared_payload(value: &ControlValue) -> InvocationPayload {
+pub(super) fn declared_payload(&self, value: &ControlValue) -> InvocationPayload {
     let mut root = &value.origin;
     while let ControlOrigin::Field { base, .. } = root {
         root = base;
@@ -245,7 +283,8 @@ pub(super) fn declared_payload(value: &ControlValue) -> InvocationPayload {
             },
         };
     }
-    construct(value, &declared_payload)
+    self.construct_payload(value, &|value| self.declared_payload(value))
+}
 }
 
 struct CapturedInput {
@@ -267,8 +306,11 @@ impl BoundControlSummaries<'_> {
             receiver_path.push(crate::core::REFERENCE_PATH_DEREF);
             callable = value;
         }
-        let captures = self.capture_inputs(callable);
+        // Missing receiver captures cannot establish a capture projection.
+        // Explicit argument dependencies can still be retained positively.
+        let captures = self.capture_inputs(callable).unwrap_or_default();
         fn derive(
+            bound: &BoundControlSummaries<'_>,
             value: &ControlValue,
             arguments: &[ControlValue],
             captures: &[CapturedInput],
@@ -321,14 +363,14 @@ impl BoundControlSummaries<'_> {
                     } };
                 }
             }
-            construct(value, &|value| {
-                derive(value, arguments, captures, receiver_path, callable_ty)
+            bound.construct_payload(value, &|value| {
+                derive(bound, value, arguments, captures, receiver_path, callable_ty)
             })
         }
-        derive(value, arguments, &captures, &receiver_path, &callable.ty)
+        derive(self, value, arguments, &captures, &receiver_path, &callable.ty)
     }
 
-    fn capture_inputs(&self, callable: &ControlValue) -> Vec<CapturedInput> {
+    fn capture_inputs(&self, callable: &ControlValue) -> Option<Vec<CapturedInput>> {
         let ControlValueShape::Callable {
             brand: CallableBrand::Closure(brand),
             captures,
@@ -336,13 +378,13 @@ impl BoundControlSummaries<'_> {
             ..
         } = &callable.shape
         else {
-            return vec![];
+            return None;
         };
         let Some(summary) = self.summaries.get(CallableBrand::Named(brand.owner)) else {
-            return vec![];
+            return None;
         };
         let Some(seal) = summary.dependencies.get(&brand.owner) else {
-            return vec![];
+            return None;
         };
         let Some(environment) =
             seal.body
@@ -355,12 +397,12 @@ impl BoundControlSummaries<'_> {
                     _ => None,
                 })
         else {
-            return vec![];
+            return None;
         };
         if environment.captures.len() != captures.len() {
-            return vec![];
+            return None;
         }
-        environment
+        Some(environment
             .captures
             .iter()
             .zip(captures)
@@ -384,6 +426,6 @@ impl BoundControlSummaries<'_> {
                     contents: formation.contents_path().to_vec(),
                 }
             })
-            .collect()
+            .collect())
     }
 }

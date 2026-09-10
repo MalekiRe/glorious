@@ -5,6 +5,71 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 109 / verifier 38: checked factory capabilities and owned label edges
+
+The shared invocation result now carries body-sealed callable constructors and
+typed capture-input relations. Source lifetime and place analyses consume this
+same payload, preserving capture obligations through generic factories, forwarded
+results and aggregates. Missing captures remain unknown; an independently owned
+computed capture is not confused with a reference or opaque input.
+
+Resource checking registers the checked body batch before evaluating any body.
+Factory and returned-closure execution use the existing quantity solver with
+caller contract identities, checked body/flow seals and bounded expansion.
+Alternative returned constructors join uses as branches, not sequential calls.
+The superseded per-body staging path and redundant callable binding field are
+removed. Missing/stale body evidence and unsupported recursive expansion reject
+instead of granting invocation permission.
+
+Structural fusion consumes those constructor demands and carries representation
+contracts with actual values, inputs, fields, references and capture environments.
+Erased callable type equality no longer selects a constructor. Compatible branch
+results retain their finite constructor alternatives; an ordinary unknown value
+cannot acquire a callable representation proof. Local replacement conservatively
+retains possible tags, while unsupported control replacement through borrowed or
+captured storage rejects explicitly.
+
+The computed-capture regression exposed a real ownership error in label rejoin:
+the VM copied a payload but left its predecessor carrier initialized, allowing
+cleanup to destroy the callable environment still owned by the successor. Leave
+now performs parallel owned transfer in the VM, verifier and native emitter.
+Resident proof snapshots move separately from storage lifetime; all source
+carriers retire before any destination is installed, including cycles and
+identity edges. Native transfer preserves initialization masks and moved-field
+holes. Exact local-label proof is retained only at private destination storage.
+
+The main focused gate passes **152 tests**, none failed or ignored
+(`target/factory-capture-final-v6.log`): 21 library units, 16 fusion groups, 26
+Core tests, one request identity check, two semantic cases, 59 service tests and
+27 bytecode tests. Fresh/decoded O0/O2 checks cover the original generic factory
+resumption case, forwarded/aggregate and alternative captures, exact quantities,
+escaping captures and computed capture values. VM and native O0/O2 checks cover
+parallel ownership and partial initialization. Native/mixed nominal-payload
+destruction checks do not establish a native captured-callable or handler ABI.
+The earlier v1-v4 runs exposed the successive missing representation and runtime
+ownership boundaries; they are not passing acceptance gates. The v5 gate passed
+16 focused tests before the larger v6 run.
+
+After the destination-private-label safeguard, the supplemental v8 gate passes
+12 tests with none failed or ignored
+(`target/factory-capture-supplemental-v8.log`): two library units, nine fusion
+groups and one bytecode ownership group. The preceding v7 attempt failed to
+compile because the new unit fixture supplied a nonexistent instruction field;
+the fixture was corrected without changing its assertion.
+
+No broad library/service sweep was repeated. The source-library matrix remains
+cache 105's 16 passes and 15 failures. Full helper-family entry, mandatory-tail
+activation transfer, guarded storage outcomes, borrowed/cross-frame resumptions,
+native owned handlers and ordinary native captured-callable storage remain open.
+Arbitrary recursive factories and incompatible joined environment layouts are
+not supported by this bounded implementation. This is not compiler/library
+completion or self-hosting acceptance.
+
+Source cache generation is 109 and verifier generation is 38. Bytecode remains
+72, its schema remains 116, and native ABI generation remains 8.
+The refreshed source closure audit passes with 100 locked source files and all
+11,455 public contracts still open.
+
 ## Cache 108: source control lifetimes and shared resumption quantity checking
 
 Resumption capture admission now comes from EscapeFlow's existing resident-value

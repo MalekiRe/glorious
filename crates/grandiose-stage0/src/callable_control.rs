@@ -414,6 +414,9 @@ impl ControlSummarySet {
 /// exact invocation count, mutation ordering, or branch-correlation proof.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct InvocationControl {
+    /// Independently sealed static declaration selection; outcome gaps do not
+    /// erase code identity. Resource consumers still bind the checked body.
+    pub declared_function: Option<DefKey>,
     pub normal: bool,
     pub labels: std::collections::BTreeSet<LabelBrand>,
     pub outer_transfer: bool,
@@ -453,9 +456,10 @@ pub(crate) enum FusionTarget {
 /// This authority comes from the sealed Core declaration, not from observing
 /// one execution path. Its branded callable type may therefore select the
 /// same body in a well-typed but unobserved branch.
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ClosureControl {
     brand: EnvironmentBrand,
+    input: crate::Digest,
     labels: std::collections::BTreeSet<LabelBrand>,
     nominal_type: bool,
 }
@@ -463,6 +467,9 @@ impl ClosureControl {
     pub(crate) fn brand(&self) -> EnvironmentBrand { self.brand }
     pub(crate) fn labels(&self) -> &std::collections::BTreeSet<LabelBrand> { &self.labels }
     pub(crate) fn nominal_type(&self) -> bool { self.nominal_type }
+    pub(crate) fn matches_body(&self, body: &TypedBody) -> bool {
+        self.input == body.semantic_fingerprint()
+    }
 }
 
 impl InvocationControl {
@@ -552,7 +559,7 @@ impl BoundControlSummaries<'_> {
         let nominal_type = crate::core::callable_environment_has_brand(&expression.ty, environment.brand);
         let erased_type = matches!(&expression.ty, Type::Callable { contract, .. } if contract.environment.is_none());
         if (!environment.captures.is_empty() || !labels.is_empty()) && !nominal_type && !erased_type { return None; }
-        Some(ClosureControl { brand: environment.brand, labels, nominal_type })
+        Some(ClosureControl { brand: environment.brand, input: seal.identity.body, labels, nominal_type })
     }
 
     pub(crate) fn lexical_dependencies(&self, owner: DefKey) -> Option<&crate::core::label_dependencies::LabelDependencies> {
@@ -674,8 +681,11 @@ impl BoundControlSummaries<'_> {
         // fabricated observation of the preceding computation or its guards.
         for (index, expression) in body.expressions.iter().enumerate() {
             let id = CoreId(index as u32);
-            if calls.get(&id).is_some_and(|control| !control.unknown) { continue; }
             if let Some(mut control) = self.declared_call_control(&body, expression, seal.labels.as_ref()?) {
+                if let Some(observed) = calls.get_mut(&id) {
+                    observed.declared_function = control.declared_function;
+                    if !observed.unknown { continue; }
+                }
                 // A complete abstract callee contract can settle coverage,
                 // but cannot erase a more precise observed input dependency.
                 if let Some(observed) = calls.get(&id) {
@@ -716,7 +726,7 @@ impl BoundControlSummaries<'_> {
         let substitutions = summary.dependencies.get(&definition).and_then(|seal|
             crate::callable_declarations::selected_template(&seal.interface, body.expression(*callee)))
             .map(|template| template.arguments);
-        let mut control = InvocationControl::default();
+        let mut control = InvocationControl { declared_function: Some(definition), ..Default::default() };
         if summary.alternatives.is_empty() { control.unknown = true; }
         for path in &summary.alternatives {
             match &path.outcome {
@@ -724,7 +734,7 @@ impl BoundControlSummaries<'_> {
                     match arguments.get(*parameter as usize).map(|argument| &body.expression(*argument).kind) {
                         Some(CoreKind::LabelValue { brand }) => {
                             control.labels.insert(*brand);
-                            let mut payload = payloads::declared_payload(value);
+                            let mut payload = self.declared_payload(value);
                             if let Some(arguments) = &substitutions { payload.instantiate_types(arguments); }
                             control.transfers.push(InvocationTransfer {
                                 target: Some(*brand), payload,
@@ -737,7 +747,7 @@ impl BoundControlSummaries<'_> {
                 }
                 ControlOutcome::LabelExit { .. } => control.unknown = true,
                 ControlOutcome::Return(value) => {
-                    let mut payload = payloads::declared_payload(value);
+                    let mut payload = self.declared_payload(value);
                     if let Some(arguments) = &substitutions { payload.instantiate_types(arguments); }
                     control.include(&path.outcome, CallableBrand::Named(definition), Some(payload));
                 }

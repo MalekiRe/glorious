@@ -504,10 +504,51 @@ holes at every structural depth. The selected storage root must still exist;
 moving it clears that root, and selecting a hole as a value remains invalid.
 This preserves initialization state, not a source Copy or invocation permission.
 
-This is not complete higher-order lifetime analysis. Generic factories with
-unknown resumption inputs still lack a complete captured-control proof and
-representation. Guard-correlated storage outcomes, full helper-family fusion,
-borrowed/cross-frame resumption transfer and native handlers remain open.
+This is not complete higher-order lifetime analysis. The factory-result
+migration below supplies checked constructor/capture relations, not arbitrary
+opaque callback behavior. Guard-correlated storage outcomes, full helper-family
+fusion, borrowed/cross-frame resumption transfer and native handlers remain open.
+
+## Factory results and owned label payloads
+
+The shared invocation payload relation retains returned closure constructors,
+sealed defining-body identities and typed capture projections. Ownership records
+these as capture provenance, not ordinary result-reference partitions or aliases
+of the callable's physical resident. Escape checking retains the same captured
+control brands and loans. Computed captures require an independent owned-type
+proof when no incoming projection represents them; unknown reference or callable
+contents cannot establish independence.
+
+All source ownership products are staged before quantity checking can inspect
+another body. UseFlow binds the checked defining body and its own closure loan
+product, and runs its existing quantity solver with the caller's capability
+identities. A factory's eager execution and returned capability are one transfer;
+blanket outgoing-argument accounting would double-count that capability. Arena
+caches are frame-local, while capability keys survive calls. Result alternatives
+join instead of adding branch counts. Missing/stale bodies and unbounded recursive
+expansion reject; may-outcomes do not become an independent quantity counter.
+
+Fusion consumes the returned-constructor obligations before helper expansion.
+Its existing value/input representation now carries closed constructor choices
+through captures, tuples, projections, references and result joins. An erased
+callable type cannot recover code identity. Compatible choices dispatch on their
+actual tags; incompatible or unrepresented joins reject. Local storage updates
+retain a conservative union of represented tags across branches and rejoins.
+Control-value replacement through captured/borrowed storage remains unsupported.
+
+Runtime label edges, like ordinary block-parameter edges, transfer ownership.
+The verifier and VM snapshot all payloads before retiring predecessor carriers
+and installing successors, preserving parallel swaps and identity edges. Reusing
+or duplicating a consumed carrier rejects. Value provenance moves separately
+from storage lifetime, and exact local-label facts retain the existing private
+storage requirement. Expired resumption contents remain tainted, not empty.
+Native emission transports initialization masks with the bytes, clears sources,
+and does not revive moved-out fields. This also prevents source cleanup from
+destroying a callable environment still owned by the label result.
+
+This completes the tested finite, checked-body factory composition slice. It
+does not supply native captured-callable/handler ABIs, mandatory-tail activation
+fusion, arbitrary recursive factories or complete guarded storage analysis.
 
 ## Executable resumption value provenance
 

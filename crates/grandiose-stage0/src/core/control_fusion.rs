@@ -27,6 +27,7 @@ struct Frame {
     refinements: BTreeMap<RefinementBrand, RefinementBrand>,
     replacements: Vec<(Type, Type)>,
     nodes: BTreeMap<CoreId, CoreId>,
+    invocations: std::sync::Arc<crate::callable_control::BodyInvocationControl>,
 }
 
 type Activation = (Vec<(CallableBrand, CoreId)>, CallableBrand, CoreId);
@@ -36,13 +37,87 @@ type Activation = (Vec<(CallableBrand, CoreId)>, CallableBrand, CoreId);
 /// physical tuple must not erase which branded callable it implements.
 struct Value {
     physical: CoreExpr,
-    semantic: Type,
+    contract: ValueContract,
 }
 
 #[derive(Clone)]
 struct Input {
     place: CorePlace,
-    semantic: Type,
+    contract: ValueContract,
+}
+
+/// The source contract and its positively constructed control representation
+/// travel together through values and storage inputs. An erased callable type
+/// alone cannot select a constructor, and joining two constructors must not
+/// forget that the joined value still owns their tagged representation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ValueContract {
+    ty: Type,
+    representation: Representation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Representation {
+    Ordinary,
+    Callable(BTreeSet<usize>),
+    Fields(Vec<Representation>),
+    Reference(Box<Representation>),
+}
+
+impl ValueContract {
+    fn ordinary(ty: Type) -> Self { Self { ty, representation: Representation::Ordinary } }
+}
+
+impl Representation {
+    fn fields(fields: Vec<Self>) -> Self {
+        if fields.iter().all(|field| *field == Self::Ordinary) { Self::Ordinary } else { Self::Fields(fields) }
+    }
+    fn reference(value: Self) -> Self {
+        if value == Self::Ordinary { Self::Ordinary } else { Self::Reference(Box::new(value)) }
+    }
+    fn field(&self, index: u32) -> Self {
+        match self { Self::Fields(fields) => fields.get(index as usize).cloned().unwrap_or(Self::Ordinary), _ => Self::Ordinary }
+    }
+    fn join(&self, other: &Self) -> Option<Self> {
+        Some(match (self, other) {
+            (Self::Ordinary, Self::Ordinary) => Self::Ordinary,
+            (Self::Callable(left), Self::Callable(right)) => Self::Callable(left.union(right).copied().collect()),
+            (Self::Fields(left), Self::Fields(right)) if left.len() == right.len() =>
+                Self::Fields(left.iter().zip(right).map(|(left, right)| left.join(right)).collect::<Option<_>>()?),
+            (Self::Reference(left), Self::Reference(right)) => Self::Reference(Box::new(left.join(right)?)),
+            _ => return None,
+        })
+    }
+
+    fn include_at(&mut self, fields: &[u32], replacement: &Self) -> Option<()> {
+        let Some((field, rest)) = fields.split_first() else {
+            *self = self.join(replacement)?;
+            return Some(());
+        };
+        match self {
+            Self::Fields(values) => values.get_mut(*field as usize)?.include_at(rest, replacement),
+            Self::Ordinary if *replacement == Self::Ordinary => Some(()),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod representation_tests {
+    use super::*;
+
+    #[test]
+    fn control_representation_joins_preserve_choices_without_inventing_authority() {
+        let first = Representation::Callable([0].into());
+        let second = Representation::Callable([1].into());
+        assert_eq!(first.join(&second), Some(Representation::Callable([0, 1].into())));
+        assert_eq!(first.join(&Representation::Ordinary), None);
+        let left = Representation::fields(vec![Representation::Ordinary, Representation::reference(first)]);
+        let right = Representation::fields(vec![Representation::Ordinary, Representation::reference(second)]);
+        let joined = left.join(&right).unwrap();
+        assert_eq!(joined.field(1), Representation::reference(Representation::Callable([0, 1].into())));
+        assert_eq!(joined.field(0), Representation::Ordinary);
+    }
 }
 
 struct ControlEnvironment {
@@ -51,7 +126,7 @@ struct ControlEnvironment {
     resident: Type,
     arguments: Option<Vec<GenericArgument>>,
     labels: BTreeMap<LabelBrand, LabelBrand>,
-    captures: Vec<Type>,
+    captures: Vec<ValueContract>,
 }
 
 enum Selected {
@@ -91,7 +166,7 @@ pub(crate) fn transform(
     };
     let mut frame = pass.frame(owner, CallableBrand::Named(owner), None, vec![], vec![])?;
     frame.locals.extend(source.parameters.iter().map(|(name, ty)| (name.clone(), Input {
-        place: CorePlace::Local { name: name.clone(), ty: ty.clone() }, semantic: ty.clone(),
+        place: CorePlace::Local { name: name.clone(), ty: ty.clone() }, contract: ValueContract::ordinary(ty.clone()),
     })));
     pass.output.root = pass.expression(source.root, &mut frame)?;
     pass.output.expressions = pass.values.into_iter().map(|value| value.physical).collect();
@@ -130,7 +205,7 @@ struct Fusion<'a> {
     stack: Vec<CallableBrand>,
     values: Vec<Value>,
     environments: Vec<ControlEnvironment>,
-    label_results: BTreeMap<LabelBrand, Vec<(Type, Type)>>,
+    label_results: BTreeMap<LabelBrand, Vec<(ValueContract, Type)>>,
 }
 
 impl Fusion<'_> {
@@ -141,40 +216,47 @@ impl Fusion<'_> {
     fn name(&mut self, original: &str) -> String { format!("$fusion.{}.{}", self.fresh(), original) }
     fn alloc(&mut self, kind: CoreKind, ty: Type, span: Span) -> CoreId {
         let id = CoreId(self.values.len() as u32);
-        self.values.push(Value { semantic: ty.clone(), physical: CoreExpr { kind, ty, span } });
+        self.values.push(Value { contract: ValueContract::ordinary(ty.clone()), physical: CoreExpr { kind, ty, span } });
         id
     }
     fn physical_expression(&self, id: CoreId) -> &CoreExpr { &self.values[id.0 as usize].physical }
-    fn semantic(&self, id: CoreId) -> &Type { &self.values[id.0 as usize].semantic }
-    fn with_semantic(&mut self, id: CoreId, ty: Type) -> CoreId { self.values[id.0 as usize].semantic = ty; id }
+    fn contract(&self, id: CoreId) -> &ValueContract { &self.values[id.0 as usize].contract }
+    fn semantic(&self, id: CoreId) -> &Type { &self.contract(id).ty }
+    fn with_semantic(&mut self, id: CoreId, ty: Type) -> CoreId { self.values[id.0 as usize].contract.ty = ty; id }
+    fn with_contract(&mut self, id: CoreId, contract: ValueContract) -> CoreId { self.values[id.0 as usize].contract = contract; id }
     fn label_result(&mut self, brand: LabelBrand, value: CoreId) {
         let physical = self.physical_expression(value).ty.clone();
         if physical == Type::Never { return; }
-        let semantic = self.semantic(value).clone();
-        self.label_results.get_mut(&brand).expect("a fused transfer has an active lexical binder").push((semantic, physical));
+        let contract = self.contract(value).clone();
+        self.label_results.get_mut(&brand).expect("a fused transfer has an active lexical binder").push((contract, physical));
     }
-    fn join_layout(&self, expected: Type, results: &[(Type, Type)], span: Span) -> Result<(Type, Type), CoreDiagnostic> {
+    fn join_layout(&self, expected: Type, results: &[(ValueContract, Type)], span: Span) -> Result<(ValueContract, Type), CoreDiagnostic> {
         let live = results.iter().filter(|(_, physical)| *physical != Type::Never).collect::<Vec<_>>();
         let Some((first_semantic, first_physical)) = live.first().copied() else {
-            return Ok((expected.clone(), self.physical(expected)));
+            return Ok((ValueContract::ordinary(expected.clone()), self.physical(expected)));
         };
         if live.iter().all(|(_, physical)| physical == first_physical) {
-            let semantic = if live.iter().all(|(semantic, _)| semantic == first_semantic) { first_semantic.clone() } else { expected };
-            Ok((semantic, first_physical.clone()))
-        } else if live.iter().any(|(semantic, physical)| semantic != physical) {
+            let semantic = if live.iter().all(|(semantic, _)| semantic.ty == first_semantic.ty) { first_semantic.ty.clone() } else { expected };
+            let representation = live.iter().skip(1).try_fold(first_semantic.representation.clone(), |joined, (contract, _)|
+                joined.join(&contract.representation)).ok_or_else(|| diagnostic(span,
+                    "control result alternatives do not share a complete representation proof"))?;
+            Ok((ValueContract { ty: semantic, representation }, first_physical.clone()))
+        } else if live.iter().any(|(semantic, physical)| semantic.ty != *physical) {
             Err(diagnostic(span, "control result alternatives have incompatible environment representations"))
         } else {
             // Unchanged source representations retain their already checked
             // directional lifetime/ABI join. No constructor identity survives
             // a join that did not establish that identity for every arm.
-            Ok((expected.clone(), self.physical(expected)))
+            Ok((ValueContract::ordinary(expected.clone()), self.physical(expected)))
         }
     }
     fn frame(&mut self, owner: DefKey, callable: CallableBrand, arguments: Option<Vec<GenericArgument>>,
         calls: Vec<(CallableBrand, CoreId)>, replacements: Vec<(Type, Type)>) -> Result<Frame, CoreDiagnostic> {
         let mut frame = Frame { owner, callable, proof_root: CallableBrand::Named(self.owner), calls, arguments,
             locals: BTreeMap::new(), resumptions: BTreeMap::new(), labels: BTreeMap::new(), environments: BTreeMap::new(),
-            refinements: BTreeMap::new(), replacements, nodes: BTreeMap::new() };
+            refinements: BTreeMap::new(), replacements, nodes: BTreeMap::new(),
+            invocations: std::sync::Arc::new(self.control.body(owner).ok_or_else(||
+                diagnostic(invalid_typed_core_span(), "control expansion requires bound invocation results"))?) };
         // Allocate one hygienic identity namespace per expansion. References
         // are remapped mechanically; only the existing binders create brands.
         let input = self.control.fusion_body(owner).map_err(|reason| diagnostic(invalid_typed_core_span(),
@@ -229,7 +311,7 @@ impl Fusion<'_> {
     }
     fn physical(&self, ty: Type) -> Type {
         let GenericArgument::Type(ty) = crate::types::CallableContract::replace_value_types(
-            GenericArgument::Type(ty), &self.environments.iter().map(|environment|
+            GenericArgument::Type(ty), &self.environments.iter().filter(|environment| environment.constructor.nominal_type()).map(|environment|
                 (environment.semantic.clone(), environment.resident.clone())).collect::<Vec<_>>(), 0) else { unreachable!() };
         // An exact named code reference with a label-valued ABI is a proof
         // selection, not independently callable storage. Its invocation must
@@ -239,6 +321,53 @@ impl Fusion<'_> {
         else { ty }
     }
     fn ty(&self, frame: &Frame, ty: Type) -> Type { self.physical(self.semantic_type(frame, ty)) }
+    fn resident_type(&self, contract: &ValueContract) -> Type {
+        match (&contract.ty, &contract.representation) {
+            (_, Representation::Ordinary) => self.physical(contract.ty.clone()),
+            (_, Representation::Callable(constructors)) => constructors.first()
+                .map(|index| self.environments[*index].resident.clone()).unwrap_or(Type::Error),
+            (Type::Tuple(fields), Representation::Fields(values)) if fields.len() == values.len() =>
+                Type::Tuple(fields.iter().zip(values).map(|(ty, representation)| self.resident_type(
+                    &ValueContract { ty: ty.clone(), representation: representation.clone() })).collect()),
+            (Type::Reference { mutability, lifetime, referent }, Representation::Reference(value)) =>
+                Type::Reference { mutability: *mutability, lifetime: lifetime.clone(), referent: Box::new(self.resident_type(
+                    &ValueContract { ty: (**referent).clone(), representation: (**value).clone() })) },
+            // Unsupported logical layouts cannot acquire a physical callable
+            // representation merely because one of their fields has a type.
+            _ => Type::Error,
+        }
+    }
+
+    fn include_storage(&self, frame: &mut Frame, updates: &BTreeMap<String, Input>, span: Span) -> Result<(), CoreDiagnostic> {
+        for (name, input) in &mut frame.locals {
+            let Some(updated) = updates.get(name).filter(|updated| updated.place == input.place) else { continue; };
+            input.contract.representation = input.contract.representation.join(&updated.contract.representation)
+                .ok_or_else(|| diagnostic(span, "storage alternatives have incompatible control representation proofs"))?;
+        }
+        Ok(())
+    }
+
+    fn assigned_representation(&self, source: &CorePlace, replacement: &ValueContract,
+        frame: &mut Frame, span: Span) -> Result<(), CoreDiagnostic> {
+        let mut source = source;
+        let mut fields = vec![];
+        while let CorePlace::Field { base, index, .. } = source { fields.push(*index); source = base; }
+        fields.reverse();
+        let CorePlace::Local { name, .. } = source else {
+            return if replacement.representation == Representation::Ordinary { Ok(()) } else {
+                Err(diagnostic(span, "control representation replacement requires a represented owning storage input"))
+            };
+        };
+        let Some(input) = frame.locals.get_mut(name) else { return Err(diagnostic(span, "control assignment lost its storage input")); };
+        if !matches!(input.place, CorePlace::Local { .. }) && replacement.representation != Representation::Ordinary {
+            return Err(diagnostic(span, "control representation replacement through captured or borrowed storage is not represented"));
+        }
+        // Retain all represented tags that may still reach this storage at a
+        // label rejoin. This is a conservative layout union, not a strong
+        // update or an independent ownership/alias proof.
+        input.contract.representation.include_at(&fields, &replacement.representation)
+            .ok_or_else(|| diagnostic(span, "assigned control value has no compatible storage representation proof"))
+    }
     fn resident_place(&mut self, place: CorePlace, span: Span) -> CoreId {
         let ty = place.ty();
         let kind = match place {
@@ -251,14 +380,14 @@ impl Fusion<'_> {
     }
     fn resident(&mut self, input: Input, span: Span) -> CoreId {
         let value = self.resident_place(input.place, span);
-        self.with_semantic(value, input.semantic)
+        self.with_contract(value, input.contract)
     }
     fn bind(&mut self, original: &str, value: CoreId, span: Span, prefix: &mut Vec<CoreId>) -> Input {
         let name = self.name(original);
         let ty = self.physical_expression(value).ty.clone();
-        let semantic = self.semantic(value).clone();
+        let contract = self.contract(value).clone();
         prefix.push(self.alloc(CoreKind::Let { name: name.clone(), value }, Type::Unit, span));
-        Input { place: CorePlace::Local { name, ty }, semantic }
+        Input { place: CorePlace::Local { name, ty }, contract }
     }
     fn target(&self, target: &ControlLabelTarget, span: Span) -> Result<LabelBrand, CoreDiagnostic> {
         let ControlLabelTarget::Lexical { activation, .. } = target else {
@@ -269,11 +398,18 @@ impl Fusion<'_> {
         self.active.get(&key).copied().ok_or_else(|| diagnostic(span,
             "label-bearing callable is invoked outside its destination activation"))
     }
-    fn represented_target(&self, mut ty: &Type) -> Option<Selected> {
-        while let Type::Reference { referent, .. } = ty { ty = referent; }
-        let environments = self.environments.iter().enumerate().filter(|(_, environment)| environment.semantic == *ty)
-            .map(|(index, _)| index).collect::<Vec<_>>();
-        if let [index] = environments.as_slice() && self.environments[*index].constructor.nominal_type() {
+    fn represented_target(&self, contract: &ValueContract) -> Option<Selected> {
+        let mut ty = &contract.ty;
+        let mut representation = &contract.representation;
+        while let Type::Reference { referent, .. } = ty {
+            ty = referent;
+            representation = match representation { Representation::Reference(value) => value, _ => &Representation::Ordinary };
+        }
+        let environments = match representation {
+            Representation::Callable(environments) => environments.iter().copied().collect::<Vec<_>>(),
+            _ => vec![],
+        };
+        if let [index] = environments.as_slice() {
             return Some(Selected::Environment(*index));
         }
         if !environments.is_empty() { return Some(Selected::Dispatch(environments)); }
@@ -312,17 +448,18 @@ impl Fusion<'_> {
                 let value = self.expression(value, frame)?;
                 let fresh = self.name(&name);
                 frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty: self.physical_expression(value).ty.clone() },
-                    semantic: self.semantic(value).clone() });
+                    contract: self.contract(value).clone() });
                 CoreKind::Let { name: fresh, value }
             }
             CoreKind::Block(values) => {
                 let locals = frame.locals.clone();
                 let values = self.expressions(values, frame)?;
-                frame.locals = locals;
+                let updates = std::mem::replace(&mut frame.locals, locals);
+                self.include_storage(frame, &updates, span)?;
                 let result = values.last().map(|id| self.physical_expression(*id).ty.clone()).unwrap_or(Type::Unit);
-                let semantic = values.last().map(|id| self.semantic(*id).clone()).unwrap_or(Type::Unit);
+                let semantic = values.last().map(|id| self.contract(*id).clone()).unwrap_or_else(|| ValueContract::ordinary(Type::Unit));
                 let result = self.alloc(CoreKind::Block(values), result, span);
-                return Ok(self.with_semantic(result, semantic));
+                return Ok(self.with_contract(result, semantic));
             }
             CoreKind::Label { brand, body } => {
                 let fresh = LabelBrand { owner: self.owner, label: self.fresh() };
@@ -348,7 +485,7 @@ impl Fusion<'_> {
                 frame.replacements.truncate(before);
                 if let Some(old) = old { frame.labels.insert(brand, old); } else { frame.labels.remove(&brand); }
                 let result = self.alloc(CoreKind::Label { brand: fresh, body }, physical, span);
-                return Ok(self.with_semantic(result, semantic));
+                return Ok(self.with_contract(result, semantic));
             }
             CoreKind::LabelValue { brand } => CoreKind::LabelValue { brand: *frame.labels.get(&brand)
                 .ok_or_else(|| diagnostic(span, "label proof has no active fused destination"))? },
@@ -370,8 +507,13 @@ impl Fusion<'_> {
                 // installing any parameter or executing the expanded body.
                 let value = self.expression(callee, frame)?;
                 let values = self.expressions(arguments.clone(), frame)?;
-                let target = self.represented_target(self.semantic(value)).or_else(|| observed.map(Selected::Observed));
-                let needed = self.physical_expression(value).ty != self.semantic_type(frame, source.expression(callee).ty.clone())
+                let target = self.represented_target(self.contract(value)).or_else(|| observed.map(Selected::Observed));
+                let mut returned_constructors = BTreeSet::new();
+                if let Some(control) = frame.invocations.get(id) {
+                    for payload in &control.returns { payload.constructors(&mut returned_constructors); }
+                }
+                let needed = returned_constructors.into_iter().any(|brand| self.control_captures.contains(brand))
+                    || self.physical_expression(value).ty != self.semantic_type(frame, source.expression(callee).ty.clone())
                     || contains_label(&self.semantic_type(frame, source.expression(callee).ty.clone()))
                     || arguments.iter().any(|id| contains_label(&self.semantic_type(frame, source.expression(*id).ty.clone())))
                     || ty != self.semantic_type(frame, expression.ty.clone())
@@ -409,8 +551,9 @@ impl Fusion<'_> {
                 let semantic = if values.is_empty() { self.semantic_type(frame, expression.ty) } else {
                     Type::Tuple(values.iter().map(|id| self.semantic(*id).clone()).collect())
                 };
+                let representation = Representation::fields(values.iter().map(|id| self.contract(*id).representation.clone()).collect());
                 let result = self.alloc(CoreKind::Tuple(values), ty, span);
-                return Ok(self.with_semantic(result, semantic));
+                return Ok(self.with_contract(result, ValueContract { ty: semantic, representation }));
             }
             CoreKind::Array(values) => CoreKind::Array(self.expressions(values, frame)?),
             CoreKind::Record { definition, fields } => CoreKind::Record { definition, fields: self.expressions(fields, frame)? },
@@ -421,67 +564,75 @@ impl Fusion<'_> {
                 let semantic = if let Type::Tuple(fields) = self.semantic(base) {
                     fields.get(index as usize).cloned().unwrap_or_else(|| self.semantic_type(frame, expression.ty.clone()))
                 } else { self.semantic_type(frame, expression.ty) };
+                let representation = self.contract(base).representation.field(index);
                 let result = self.alloc(CoreKind::Field { base, index, field_count }, ty, span);
-                return Ok(self.with_semantic(result, semantic));
+                return Ok(self.with_contract(result, ValueContract { ty: semantic, representation }));
             }
             CoreKind::Assign { place, value } => {
                 let value = self.expression(value, frame)?;
                 let source_ty = self.semantic_type(frame, place.ty());
-                let place = self.place(place, frame)?;
-                if (place.ty() != source_ty || self.physical_expression(value).ty != *self.semantic(value))
-                    && place.ty() != self.physical_expression(value).ty {
+                let target = self.place(place.clone(), frame)?;
+                if (target.ty() != source_ty || self.physical_expression(value).ty != *self.semantic(value))
+                    && target.ty() != self.physical_expression(value).ty {
                     return Err(diagnostic(span, "assigned control environments do not share a checked resident layout"));
                 }
-                CoreKind::Assign { place, value }
+                self.assigned_representation(&place, self.contract(value), frame, span)?;
+                CoreKind::Assign { place: target, value }
             }
             CoreKind::Borrow { unique, value } => {
                 let value = self.expression(value, frame)?;
                 let Type::Reference { lifetime, mutability, .. } = ty else { return Err(diagnostic(span, "borrow lacks its frozen reference type")); };
                 let ty = Type::Reference { lifetime, mutability, referent: Box::new(self.physical_expression(value).ty.clone()) };
                 let semantic = Type::Reference { lifetime, mutability, referent: Box::new(self.semantic(value).clone()) };
+                let representation = Representation::reference(self.contract(value).representation.clone());
                 let result = self.alloc(CoreKind::Borrow { unique, value }, ty, span);
-                return Ok(self.with_semantic(result, semantic));
+                return Ok(self.with_contract(result, ValueContract { ty: semantic, representation }));
             }
             CoreKind::Deref(value) => {
                 let value = self.expression(value, frame)?;
                 let Type::Reference { referent, .. } = self.physical_expression(value).ty.clone() else { return Err(diagnostic(span, "dereference lost its resident reference")); };
                 let Type::Reference { referent: semantic, .. } = self.semantic(value).clone() else { return Err(diagnostic(span, "dereference lost its source reference contract")); };
+                let representation = match &self.contract(value).representation {
+                    Representation::Reference(value) => (**value).clone(), _ => Representation::Ordinary,
+                };
                 let result = self.alloc(CoreKind::Deref(value), *referent, span);
-                return Ok(self.with_semantic(result, *semantic));
+                return Ok(self.with_contract(result, ValueContract { ty: *semantic, representation }));
             }
             CoreKind::Move(value) => {
                 let value = self.expression(value, frame)?;
                 let result = self.alloc(CoreKind::Move(value), self.physical_expression(value).ty.clone(), span);
-                return Ok(self.with_semantic(result, self.semantic(value).clone()));
+                return Ok(self.with_contract(result, self.contract(value).clone()));
             }
             CoreKind::ReleaseAvailable(value) => CoreKind::ReleaseAvailable(self.expression(value, frame)?),
             CoreKind::IntrinsicCall { operator, arguments } => CoreKind::IntrinsicCall { operator, arguments: self.expressions(arguments, frame)? },
             CoreKind::PatternTest { subject, pattern, refinement } => {
                 let subject = self.expression(subject, frame)?;
-                CoreKind::PatternTest { subject, pattern: self.pattern(pattern, frame), refinement: self.refinement(refinement, frame) }
+                CoreKind::PatternTest { subject, pattern: self.pattern(pattern, frame, Some(self.contract(subject).clone())), refinement: self.refinement(refinement, frame) }
             }
             CoreKind::Completion { computation, clauses, refinement_test, handles_operations } => {
                 let computation = self.expression(computation, frame)?;
                 let mut output = vec![];
+                let mut updates = vec![];
                 for mut clause in clauses {
                     let locals = frame.locals.clone();
-                    clause.pattern = self.pattern(clause.pattern, frame);
+                    clause.pattern = self.pattern(clause.pattern, frame, Some(self.contract(computation).clone()));
                     clause.bindings = self.bindings(clause.bindings, frame);
                     if let Some(ref mut refinement) = clause.refinement {
                         refinement.environment = self.refinement(refinement.environment.clone(), frame);
-                        refinement.pattern = self.pattern(refinement.pattern.clone(), frame);
+                        refinement.pattern = self.pattern(refinement.pattern.clone(), frame, Some(self.contract(computation).clone()));
                         refinement.subject = *frame.nodes.get(&refinement.subject).ok_or_else(|| diagnostic(span,
                             "refinement metadata lost its once-evaluated subject"))?;
                     }
                     clause.body = self.expression(clause.body, frame)?;
-                    frame.locals = locals;
+                    updates.push(std::mem::replace(&mut frame.locals, locals));
                     output.push(clause);
                 }
-                let results = output.iter().map(|clause| (self.semantic(clause.body).clone(), self.physical_expression(clause.body).ty.clone())).collect::<Vec<_>>();
+                for update in &updates { self.include_storage(frame, update, span)?; }
+                let results = output.iter().map(|clause| (self.contract(clause.body).clone(), self.physical_expression(clause.body).ty.clone())).collect::<Vec<_>>();
                 let (semantic, physical) = self.join_layout(self.semantic_type(frame, expression.ty), &results, span)?;
                 let refinement_test = refinement_test.map(|value| self.refinement(value, frame));
                 let result = self.alloc(CoreKind::Completion { computation, clauses: output, refinement_test, handles_operations }, physical, span);
-                return Ok(self.with_semantic(result, semantic));
+                return Ok(self.with_contract(result, semantic));
             }
             CoreKind::Perform { effect, operation, payload_types, arguments, terminal, reference_contract, reference_origin, reference_shape } => CoreKind::Perform {
                 effect: self.effect(effect, frame), operation, payload_types: payload_types.into_iter().map(|ty| self.ty(frame, ty)).collect(),
@@ -494,13 +645,13 @@ impl Fusion<'_> {
                 let handler = self.alloc(CoreKind::Error, ty.clone(), span);
                 let computation = self.expression(computation, frame)?;
                 let mut output = vec![];
-                let mut results = vec![(self.semantic(computation).clone(), self.physical_expression(computation).ty.clone())];
+                let mut results = vec![(self.contract(computation).clone(), self.physical_expression(computation).ty.clone())];
                 for (index, mut clause) in clauses.into_iter().enumerate() {
                     let mut child = frame.clone();
                     clause.brand = CallableBrand::HandlerClause { owner: self.owner, handler, clause: index as u32 };
                     clause.effect = self.effect(clause.effect, &child);
                     clause.payload_types = clause.payload_types.into_iter().map(|ty| self.ty(&child, ty)).collect();
-                    clause.patterns = clause.patterns.into_iter().map(|pattern| self.pattern(pattern, &mut child)).collect();
+                    clause.patterns = clause.patterns.into_iter().map(|pattern| self.pattern(pattern, &mut child, None)).collect();
                     clause.bindings = self.bindings(clause.bindings, &mut child);
                     if let Some(contract) = &mut clause.continuation {
                         contract.brand = CallableBrand::Continuation { owner: self.owner, handler, clause: index as u32 };
@@ -517,14 +668,14 @@ impl Fusion<'_> {
                         let ty = contract.callable_type();
                         child.resumptions.insert(*original, (fresh, fresh_name.clone(), ty.clone()));
                         child.locals.insert(name.clone(), Input {
-                            place: CorePlace::Local { name: fresh_name.clone(), ty: ty.clone() }, semantic: ty,
+                            place: CorePlace::Local { name: fresh_name.clone(), ty: ty.clone() }, contract: ValueContract::ordinary(ty),
                         });
                         *original = fresh;
                         *name = fresh_name;
                     }
                     clause.body = self.expression(clause.body, &mut child)?;
                     if !matches!(clause.resumption, CoreHandlerResumption::Tail { .. }) {
-                        results.push((self.semantic(clause.body).clone(), self.physical_expression(clause.body).ty.clone()));
+                        results.push((self.contract(clause.body).clone(), self.physical_expression(clause.body).ty.clone()));
                     }
                     output.push(clause);
                 }
@@ -535,7 +686,7 @@ impl Fusion<'_> {
                 if physical != ty && output.iter().any(|clause| clause.continuation.is_some()) {
                     return Err(diagnostic(span, "handler result representation changed after binding its resumption ABI"));
                 }
-                self.values[handler.0 as usize] = Value { semantic, physical: CoreExpr {
+                self.values[handler.0 as usize] = Value { contract: semantic, physical: CoreExpr {
                     kind: CoreKind::Handle { computation, clauses: output }, ty: physical, span,
                 } };
                 return Ok(handler);
@@ -582,31 +733,49 @@ impl Fusion<'_> {
     fn bindings(&mut self, bindings: Vec<(String, Type)>, frame: &mut Frame) -> Vec<(String, Type)> {
         bindings.into_iter().map(|(name, ty)| {
             let semantic = self.semantic_type(frame, ty.clone());
-            let ty = self.ty(frame, ty);
             let fresh = match frame.locals.get(&name) {
                 Some(Input { place: CorePlace::Local { name, .. }, .. }) => name.clone(),
                 _ => self.name(&name),
             };
-            frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty: ty.clone() }, semantic });
+            let representation = frame.locals.get(&name).map(|input| input.contract.representation.clone()).unwrap_or(Representation::Ordinary);
+            let contract = ValueContract { ty: semantic, representation };
+            let ty = self.resident_type(&contract);
+            frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty: ty.clone() }, contract });
             (fresh, ty)
         }).collect()
     }
-    fn pattern(&mut self, pattern: CorePattern, frame: &mut Frame) -> CorePattern {
+    fn pattern(&mut self, pattern: CorePattern, frame: &mut Frame, subject: Option<ValueContract>) -> CorePattern {
         match pattern {
             CorePattern::Bind { name } => {
                 let fresh = self.name(&name);
-                frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty: Type::Unit }, semantic: Type::Unit });
+                let contract = subject.unwrap_or_else(|| ValueContract::ordinary(Type::Unit));
+                let ty = self.resident_type(&contract);
+                frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty }, contract });
                 CorePattern::Bind { name: fresh }
             }
-            CorePattern::Tuple(values) => CorePattern::Tuple(values.into_iter().map(|value| self.pattern(value, frame)).collect()),
-            CorePattern::Array { element, elements, rest } => CorePattern::Array { element: self.ty(frame, element), elements: elements.into_iter().map(|value| self.pattern(value, frame)).collect(), rest },
+            CorePattern::Tuple(values) => CorePattern::Tuple(values.into_iter().enumerate().map(|(index, value)| {
+                let field = subject.as_ref().and_then(|subject| match &subject.ty {
+                    Type::Tuple(fields) => fields.get(index).map(|ty| ValueContract { ty: ty.clone(), representation: subject.representation.field(index as u32) }),
+                    _ => None,
+                });
+                self.pattern(value, frame, field)
+            }).collect()),
+            CorePattern::Array { element, elements, rest } => CorePattern::Array { element: self.ty(frame, element.clone()),
+                elements: elements.into_iter().enumerate().map(|(index, value)| self.pattern(value, frame,
+                    subject.as_ref().map(|subject| ValueContract { ty: self.semantic_type(frame, element.clone()),
+                        representation: subject.representation.field(index as u32) }))).collect(), rest },
             mut value @ (CorePattern::Record { .. } | CorePattern::Enum { .. }) => {
                 let (field_types, fields) = match &mut value {
                     CorePattern::Record { field_types, fields, .. } | CorePattern::Enum { field_types, fields, .. } => (field_types, fields),
                     _ => unreachable!(),
                 };
                 for ty in field_types { *ty = self.ty(frame, ty.clone()); }
-                for field in fields { field.ty = self.ty(frame, field.ty.clone()); field.pattern = self.pattern(field.pattern.clone(), frame); }
+                for (index, field) in fields.iter_mut().enumerate() {
+                    let contract = subject.as_ref().map(|subject| ValueContract { ty: self.semantic_type(frame, field.ty.clone()),
+                        representation: subject.representation.field(index as u32) });
+                    field.ty = contract.as_ref().map(|contract| self.resident_type(contract)).unwrap_or_else(|| self.ty(frame, field.ty.clone()));
+                    field.pattern = self.pattern(field.pattern.clone(), frame, contract);
+                }
                 value
             }
             value => value,
@@ -633,7 +802,8 @@ impl Fusion<'_> {
         let semantic_ty = self.semantic_type(frame, source_ty);
         let transformed_capture = environment.captures.iter().any(|capture|
             contains_label(&self.semantic_type(frame, capture.ty.clone()))
-                || self.ty(frame, capture.ty.clone()) != self.semantic_type(frame, capture.ty.clone()));
+                || frame.locals.get(&capture.name).is_some_and(|input|
+                    input.place.ty() != input.contract.ty || input.contract.representation != Representation::Ordinary));
         if !free.is_empty() || transformed_capture || self.control_captures.contains(environment.brand) {
             let tag = self.alloc(CoreKind::Literal(self.environments.len().to_string()), Type::Scalar(ScalarType::I64), span);
             let mut fields = vec![tag];
@@ -642,7 +812,7 @@ impl Fusion<'_> {
                 let place = frame.locals.get(&capture.name).cloned().ok_or_else(|| diagnostic(span, "missing closure formation storage"))?;
                 let value = self.resident(place, span);
                 let ty = self.physical_expression(value).ty.clone();
-                captures.push(self.semantic(value).clone());
+                captures.push(self.contract(value).clone());
                 fields.push(match CaptureFormation::new(capture).source() {
                     CaptureSource::Copy => value,
                     CaptureSource::Move => self.alloc(CoreKind::Move(value), ty, span),
@@ -658,14 +828,15 @@ impl Fusion<'_> {
                 fields.push(self.alloc(CoreKind::LabelValue { brand: target }, crate::types::label::new(target, payload), span));
             }
             let physical = Type::Tuple(fields.iter().map(|id| self.physical_expression(*id).ty.clone()).collect());
-            if self.environments.iter().any(|old| old.semantic == semantic_ty && old.resident != physical) {
+            if constructor.nominal_type() && self.environments.iter().any(|old| old.semantic == semantic_ty && old.resident != physical) {
                 return Err(diagnostic(span, "alternative control environments require a common checked resident layout"));
             }
             let labels = free.iter().map(|brand| (*brand, frame.labels[brand])).collect();
+            let representation = Representation::Callable([self.environments.len()].into());
             self.environments.push(ControlEnvironment { constructor, semantic: semantic_ty.clone(), resident: physical.clone(),
                 arguments: frame.arguments.clone(), labels, captures });
             let result = self.alloc(CoreKind::Tuple(fields), physical, span);
-            return Ok(self.with_semantic(result, semantic_ty));
+            return Ok(self.with_contract(result, ValueContract { ty: semantic_ty, representation }));
         }
         let outer = frame.clone();
         let mut child = frame.clone();
@@ -727,11 +898,11 @@ impl Fusion<'_> {
                         else { CorePattern::Literal(index.to_string()) }, bindings: vec![], refinement: None, body, span });
                 }
                 let expected = self.semantic_type(parent, self.source(parent.owner).expression(id).ty.clone());
-                let results = clauses.iter().map(|clause| (self.semantic(clause.body).clone(), self.physical_expression(clause.body).ty.clone())).collect::<Vec<_>>();
+                let results = clauses.iter().map(|clause| (self.contract(clause.body).clone(), self.physical_expression(clause.body).ty.clone())).collect::<Vec<_>>();
                 let (semantic, physical) = self.join_layout(expected, &results, span)?;
                 let dispatch = self.alloc(CoreKind::Completion { computation: tag, clauses,
                     refinement_test: None, handles_operations: false }, physical, span);
-                self.with_semantic(dispatch, semantic);
+                self.with_contract(dispatch, semantic);
                 prefix.push(dispatch);
             }
             Selected::Label(brand) => {
@@ -794,9 +965,9 @@ impl Fusion<'_> {
                             let Type::Reference { referent, .. } = fields[field].clone() else { return Err(diagnostic(span, "borrowed capture lost its resident reference")); };
                             place = CorePlace::Deref { reference, ty: *referent, unique: mutability == Mutability::Unique };
                         }
-                        let semantic = capture_types.as_ref().and_then(|types| types.get(index)).cloned()
-                            .unwrap_or_else(|| self.semantic_type(&child, capture.ty.clone()));
-                        child.locals.insert(capture.name.clone(), Input { place, semantic });
+                        let contract = capture_types.as_ref().and_then(|types| types.get(index)).cloned()
+                            .unwrap_or_else(|| ValueContract::ordinary(self.semantic_type(&child, capture.ty.clone())));
+                        child.locals.insert(capture.name.clone(), Input { place, contract });
                     }
                 }
                 for ((name, _), value) in parameters.into_iter().zip(values) { child.locals.insert(name, value); }
@@ -810,8 +981,8 @@ impl Fusion<'_> {
         }
         let last = *prefix.last().expect("expanded invocation has a result or transfer");
         let result = self.physical_expression(last).ty.clone();
-        let semantic = self.semantic(last).clone();
+        let semantic = self.contract(last).clone();
         let result = self.alloc(CoreKind::Block(prefix), result, span);
-        Ok(self.with_semantic(result, semantic))
+        Ok(self.with_contract(result, semantic))
     }
 }

@@ -58,7 +58,7 @@ impl ControlCaptures {
     }
 
     pub(crate) fn contains(&self, environment: EnvironmentBrand) -> bool {
-        self.bodies.get(&environment.owner).is_some_and(|(_, captures)| captures.contains(&environment))
+        self.bodies.values().any(|(_, captures)| captures.contains(&environment))
     }
 }
 
@@ -640,11 +640,11 @@ impl Analyzer<'_> {
                     }
                     footprint.push(value);
                 }
-                let returned = self.continuations.invocation(id).into_iter()
-                    .flat_map(|control| &control.returns)
-                    .filter_map(|payload| control::known_payload(crate::callable_control::resolve_payload(
-                        payload, &callable, &values, self)))
-                    .collect::<Vec<_>>();
+                let payloads = self.continuations.invocation(id).into_iter()
+                    .flat_map(|control| &control.returns).map(|payload|
+                        crate::callable_control::resolve_payload(payload, &callable, &values, self)).collect::<Vec<_>>();
+                let returned = payloads.into_iter().filter_map(|payload|
+                    control::known_payload(payload, &self.values, &mut self.control_captures, self.signatures)).collect::<Vec<_>>();
                 let mut result = self.reference_result_value(
                     &reference_origin,
                     reference_shape,

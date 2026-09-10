@@ -104,6 +104,9 @@ impl Inputs for Analyzer<'_> {
 }
 
 impl crate::callable_control::PayloadInputs for Analyzer<'_> {
+    type Value = Value;
+    fn project(&self, value: &Value, path: &[u32]) -> Option<Value> { Inputs::project(self, value, path) }
+    fn captures(&self, callable: &Operand<Value>) -> CapturedInputs<Value> { Inputs::captures(self, callable) }
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         let (regions, loans) = self.invocation_origins(reference);
         Some(Value { core: None, owners: BTreeSet::new(), path: vec![],
@@ -204,7 +207,7 @@ impl Analyzer<'_> {
         payload: crate::callable_control::ResolvedPayload<Value>,
         source: CoreId,
     ) {
-        self.record_payload_origins_at(owner, payload, source, Some(&[]));
+        self.record_payload_origins_at(owner, payload, source, Some(&[]), true);
     }
 
     pub(super) fn record_payload_origins(
@@ -213,7 +216,7 @@ impl Analyzer<'_> {
         payload: crate::callable_control::ResolvedPayload<Value>,
         source: CoreId,
     ) {
-        self.record_payload_origins_at(owner, payload, source, None);
+        self.record_payload_origins_at(owner, payload, source, None, true);
     }
 
     fn record_payload_origins_at(
@@ -224,6 +227,7 @@ impl Analyzer<'_> {
         // Some denotes a normal result and retains its exact result prefix
         // for the existing checked unique-reference partition relation.
         result_path: Option<&[u32]>,
+        partition: bool,
     ) {
         use crate::callable_control::ResolvedPayload;
         match payload {
@@ -235,7 +239,16 @@ impl Analyzer<'_> {
                         field,
                         source,
                         path.as_deref(),
+                        partition,
                     );
+                }
+            }
+            ResolvedPayload::Callable { captures, .. } => {
+                for (ty, capture) in captures {
+                    self.capture_types.insert(Self::capture_type_key(&ty), ty.clone());
+                    let root = Self::capture_origin_key(owner, &ty);
+                    self.reference_origins.entry(root.clone()).or_default();
+                    self.record_payload_origins_at(&root, capture, source, result_path, false);
                 }
             }
             ResolvedPayload::Inputs { ty, values } => {
@@ -263,7 +276,7 @@ impl Analyzer<'_> {
                             .or_default()
                             .extend(regions);
                         for loan in loans {
-                            let loan = if let Some(prefix) = result_path {
+                            let loan = if let Some(prefix) = result_path.filter(|_| partition) {
                                 let fields = prefix.iter().chain(&path).copied().collect::<Vec<_>>();
                                 self.partition_call_result(source, &fields, loan)
                             } else { loan };

@@ -409,6 +409,46 @@ mod tests {
     use crate::vm_backend::{VmFunction, VmInstruction as I, VmNominalCopyDescriptor, verify_program};
 
     #[test]
+    fn native_leave_transfers_initialization_without_reviving_moved_fields() {
+        let entry = DefKey(Digest::of_bytes(b"native-owned-leave-initialization"));
+        let tuple = VmType::Tuple(vec![VmType::I64, VmType::I64]);
+        let function = VmFunction {
+            definition: entry, safety: crate::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers: vec![VmType::I64, VmType::I64, tuple.clone(), VmType::I64, tuple, VmType::Bool, VmType::Bool, VmType::I64],
+            instructions: vec![
+                I::DeclareResult { result: VmType::I64, returns: true },
+                I::ConstI64 { dst: 0, value: 17 }, I::ConstI64 { dst: 1, value: 42 },
+                I::MakeTupleOwned { dst: 2, fields: vec![0,1] },
+                I::TakeProjection { dst: 3, base: 2, fields: vec![0] },
+                I::Leave { brand_owner: entry, brand_label: 0, handler_depth: 0, target: 6,
+                    arguments: vec![2], destinations: vec![4], cleanup: super::super::VmCleanupProof {
+                        moved_places: vec![], active_loans: vec![],
+                        storage_erasure: super::super::VmStorageErasureWitness::without_source_storage(),
+                    } },
+                I::IsInitialized { dst: 5, base: 2, fields: vec![] },
+                I::BranchBool { condition: 5, then_target: 12, else_target: 8 },
+                I::IsInitialized { dst: 6, base: 4, fields: vec![0] },
+                I::BranchBool { condition: 6, then_target: 12, else_target: 10 },
+                I::TakeProjection { dst: 7, base: 4, fields: vec![1] },
+                I::Return { value: 7 }, I::Trap,
+            ],
+        };
+        let mut candidate = CandidateVmProgram { schema: crate::STAGE0_VM_SCHEMA,
+            runtime_manifest: None, host_capabilities: vec![], entry, functions: [(entry,function)].into(),
+            callable_environments: Default::default(), fingerprint: Digest::of_bytes(b"unsealed") };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        let verified = verify_program(candidate).unwrap();
+        assert_eq!(verified.run_i64().unwrap(), 42);
+        let ir = LlvmIrProgram::lower_partitioned(verified, Digest::of_bytes(b"native-leave-initialization-test"),
+            LlvmTarget::host().unwrap(), Default::default()).unwrap();
+        for optimization in [0,2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+        }
+    }
+
+    #[test]
     fn native_enum_projection_checks_the_active_type_and_field_count() {
         for count_mismatch in [false, true] {
             let definition = DefKey(Digest::of_bytes(b"native-projection-type"));

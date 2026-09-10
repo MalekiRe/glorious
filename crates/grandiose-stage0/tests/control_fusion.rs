@@ -24,7 +24,7 @@ fn executes(body: &str) {
         assert!(!emitted.functions.values().flat_map(|function| &function.instructions)
             .any(|instruction| matches!(instruction, grandiose_stage0::VmInstruction::MakeLabel { .. })),
             "fused lexical destinations must not survive as runtime label carriers: {source}");
-        assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("O{optimization}: {source}\n{error:#?}")), 42, "{source}");
+        assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("O{optimization}: {source}\n{error:#?}\n{emitted:#?}")), 42, "{source}");
         assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42, "{source}");
     }
 }
@@ -193,6 +193,130 @@ fn handler_fusion_preserves_captured_resumption_values() {
                 apply(task,40)
             } }
         }");
+}
+
+#[test]
+fn generic_factories_preserve_resumption_capture_dependencies() {
+    executes("effect Ask { [1,1] ask() -> i64; }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            move (task) { task(42) }
+        }
+        pub fn main() -> i64 {
+            handle Ask::ask() { Ask::ask() with k => wrap(k)() }
+        }");
+}
+
+#[test]
+fn generic_factories_compose_aggregate_captures_and_forwarded_results() {
+    executes("effect Ask { [1,1] ask() -> i64; }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            let saved = (task,);
+            move (saved) { saved.0(42) }
+        }
+        fn relay<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> { wrap(task) }
+        pub fn main() -> i64 {
+            handle Ask::ask() { Ask::ask() with k => {
+                let saved = (relay(k),); saved.0()
+            } }
+        }");
+}
+
+#[test]
+fn generic_factories_join_alternative_resumption_capture_results() {
+    for selected in ["Yes", "No"] {
+        executes(&format!("effect Ask {{ [1,1] ask() -> i64; }}
+            enum Flag {{ Yes, No }}
+            fn wrap<F>(task:F, flag:Flag) -> () -> i64 where F:Fn<(i64,),Output=i64> {{
+                handle flag {{
+                    Flag::Yes => move (task) {{ task(42) }},
+                    Flag::No => move (task) {{ task(42) }}
+                }}
+            }}
+            pub fn main() -> i64 {{
+                handle Ask::ask() {{ Ask::ask() with k => wrap(k,Flag::{selected})() }}
+            }}"));
+    }
+}
+
+#[test]
+fn generic_factories_cannot_discharge_an_unused_resumption() {
+    let source = "use std::*;
+        effect Ask { [1,1] ask() -> i64; }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            move (task) { task(42) }
+        }
+        pub fn main() -> i64 {
+            handle Ask::ask() { Ask::ask() with k => { let unused = wrap(k); 42 } }
+        }";
+    let error = StageZeroCompiler::new().compile(request(source, 0)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5012"), "{error:#?}");
+}
+
+#[test]
+fn generic_factories_preserve_exact_callable_quantity() {
+    executes("fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            move (task) { task(42) }
+        }
+        fn consume(task:(i64) -> i64) -> i64 { let returned = wrap(task); returned() }
+        fn identity(value:i64) -> i64 { value }
+        pub fn main() -> i64 { consume(identity) }");
+}
+
+#[test]
+fn generic_factories_preserve_independent_computed_capture_provenance() {
+    executes("fn identity(value:i64) -> i64 { value }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            let value = 40 + 2; move (task,value) { task(value) }
+        }
+        fn make() -> () -> i64 {
+            @done: () -> i64 { let exit = @done; exit(wrap(identity)) }
+        }
+        pub fn main() -> i64 { make()() }");
+}
+
+#[test]
+fn generic_factories_preserve_computed_capture_values_without_control() {
+    executes("fn identity(value:i64) -> i64 { value }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            let value = 40 + 2; move (task,value) { task(value) }
+        }
+        pub fn main() -> i64 { wrap(identity)() }");
+}
+
+#[test]
+fn label_payload_ownership_survives_native_and_mixed_cleanup() {
+    executes_native_and_mixed("use std::*;
+        struct Probe<'a> { count: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.count = *self.count + 1; } }
+        fn make<'a>(count:&'a mut i64) -> Probe<'a> {
+            @done: Probe<'a> { let exit = @done; exit(Probe { count: count }) }
+        }
+        fn finish(value:i64) -> i64 { let marker = 41003; value }
+        pub fn main() -> i64 { let mut count = 41; { let owner = make(&mut count); () }; finish(count) }");
+}
+
+#[test]
+fn generic_factories_reject_escaping_resumption_captures() {
+    let source = "use std::*;
+        effect Ask { [1,1] ask() -> i64; }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64> {
+            move (task) { task(42) }
+        }
+        fn make() -> () -> i64 {
+            @done: () -> i64 {
+                let exit = @done;
+                handle { handle Ask::ask() {
+                    Ask::ask() with k => exit(wrap(k))
+                } } { value => () -> i64 { value } }
+            }
+        }
+        pub fn main() -> i64 { make()() }";
+    for optimization in [0, 2] {
+        let error = StageZeroCompiler::new().compile(request(source, optimization)).unwrap_err();
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4174"), "{error:#?}");
+        assert!(!error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G7010" | "G7042")), "{error:#?}");
+    }
 }
 
 #[test]

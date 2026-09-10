@@ -293,7 +293,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 20;
 // control fusion and independently validates the receiving lexical scopes.
 // Cache 108 derives resumption capture/lifetime obligations from shared escape
 // snapshots before fusion, replacing the source-only immediate-call rewrite.
-pub const STAGE0_CACHE_GENERATION: u32 = 108;
+// Cache 109 preserves factory-created capture dependencies and quantity
+// identities through shared invocation results and value-based control fusion.
+pub const STAGE0_CACHE_GENERATION: u32 = 109;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -304,7 +306,9 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // address of their carrier; overwrites invalidate retained referent proofs.
 // Verifier 37 retains resumption identity in structural resident values,
 // including field extraction, joins and exact handler expiry.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 37;
+// Verifier 38 treats label payloads as parallel owned transfers, preserving
+// resident provenance while retiring predecessor carriers before rejoin.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 38;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

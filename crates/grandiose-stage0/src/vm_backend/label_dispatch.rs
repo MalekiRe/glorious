@@ -96,6 +96,29 @@ fn private_register(function: &VmFunction, register: u32) -> bool {
     })
 }
 
+pub(super) fn retain_at(function: &VmFunction, register: u32, label: Option<LocalLabel>) -> Option<LocalLabel> {
+    label.filter(|_| private_register(function, register))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transferred_label_proof_requires_private_destination_storage() {
+        let definition = DefKey(Digest::of_bytes(b"label-transfer-private-storage"));
+        let label = Some(LocalLabel { target: 3, destination: 2 });
+        let mut function = VmFunction { definition, safety: Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0, registers: vec![], instructions: vec![] };
+        assert_eq!(retain_at(&function, 0, label), label);
+        function.instructions.push(VmInstruction::Borrow { dst: 1, src: 0, fields: vec![], unique: false, reborrow: false });
+        assert_eq!(retain_at(&function, 0, label), None);
+        function.instructions = vec![VmInstruction::MakeLabel { dst: 1, brand_owner: definition,
+            brand_label: 0, target: 3, destination: 0 }];
+        assert_eq!(retain_at(&function, 0, label), None);
+    }
+}
+
 pub(super) fn produced(
     function: &VmFunction, instruction: &VmInstruction, states: &VerifierState,
 ) -> Option<(u32, Option<LocalLabel>)> {
@@ -108,7 +131,7 @@ pub(super) fn produced(
             (*dst, states.local_labels.get(*src as usize).copied().flatten()),
         _ => return None,
     };
-    Some((destination, label.filter(|_| private_register(function, destination))))
+    Some((destination, retain_at(function, destination, label)))
 }
 
 /// Simulate only the proven shim, then verify the actual destination normally.
@@ -132,32 +155,12 @@ pub(super) fn transfer(
         return Err(VmArtifactError::MalformedEncoding { message: "consuming call repeats an argument carrier" });
     }
     same_type(function, label.destination, payload)?;
-    let index = payload as usize;
-    let metadata = (states.reference_origins[index].clone(), states.frame_independent[index],
-        states.referent_independent[index], states.destruction_preserves_frames[index],
-        states.labels[index], states.resumptions[index].clone(), states.invocation_preserves_frames[index]);
+    let metadata = VerifierValue::snapshot(function, states, payload);
     let mut next = states.clone();
     for argument in arguments {
-        let index = *argument as usize;
-        next.registers[index] = Some(false);
-        next.reference_origins[index].clear();
-        next.frame_independent[index] = false;
-        next.referent_independent[index] = false;
-        next.destruction_preserves_frames[index] = false;
-        next.invocation_preserves_frames[index] = false;
-        next.local_labels[index] = None;
-        next.labels[index] = false;
-        next.resumptions[index] = ResumptionValue::None;
+        next.retire_value(*argument);
     }
-    write(&mut next, label.destination)?;
-    let destination = label.destination as usize;
-    next.reference_origins[destination] = metadata.0;
-    next.frame_independent[destination] = metadata.1;
-    next.referent_independent[destination] = metadata.2;
-    next.destruction_preserves_frames[destination] = metadata.3;
-    next.labels[destination] = metadata.4;
-    next.resumptions[destination] = metadata.5;
-    next.invocation_preserves_frames[destination] = metadata.6;
+    metadata.install(function, &mut next, label.destination)?;
     Ok(Some((label.target, next)))
 }
 

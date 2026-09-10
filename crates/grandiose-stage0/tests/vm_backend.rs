@@ -11647,6 +11647,61 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
 }
 
 #[test]
+fn leave_payloads_move_in_parallel_and_retire_their_source_carriers() {
+    let definition = DefKey(Digest::of_bytes(b"owned-parallel-leave"));
+    let leave = |target, arguments, destinations| VmInstruction::Leave {
+        brand_owner: definition, brand_label: 0, handler_depth: 0, target, arguments, destinations,
+        cleanup: VmCleanupProof { moved_places: vec![], active_loans: vec![],
+            storage_erasure: VmStorageErasureWitness::without_source_storage() },
+    };
+    let candidate = |registers, instructions| {
+        let mut candidate = CandidateVmArtifact { schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+            runtime_manifest: None, fingerprint: Digest::of_bytes(b"unsealed-owned-leave"),
+            function: VmFunction { definition, safety: grandiose_stage0::Safety::Safe,
+                unsafe_execution: false, nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+                registers, instructions } };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        candidate
+    };
+    let retired = candidate(vec![VmType::I64, VmType::I64, VmType::Bool], vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 },
+        leave(2, vec![0], vec![1]),
+        VmInstruction::IsInitialized { dst: 2, base: 0, fields: vec![] },
+        VmInstruction::BranchBool { condition: 2, then_target: 4, else_target: 5 },
+        VmInstruction::Trap,
+        VmInstruction::Return { value: 1 },
+    ]);
+    let swapped = candidate(vec![VmType::I64, VmType::I64], vec![
+        VmInstruction::ConstI64 { dst: 0, value: 17 },
+        VmInstruction::ConstI64 { dst: 1, value: 42 },
+        leave(3, vec![0, 1], vec![1, 0]),
+        VmInstruction::Return { value: 0 },
+    ]);
+    let retained = candidate(vec![VmType::I64], vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 },
+        leave(2, vec![0], vec![0]),
+        VmInstruction::Return { value: 0 },
+    ]);
+    for candidate in [retired.clone(), swapped, retained] {
+        assert_eq!(verify_vm(candidate.clone()).unwrap().run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_artifact(&encode_artifact(&candidate)).unwrap().run_i64().unwrap(), 42);
+    }
+    let mut reused = retired;
+    reused.function.instructions = vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 }, leave(2, vec![0], vec![1]),
+        VmInstruction::Return { value: 0 },
+    ];
+    reused.fingerprint = reused.computed_fingerprint();
+    assert!(matches!(verify_vm(reused.clone()), Err(VmArtifactError::UseAfterMove { register: 0 })));
+    assert!(matches!(decode_and_verify_artifact(&encode_artifact(&reused)), Err(VmArtifactError::UseAfterMove { register: 0 })));
+    let duplicated = candidate(vec![VmType::I64, VmType::I64, VmType::I64], vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 }, leave(2, vec![0, 0], vec![1, 2]),
+        VmInstruction::Return { value: 1 },
+    ]);
+    assert!(matches!(verify_vm(duplicated), Err(VmArtifactError::MalformedEncoding { message: "label transfer repeats an owned payload carrier" })));
+}
+
+#[test]
 fn cleanup_leave_preserves_the_lexical_outer_handler_prefix() {
     let outer_effect = DefKey(Digest::of_bytes(b"leave-retained-outer-handler"));
     let inner_effect = DefKey(Digest::of_bytes(b"leave-exited-inner-handler"));

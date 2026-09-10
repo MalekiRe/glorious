@@ -93,6 +93,44 @@ const AFTER_UNKNOWN: &str = "#![no_std]
     fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); relay(42,@select) }";
 
 #[test]
+fn returned_factory_capability_requires_the_exact_checked_body_batch() {
+    let fixture = Fixture::new("#![no_std]
+        fn wrap(task:(i64) -> i64) -> () -> i64 { move (task) { task(42) } }
+        fn main(task:(i64) -> i64) -> i64 { wrap(task)() }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries_with_check(&inputs, Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    let bound = summaries.bind(&inputs).unwrap();
+    let solver = crate::TraitSolver::new(&fixture.interface);
+    let flows = fixture.bodies.iter().map(|(owner, body)| {
+        let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(body, bound.body(*owner)).unwrap();
+        let flow = crate::PlaceFlow::analyze_with_frozen_solver(body, &fixture.interface, &[], &[], &solver,
+            None, std::sync::Arc::new(facts));
+        assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+        (*owner, flow)
+    }).collect::<BTreeMap<_, _>>();
+    let main = fixture.names["main"];
+    let wrap = fixture.names["wrap"];
+    let mut bodies = fixture.bodies.iter().map(|(owner, body)| (*owner,
+        crate::useflow::UseBody { body, flow: &flows[owner] })).collect::<crate::useflow::UseBodies<'_>>();
+    let analyze = |bodies: &crate::useflow::UseBodies<'_>| crate::UseFlow::analyze_with_bodies(
+        &fixture.bodies[&main], &flows[&main], &fixture.interface, bodies);
+    let uses = analyze(&bodies);
+    assert!(uses.diagnostics.is_empty(), "{uses:#?}");
+    assert!(uses.callable_uses.iter().any(|fact| fact.name == "task" && fact.actual == crate::Quantity::ONCE), "{uses:#?}");
+    bodies.remove(&wrap);
+    let missing = analyze(&bodies);
+    assert!(missing.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"), "{missing:#?}");
+    let mut changed = fixture.bodies[&wrap].clone();
+    let literal = changed.expressions.iter_mut().find(|expression|
+        matches!(&expression.kind, CoreKind::Literal(value) if value == "42")).unwrap();
+    literal.kind = CoreKind::Literal("43".into());
+    bodies.insert(wrap, crate::useflow::UseBody { body: &changed, flow: &flows[&wrap] });
+    let stale = analyze(&bodies);
+    assert!(stale.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"), "{stale:#?}");
+}
+
+#[test]
 fn pending_control_is_sealed_and_discharged_before_ordinary_core() {
     let mut fixture = Fixture::control_input("#![no_std]
         pub fn main() -> i64 { @done: i64 { let task = () -> ! { @done(42) }; task() } }", true);
@@ -497,8 +535,11 @@ fn payload_projection_shares_explicit_and_captured_inputs_without_erasing_unknow
         unresolved: bool,
     }
     impl PayloadInputs for Domain {
+        type Value = Value;
+        fn project(&self, value: &Value, path: &[u32]) -> Option<Value> { Inputs::project(self, value, path) }
+        fn captures(&self, callable: &Operand<Value>) -> CapturedInputs<Value> { Inputs::captures(self, callable) }
         fn reborrow(&self, value: &Value, fields: &[u32]) -> Option<Value> {
-            self.project(value, fields)
+            Inputs::project(self, value, fields)
         }
     }
     impl Inputs for Domain {

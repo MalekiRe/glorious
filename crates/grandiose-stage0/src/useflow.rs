@@ -9,7 +9,7 @@
 
 use crate::{
     core::{
-        CallableId, CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
+        CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
         CorePlace, TypedBody, instantiate_nominal_field_type,
     },
     placeflow::{FlowEventKind, MoveFact, PlaceFlow},
@@ -19,6 +19,8 @@ use crate::{
     types::Type,
 };
 use std::collections::{BTreeMap, BTreeSet};
+mod invocations;
+pub(crate) use invocations::{UseBodies, UseBody};
 
 /// One structured failure from quantitative Core analysis.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -103,7 +105,7 @@ impl UseFlow {
     /// a valid witness for a quantitative callable contract, and reporting a
     /// second use error for it would be misleading.
     pub fn analyze(body: &TypedBody, ownership: &PlaceFlow) -> Self {
-        Self::analyze_with_optional_interface(body, ownership, None)
+        Self::analyze_with_optional_interface(body, ownership, None, None)
     }
 
     /// Analyze a source body with the frozen nominal layouts that define its
@@ -115,13 +117,19 @@ impl UseFlow {
         ownership: &PlaceFlow,
         signatures: &ElaboratedInterface,
     ) -> Self {
-        Self::analyze_with_optional_interface(body, ownership, Some(signatures))
+        Self::analyze_with_optional_interface(body, ownership, Some(signatures), None)
+    }
+
+    pub(crate) fn analyze_with_bodies(body: &TypedBody, ownership: &PlaceFlow,
+        signatures: &ElaboratedInterface, bodies: &UseBodies<'_>) -> Self {
+        Self::analyze_with_optional_interface(body, ownership, Some(signatures), Some(bodies))
     }
 
     fn analyze_with_optional_interface(
         body: &TypedBody,
         ownership: &PlaceFlow,
         signatures: Option<&ElaboratedInterface>,
+        bodies: Option<&UseBodies<'_>>,
     ) -> Self {
         if !ownership.diagnostics.is_empty() {
             return Self::default();
@@ -136,12 +144,17 @@ impl UseFlow {
             body,
             continuations,
             ownership,
+            body_flow: ownership,
+            bodies,
+            active_frames: vec![],
+            frame_steps: 0,
             signatures,
             next_key: 0,
             contracts: BTreeMap::new(),
             facts: BTreeMap::new(),
             projected_contracts: BTreeMap::new(),
             closure_values: BTreeMap::new(),
+            result_values: BTreeMap::new(),
             escapes: EscapeSummary::default(),
             value_obligations: vec![],
             diagnostics: vec![],
@@ -345,11 +358,12 @@ struct Contract {
 
 #[derive(Clone, Debug)]
 struct ClosureValue {
-    callable: CallableId,
+    environment: crate::core::EnvironmentBrand,
     body: CoreId,
     captures: BTreeMap<String, Binding>,
     parameters: Vec<(String, Type)>,
     invocation: Quantity,
+    resident_types: Vec<(String, Type)>,
 }
 
 /// One outgoing capability transfer observed while evaluating Core.  The
@@ -442,6 +456,7 @@ enum Binding {
     /// projection is live/moved/borrowed; this map only preserves the
     /// callable-use obligation while the aggregate is live.
     Aggregate(BTreeMap<u32, Binding>),
+    Choice(Vec<Binding>),
     /// A callable created by a named declaration is globally reusable. Its
     /// invocation field describes the invocation itself, not a consumable
     /// body-local capability, so no local quantity fact is created here.
@@ -458,6 +473,10 @@ struct Analyzer<'a> {
     continuations: &'a crate::core_continuations::CoreContinuations,
     body: &'a TypedBody,
     ownership: &'a PlaceFlow,
+    body_flow: &'a PlaceFlow,
+    bodies: Option<&'a UseBodies<'a>>,
+    active_frames: Vec<crate::CallableBrand>,
+    frame_steps: usize,
     signatures: Option<&'a ElaboratedInterface>,
     next_key: u32,
     contracts: BTreeMap<ContractKey, Contract>,
@@ -471,6 +490,7 @@ struct Analyzer<'a> {
     /// removes its outer binding while the closure is evaluated, but the
     /// resulting closure remains the owner of that capability.
     closure_values: BTreeMap<CoreId, ClosureValue>,
+    result_values: BTreeMap<CoreId, Binding>,
     escapes: EscapeSummary,
     value_obligations: Vec<ValueUseFact>,
     diagnostics: Vec<UseDiagnostic>,
@@ -580,7 +600,7 @@ impl Analyzer<'_> {
             | CoreKind::Constant { .. }
             | CoreKind::Error => Summary::default(),
             CoreKind::Closure {
-                callable,
+                callable: _,
                 parameters,
                 environment: capture_environment,
                 body,
@@ -591,7 +611,9 @@ impl Analyzer<'_> {
                 self.closure_values
                     .entry(id)
                     .or_insert_with(|| ClosureValue {
-                        callable,
+                        environment: capture_environment.brand,
+                        resident_types: capture_environment.captures.iter().map(|capture|
+                            (capture.name.clone(), crate::capture_formation::CaptureFormation::new(capture).resident_type())).collect(),
                         body,
                         captures: capture_environment
                             .captures
@@ -696,7 +718,15 @@ impl Analyzer<'_> {
             | CoreKind::ReleaseAvailable(value)
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. } => self.expression(value, environment),
-            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+            CoreKind::Block(values) => {
+                let last = values.last().copied();
+                let summary = self.sequence(values, environment, expression.span);
+                let binding = last.filter(|_| !self.continuations.is_abrupt(id))
+                    .map(|last| self.binding_for_value(last, environment)).unwrap_or(Binding::Other);
+                self.result_values.insert(id, binding);
+                summary
+            }
+            CoreKind::Tuple(values) | CoreKind::Array(values) => {
                 self.sequence(values, environment, expression.span)
             }
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
@@ -738,7 +768,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Call {
                 callee, arguments, ..
-            } => self.call(callee, arguments, environment, expression.span),
+            } => self.call(id, callee, arguments, environment, expression.span),
             CoreKind::Handle {
                 computation,
                 clauses,
@@ -924,6 +954,7 @@ impl Analyzer<'_> {
                 let computation_escapes = self.take_escapes();
                 let mut arms = None::<Summary>;
                 let mut arm_escapes = None::<EscapeSummary>;
+                let mut results = vec![];
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
                     // Completion patterns have the same conditional-owner
@@ -939,6 +970,9 @@ impl Analyzer<'_> {
                         clause.span,
                     );
                     let arm = self.expression(clause.body, &mut arm_environment);
+                    if !self.continuations.is_abrupt(clause.body) {
+                        results.push(self.binding_for_value(clause.body, &arm_environment));
+                    }
                     let mut arm = arm;
                     self.check_conditional_contracts(&mut arm, &completion_contracts);
                     let escapes = self.take_escapes();
@@ -953,6 +987,7 @@ impl Analyzer<'_> {
                 }
                 self.escapes = computation_escapes;
                 self.sequence_escapes(expression.span, arm_escapes.unwrap_or_default());
+                self.result_values.insert(id, Binding::choice(results));
                 self.compose(expression.span, computation, arms.unwrap_or_default())
             }
         }
@@ -1093,6 +1128,7 @@ impl Analyzer<'_> {
 
     fn call(
         &mut self,
+        id: CoreId,
         callee: CoreId,
         arguments: Vec<CoreId>,
         environment: &mut Environment,
@@ -1112,56 +1148,37 @@ impl Analyzer<'_> {
         {
             return summary;
         }
-        match self.binding_for_value(callee, environment) {
+        let binding = self.binding_for_value(callee, environment);
+        let inputs = arguments.iter().map(|argument| self.binding_for_value(*argument, environment)).collect::<Vec<_>>();
+        if !matches!(binding, Binding::Closure(_) | Binding::Choice(_))
+            && let Some((body, result)) = self.factory_call(id, &binding, &inputs, span) {
+            self.result_values.insert(id, result);
+            return self.compose(span, summary, body);
+        }
+        let body = self.invoke_binding(&binding, &inputs, callee, &arguments, environment, span);
+        self.result_values.insert(id, body.1);
+        self.compose(span, summary, body.0)
+    }
+
+    fn invoke_binding(&mut self, binding: &Binding, inputs: &[Binding], callee: CoreId,
+        arguments: &[CoreId], environment: &Environment, span: Span) -> (Summary, Binding) {
+        match binding {
             Binding::Contract(key) => {
-                let arguments = self.escape_arguments(callee, &arguments, environment, span);
-                let summary = self.compose(span, summary, arguments);
-                self.compose(span, summary, Summary::one(key))
+                let arguments = self.escape_arguments(callee, arguments, environment, span);
+                (self.compose(span, arguments, Summary::one(*key)), Binding::Other)
             }
-            Binding::Closure(closure) => {
-                let enclosing_escapes = self.take_escapes();
-                let mut closure_environment = Environment {
-                    bindings: closure.captures.clone(),
-                };
-                for (index, (name, ty)) in closure.parameters.iter().enumerate() {
-                    // Preserve the caller's contract identity when a local
-                    // capability is passed through a closure. Creating a
-                    // fresh parameter contract here would lose the caller's
-                    // lower-bound obligation and undercount captures.
-                    let binding = arguments
-                        .get(index)
-                        .map(|argument| self.binding_for_value(*argument, environment))
-                        .filter(|binding| {
-                            matches!(binding, Binding::Contract(_) | Binding::Closure(_))
-                        })
-                        .unwrap_or_else(|| {
-                            callable_invocation(ty)
-                                .map(|quantity| {
-                                    Binding::Contract(self.contract(
-                                        &format!("{name}@closure{}", closure.callable.0),
-                                        quantity,
-                                        span,
-                                        false,
-                                    ))
-                                })
-                                .unwrap_or(Binding::Other)
-                        });
-                    closure_environment.bindings.insert(name.clone(), binding);
-                }
-                let body = self.expression(closure.body, &mut closure_environment);
-                let escapes = self.take_escapes();
-                self.escapes = enclosing_escapes;
-                let escapes = self.scale_escapes(span, escapes, closure.invocation);
-                self.sequence_escapes(span, escapes);
-                // A contextual closure can carry a finite, optional, or
-                // widened invocation interval from its expected callable
-                // type.  Replaying it multiplies every captured obligation.
-                let body = self.repeat(span, body, closure.invocation);
-                self.compose(span, summary, body)
+            Binding::Closure(closure) => self.run_closure(closure.clone(), inputs, span),
+            Binding::Choice(choices) => {
+                let mut results = vec![];
+                let summary = self.branch_bindings(choices, span, |this, binding| {
+                    let (summary, result) = this.invoke_binding(binding, inputs, callee, arguments, environment, span);
+                    results.push(result);
+                    summary
+                });
+                (summary, Binding::choice(results))
             }
             Binding::Aggregate(_) | Binding::GlobalCallable | Binding::Other => {
-                let arguments = self.escape_arguments(callee, &arguments, environment, span);
-                self.compose(span, summary, arguments)
+                (self.escape_arguments(callee, arguments, environment, span), Binding::Other)
             }
         }
     }
@@ -1201,6 +1218,10 @@ impl Analyzer<'_> {
                             expression.span,
                         )
                         .unwrap_or(Binding::Other),
+                    Binding::Choice(choices) => Binding::choice(choices.into_iter().map(|binding| match binding {
+                        Binding::Aggregate(fields) => fields.get(index).cloned().unwrap_or(Binding::Other),
+                        _ => Binding::Other,
+                    }).collect()),
                     _ => Binding::Other,
                 }
             }
@@ -1222,7 +1243,7 @@ impl Analyzer<'_> {
                 self.move_place_fact(expression.span),
             ),
             CoreKind::Closure {
-                callable,
+                callable: _,
                 parameters,
                 environment: closure_environment,
                 body,
@@ -1248,13 +1269,18 @@ impl Analyzer<'_> {
                     })
                     .collect();
                 Binding::Closure(ClosureValue {
-                    callable: *callable,
+                    environment: closure_environment.brand,
+                    resident_types: closure_environment.captures.iter().map(|capture|
+                        (capture.name.clone(), crate::capture_formation::CaptureFormation::new(capture).resident_type())).collect(),
                     body: *body,
                     captures,
                     parameters: parameters.clone(),
                     invocation: callable_invocation(&expression.ty).unwrap_or(Quantity::ONCE),
                 })
             }
+            CoreKind::Borrow { value, .. } | CoreKind::Deref(value) => self.binding_for_value(*value, environment),
+            CoreKind::Call { .. } | CoreKind::Block(_) | CoreKind::Completion { .. } | CoreKind::Handle { .. }
+                => self.result_values.get(&id).cloned().unwrap_or(Binding::Other),
             _ => Binding::Other,
         }
     }
@@ -1433,6 +1459,9 @@ impl Analyzer<'_> {
 
     fn binding_contract_keys(binding: &Binding, contracts: &mut Vec<ContractKey>) {
         match binding {
+            Binding::Choice(choices) => {
+                for binding in choices { Self::binding_contract_keys(binding, contracts); }
+            }
             Binding::Contract(key) => contracts.push(*key),
             Binding::Aggregate(fields) => {
                 for binding in fields.values() {
@@ -1670,6 +1699,9 @@ impl Analyzer<'_> {
 
     fn record_overwrite(&mut self, binding: &Binding, place: MoveFact, span: Span) {
         match binding {
+            Binding::Choice(choices) => {
+                for binding in choices { self.record_overwrite(binding, place.clone(), span); }
+            }
             Binding::Contract(key) => {
                 let Some(contract) = self.contracts.get(key) else {
                     return;
@@ -1707,6 +1739,9 @@ impl Analyzer<'_> {
 
     fn record_transfer(&mut self, binding: &Binding, place: MoveFact, span: Span) {
         match binding {
+            Binding::Choice(choices) => {
+                for binding in choices { self.record_transfer(binding, place.clone(), span); }
+            }
             Binding::Contract(key) => {
                 if let Some(contract) = self.contracts.get(key) {
                     self.value_obligations.push(ValueUseFact {
@@ -1731,6 +1766,9 @@ impl Analyzer<'_> {
 
     fn record_borrow(&mut self, binding: &Binding, place: MoveFact, span: Span) {
         match binding {
+            Binding::Choice(choices) => {
+                for binding in choices { self.record_borrow(binding, place.clone(), span); }
+            }
             Binding::Contract(key) => {
                 if let Some(contract) = self.contracts.get(key) {
                     self.value_obligations.push(ValueUseFact {
@@ -1903,22 +1941,7 @@ impl Analyzer<'_> {
         // to an enclosing closure but cannot capture its own not-yet-bound
         // local name.  Re-evaluating this snapshot therefore terminates and
         // accurately charges each independent transfer.
-        let enclosing_escapes = self.take_escapes();
-        let mut environment = Environment {
-            bindings: closure.captures,
-        };
-        // Arguments belong to the receiver of the escaped closure. They are
-        // not body-local obligations of the enclosing declaration.
-        for (name, _) in closure.parameters {
-            environment.bindings.insert(name, Binding::Other);
-        }
-        let summary = self.expression(closure.body, &mut environment);
-        let escapes = self.take_escapes();
-        self.escapes = enclosing_escapes;
-        let escapes = self.scale_escapes(span, escapes, closure.invocation);
-        self.sequence_escapes(span, escapes);
-        let summary = self.repeat(span, summary, closure.invocation);
-        summary
+        self.run_closure(closure, &[], span).0
     }
 
     fn escape_value(
@@ -1936,6 +1959,8 @@ impl Analyzer<'_> {
             Binding::Closure(closure) => {
                 self.escape_closure(closure, self.body.expression(id).span)
             }
+            Binding::Choice(choices) => self.branch_bindings(&choices, self.body.expression(id).span,
+                |this, binding| this.escape_binding(binding, required, this.body.expression(id).span, boundary)),
             Binding::Aggregate(fields) => {
                 let mut summary = Summary::default();
                 for binding in fields.values() {
@@ -2035,6 +2060,8 @@ impl Analyzer<'_> {
                 Summary::default()
             }
             Binding::Closure(closure) => self.escape_closure(closure.clone(), span),
+            Binding::Choice(choices) => self.branch_bindings(choices, span,
+                |this, binding| this.escape_binding_as(binding, expected, span, boundary)),
             Binding::Aggregate(fields) => {
                 let mut summary = Summary::default();
                 for (index, binding) in fields {
@@ -2108,6 +2135,8 @@ impl Analyzer<'_> {
                 Summary::default()
             }
             Binding::Closure(closure) => self.escape_closure(closure.clone(), span),
+            Binding::Choice(choices) => self.branch_bindings(choices, span,
+                |this, binding| this.escape_binding(binding, required, span, boundary)),
             Binding::Aggregate(fields) => {
                 let mut summary = Summary::default();
                 for binding in fields.values() {
@@ -2339,6 +2368,7 @@ fn display_place(place: &MoveFact) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CallableId;
     use crate::{
         core::{CaptureMode, ClosureCapture, CoreCompletionClause, CoreExpr},
         identity::{FileKey, PackageKey},

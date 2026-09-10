@@ -20,12 +20,26 @@ impl ControlBrand {
 /// this partial projection never substitutes for those independent checks.
 pub(super) fn known_payload(
     payload: crate::callable_control::ResolvedPayload<Value>,
+    storage: &ValueEnvironment,
+    obligations: &mut BTreeMap<EnvironmentBrand, BTreeSet<ControlBrand>>,
+    signatures: &crate::ElaboratedInterface,
+) -> Option<Value> {
+    payload_value(payload, storage, obligations, signatures, false)
+}
+
+fn payload_value(
+    payload: crate::callable_control::ResolvedPayload<Value>,
+    storage: &ValueEnvironment,
+    obligations: &mut BTreeMap<EnvironmentBrand, BTreeSet<ControlBrand>>,
+    signatures: &crate::ElaboratedInterface,
+    capture: bool,
 ) -> Option<Value> {
     use crate::callable_control::ResolvedPayload;
     match payload {
-        ResolvedPayload::Inputs { values, .. } => Some(join(values)),
+        ResolvedPayload::Inputs { values, .. } => Some(join(values.into_iter()
+            .map(|value| Analyzer::resolved_value_in(&value, storage)).collect())),
         ResolvedPayload::Aggregate(fields) => {
-            let fields = fields.into_iter().map(known_payload).collect::<Vec<_>>();
+            let fields = fields.into_iter().map(|field| payload_value(field, storage, obligations, signatures, capture)).collect::<Vec<_>>();
             fields.iter().any(Option::is_some).then(|| {
                 Value::Aggregate(
                     fields
@@ -35,6 +49,26 @@ pub(super) fn known_payload(
                 )
             })
         }
+        ResolvedPayload::Callable { constructor, captures, .. } => {
+            let environment = constructor.brand();
+            let resident_captures = captures.into_iter().map(|(ty, payload)|
+                crate::resident_invocations::Operand { ty,
+                    value: payload_value(payload, storage, obligations, signatures, true).unwrap_or(Value::None) }).collect::<Vec<_>>();
+            let controls = resident_captures.iter().flat_map(|capture| value_controls(&capture.value))
+                .chain(constructor.labels().iter().copied().map(ControlBrand::Label)).collect::<BTreeSet<_>>();
+            obligations.entry(environment).or_default().extend(&controls);
+            let captures = resident_captures.iter().flat_map(|capture| capture_dependency_roots(&capture.value))
+                .collect::<BTreeSet<_>>().into_iter().map(|root| Capture::Borrowed { root, environment }).collect();
+            let regions = resident_captures.iter().flat_map(|capture| contained_regions(&capture.value)).collect();
+            let frame_independent = constructor.labels().is_empty() && controls.is_empty()
+                && resident_captures.iter().all(|capture| frame_independent_value(&capture.value));
+            Some(Value::Closure { environment, captures, resident_captures, frame_independent, regions, controls })
+        }
+        // A constructor must describe each resident capture. A missing
+        // input projection can still be independently frame-independent
+        // (for example, a scalar computed inside the factory). References
+        // and opaque callable environments do not receive that permission.
+        ResolvedPayload::Unknown(ty) if capture && crate::core::tail::tail_owned_type(signatures, &ty, &mut vec![]) => Some(Value::FrameIndependent),
         ResolvedPayload::Unknown(_) => None,
     }
 }
@@ -77,6 +111,20 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
         }
     }
     labels
+}
+
+pub(super) fn unrepresented_capture(value: &Value) -> bool {
+    match value {
+        Value::None | Value::Region(_) => true,
+        Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
+            values.iter().any(unrepresented_capture),
+        Value::Array { length, element, fields } => array_values(*length, element, fields).any(unrepresented_capture),
+        Value::Closure { resident_captures, .. } => resident_captures.iter().any(|capture| unrepresented_capture(&capture.value)),
+        Value::CallableResident { footprint, resident_captures } => unrepresented_capture(footprint)
+            || resident_captures.iter().any(|capture| unrepresented_capture(&capture.value)),
+        Value::Logical { physical, arguments } => unrepresented_capture(physical) || arguments.values().any(unrepresented_capture),
+        Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } | Value::Control(_) => false,
+    }
 }
 
 impl Analyzer<'_> {
@@ -145,14 +193,17 @@ mod tests {
     #[test]
     fn partial_return_payloads_preserve_field_positions_without_proving_unknown_fields() {
         use crate::callable_control::ResolvedPayload;
-        assert_eq!(known_payload(ResolvedPayload::Unknown(Type::Unit)), None);
+        let storage = ValueEnvironment::default();
+        let mut obligations = BTreeMap::new();
+        let signatures = crate::ElaboratedInterface::default();
+        assert_eq!(known_payload(ResolvedPayload::Unknown(Type::Unit), &storage, &mut obligations, &signatures), None);
         let returned = known_payload(ResolvedPayload::Aggregate(vec![
             ResolvedPayload::Unknown(Type::Unit),
             ResolvedPayload::Inputs {
                 ty: Type::Unit,
                 values: vec![Value::Control(brand(0))],
             },
-        ]))
+        ]), &storage, &mut obligations, &signatures)
         .unwrap();
         assert_eq!(
             returned,

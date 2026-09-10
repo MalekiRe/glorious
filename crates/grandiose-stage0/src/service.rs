@@ -91,44 +91,41 @@ impl std::fmt::Debug for StagedTypedBody {
 }
 
 impl StagedTypedBody {
-    fn check_resources(
+    fn resource_flow(
         &self,
         signatures: &ElaboratedInterface,
         abort_primitive: Option<DefKey>,
         continuations: Arc<crate::core_continuations::CoreContinuations>,
-        diagnostics: &mut Vec<CompileDiagnostic>,
-    ) -> (PlaceFlow, EscapeFlow, bool) {
+    ) -> PlaceFlow {
         let Self { core, lexical_bounds, lexical_effect_bindings, solver, .. } = self;
-        let flow = PlaceFlow::analyze_with_frozen_solver(
+        PlaceFlow::analyze_with_frozen_solver(
             core, signatures, lexical_bounds, lexical_effect_bindings, solver, abort_primitive,
             continuations,
-        );
+        )
+    }
+
+    fn check_resources(
+        &self,
+        signatures: &ElaboratedInterface,
+        flow: &PlaceFlow,
+        bodies: &crate::useflow::UseBodies<'_>,
+        diagnostics: &mut Vec<CompileDiagnostic>,
+    ) -> (EscapeFlow, bool) {
+        let core = &self.core;
         diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
             diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
         )));
-        let escapes = EscapeFlow::analyze_with_interface(core, &flow, signatures);
+        let escapes = EscapeFlow::analyze_with_interface(core, flow, signatures);
         diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
             diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
         )));
-        let uses = UseFlow::analyze_with_interface(core, &flow, signatures);
+        let uses = UseFlow::analyze_with_bodies(core, flow, signatures, bodies);
         diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| CompileDiagnostic::source(
             diagnostic.code, diagnostic.message.clone(), Some(diagnostic.span),
         )));
         let valid = self.valid && flow.diagnostics.is_empty() && escapes.diagnostics.is_empty()
             && uses.diagnostics.is_empty();
-        (flow, escapes, valid)
-    }
-
-    fn analyze(
-        self,
-        signatures: &ElaboratedInterface,
-        abort_primitive: Option<DefKey>,
-        continuations: Arc<crate::core_continuations::CoreContinuations>,
-        diagnostics: &mut Vec<CompileDiagnostic>,
-    ) -> PublishedBody {
-        let (flow, _, valid) = self.check_resources(signatures, abort_primitive, continuations, diagnostics);
-        let Self { definition, is_constant, core, budget, .. } = self;
-        PublishedBody { definition, is_constant, valid, core, flow, budget }
+        (escapes, valid)
     }
 }
 
@@ -1968,19 +1965,31 @@ impl StageZeroCompiler {
             let bound = summaries.bind(&control_bodies).map_err(|reason| ServiceError::Failed(vec![
                 CompileDiagnostic::invariant("G4180", format!("staged control batch failed validation: {reason:?}"))]))?;
             let mut control_captures = crate::escape::ControlCaptures::default();
+            let mut source_flows = BTreeMap::new();
             for staged in &staged_bodies {
                 if !staged.valid || !control_bodies.contains_key(&staged.definition) { continue; }
                 session.checkpoint_in(&staged.budget, 0)?;
                 let facts = crate::core_continuations::CoreContinuations::derive_with_invocations(
                     &staged.core, bound.body(staged.definition))
                     .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant(error.code, error.message)]))?;
-                let (flow, escapes, valid) = staged.check_resources(&signatures, abort_primitive, Arc::new(facts), &mut diagnostics);
+                source_flows.insert(staged.definition, staged.resource_flow(&signatures, abort_primitive, Arc::new(facts)));
+            }
+            let use_bodies = staged_bodies.iter().filter_map(|staged| source_flows.get(&staged.definition)
+                .map(|flow| (staged.definition, crate::useflow::UseBody { body: &staged.core, flow })))
+                .collect::<crate::useflow::UseBodies<'_>>();
+            let mut source_validity = BTreeMap::new();
+            for staged in &staged_bodies {
+                let Some(flow) = source_flows.get(&staged.definition) else { continue; };
+                let (escapes, valid) = staged.check_resources(&signatures, flow, &use_bodies, &mut diagnostics);
                 if valid {
                     control_captures.include(staged.definition, &staged.core, &escapes).map_err(|error|
                         ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180", error)]))?;
                 }
-                original_resources.insert(staged.definition, (flow, valid));
+                source_validity.insert(staged.definition, valid);
             }
+            drop(use_bodies);
+            original_resources.extend(source_flows.into_iter().map(|(definition, flow)|
+                (definition, (flow, source_validity[&definition]))));
             let mut transformed = BTreeMap::new();
             for staged in &staged_bodies {
                 if !staged.valid || !control_bodies.contains_key(&staged.definition) { continue; }
@@ -2039,6 +2048,22 @@ impl StageZeroCompiler {
             ).map(|facts| (staged.definition, Arc::new(facts)))
         }).collect::<Result<BTreeMap<_, _>, _>>()
             .map_err(|error| ServiceError::Failed(vec![CompileDiagnostic::invariant(error.code, error.message)]))?;
+        let mut receiving_flows = staged_bodies.iter().filter_map(|staged|
+            continuations.get(&staged.definition).map(|facts| (staged.definition,
+                staged.resource_flow(&signatures, abort_primitive, facts.clone())))).collect::<BTreeMap<_, _>>();
+        let use_bodies = staged_bodies.iter().filter_map(|staged|
+            receiving_flows.get(&staged.definition).or_else(|| original_resources.get(&staged.definition).map(|(flow, _)| flow))
+                .map(|flow| (staged.definition, crate::useflow::UseBody { body: &staged.core, flow })))
+                .collect::<crate::useflow::UseBodies<'_>>();
+        let mut receiving_validity = BTreeMap::new();
+        for staged in &staged_bodies {
+            if let Some(flow) = receiving_flows.get(&staged.definition) {
+                session.checkpoint_in(&staged.budget, 0)?;
+                let (_, valid) = staged.check_resources(&signatures, flow, &use_bodies, &mut diagnostics);
+                receiving_validity.insert(staged.definition, valid);
+            }
+        }
+        drop(use_bodies);
         let mut body_products = Vec::with_capacity(staged_bodies.len());
         for staged in staged_bodies {
             // Observe cancellation at the new phase boundary without
@@ -2049,8 +2074,10 @@ impl StageZeroCompiler {
                 let StagedTypedBody { definition, is_constant, core, budget, .. } = staged;
                 body_products.push(PublishedBody { definition, is_constant, valid, core, flow, budget });
             } else {
-                let facts = continuations[&staged.definition].clone();
-                body_products.push(staged.analyze(&signatures, abort_primitive, facts, &mut diagnostics));
+                let flow = receiving_flows.remove(&staged.definition).expect("staged receiving flow");
+                let valid = receiving_validity[&staged.definition];
+                let StagedTypedBody { definition, is_constant, core, budget, .. } = staged;
+                body_products.push(PublishedBody { definition, is_constant, valid, core, flow, budget });
             }
         }
         for PublishedBody {

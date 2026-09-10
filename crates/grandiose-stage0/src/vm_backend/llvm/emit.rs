@@ -128,7 +128,8 @@ impl<'a> Plan<'a> {
                         let layout = &layouts[*argument as usize];
                         frame_bytes = frame_bytes
                             .checked_add(
-                                layout.memory.size() as u64 + layout.memory.alignment() as u64,
+                                layout.memory.size() as u64 + layout.memory.alignment() as u64
+                                    + paths[*argument as usize].len() as u64,
                             )
                             .ok_or_else(|| {
                                 unsupported(0, "native parallel-transfer storage overflow")
@@ -623,6 +624,8 @@ impl<'a, 'p> Body<'a, 'p> {
                         layout.memory.size().max(1),
                         layout.memory.alignment()
                     ));
+                    self.line(format!("%leave_init_{pc}_{index} = alloca [{} x i8], align 1",
+                        self.data.paths[*argument as usize].len()));
                 }
             }
         }
@@ -1087,14 +1090,18 @@ impl<'a, 'p> Body<'a, 'p> {
                     let layout = self.data.layouts[*argument as usize].clone();
                     let temporary = format!("%leave_{}_{}", self.pc, index);
                     self.copy_bytes(&temporary, &self.pointer(*argument), &layout);
+                    self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr %leave_init_{}_{index}, ptr %init{argument}, i64 {}, i1 false)",
+                        self.pc, self.data.paths[*argument as usize].len()));
                 }
+                for argument in arguments { self.mark(*argument, &[], false); }
                 for (index, destination) in destinations.iter().enumerate() {
                     self.copy_bytes(
                         &self.pointer(*destination),
                         &format!("%leave_{}_{}", self.pc, index),
                         &self.data.layouts[*destination as usize].clone(),
                     );
-                    self.mark(*destination, &[], true);
+                    self.line(format!("call void @llvm.memmove.p0.p0.i64(ptr %init{destination}, ptr %leave_init_{}_{index}, i64 {}, i1 false)",
+                        self.pc, self.data.paths[*destination as usize].len()));
                 }
                 self.line(format!("br label %pc{target}"));
                 return Ok(true);

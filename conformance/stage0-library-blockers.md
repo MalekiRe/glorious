@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated 2026-09-09 from the current source and cache 108 verification below,
+Updated 2026-09-09 from the current source and cache 109 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,32 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 109 / verifier 38 carries checked factory constructors and typed capture
+inputs through the shared invocation payload. Lifetime/place analysis, the
+existing quantity solver and structural fusion consume the same relation.
+Returned callable representations follow actual values rather than erased type
+equality, including compatible branch alternatives. Generic resumption factories,
+forwarded/aggregate captures and independently computed capture values execute
+fresh/decoded at O0/O2. The main focused gate passes 152 tests.
+The final destination-proof safeguard passes 12 supplemental checks.
+
+Factory execution exposed a label-edge ownership bug: predecessor cleanup could
+destroy an environment already copied to the successor. Leave now performs
+parallel owned transfer across VM, verifier and native emission, preserving
+partial initialization and retiring old carriers before installing new owners.
+Native/mixed owned nominal-payload checks pass; these do not demonstrate native
+captured-callable or handler support.
+
+Full helper-family entry, native owned handlers, ordinary native captured
+callables, borrowed/cross-frame resumptions, guarded storage outcomes and
+mandatory-tail activation transfer remain open. Unsupported recursive factories,
+incompatible joined layouts and borrowed/captured control replacement reject
+explicitly. No broad library/service sweep was repeated; the source-library
+matrix remains cache 105 above. Exact logs and limitations are recorded in
+`implementation-progress.md`.
+
+The following cache 108 and earlier checkpoints are historical.
 
 Cache 108 migrates resumption capture admission into the shared source lifetime
 analysis and structural fusion, removing the independent source alias walker
