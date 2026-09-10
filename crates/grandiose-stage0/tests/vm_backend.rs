@@ -711,7 +711,7 @@ fn owned_effect_candidate(forward: bool) -> CandidateVmArtifact {
     let install = |payload, target| VmInstruction::InstallHandlerOwned {
         effect, effect_arguments: vec![], operation: 0, payload_destinations: vec![payload],
         resume_type: VmType::I64, continuation: VmContinuationPolicy::Consume, target,
-        replay_owned: vec![],
+        continuation_owned: vec![],
     };
     let instructions = if forward {
         vec![
@@ -878,7 +878,7 @@ fn owned_resumption_return_does_not_restore_its_outgoing_argument() {
     candidate.function.instructions = vec![
         VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], resume_type: VmType::I64,
-            continuation: VmContinuationPolicy::Consume, target: 5, replay_owned: vec![] },
+            continuation: VmContinuationPolicy::Consume, target: 5, continuation_owned: vec![] },
         VmInstruction::PerformOwned { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
         VmInstruction::CompleteHandler { value: 0 },
         VmInstruction::UninstallHandler,
@@ -935,7 +935,7 @@ fn captured_resumption_calls_restore_intervening_handlers_and_retire_arguments()
     candidate.function.instructions = vec![
         VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], resume_type: VmType::I64,
-            continuation: VmContinuationPolicy::Consume, target: 5, replay_owned: vec![] },
+            continuation: VmContinuationPolicy::Consume, target: 5, continuation_owned: vec![] },
         VmInstruction::PerformOwned { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
         VmInstruction::CompleteHandler { value: 0 },
         VmInstruction::UninstallHandler,
@@ -944,7 +944,7 @@ fn captured_resumption_calls_restore_intervening_handlers_and_retire_arguments()
         VmInstruction::CaptureResumption { dst: 4 },
         VmInstruction::InstallHandlerOwned { effect: inner, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], resume_type: VmType::I64,
-            continuation: VmContinuationPolicy::Consume, target: 17, replay_owned: vec![] },
+            continuation: VmContinuationPolicy::Consume, target: 17, continuation_owned: vec![] },
         VmInstruction::ConstI64 { dst: 1, value: 42 },
         VmInstruction::CallIndirectOwned { dst: 2, callee: 4, arguments: vec![1] },
         VmInstruction::IsInitialized { dst: 3, base: 1, fields: vec![] },

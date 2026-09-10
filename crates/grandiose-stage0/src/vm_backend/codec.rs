@@ -28,7 +28,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// rejected, never interpreted using the current instruction or type layout.
 // Schema 116 retains independently verified shared/unique callable receiver
 // authority alongside the schema-115 fixed-array representation.
-pub const STAGE0_VM_SCHEMA: u32 = 116;
+// Schema 117 distinguishes optional one-shot cancellation and carries the
+// protected ownership partition for all owned handler policies.
+pub const STAGE0_VM_SCHEMA: u32 = 117;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;

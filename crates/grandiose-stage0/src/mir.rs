@@ -1549,10 +1549,12 @@ pub(crate) fn materialized_lifted_callable_definition(
 
 /// The executable use policy for a handler continuation. Typed Core remains
 /// authoritative for exact lower/upper bounds; MIR preserves the distinction
-/// the VM must enforce at runtime: affine continuations are consumed, whereas
-/// unrestricted continuations retain a replayable snapshot.
+/// the VM must enforce at runtime: optional cancellation, exact one-shot use,
+/// and exact finite replay are distinct policies.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirContinuationPolicy {
+    /// A one-shot capability whose uninvoked continuation may be canceled.
+    Optional,
     Consume,
     /// An exact finite multi-shot continuation.  The count is frozen from
     /// Typed Core and crosses the VM boundary so bytecode cannot turn an
@@ -1563,6 +1565,36 @@ pub enum MirContinuationPolicy {
     /// A bottom-typed operation transfers to its clause without any legal
     /// resumption. The target must cancel the suspended frame before return.
     Terminal,
+}
+
+impl MirContinuationPolicy {
+    /// Preserve the admitted source interval; consumers must not reconstruct
+    /// cancellation authority from an upper bound or an unused-token scan.
+    pub(crate) fn from_quantity(quantity: crate::Quantity) -> Option<Self> {
+        match (quantity.lower, quantity.upper) {
+            (0, Some(1)) => Some(Self::Optional),
+            (1, Some(1)) => Some(Self::Consume),
+            (uses, Some(upper)) if uses == upper && uses >= 2 =>
+                Some(Self::Replay { uses: u32::try_from(uses).ok()? }),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod continuation_policy_tests {
+    use super::*;
+
+    #[test]
+    fn admitted_quantities_have_distinct_executable_policies() {
+        assert_eq!(MirContinuationPolicy::from_quantity(crate::Quantity::AFFINE), Some(MirContinuationPolicy::Optional));
+        assert_eq!(MirContinuationPolicy::from_quantity(crate::Quantity::ONCE), Some(MirContinuationPolicy::Consume));
+        assert_eq!(MirContinuationPolicy::from_quantity(crate::Quantity { lower: 3, upper: Some(3) }), Some(MirContinuationPolicy::Replay { uses: 3 }));
+        for quantity in [crate::Quantity::UNRESTRICTED, crate::Quantity { lower: 0, upper: Some(2) },
+            crate::Quantity { lower: 2, upper: Some(3) }] {
+            assert_eq!(MirContinuationPolicy::from_quantity(quantity), None);
+        }
+    }
 }
 
 /// Explicit control edge for a MIR basic block. Block parameters are the only

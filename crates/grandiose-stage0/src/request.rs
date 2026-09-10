@@ -356,8 +356,10 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 139 checks quantity execution for capability-consuming helpers and
 // derives resumption input/result contracts from the complete executable batch.
 // Cache 140 retains actual resumption value quantities and branded borrow places.
-pub const STAGE0_CACHE_GENERATION: u32 = 140;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
+// Cache 141 preserves optional cancellation policy and checked helper disposal;
+// bytecode 73/schema 117 retain the common continuation ownership partition.
+pub const STAGE0_CACHE_GENERATION: u32 = 141;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 73;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
 // Verifier 28 independently reconstructs frame-independence must facts and
@@ -378,7 +380,9 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 42 authenticates scoped resumption transport and single invocation
 // through checked ordinary helper bodies, including guaranteed-use branches.
 // Verifier 43 preserves exact source tokens across read-only borrowed exposure.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 43;
+// Verifier 44 distinguishes cancellation from required invocation and owns
+// explicit parameter slots independently of lent capture storage.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 44;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

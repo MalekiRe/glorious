@@ -1720,3 +1720,53 @@ policy failure. Repeated ordinary helper calls still expose premature replay
 owner consumption. Both regressions remain preserved; ordered replay, dynamic
 cancellation, mandatory-tail handler fusion and full zero-marshalling acceptance
 are not complete.
+
+## Optional cancellation and protected continuation ownership
+
+One checked quantity-to-policy projection supplies both executable MIR paths.
+Optional `[0,1]`, exact one-shot `[1,1]`, and exact finite replay no longer share
+a cancellation policy. Both VM engines reject an explicit normal cancellation
+of an exact one-shot frame. The portable policy encoding preserves the distinction.
+
+The existing helper contract records possible cancellation separately from
+possible invocation and guaranteed invocation. Guaranteed disposition means
+invocation or cancellation on every normal path; it cannot discharge an exact
+invocation requirement. Callable destruction of a symbolic input participates
+in that same verifier state. Cleanup after a guaranteed invocation does not
+claim another cancellation. Final contract revalidation and decoded proof
+reconstruction remain mandatory, and the single-input/single-invocation bound
+still applies.
+
+Proven handler expiry retains a distinct expired control value in the resident
+domain. It cannot be invoked, escaped or joined back into live authority, but
+releasing its inert bytes is not cancellation of an unknown branch. Opaque
+mutation still loses that proof. The shared runtime may release a handle after
+its dynamic owner has ended without searching for or recreating that owner.
+
+Explicit invocation arguments establish owned parameter slots; capture inputs
+lend existing storage. The executable exposure product retains that distinction
+at entry. An immediately preceding whole-slot initialization probe can settle
+either outcome for an unexposed slot using its existing definite state. An
+exposed or partially projected slot does not gain the proof. This allows actual
+conditional argument cleanup to establish disposition without inventing a path
+where a fresh incoming owner was already absent.
+
+Callable disposal dispatches an uninvoked optional token to the common runtime
+abandonment transition, including from an ordinary helper. It retains the
+delimiter marker needed by completion while destroying the suspended branch.
+A spent token does not cancel again. The former replay-only ownership list is
+now the common `continuation_owned` partition consumed by replay and cancellation.
+Its original Cleanup MIR producer selects definitions on the protected graph,
+not every lexical descendant: a sibling clause's newly initialized storage is
+not part of the suspended computation. Retained nonowned slots include initially
+empty slots, with the same source-allocation brands guarding later synchronization.
+Existing frame cleanup executes inner frames before their owners and preserves
+outer borrowed storage.
+
+Cache 141, verifier 44, bytecode 73/schema 117 and native ABI 15 record this
+integrated contract. Focused execution covers both helper branches, same-frame
+and deeper-frame owned cancellation, legacy cancellation and direct replay.
+Full replay transport and ordered multi-invocation helper proofs remain open.
+Arbitrary resumption-bearing destruction during abandonment, complete borrowed
+invocation, mandatory-tail handler fusion and zero-marshalling/performance
+acceptance also require further integration; these tests do not certify them.

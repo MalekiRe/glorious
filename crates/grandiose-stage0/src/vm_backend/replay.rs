@@ -13,14 +13,14 @@ pub(super) fn shared_registers(
     if !enabled {
         return Ok(BTreeMap::new());
     }
-    budget.reserve_value("replay outer storage", registers.len())?;
+    budget.reserve_value("retained outer storage", registers.len())?;
     Ok(registers
         .values
         .iter()
         .enumerate()
-        .filter_map(|(index, value)| {
+        .filter_map(|(index, _)| {
             let index = index as u32;
-            (!owned.contains(&index) && storage_is_initialized(value.as_ref(), &[]))
+            (!owned.contains(&index))
                 .then(|| (index, registers.source_storage.get(&index).copied()))
         })
         .collect())

@@ -1158,6 +1158,7 @@ impl<'a> Decoder<'a> {
                         0 => VmContinuationPolicy::Consume,
                         1 => VmContinuationPolicy::Replay { uses: self.u32()? },
                         2 => VmContinuationPolicy::Terminal,
+                        3 => VmContinuationPolicy::Optional,
                         _ => {
                             return Err(VmArtifactError::MalformedEncoding {
                                 message: "invalid handler continuation policy",
@@ -1173,10 +1174,10 @@ impl<'a> Decoder<'a> {
                         roots.push(self.u32()?);
                     }
                     let mut instruction = instruction.with_owned_effect_payloads();
-                    if let VmInstruction::InstallHandlerOwned { replay_owned, .. } =
+                    if let VmInstruction::InstallHandlerOwned { continuation_owned, .. } =
                         &mut instruction
                     {
-                        *replay_owned = roots;
+                        *continuation_owned = roots;
                     }
                     Ok(instruction)
                 } else {

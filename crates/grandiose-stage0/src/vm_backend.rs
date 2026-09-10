@@ -279,11 +279,12 @@ pub enum VmCompare {
     GreaterEqual,
 }
 
-/// Runtime policy carried by each handler frame.  `Consume` retains affine
-/// one-shot behavior; `Replay` keeps an immutable continuation snapshot for
-/// every permitted resumption.
+/// Runtime policy carried by each handler frame. Optional and exact one-shot
+/// use share consuming invocation, but only the optional policy permits
+/// cancellation before invocation. Replay retains a bounded snapshot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmContinuationPolicy {
+    Optional,
     Consume,
     /// The exact remaining-use budget is part of the executable frame, not
     /// merely an elaborator-side fact.  It is reset on each `Perform` and is
@@ -304,7 +305,7 @@ impl VmContinuationPolicy {
     fn replay_uses(self) -> Option<u32> {
         match self {
             Self::Replay { uses } => Some(uses),
-            Self::Consume | Self::Terminal => None,
+            Self::Optional | Self::Consume | Self::Terminal => None,
         }
     }
 }
@@ -861,7 +862,7 @@ pub enum VmInstruction {
         resume_type: VmType,
         continuation: VmContinuationPolicy,
         target: u32,
-        replay_owned: Vec<u32>,
+        continuation_owned: Vec<u32>,
     },
     ClaimEffectPayloads { payloads: Vec<u32> },
     /// Install one lexical handler frame. The frame is active while its
@@ -1282,7 +1283,7 @@ impl VmInstruction {
             Self::Perform { dst, effect, effect_arguments, operation, arguments } =>
                 Self::PerformOwned { dst, effect, effect_arguments, operation, arguments },
             Self::InstallHandler { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target } =>
-                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target, replay_owned: vec![] },
+                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target, continuation_owned: vec![] },
             value => value,
         }
     }
@@ -5475,6 +5476,7 @@ pub(crate) fn lower_instruction(
             resume_type: vm_type(resume_type)
                 .expect("validated MIR has VM-representable handler result type"),
             continuation: match continuation {
+                MirContinuationPolicy::Optional => VmContinuationPolicy::Optional,
                 MirContinuationPolicy::Consume => VmContinuationPolicy::Consume,
                 MirContinuationPolicy::Replay { uses } => {
                     VmContinuationPolicy::Replay { uses: *uses }
@@ -6206,6 +6208,7 @@ struct VerifierPerformed {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
+    disposed_resumption_inputs: BTreeSet<resumption_values::InputPath>,
     /// May history prevents a loop or later alias from hiding a second use.
     may_invoked_resumption_inputs: BTreeSet<resumption_values::InputPath>,
     /// Caller capabilities invoked on every path reaching this point.
@@ -6501,6 +6504,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     let mut resumption_contract = resumption_calls::Contract::default();
     let mut returned_resumptions = None::<ResumptionValue>;
     let mut required_resumptions = None::<BTreeSet<resumption_values::InputPath>>;
+    let mut disposed_resumptions = None::<BTreeSet<resumption_values::InputPath>>;
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -6590,9 +6594,13 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     let mut incoming: VerifierIncoming = vec![BTreeMap::new(); function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
         entry.insert(VerifierContext::default(), VerifierState {
+            disposed_resumption_inputs: BTreeSet::new(),
             may_invoked_resumption_inputs: BTreeSet::new(),
             invoked_resumption_inputs: BTreeSet::new(),
-            address_exposed: (0..function.registers.len()).map(|index| index < function.parameters as usize).collect(),
+            // Captures lend existing environment slots. Explicit arguments
+            // establish the callee's owned parameter slots; references they
+            // contain expose their referents, not these new handle locations.
+            address_exposed: (0..function.registers.len()).map(|index| index < function.captures as usize).collect(),
             last_instruction: None,
             may_initialized: initial.iter().map(|state| *state == Some(true)).collect(),
             registers: initial,
@@ -7801,13 +7809,12 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if matches!(continuation, VmContinuationPolicy::Replay { uses } if *uses < 2) {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
-                if let VmInstruction::InstallHandlerOwned { replay_owned, .. } = instruction {
-                    if replay_owned.windows(2).any(|pair| pair[0] >= pair[1])
-                        || (!replay_owned.is_empty() && !continuation.is_replay())
+                if let VmInstruction::InstallHandlerOwned { continuation_owned, .. } = instruction {
+                    if continuation_owned.windows(2).any(|pair| pair[0] >= pair[1])
                     {
                         return Err(VmArtifactError::HandlerStateMismatch);
                     }
-                    for root in replay_owned { register_type(function, *root)?; }
+                    for root in continuation_owned { register_type(function, *root)?; }
                 }
                 validate_vm_type(resume_type)?;
                 // Source `!` is represented by the VM's Unit leaf. A
@@ -7916,7 +7923,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     });
                 }
                 let continuations = match frame.continuation {
-                    VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
                     VmContinuationPolicy::Replay { .. } => frame.continuations.clone(),
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -7938,6 +7945,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
+                        disposed_resumption_inputs: states.disposed_resumption_inputs.clone(),
                         may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
                         invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
                         last_instruction: Some(pc),
@@ -8071,7 +8079,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 let continuations = match frame.continuation {
-                    VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
                     VmContinuationPolicy::Replay { .. } => frame.continuations.clone(),
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -8098,6 +8106,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
+                        disposed_resumption_inputs: states.disposed_resumption_inputs.clone(),
                         may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
                         invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
                         last_instruction: Some(pc),
@@ -8220,6 +8229,9 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let Some(frame) = states.handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if frame.continuation == VmContinuationPolicy::Consume {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 if frame.continuations.is_empty()
                     && frame.continuation != VmContinuationPolicy::Terminal
                 {
@@ -8756,6 +8768,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
             }
             VmInstruction::DestroyCallable { dst, value } => {
                 read(&states, *value)?;
+                let resumption = states.resumptions[*value as usize].clone();
+                resumption_calls::cancel(&resumption, &mut states, &mut resumption_contract)?;
                 if !matches!(register_type(function, *value)?, VmType::Callable { .. }) {
                     return Err(VmArtifactError::NotCallable { register: *value });
                 }
@@ -8809,6 +8823,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if returns {
                     returned = Some(result.clone());
                     returned_resumptions = Some(returned_resumptions.map_or_else(|| outgoing.clone(), |previous| previous.join(&outgoing)));
+                    disposed_resumptions = Some(disposed_resumptions.map_or_else(|| states.disposed_resumption_inputs.clone(), |previous| previous.intersection(&states.disposed_resumption_inputs).cloned().collect()));
                     required_resumptions = Some(required_resumptions.map_or_else(|| states.invoked_resumption_inputs.clone(), |previous|
                         previous.intersection(&states.invoked_resumption_inputs).cloned().collect()));
                     result_independent &= transfer_proofs.independent_results.contains(callee)
@@ -8936,6 +8951,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         parameter: parameter.clone(), result: (**result).clone(),
                     }, &mut resumption_contract)?;
                     states.invoked_resumption_inputs.insert(path.clone());
+                    states.disposed_resumption_inputs.insert(path.clone());
                 }
                 write(&mut states, *dst)?;
                 if symbolic && resumption_calls::may_contain(result, &function.nominal_copy_descriptors) {
@@ -9020,6 +9036,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let mut then_states = states.clone();
                 let mut else_states = states.clone();
                 let mut definitely_empty = false;
+                let mut definitely_present = false;
                 if let Some(VmInstruction::DerefIsInitialized { dst, reference }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
                     && dst == condition && previous_instruction == pc.checked_sub(1) {
                     then_states[*reference as usize] = Some(true);
@@ -9029,11 +9046,14 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     && dst == condition && previous_instruction == pc.checked_sub(1) {
                     definitely_empty = fields.is_empty() && !states.address_exposed[*base as usize]
                         && states.registers[*base as usize] == Some(false);
+                    definitely_present = fields.is_empty() && !states.address_exposed[*base as usize]
+                        && states.registers[*base as usize] == Some(true);
                     then_states[*base as usize] = Some(true);
                     if fields.is_empty() { else_states[*base as usize] = Some(false); }
                 }
                 for (outcome, target, mut branch) in [(true, *then_target, then_states), (false, *else_target, else_states)] {
                     if outcome && definitely_empty { continue; }
+                    if !outcome && definitely_present { continue; }
                     if let Some(frame) = branch.handlers.last_mut()
                         && frame.payload_claim == Some(false)
                         && let Some((probe, column, pattern)) = &frame.payload_probe
@@ -9076,6 +9096,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 let result = &states.resumptions[*value as usize];
                 returned_resumptions = Some(returned_resumptions.map_or_else(|| result.clone(), |previous| previous.join(result)));
+                disposed_resumptions = Some(disposed_resumptions.map_or_else(|| states.disposed_resumption_inputs.clone(), |previous| previous.intersection(&states.disposed_resumption_inputs).cloned().collect()));
                 required_resumptions = Some(required_resumptions.map_or_else(|| states.invoked_resumption_inputs.clone(), |previous|
                     previous.intersection(&states.invoked_resumption_inputs).cloned().collect()));
                 result_independent &= tail_provenance::independent(function, &states, *value);
@@ -9140,6 +9161,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
         resumption_contract.result = returned_resumptions.unwrap_or_default();
         resumption_contract.required = required_resumptions.unwrap_or_default();
+        resumption_contract.disposed = disposed_resumptions.unwrap_or_default();
         Ok(VerifiedFunctionControl { resumption_contract, call_input_behaviors, returns: returned.is_some(), result_independent,
             result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
             captures_intact_at_boundaries })
@@ -9529,6 +9551,8 @@ fn propagate_state(
             // An arm cannot erase authority carried on another predecessor.
             changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
             let required = existing.invoked_resumption_inputs.intersection(&state.invoked_resumption_inputs).cloned().collect();
+            let disposed = existing.disposed_resumption_inputs.intersection(&state.disposed_resumption_inputs).cloned().collect();
+            if existing.disposed_resumption_inputs != disposed { existing.disposed_resumption_inputs = disposed; changed = true; }
             if existing.invoked_resumption_inputs != required { existing.invoked_resumption_inputs = required; changed = true; }
             let previous = existing.may_invoked_resumption_inputs.len();
             existing.may_invoked_resumption_inputs.extend(state.may_invoked_resumption_inputs.iter().cloned());
@@ -13025,8 +13049,8 @@ fn execute_in_float_profile(
         registers.instruction_result(pc);
         let consumes_arguments = instruction.consumed_arguments().is_some();
         let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
-        let replay_owned = match &instruction {
-            VmInstruction::InstallHandlerOwned { replay_owned, .. } => replay_owned.clone(),
+        let continuation_owned = match &instruction {
+            VmInstruction::InstallHandlerOwned { continuation_owned, .. } => continuation_owned.clone(),
             _ => vec![],
         };
         if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
@@ -13933,7 +13957,7 @@ fn execute_in_float_profile(
                     continuation,
                     target,
                     owned_payloads,
-                    shared_registers: replay::shared_registers(&registers, owned_payloads && continuation.is_replay(), &replay_owned, budget)?,
+                    shared_registers: replay::shared_registers(&registers, owned_payloads, &continuation_owned, budget)?,
                     suspended: None,
                 })
             }
@@ -13974,7 +13998,7 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 let continuation = match frame.continuation {
-                    VmContinuationPolicy::Consume => frame.suspended.take(),
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => frame.suspended.take(),
                     VmContinuationPolicy::Replay { .. } => frame.suspended.clone(),
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -14117,7 +14141,7 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = match handlers[index].continuation {
-                    VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
                         handlers[index].suspended.take()
                     }
                     VmContinuationPolicy::Terminal => {
@@ -14213,6 +14237,9 @@ fn execute_in_float_profile(
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if frame.continuation == VmContinuationPolicy::Consume {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 if frame.suspended.is_none() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
@@ -15387,23 +15414,23 @@ fn abandon_program_handlers(
         let mut frame = handlers.pop().expect("checked handler suffix");
         if let Some(suspended) = frame.suspended.take() {
             abandon_program_continuation(program, suspended, frame.call_depth,
-                (frame.owned_payloads && frame.continuation.is_replay()).then_some(frame.shared_registers),
+                frame.owned_payloads.then_some(frame.shared_registers),
                 current, current_callers, depth, budget, host)?;
         }
     }
     Ok(())
 }
 
-/// Abandon only the call frames strictly inside the handler's owner. That
-/// owner's source storage survives in the clause and is cleaned by its own
-/// exit. The clause may itself have called a helper before transferring out.
+/// Abandon deeper call frames and the protected roots in the handler owner.
+/// Its outer and clause storage survive according to the frozen ownership
+/// partition. The clause may itself have called a helper before cancellation.
 /// Process retained inner branches and deeper frames before their callers so
 /// a destructor never observes an already-ended ancestor loan.
 fn abandon_program_continuation(
     program: &CandidateVmProgram,
     mut suspended: RuntimeContinuation,
     owner_depth: usize,
-    replay_outer: Option<BTreeMap<u32, Option<u64>>>,
+    retained_outer: Option<BTreeMap<u32, Option<u64>>>,
     current: &mut RuntimeRegisters,
     current_callers: &mut [RuntimeProgramCaller],
     depth: u32,
@@ -15419,7 +15446,7 @@ fn abandon_program_continuation(
     // recurse on the Rust stack. Every visited edge and saved path is charged.
     budget.reserve_value("abandoned continuation paths", 1)?;
     budget.reserve_allocation(1)?;
-    let mut pending = vec![(suspended, owner_depth, replay_outer)];
+    let mut pending = vec![(suspended, owner_depth, retained_outer)];
     while let Some((parent, _, _)) = pending.last_mut() {
         if let Some(mut frame) = parent.above.pop() {
             budget.tick()?;
@@ -15434,11 +15461,11 @@ fn abandon_program_continuation(
                 budget.reserve_value("abandoned continuation paths", pending.len() + 1)?;
                 budget.reserve_allocation(1)?;
                 pending.push((child, frame.call_depth,
-                    (frame.owned_payloads && frame.continuation.is_replay()).then_some(frame.shared_registers)));
+                    frame.owned_payloads.then_some(frame.shared_registers)));
             }
             continue;
         }
-        let (mut finished, owner_depth, replay_outer) = pending.pop().expect("checked pending path");
+        let (mut finished, owner_depth, retained_outer) = pending.pop().expect("checked pending path");
         let saved = finished.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
         while saved.callers.len() > owner_depth {
             budget.tick()?;
@@ -15448,7 +15475,7 @@ fn abandon_program_continuation(
             saved.definition = caller.definition;
             finished.registers = caller.registers;
         }
-        if let Some(outer) = &replay_outer {
+        if let Some(outer) = &retained_outer {
             destroy_program_frame_except(program, saved.definition, &mut finished.registers,
                 &mut saved.callers, None, Some(outer), depth, budget, host)?;
         }
@@ -15575,8 +15602,8 @@ fn execute_program_in_float_profile(
         registers.instruction_result(pc);
         let consumes_arguments = instruction.consumed_arguments().is_some();
         let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
-        let replay_owned = match instruction {
-            VmInstruction::InstallHandlerOwned { replay_owned, .. } => replay_owned.as_slice(),
+        let continuation_owned = match instruction {
+            VmInstruction::InstallHandlerOwned { continuation_owned, .. } => continuation_owned.as_slice(),
             _ => &[],
         };
         if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
@@ -16512,7 +16539,7 @@ fn execute_program_in_float_profile(
                     continuation: *continuation,
                     target: *target,
                     owned_payloads,
-                    shared_registers: replay::shared_registers(&registers, owned_payloads && continuation.is_replay(), replay_owned, budget)?,
+                    shared_registers: replay::shared_registers(&registers, owned_payloads, continuation_owned, budget)?,
                     suspended: None,
                 });
             }
@@ -16560,7 +16587,7 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 let continuation = match frame.continuation {
-                    VmContinuationPolicy::Consume => frame.suspended.take(),
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => frame.suspended.take(),
                     VmContinuationPolicy::Replay { .. } => frame.suspended.clone(),
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -16723,7 +16750,7 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = match handlers[index].continuation {
-                    VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
                         handlers[index].suspended.take()
                     }
                     VmContinuationPolicy::Terminal => {
@@ -16855,9 +16882,12 @@ fn execute_program_in_float_profile(
                 let Some(mut frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if frame.continuation == VmContinuationPolicy::Consume {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 let suspended = frame.suspended.take().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 abandon_program_continuation(program, suspended, frame.call_depth,
-                    (frame.owned_payloads && frame.continuation.is_replay()).then_some(frame.shared_registers),
+                    frame.owned_payloads.then_some(frame.shared_registers),
                     &mut registers, &mut callers, depth, budget, host)?;
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     resumption_returns.clear();
@@ -17710,11 +17740,22 @@ fn execute_program_in_float_profile(
                 };
                 let (callee, captures) = match callable {
                     VmValue::Callable { callee, captures, .. } => (callee, captures),
-                    // Labels and resumptions expose a callable source ABI,
-                    // but carry only a capability into the control engine.
-                    // Disposing the token owns no capture environment and
-                    // must not repeat an already checked Cancel/Leave.
-                    VmValue::Label { .. } | VmValue::Resumption { .. } => {
+                    // Callable disposal of an uninvoked optional token is
+                    // cancellation at this execution point, even in a helper.
+                    // A spent token has no remaining branch to destroy.
+                    VmValue::Resumption { frame: id, .. } => {
+                        if let Some(frame) = handlers.iter_mut().find(|frame| frame.id == id)
+                            && frame.continuation == VmContinuationPolicy::Optional
+                            && let Some(suspended) = frame.suspended.take() {
+                            abandon_program_continuation(program, suspended, frame.call_depth,
+                                frame.owned_payloads.then(|| frame.shared_registers.clone()),
+                                &mut registers, &mut callers, depth, budget, host)?;
+                        }
+                        registers[*dst as usize] = Some(VmValue::Unit);
+                        pc += 1;
+                        continue;
+                    }
+                    VmValue::Label { .. } => {
                         registers[*dst as usize] = Some(VmValue::Unit);
                         pc += 1;
                         continue;

@@ -3,8 +3,9 @@
 //! This is the verifier's single resumption value domain. A possible token is
 //! not permission to invoke it: only an exact, live `Token` supplies a handler
 //! identity. Products retain that distinction per field. Opaque memory access,
-//! incompatible joins and expired frames retain possible authority without
-//! manufacturing an exact identity.
+//! incompatible joins retain possible authority without manufacturing an exact
+//! identity. Proven frame expiry retains non-invocable control contents so
+//! releasing a dead handle cannot be confused with canceling a live branch.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,6 +26,9 @@ pub(super) enum ResumptionValue {
     #[default]
     None,
     Unknown,
+    /// Possible control bytes whose exact owner was proved to have ended.
+    /// They remain forbidden to escape or invoke, but own no live branch.
+    Expired,
     Token(u32),
     Input(InputPath),
     Product(Arc<BTreeMap<u32, ResumptionValue>>),
@@ -46,7 +50,7 @@ impl ResumptionValue {
     pub(super) fn has_local_or_unknown(&self) -> bool {
         match self {
             Self::None | Self::Input(_) => false,
-            Self::Token(_) | Self::Unknown => true,
+            Self::Token(_) | Self::Unknown | Self::Expired => true,
             Self::Product(fields) => fields.values().any(Self::has_local_or_unknown),
         }
     }
@@ -125,7 +129,7 @@ impl ResumptionValue {
 
     pub(super) fn expire(&mut self, frame: u32) {
         match self {
-            Self::Token(actual) if *actual == frame => *self = Self::Unknown,
+            Self::Token(actual) if *actual == frame => *self = Self::Expired,
             Self::Product(fields) => for value in Arc::make_mut(fields).values_mut() { value.expire(frame); },
             _ => {},
         }
@@ -134,6 +138,7 @@ impl ResumptionValue {
     pub(super) fn join(&self, other: &Self) -> Self {
         if self == other { return self.clone(); }
         match (self, other) {
+            (Self::Expired, Self::None) | (Self::None, Self::Expired) => Self::Expired,
             (Self::Product(left), Self::Product(right)) => {
                 let keys = left.keys().chain(right.keys());
                 Self::fields(keys.map(|key| (*key,
@@ -171,7 +176,7 @@ mod tests {
         assert_eq!(joined.project(&[0]), Value::Unknown);
         assert_eq!(joined.project(&[1]).frame(), Some(7));
         joined.expire(7);
-        assert_eq!(joined.project(&[1]), Value::Unknown);
+        assert_eq!(joined.project(&[1]), Value::Expired);
         assert!(joined.contains());
         assert_eq!(joined.frame(), None);
         assert_eq!(left.join(&Value::None).project(&[0]), Value::Unknown);
@@ -198,8 +203,25 @@ mod tests {
         let mut supplied = Value::product([Value::None, Value::Token(7)]);
         assert_eq!(input.instantiate(&[supplied.clone()]), Value::Token(7));
         supplied.expire(7);
-        assert_eq!(input.instantiate(&[supplied]), Value::Unknown);
+        assert_eq!(input.instantiate(&[supplied]), Value::Expired);
         assert_eq!(input.instantiate(&[]), Value::Unknown);
         assert_eq!(input.join(&Value::Token(0)), Value::Unknown);
+    }
+
+    #[test]
+    fn expired_contents_can_be_released_but_never_regain_live_authority() {
+        let mut value = Value::Token(7);
+        value.expire(7);
+        assert_eq!(value, Value::Expired);
+        assert!(value.contains());
+        assert!(value.has_local_or_unknown());
+        assert_eq!(value.frame(), None);
+        assert_eq!(value.join(&Value::None), Value::Expired);
+        assert_eq!(value.join(&Value::Token(7)), Value::Unknown);
+        assert_eq!(value.opaque(), Value::Unknown);
+        // A later installation at the same executable location cannot turn
+        // the old bytes into that new dynamic frame's token.
+        value.expire(7);
+        assert_eq!(value.frame(), None);
     }
 }

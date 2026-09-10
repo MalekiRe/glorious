@@ -114,11 +114,53 @@ fn replay_resumptions_cross_multiple_ordinary_helper_calls() {
 
 #[test]
 fn optional_resumption_cancellation_inside_an_ordinary_helper() {
-    candidate("effect Ask { [0,1] ask() -> i64; }
+    let source = "effect Ask { [0,1] ask() -> i64; }
         fn choose<F>(task:F, choice:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
             handle choice { 0 => 42, _ => task(42) }
         }
-        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => choose(k,0) } }");
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => choose(k,0) } }";
+    let mut program = candidate(source);
+    let mut missing_disposal = program.clone();
+    let helper = missing_disposal.functions.values_mut().find(|function| function.parameters == 2).unwrap();
+    for instruction in &mut helper.instructions {
+        if let VmInstruction::DestroyCallable { dst, .. } = instruction {
+            *instruction = VmInstruction::ConstUnit { dst: *dst };
+        }
+    }
+    missing_disposal.fingerprint = missing_disposal.computed_fingerprint();
+    assert!(verify_vm_program(missing_disposal.clone()).is_err());
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&missing_disposal)).is_err());
+    for function in program.functions.values_mut() {
+        for instruction in &mut function.instructions {
+            if let VmInstruction::InstallHandlerOwned { continuation, .. } = instruction
+                && *continuation == VmContinuationPolicy::Optional {
+                *continuation = VmContinuationPolicy::Consume;
+            }
+        }
+    }
+    program.fingerprint = program.computed_fingerprint();
+    assert!(verify_vm_program(program.clone()).is_err(), "cancellation must not discharge an exact-once policy");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&program)).is_err());
+    candidate(&source.replace("choose(k,0)", "choose(k,1)"));
+}
+
+#[test]
+fn optional_helper_cancellation_destroys_protected_owners_once() {
+    let source = "use std::*;
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.target = *self.target + 1; } }
+        effect Ask { [0,1] ask() -> i64; }
+        fn ignore<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { 41 }
+        fn worker(target: &mut i64) -> i64 / Ask { let owner = Probe { target: target }; Ask::ask() }
+        pub fn main() -> i64 {
+            let mut count = 0;
+            let result = handle { let owner = Probe { target: &mut count }; Ask::ask() }
+                { Ask::ask() with k => ignore(k) };
+            result + count
+        }";
+    candidate(source);
+    candidate(&source.replace("handle { let owner = Probe { target: &mut count }; Ask::ask() }", "handle worker(&mut count)"));
 }
 
 #[test]
@@ -207,7 +249,15 @@ fn completion_changes_the_resumption_result_type() {
 
 #[test]
 fn cancellation_bypasses_nonidentity_completion() {
-    candidate("effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 100, Ask::ask(_) => 42 } }");
+    let mut program = candidate("effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 100, Ask::ask(_) => 42 } }");
+    for instruction in &mut program.functions.get_mut(&program.entry).unwrap().instructions {
+        if let VmInstruction::InstallHandlerOwned { continuation, .. } = instruction {
+            *continuation = VmContinuationPolicy::Consume;
+        }
+    }
+    program.fingerprint = program.computed_fingerprint();
+    assert!(verify_vm_program(program.clone()).is_err());
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&program)).is_err());
 }
 
 #[test]

@@ -1762,16 +1762,15 @@ impl RuntimeMir {
             payload_destinations,
             continuation,
             target,
-            replay_owned,
+            continuation_owned,
             ..
         } = instruction
         {
-            if replay_owned.windows(2).any(|pair| pair[0] >= pair[1])
-                || (!replay_owned.is_empty() && !matches!(continuation, MirContinuationPolicy::Replay { .. }))
+            if continuation_owned.windows(2).any(|pair| pair[0] >= pair[1])
             {
-                return Err("MIR replay ownership roots are not canonical".into());
+                return Err("MIR continuation ownership roots are not canonical".into());
             }
-            for root in replay_owned { self.local_type(*root)?; }
+            for root in continuation_owned { self.local_type(*root)?; }
             if matches!(continuation, MirContinuationPolicy::Replay { uses } if *uses < 2) {
                 return Err("MIR replay handler has fewer than two exact uses".into());
             }

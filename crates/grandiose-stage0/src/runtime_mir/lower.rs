@@ -990,17 +990,7 @@ impl CleanupMir {
                                 let (resume_type, continuation) = match &clause.contract {
                                     Some(contract) => (
                                         contract.parameter.clone(),
-                                        if contract.invocation.lower >= 2
-                                            && contract.invocation.upper
-                                                == Some(contract.invocation.lower)
-                                        {
-                                            crate::MirContinuationPolicy::Replay {
-                                                uses: u32::try_from(contract.invocation.lower)
-                                                    .ok()?,
-                                            }
-                                        } else {
-                                            crate::MirContinuationPolicy::Consume
-                                        },
+                                        crate::MirContinuationPolicy::from_quantity(contract.invocation)?,
                                     ),
                                     None => (Type::Never, crate::MirContinuationPolicy::Terminal),
                                 };
@@ -1018,10 +1008,8 @@ impl CleanupMir {
                                     resume_type,
                                     continuation,
                                     target: MirBlockId(clause.entry.0),
-                                    replay_owned: if matches!(continuation, crate::MirContinuationPolicy::Replay { .. }) {
-                                        self.replay_owned_roots(*handler).into_iter().map(local)
-                                            .collect::<BTreeSet<_>>().into_iter().collect()
-                                    } else { vec![] },
+                                    continuation_owned: self.continuation_owned_roots(*handler).into_iter().map(local)
+                                        .collect::<BTreeSet<_>>().into_iter().collect(),
                                 });
                             }
                             Some(computation)

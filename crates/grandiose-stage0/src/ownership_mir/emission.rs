@@ -1070,17 +1070,7 @@ impl OwnershipMir {
                                 let (resume_type, continuation) = match &clause.contract {
                                     Some(contract) => (
                                         contract.parameter.clone(),
-                                        if contract.invocation.lower >= 2
-                                            && contract.invocation.upper
-                                                == Some(contract.invocation.lower)
-                                        {
-                                            crate::MirContinuationPolicy::Replay {
-                                                uses: u32::try_from(contract.invocation.lower)
-                                                    .ok()?,
-                                            }
-                                        } else {
-                                            crate::MirContinuationPolicy::Consume
-                                        },
+                                        crate::MirContinuationPolicy::from_quantity(contract.invocation)?,
                                     ),
                                     None => (Type::Never, crate::MirContinuationPolicy::Terminal),
                                 };

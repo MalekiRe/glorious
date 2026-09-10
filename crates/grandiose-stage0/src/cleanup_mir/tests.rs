@@ -63,8 +63,21 @@ fn replay_outer_consumption_is_classified_from_the_resumed_suffix() {
         let source = format!("effect Tick {{ [2, 2] tick() -> i64; }} pub fn main(value: i64) -> i64 {{ handle {{ {computation} }} {{ Tick::tick() with k => {{ let first = k(0); k(0) }} }} }}");
         let body = fixture(&source);
         assert_eq!(body.handlers.len(), 1);
-        assert_eq!(body.replay_owned_roots(ControlHandlerId(0)).contains(&body.parameters[0]), captured,
+        assert_eq!(body.continuation_owned_roots(ControlHandlerId(0)).contains(&body.parameters[0]), captured,
             "only consuming the outer owner after suspension captures it: {computation}");
+    }
+}
+
+#[test]
+fn continuation_ownership_excludes_sibling_clause_storage() {
+    let body = fixture("effect Ask { [0,1] ask() -> i64; }
+        pub fn main() -> i64 { handle { let protected = 42; Ask::ask(); protected }
+            { Ask::ask() with _ => { let clause_local = 42; clause_local } } }");
+    let roots = body.continuation_owned_roots(ControlHandlerId(0));
+    for (name, owned) in [("protected", true), ("clause_local", false)] {
+        let binding = body.source_flow.bindings.iter().find(|binding| binding.spelling == name).unwrap();
+        let value = body.source_bindings[&binding.origin];
+        assert_eq!(roots.contains(&value), owned, "{name}");
     }
 }
 

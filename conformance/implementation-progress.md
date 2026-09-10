@@ -5,6 +5,48 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 141: optional helper disposal and shared cancellation ownership
+
+The source interval now projects through one producer into distinct optional,
+exact one-shot and finite replay policies. The executable helper proof records
+possible cancellation, possible invocation, guaranteed invocation and guaranteed
+disposition separately. An optional helper's disposal can discharge its caller's
+pending branch, but never an exact invocation obligation. Conditional cleanup
+uses the existing initialization/exposure facts, with owned explicit parameter
+slots distinct from lent captures. There is no new source use counter.
+
+The common runtime implements disposal of an uninvoked optional token at the
+helper's actual destruction point. It abandons the suspended branch and retains
+its completion marker. Replay and cancellation consume one frozen ownership
+partition, now named `continuation_owned`. Its Cleanup MIR producer excludes
+sibling clause definitions by following the protected execution graph. Initially
+empty nonowned slots retain their own identity instead of becoming computation
+owners when a clause initializes them later.
+
+Four focused cancellation groups pass through fresh/decoded VM and all-native
+and both mixed partitions at O0/O2: completion bypass, early cancellation before
+a later performance, both optional-helper branches, and owned cleanup in the
+handler frame and a deeper ordinary frame. Mutations removing helper disposal
+or replacing optional policy with exact-once policy reject in fresh/decoded
+verification. Seven helper-proof unit tests and 21 cleanup tests pass, including
+disposal versus invocation, lent-capture uncertainty and clause-owner exclusion.
+Four existing destruction cancellation groups and direct replay completion pass.
+The broader handler integration check passed 27 cases and exposed two cleanup
+regressions. Both now pass individually through the same engine matrix: returned
+resumption products and resumption under a clause's nested outer handler. Their
+repair retains proven expired tokens separately from unknown live capabilities;
+cleanup cannot invoke them or resurrect their owner. The preserved replay-helper
+failure was excluded from that 29-case integration check, not counted as passing.
+All 19 focused resumption unit checks pass after the expiry repair, including
+the new negative checks against recovering live authority from an expired token.
+
+Cache 141, verifier 44, bytecode 73/schema 117 and native ABI 15 change. The
+preserved repeated-helper replay regression still fails on premature owner
+consumption. Ordered multi-invocation proofs, general resumption-bearing cleanup
+while abandoning another continuation, borrowed invocation, mandatory-tail
+handler fusion and full zero-marshalling/performance acceptance remain open.
+Unrelated nominal-layout work remains outside this checkpoint.
+
 ## Cache 140: branded resumption borrowing and actual value quantities
 
 Borrowed resumptions now name the actual lexical binder's storage through an

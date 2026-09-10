@@ -20,6 +20,10 @@ pub(super) struct Invocation {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) struct Contract {
     pub(super) invocations: BTreeMap<InputPath, Invocation>,
+    pub(super) cancellations: BTreeSet<InputPath>,
+    /// Every normal path invokes or cancels this input. This is not proof
+    /// that an exact-positive capability was invoked.
+    pub(super) disposed: BTreeSet<InputPath>,
     pub(super) required: BTreeSet<InputPath>,
     pub(super) result: ResumptionValue,
 }
@@ -80,6 +84,8 @@ pub(super) fn publish(functions: &BTreeMap<DefKey, VmFunction>, proofs: &mut tai
         for key in &pending {
             if let Ok(control) = verify_function_control(&functions[key], false, false, proofs)
                 && control.resumption_contract.invocations.len() <= 1
+                && control.resumption_contract.invocations.keys().chain(control.resumption_contract.cancellations.iter())
+                    .collect::<BTreeSet<_>>().len() <= 1
                 && !control.resumption_contract.result.has_local_or_unknown() {
                 proofs.resumption_calls.insert(*key, control.resumption_contract);
                 published.push(*key);
@@ -124,6 +130,26 @@ pub(super) fn apply(function: &VmFunction, pc: usize, inputs: &[ResumptionValue]
     contract: &Contract, states: &mut VerifierState, observed: &mut Contract,
     incoming: &mut VerifierIncoming, worklist: &mut VerifierWorklist,
 ) -> Result<ResumptionValue, VmArtifactError> {
+    for path in &contract.cancellations {
+        let value = inputs.get(path.input as usize).ok_or(VmArtifactError::HandlerResumeUnavailable)?.project(&path.fields);
+        match value {
+            ResumptionValue::None | ResumptionValue::Expired => {},
+            ResumptionValue::Input(input) => {
+                if !states.handlers.is_empty() || states.may_invoked_resumption_inputs.contains(&input) {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                observed.cancellations.insert(input);
+            }
+            ResumptionValue::Token(id) => {
+                let frame = states.handlers.iter().find(|frame| frame.id == id)
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if frame.continuation != VmContinuationPolicy::Optional || frame.continuations.is_empty() {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+            }
+            _ => return Err(VmArtifactError::HandlerResumeUnavailable),
+        }
+    }
     for (path, invocation) in &contract.invocations {
         let value = inputs.get(path.input as usize).ok_or(VmArtifactError::HandlerResumeUnavailable)?
             .project(&path.fields);
@@ -143,6 +169,21 @@ pub(super) fn apply(function: &VmFunction, pc: usize, inputs: &[ResumptionValue]
                 resume(function, pc, index, invocation, required, states, incoming, worklist)?;
             }
             _ => return Err(VmArtifactError::HandlerResumeUnavailable),
+        }
+    }
+    for path in contract.cancellations.iter().chain(contract.disposed.iter()) {
+        let value = inputs.get(path.input as usize).ok_or(VmArtifactError::HandlerResumeUnavailable)?.project(&path.fields);
+        match value {
+            ResumptionValue::Input(input) => {
+                states.may_invoked_resumption_inputs.insert(input.clone());
+                if contract.disposed.contains(path) { states.disposed_resumption_inputs.insert(input); }
+            }
+            ResumptionValue::Token(id) if contract.disposed.contains(path) => {
+                let frame = states.handlers.iter_mut().find(|frame| frame.id == id)
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if frame.continuation == VmContinuationPolicy::Optional { frame.continuations.clear(); }
+            }
+            _ => {},
         }
     }
     let result = contract.result.instantiate(inputs);
@@ -181,6 +222,7 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
             return Err(VmArtifactError::HandlerStateMismatch);
         }
         let mut resumed = VerifierState {
+            disposed_resumption_inputs: states.disposed_resumption_inputs.clone(),
             may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
             invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
             last_instruction: Some(pc),
@@ -206,11 +248,40 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
         write(&mut resumed, continuation.dst)?;
         propagate_state(incoming, worklist, continuation.target, &resumed)?;
     }
-    if required && states.handlers[index].continuation == VmContinuationPolicy::Consume {
+    if required && matches!(states.handlers[index].continuation, VmContinuationPolicy::Optional | VmContinuationPolicy::Consume) {
         states.handlers[index].continuations.clear();
     }
     let _ = function;
     Ok(())
+}
+
+pub(super) fn cancel(value: &ResumptionValue, states: &mut VerifierState, observed: &mut Contract)
+    -> Result<(), VmArtifactError>
+{
+    match value {
+        ResumptionValue::None | ResumptionValue::Expired => Ok(()),
+        ResumptionValue::Input(input) => {
+            if !states.handlers.is_empty() {
+                return Err(VmArtifactError::HandlerResumeUnavailable);
+            }
+            if !states.invoked_resumption_inputs.contains(input) {
+                observed.cancellations.insert(input.clone());
+            }
+            states.may_invoked_resumption_inputs.insert(input.clone());
+            states.disposed_resumption_inputs.insert(input.clone());
+            Ok(())
+        }
+        ResumptionValue::Token(id) => {
+            let frame = states.handlers.iter_mut().find(|frame| frame.id == *id)
+                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+            if !frame.continuations.is_empty() && frame.continuation != VmContinuationPolicy::Optional {
+                return Err(VmArtifactError::HandlerResumeUnavailable);
+            }
+            frame.continuations.clear();
+            Ok(())
+        }
+        _ => Err(VmArtifactError::HandlerResumeUnavailable),
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +334,46 @@ mod tests {
             VmInstruction::CallIndirectOwned { dst: 2, callee: 0, arguments: vec![3] },
             VmInstruction::Return { value: 2 }], vec![callable(), VmType::I64, VmType::I64, VmType::I64], 2);
         assert!(proof(function).is_none());
+    }
+
+    #[test]
+    fn conditional_disposal_proves_owned_parameter_slots_but_not_lent_capture_storage() {
+        for capture in [false, true] {
+            let mut function = helper(vec![declaration(),
+                VmInstruction::IsInitialized { dst: 2, base: 0, fields: vec![] },
+                VmInstruction::BranchBool { condition: 2, then_target: 3, else_target: 4 },
+                VmInstruction::DestroyCallable { dst: 3, value: 0 },
+                VmInstruction::Return { value: 1 }], vec![callable(), VmType::I64, VmType::Bool, VmType::Unit], 2);
+            function.captures = u32::from(capture);
+            let contract = proof(function).unwrap();
+            assert_eq!(contract.disposed.contains(&InputPath { input: 0, fields: vec![] }), !capture);
+        }
+    }
+
+    #[test]
+    fn input_disposal_is_not_a_guaranteed_invocation() {
+        let function = helper(vec![declaration(),
+            VmInstruction::DestroyCallable { dst: 2, value: 0 },
+            VmInstruction::Return { value: 1 }], vec![callable(), VmType::I64, VmType::Unit], 2);
+        let contract = proof(function).unwrap();
+        let path = InputPath { input: 0, fields: vec![] };
+        assert!(contract.cancellations.contains(&path));
+        assert!(contract.disposed.contains(&path));
+        assert!(contract.required.is_empty());
+        assert!(contract.invocations.is_empty());
+    }
+
+    #[test]
+    fn invoked_input_cleanup_does_not_cancel_the_callers_remaining_authority() {
+        let function = helper(vec![declaration(),
+            VmInstruction::CallIndirectOwned { dst: 2, callee: 0, arguments: vec![1] },
+            VmInstruction::DestroyCallable { dst: 3, value: 0 },
+            VmInstruction::Return { value: 2 }], vec![callable(), VmType::I64, VmType::I64, VmType::Unit], 2);
+        let contract = proof(function).unwrap();
+        let path = InputPath { input: 0, fields: vec![] };
+        assert!(contract.disposed.contains(&path));
+        assert!(contract.required.contains(&path));
+        assert!(contract.cancellations.is_empty());
     }
 
     #[test]

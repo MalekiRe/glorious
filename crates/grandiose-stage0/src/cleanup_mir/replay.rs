@@ -122,7 +122,7 @@ pub(super) fn validate(program: &CleanupProgram) -> Result<(), CleanupError> {
                 continue;
             };
             let delimiter = &root.handlers[handler.0 as usize];
-            let owned_roots = root.replay_owned_roots(*handler);
+            let owned_roots = root.continuation_owned_roots(*handler);
             for clause in &delimiter.clauses {
                 if !clause
                     .contract

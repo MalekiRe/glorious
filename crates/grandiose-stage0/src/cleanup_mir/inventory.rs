@@ -7,16 +7,9 @@ impl CleanupMir {
     /// Roots owned by the protected computation, including outer bindings
     /// explicitly consumed within it. Mere borrowed access keeps outer storage
     /// shared; lexical allocation time alone does not determine capture mode.
-    pub(crate) fn replay_owned_roots(&self, handler: ControlHandlerId) -> BTreeSet<ControlValue> {
+    pub(crate) fn continuation_owned_roots(&self, handler: ControlHandlerId) -> BTreeSet<ControlValue> {
         let delimiter = &self.handlers[handler.0 as usize];
-        let mut roots = self
-            .owners
-            .iter()
-            .filter(|owner| self.frame_owner(owner)
-                && !self.aliases.contains_key(&owner.value)
-                && self.below_scope(owner, delimiter.scope))
-            .map(|owner| owner.value)
-            .collect::<BTreeSet<_>>();
+        let mut roots = BTreeSet::new();
         let mut pending = self
             .blocks
             .iter()
@@ -36,6 +29,16 @@ impl CleanupMir {
                 continue;
             }
             let block = &self.blocks[target.0 as usize];
+            // Clause storage is lexically below the delimiter too, but it
+            // does not belong to the suspended computation. Select actual
+            // definitions on the protected graph before classifying roots.
+            for value in block.parameters.iter().copied().chain(block.instructions.iter().map(|instruction| instruction.destination)) {
+                let owner = &self.owners[value.0 as usize];
+                if self.frame_owner(owner) && !self.aliases.contains_key(&value)
+                    && self.below_scope(owner, delimiter.scope) {
+                    roots.insert(value);
+                }
+            }
             if matches!(&block.terminator.control,
                 CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
                     | ControlTransfer::FinishClause { handler: exited, .. }) if *exited == handler)
