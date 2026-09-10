@@ -142,8 +142,11 @@ impl InvocationControl {
             match payload {
                 ResolvedPayload::Inputs { ty, values } => {
                     let mut input_leaves = vec![];
-                    crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut input_leaves).is_ok()
-                        && input_leaves.iter().any(|(fields, _)| fields == path)
+                    let _ = crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut input_leaves);
+                    // Result coverage is checked independently below. A
+                    // positively represented input leaf can authenticate
+                    // this projection even when another input field is open.
+                    input_leaves.iter().any(|(fields, _)| fields == path)
                         && !values.is_empty() && values.iter().all(|value|
                             domain.project(value, path).is_some_and(|value| domain.reference_known(&value)))
                 }

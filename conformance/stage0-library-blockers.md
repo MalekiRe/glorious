@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 117 verification below,
+Updated from the current source and cache 118 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,27 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 118 repairs the authoritative invocation reference contract so unresolved
+generic coverage no longer erases positively known caller paths. Calls and
+operations share one producer, and their real Core/ownership/escape consumers
+retain both the known loans and the unresolved obligation. Conflicting enum
+paths, raw residents and concrete incomplete coverage remain fail-closed.
+
+The full-library root **still fails** with 61 diagnostic records and no
+suppression marker (`target/reference-result-contracts-final-library-v24.log`). Sorting's
+library-side provenance/loan failures and graph's line-95 provenance failure are
+absent. Sorting's executable root still fails with 48 application-side errors,
+including private API, callback inference/lifetimes, borrows and quantity.
+Five new source groups pass, with positive fresh/decoded VM O0/O2 execution,
+escape negatives and distinct unique outputs. A sixth valid source remains
+actively failing at per-projection reference authentication after preserving
+unresolved input coverage. Exact gate counts and independently reproduced
+existing failures are recorded in `implementation-progress.md`.
+The source matrix remains the historical 16 passing / 15 failing result above;
+native labels/handlers, guarded storage and self-hosting remain open.
+
+The following cache 117 and earlier entries are historical.
 
 Cache 117 couples normal result values and storage snapshots in EscapeFlow,
 using the existing shared continuation authority. Terminal branches retain their

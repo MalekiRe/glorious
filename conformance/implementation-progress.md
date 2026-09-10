@@ -5,6 +5,98 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 118: known reference paths with deferred coverage
+
+The actual sorting failure began at `SliceMut::split_at`: an unresolved logical
+element type erased the result's already-known physical reference paths. The
+authoritative invocation contract now represents known paths with incomplete
+coverage as `CallReferenceOrigin::Partial`. Both declaration and realized call
+contracts use the same producer; the duplicate realized-region matcher is
+removed. Ordinary calls, operations, Core validation, PlaceFlow aliases and
+partitions, EscapeFlow values and existing MIR transport consume that product.
+No parallel fact table, named-library exception or new control walker is added.
+
+The one layout traversal keeps independent siblings after an open component
+and restores projection prefixes. Enum gaps and conflicting variant regions
+cannot certify overlapping paths. Refinement retains pre-opening dependencies.
+Unknown coverage remains a proof obligation: known paths do not make a concrete
+opaque result complete, and raw-backed unknown residents remain deferred.
+
+The final new target has **five passes and one active failure**
+(`target/reference-result-contracts-final-source-v23.log`). Passing groups cover
+generic outcome/view results, distinct input regions, distinct unique outputs,
+and local-loan escape negatives through both logical and physical generic
+residents. Passing positive sources execute fresh and decoded VM artifacts at
+O0/O2; negatives reject at the source lifetime boundary at both levels.
+The original two positive failures are retained in
+`target/reference-result-contracts-baseline-v2.log`. The physical-resident
+fixture uses explicit field syntax and the required zero-use bound for its
+discarded generic field; invalid draft syntax is not an acceptance regression.
+
+The final integration gate passes 370 unit, eight effect-contract and 22 request
+checks (`target/reference-result-contracts-final-integration-v21.log`).
+Producer tests cover prefix recovery,
+enum conflict/gap exclusion and monotonic refinement. Core mutation tests reject
+erased, repeated, retargeted and shape-forged partial dependencies before MIR.
+The existing raw-resident Core test now expects partial known paths rather than
+total opacity, while retaining its required `G5023` rejection.
+
+The final focused Core reference gate has 28 passes and one active failure
+(`target/reference-result-contracts-final-core-v22.log`). The unchanged requirement in
+`inferred_generic_aggregate_reference_paths_refine_after_instantiation` expects
+an opaque declaration contract even though the producer already returns exact
+paths. It also fails at pre-change `1263ea85`
+(`target/reference-result-contracts-refinement-baseline-v11.log`); that commit's
+Core source is identical to immediate pre-change `406ccffd`. The source and
+assertion remain active; richer failure output records the precise contract.
+This is not a green whole-target claim.
+
+Final review also repaired input coverage: finding known siblings cannot turn
+an unresolved physical component into complete input evidence. The shared
+invocation return proof can authenticate an individual known input projection,
+but still requires complete result shape, invocation coverage and actual
+reference evidence. Unit guards exercise that distinction and reject unauthenticated
+references or an open result even when a sibling is represented.
+
+The new active failing source is
+`generic_result_preserves_a_known_field_after_an_open_physical_resident`.
+It passed before the missing input-coverage propagation was repaired, which is
+not valid completion evidence. Its `forward` result now correctly stays partial;
+the conservative known-path union combines a physical borrow with an unresolved
+logical-region dependency. The getter's exact bound return projection is known,
+but the existing resource snapshot cannot authenticate that joined reference
+as complete (`G5023`). Per-projection returned-reference authentication remains
+open. The valid source, its success assertion and unknown-coverage rejection
+remain intact; no ignored or expected-failure substitution is used.
+
+Five returned-capture checks pass, including receiver authority and factory-local
+escape negatives (`target/reference-result-contracts-final-captures-v26.log`).
+Expected reborrows have 14 passes and the same active carrier-access failure
+already reproduced before cache 117 at `1263ea85`
+(`target/reference-result-contracts-final-unique-v25.log` and
+`target/normal-result-carrier-access-baseline-v16.log`). Across the final integration,
+Core, source, capture and reborrow gates, **452 distinct checks pass and three
+tests fail**. The two failing library roots below are separate failures, not
+passes; prior native/destroyed-environment failures remain open and were not
+rerun in this checkpoint.
+
+The full-library root **still fails** with 61 diagnostic records, no suppression
+marker, in 33.21 seconds (`target/reference-result-contracts-final-library-v24.log`),
+down from 68 at cache 117. The sorting library errors and graph's line-95
+provenance error are absent. The sorting executable root still fails with 48
+application-side diagnostics (`target/reference-result-contracts-final-sorting-v27.log`),
+including private API, callback lifetime/inference, borrow and quantity failures.
+Neither root is counted as passing and the full 31-test matrix was not rerun.
+Remaining full-library diagnostics include random API/array mismatches, graph's
+line-166 result type, custom-Drop extraction, unsafe UTF-8 operations, tail
+provenance, traversal result provenance and minimum-use obligations.
+
+Cache generation is 118. Interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 are unchanged. Native handlers, generic label materialization,
+guard-correlated handler/storage analysis, full library conformance and GSC-2
+acceptance remain open. No diagnostic/allocation budget or language guarantee
+was relaxed. The following checkpoints are historical.
+
 ## Cache 117: normal result snapshots and terminal payloads
 
 EscapeFlow previously excluded terminal branches from the continuing storage

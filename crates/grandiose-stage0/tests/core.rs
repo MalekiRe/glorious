@@ -3168,17 +3168,18 @@ fn open_identity_arguments_do_not_erase_an_independent_physical_reference_input(
     assert!(PlaceFlow::analyze(&core).diagnostics.is_empty());
 
     // An unknown raw-backed resident is not an identity-only argument. It
-    // must retain declaration opacity until its concrete reference shape is
-    // available, even in the presence of another physical reference input.
+    // must retain unresolved coverage until its concrete reference shape is
+    // available, while preserving the independent physical reference input.
     let opaque = core_for(
         "core-open-resident-reference-input@0.1.0",
         "struct Owner<T> { pointer:*const T } fn select<'a,T>(value:&'a i64, owner:Owner<T>) -> &'a i64 { value } pub fn main<'a,T>(value:&'a i64, owner:Owner<T>) -> &'a i64 { select(value,owner) }",
     );
     assert!(opaque.diagnostics.is_empty(), "{:#?}", opaque.diagnostics);
-    assert!(opaque.expressions.iter().any(|expression| matches!(expression.kind, CoreKind::Call {
-        reference_origin: grandiose_stage0::CallReferenceOrigin::Opaque,
+    assert!(opaque.expressions.iter().any(|expression| matches!(&expression.kind, CoreKind::Call {
+        reference_origin: grandiose_stage0::CallReferenceOrigin::Partial(paths),
         reference_shape: grandiose_stage0::CallReferenceShape::OpaquePotentiallyReference, ..
-    })));
+    } if paths.len() == 1 && paths[0].argument == 0 && paths[0].argument_fields.is_empty()
+        && paths[0].result_fields.is_empty())));
     assert!(PlaceFlow::analyze(&opaque).diagnostics.iter().any(|diagnostic| diagnostic.code == "G5023"));
 }
 
@@ -5765,7 +5766,8 @@ fn inferred_generic_aggregate_reference_paths_refine_after_instantiation() {
             } => Some(paths),
             _ => None,
         })
-        .expect("inferred generic aggregate did not refine its concrete reference path");
+        .unwrap_or_else(|| panic!("inferred generic aggregate did not refine its concrete reference path: {:#?}",
+            core.expressions.iter().filter(|expression| matches!(expression.kind, CoreKind::Call { .. })).collect::<Vec<_>>()));
     assert_eq!(call[0].result_fields, [0]);
     assert_eq!(call[0].argument_fields, [0]);
     let flow = PlaceFlow::analyze(&core);
@@ -6282,6 +6284,41 @@ fn forged_perform_reference_provenance_fails_core_validation() {
         "forged performed-operation provenance was accepted: {:#?}",
         core.validate()
     );
+}
+
+#[test]
+fn partial_reference_contracts_reject_erased_repeated_and_retargeted_dependencies() {
+    use grandiose_stage0::{CallReferenceOrigin, CallReferenceShape};
+    let core = core_for("partial-reference-validation@0.1.0", r#"
+        struct View<'a,'b,T> { first: &'a i64, second: &'b i64 }
+        fn forward<'a,'b,T>(value: View<'a,'b,T>) -> View<'a,'b,T> { value }
+        pub fn main<'a,'b,T>(value: View<'a,'b,T>) -> View<'a,'b,T> { forward(value) }
+    "#);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    let index = core.expressions.iter().position(|expression| matches!(&expression.kind,
+        CoreKind::Call { reference_origin: CallReferenceOrigin::Partial(_), .. }))
+        .expect("open generic call must retain partial provenance");
+    for mutation in 0..6 {
+        let mut forged = core.clone();
+        let CoreKind::Call { reference_origin, reference_shape, .. } = &mut forged.expressions[index].kind
+            else { unreachable!() };
+        let CallReferenceOrigin::Partial(paths) = reference_origin else { unreachable!() };
+        match mutation {
+            0 => { paths.pop(); }
+            1 => { paths.push(paths[0].clone()); }
+            2 => { paths[0].argument = u32::MAX; }
+            3 => { *reference_shape = CallReferenceShape::CallerPaths; }
+            4 => { *reference_origin = CallReferenceOrigin::Opaque; }
+            5 => { paths.clear(); }
+            _ => unreachable!(),
+        }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4187"),
+            "mutation {mutation} escaped Core validation: {:#?}", forged.validate());
+        let flow = PlaceFlow::analyze(&forged);
+        let lowered = MirLowering::lower(DefKey(Digest::of_bytes(b"partial-reference-validation")), &forged, &flow);
+        assert!(lowered.function.is_none(), "mutation {mutation} reached MIR");
+    }
 }
 
 #[test]

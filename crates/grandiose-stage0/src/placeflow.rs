@@ -3032,7 +3032,7 @@ impl Analyzer<'_> {
                 }).collect();
             }
             CoreKind::Call { arguments, .. }
-            | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(_), .. } => {
+            | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(_) | CallReferenceOrigin::Partial(_), .. } => {
                 let mut known = BTreeSet::new();
                 let callable = self.signatures.is_some_and(|signatures| regions::callable_paths(signatures, &self.body.expression(id).ty, false)
                     .iter().any(|(path, _)| crate::core::reference_path_matches(path, fields)));
@@ -3093,8 +3093,8 @@ impl Analyzer<'_> {
 
     fn resident_call_paths(&self, id: CoreId) -> Vec<crate::core::CallReferencePath> {
         let mut paths = match &self.body.expression(id).kind {
-            CoreKind::Call { reference_origin: CallReferenceOrigin::Paths(paths), .. }
-            | CoreKind::Perform { reference_origin: CallReferenceOrigin::Paths(paths), .. } => paths.clone(),
+            CoreKind::Call { reference_origin, .. }
+            | CoreKind::Perform { reference_origin, .. } => reference_origin.paths().to_vec(),
             _ => vec![],
         };
         if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(id).kind) {
@@ -3253,10 +3253,7 @@ impl Analyzer<'_> {
             }
             return;
         }
-        let CallReferenceOrigin::Paths(paths) = origin else {
-            return;
-        };
-        for path in paths {
+        for path in origin.paths() {
             let Some(argument) = arguments.get(path.argument as usize).copied() else {
                 self.error(
                     self.body.expression(self.body.root).span,
@@ -3360,7 +3357,7 @@ impl Analyzer<'_> {
             }
             | CoreKind::Perform {
                 arguments,
-                reference_origin: CallReferenceOrigin::Paths(_),
+                reference_origin: CallReferenceOrigin::Paths(_) | CallReferenceOrigin::Partial(_),
                 ..
             } => self.resident_call_paths(id)
                 .into_iter()
@@ -3410,7 +3407,7 @@ impl Analyzer<'_> {
             }
             | CoreKind::Perform {
                 arguments,
-                reference_origin: CallReferenceOrigin::Paths(_),
+                reference_origin: CallReferenceOrigin::Paths(_) | CallReferenceOrigin::Partial(_),
                 ..
             } => {
                 let mut loans = BTreeSet::new();
@@ -3527,9 +3524,12 @@ impl Analyzer<'_> {
     fn partition_call_result(&self, call: CoreId, fields: &[u32], mut loan: ProjectionLoan) -> ProjectionLoan {
         let empty = ElaboratedInterface::default();
         let mut leaves = vec![];
-        if crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
-            &self.body.expression(call).ty, &mut vec![], &mut leaves).is_ok()
-            && let Some((path, Type::Reference { mutability, .. })) = leaves.iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) {
+        let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
+            &self.body.expression(call).ty, &mut vec![], &mut leaves);
+        // Distinct known unique leaves remain distinct even if another part
+        // of the result has unresolved coverage. No partition is inferred for
+        // an unknown or conflicting leaf discarded by the shared collector.
+        if let Some((path, Type::Reference { mutability, .. })) = leaves.iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) {
             loan.unique = matches!(mutability, crate::Mutability::Unique);
             if leaves.len() > 1 || path.contains(&crate::core::REFERENCE_PATH_ARRAY_ELEMENT) {
                 loan.partitions.insert(call, fields.to_vec());
@@ -3630,7 +3630,7 @@ impl Analyzer<'_> {
                 signatures, parameters, &Type::Tuple(operation.signature.parameters),
             );
             match origin {
-                CallReferenceOrigin::Paths(incoming) => paths.extend(incoming),
+                CallReferenceOrigin::Paths(incoming) | CallReferenceOrigin::Partial(incoming) => paths.extend(incoming),
                 CallReferenceOrigin::None | CallReferenceOrigin::External => {},
                 // A callee-local or otherwise unproven payload cannot be
                 // promoted to one of the known caller regions.

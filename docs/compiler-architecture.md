@@ -903,3 +903,42 @@ handler execution. General handler payload discovery, the remaining independent
 minimum-handler completion logic, opaque nominal-result reference coverage and
 native handlers remain open. No new continuation walker or runtime representation
 was introduced, and normal-result exclusion does not erase outer-transfer debt.
+
+## Partial invocation reference coverage
+
+The interface-aware reference-path producer retains known caller dependencies
+separately from unresolved coverage. `CallReferenceOrigin::Partial` travels in
+the existing call/operation contract; its paths keep loans live but its result
+shape remains potentially reference-bearing and incomplete. It is neither an
+empty result nor external-reference permission. Declaration and realized call
+types use the same producer; the duplicate realized-region matching algorithm
+is removed. Refinement preserves every dependency frozen before region opening.
+
+The shared layout traversal continues through unknown tuple/record components,
+restoring each projection prefix. Enum alternatives merge only compatible known
+paths: an unresolved prefix or conflicting region cannot certify a path beneath
+that prefix, while an independent sibling remains usable. Logical residents,
+raw-storage obligations, recursive-layout termination and unresolved array
+extents retain their existing conservative treatment. Missing evidence is not
+complete coverage.
+
+Core validates partial shape, nonempty/nonrepeated paths, argument arity and
+preservation of frozen dependencies; it does not independently reopen nominal
+layouts without the interface. PlaceFlow uses those same known paths for result
+aliases, projections, unique-output partitions and operation payload transfers.
+EscapeFlow preserves their values and still rejects an incomplete concrete
+reference result unless the existing bound invocation relation proves complete
+returned-reference coverage. Generic coverage remains deferred, not certified.
+Input collection cannot settle an unknown physical component merely by finding
+another known leaf. The shared return proof can authenticate a known input
+projection independently of its siblings, but still requires complete output
+shape and checked reference evidence. A joined physical borrow and unresolved
+logical-region dependency do not yet supply that evidence for every generic
+getter; that active source regression is not a supported completeness claim.
+MIR transports the existing contract product and its fingerprint; runtime
+provenance and wire-verifier representations are unchanged.
+
+This repairs the generic erased-view result boundary exposed by sorting and
+graph, not complete nominal/handler provenance or library execution. General
+handler payload discovery, guarded storage, native label materialization and
+the full-library acceptance gate remain open.

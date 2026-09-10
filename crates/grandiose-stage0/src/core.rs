@@ -384,6 +384,10 @@ pub enum CallReferenceOrigin {
     /// Several relations may share a result path; all such input loans remain
     /// live. Vectors use frozen structural field indices, never spellings.
     Paths(Vec<CallReferencePath>),
+    /// Known caller dependencies with unresolved reference coverage elsewhere
+    /// in the result or its inputs. These paths retain loans; they do not
+    /// discharge the remaining opaque-result obligation.
+    Partial(Vec<CallReferencePath>),
     /// The result is an external/static reference with no caller loan.
     External,
     /// Reference validity/lifetimes (including nested/generic residents) are
@@ -391,6 +395,32 @@ pub enum CallReferenceOrigin {
     Unsafe,
     /// Core could not prove the possible source regions for a reference result.
     Opaque,
+}
+
+impl CallReferenceOrigin {
+    pub(crate) fn paths(&self) -> &[CallReferencePath] {
+        match self { Self::Paths(paths) | Self::Partial(paths) => paths, _ => &[] }
+    }
+
+    pub(crate) fn is_deferred(&self) -> bool {
+        matches!(self, Self::Opaque | Self::Partial(_))
+    }
+
+    /// Specialization may settle an open contract, but cannot erase a caller
+    /// dependency already established before lifetime cells were opened.
+    fn refine(&self, refined: Self) -> Self {
+        match self {
+            Self::Opaque => refined,
+            Self::Partial(previous) => {
+                let mut paths = previous.clone();
+                for path in refined.paths() {
+                    if !paths.contains(path) { paths.push(path.clone()); }
+                }
+                if refined.is_deferred() { Self::Partial(paths) } else { Self::Paths(paths) }
+            }
+            _ => self.clone(),
+        }
+    }
 }
 /// The sealed reference-bearing shape of a callable result.  This is kept
 /// alongside its provenance because an opaque nominal, enum, array, or
@@ -427,6 +457,9 @@ fn call_reference_shape(
     // the unsafe caller's obligation, not a fabricated checked input loan.
     if matches!(origin, CallReferenceOrigin::Unsafe) {
         return CallReferenceShape::Unsafe;
+    }
+    if matches!(origin, CallReferenceOrigin::Partial(_)) {
+        return CallReferenceShape::OpaquePotentiallyReference;
     }
     let mut leaves = vec![];
     match reference_leaf_paths(signatures, result, &mut vec![], &mut leaves) {
@@ -1991,6 +2024,7 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
         CallReferenceOrigin::Paths(_) => {
             matches!(reference_shape, CallReferenceShape::CallerPaths)
         }
+        CallReferenceOrigin::Partial(_) => matches!(reference_shape, CallReferenceShape::OpaquePotentiallyReference),
         CallReferenceOrigin::Opaque => matches!(
             reference_shape,
             CallReferenceShape::None
@@ -2012,20 +2046,25 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
             return Some("raw-reference provenance requires an unsafe callable".into());
         }
     }
-    if let Some(contract) = callable_contract
-        && !matches!(contract, CallReferenceOrigin::Opaque)
-        && reference_origin != &contract
-    {
-        return Some(format!(
-            "reference-valued {boundary} does not match its frozen callable lifetime contract"
-        ));
+    if let Some(contract) = callable_contract {
+        let matches = match &contract {
+            CallReferenceOrigin::Opaque => true,
+            CallReferenceOrigin::Partial(paths) => paths.iter().all(|path| reference_origin.paths().contains(path)),
+            _ => reference_origin == &contract,
+        };
+        if !matches {
+            return Some(format!(
+                "reference-valued {boundary} does not match its frozen callable lifetime contract"
+            ));
+        }
     }
     let is_reference = known_reference_bearing_type(result);
     match reference_origin {
         CallReferenceOrigin::None if is_reference => Some(format!(
             "reference-valued {boundary} omitted its frozen caller-region provenance"
         )),
-        CallReferenceOrigin::Paths(paths) => {
+        CallReferenceOrigin::Paths(paths) | CallReferenceOrigin::Partial(paths) => {
+            if paths.is_empty() { return Some(format!("{boundary}-reference paths omit their claimed known dependencies")); }
             if !permits_reference_leaf_paths(result) {
                 return Some(format!(
                     "{boundary}-reference paths require a reference-bearing result"
@@ -8071,15 +8110,15 @@ impl Elaborator<'_> {
                 // The declared operation relation is determined before
                 // zonking can collapse distinct generic lifetimes into the
                 // same caller-local representation.  Fall back to the
-                // realized expression types only for a genuinely opaque
-                // declaration contract, as ordinary calls do.
-                if matches!(reference_contract, CallReferenceOrigin::Opaque) {
-                    *reference_origin = call_reference_origin(
+                // realized expression types only for deferred coverage,
+                // retaining known declaration paths as ordinary calls do.
+                if reference_contract.is_deferred() {
+                    *reference_origin = reference_contract.refine(call_reference_origin(
                         self.signatures,
                         &self.expressions,
                         arguments,
                         result,
-                    );
+                    ));
                 } else {
                     *reference_origin = reference_contract.clone();
                 }
@@ -8096,14 +8135,14 @@ impl Elaborator<'_> {
                 // relationship than the caller's erased local regions.  Once
                 // that contract names a unique source argument, keep it
                 // frozen instead of recomputing an ambiguous `Elided` match.
-                if matches!(reference_origin, CallReferenceOrigin::Opaque) {
-                    *reference_origin = crate::placeflow::regions::call_origin(self.signatures,
+                if reference_origin.is_deferred() {
+                    *reference_origin = reference_origin.refine(crate::placeflow::regions::call_origin(self.signatures,
                         &self.expressions[callee.0 as usize]).unwrap_or_else(|| call_reference_origin(
                         self.signatures,
                         &self.expressions,
                         arguments,
                         result,
-                    ));
+                    )));
                 }
                 *reference_shape = call_reference_shape(self.signatures, result, reference_origin);
             }
@@ -10645,7 +10684,7 @@ impl Elaborator<'_> {
         let mut reference_contract =
             callable_reference_origin_from_contract(self.signatures, &parameters, &result);
         let unsafe_reference_result = if safety == crate::Safety::Unsafe
-            && matches!(reference_contract, CallReferenceOrigin::Opaque)
+            && reference_contract.is_deferred()
         {
             reference_contract = CallReferenceOrigin::Unsafe;
             if matches!(result.as_ref(), Type::Reference { .. }) {
@@ -16131,83 +16170,10 @@ fn call_reference_origin(
     arguments: &[CoreId],
     result: &Type,
 ) -> CallReferenceOrigin {
-    let mut result_leaves = vec![];
-    if reference_leaf_paths(signatures, result, &mut vec![], &mut result_leaves).is_err() {
-        return CallReferenceOrigin::Opaque;
-    }
-    if result_leaves.is_empty() {
-        return CallReferenceOrigin::None;
-    }
-    if result_leaves.iter().all(|(_, ty)| {
-        matches!(
-            ty,
-            Type::Reference {
-                lifetime: Lifetime::Static,
-                ..
-            }
-        )
-    }) {
-        return CallReferenceOrigin::External;
-    }
-    let mut argument_leaves = vec![];
-    for (argument, id) in arguments.iter().enumerate() {
-        let Some(expression) = expressions.get(id.0 as usize) else {
-            return CallReferenceOrigin::Opaque;
-        };
-        let mut leaves = vec![];
-        if input_reference_leaf_paths(signatures, &expression.ty, &mut leaves).is_err() {
-            return CallReferenceOrigin::Opaque;
-        }
-        argument_leaves.extend(
-            leaves
-                .into_iter()
-                .map(|(fields, ty)| (argument as u32, fields, ty)),
-        );
-    }
-    let mut paths = vec![];
-    for (result_fields, result_ty) in result_leaves {
-        let Type::Reference {
-            lifetime: result_lifetime,
-            ..
-        } = result_ty
-        else {
-            unreachable!("reference leaf traversal only yields references");
-        };
-        if matches!(result_lifetime, Lifetime::Static) {
-            // `Paths` records only caller-region leaves.  A result that is
-            // entirely static used `External` above; in a mixed aggregate the
-            // static leaf has no loan to preserve and can be omitted while
-            // its caller-derived siblings retain their exact paths.
-            continue;
-        }
-        let candidates = argument_leaves
-            .iter()
-            // Caller-region provenance follows the reference lifetime and
-            // structural path, not referent equality.  A well-typed callee
-            // may project `&'a Tri` to `&'a i64`; requiring `Tri == i64`
-            // would incorrectly turn that unique, frozen loan relation into
-            // opaque provenance. With several inputs in the same region,
-            // retain their union: referent equality cannot rule out a
-            // projection from a differently shaped input aggregate.
-            .filter(|(_, _, candidate)| {
-                matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() && reference_path_is_logical(&result_fields) {
-            continue;
-        }
-        if candidates.is_empty() {
-            return CallReferenceOrigin::Opaque;
-        }
-        for (argument, argument_fields, _) in candidates {
-            paths.push(CallReferencePath {
-                result_fields: result_fields.clone(),
-                argument: *argument,
-                argument_fields: argument_fields.clone(),
-            });
-        }
-    }
-    if paths.is_empty() { CallReferenceOrigin::None } else { CallReferenceOrigin::Paths(paths) }
+    let Some(parameters) = arguments.iter().map(|id|
+        expressions.get(id.0 as usize).map(|expression| expression.ty.clone()))
+        .collect::<Option<Vec<_>>>() else { return CallReferenceOrigin::Opaque; };
+    callable_reference_origin_from_contract(signatures, &parameters, result)
 }
 
 
@@ -16220,13 +16186,11 @@ pub(crate) fn callable_reference_origin_from_contract(
     result: &Type,
 ) -> CallReferenceOrigin {
     let mut result_leaves = vec![];
-    if reference_leaf_paths(signatures, result, &mut vec![], &mut result_leaves).is_err() {
-        return CallReferenceOrigin::Opaque;
-    }
+    let mut complete = reference_leaf_paths(signatures, result, &mut vec![], &mut result_leaves).is_ok();
     if result_leaves.is_empty() {
-        return CallReferenceOrigin::None;
+        return if complete { CallReferenceOrigin::None } else { CallReferenceOrigin::Opaque };
     }
-    if result_leaves.iter().all(|(_, ty)| {
+    if complete && result_leaves.iter().all(|(_, ty)| {
         matches!(
             ty,
             Type::Reference {
@@ -16240,9 +16204,7 @@ pub(crate) fn callable_reference_origin_from_contract(
     let mut argument_leaves = vec![];
     for (argument, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
-        if input_reference_leaf_paths(signatures, parameter, &mut leaves).is_err() {
-            return CallReferenceOrigin::Opaque;
-        }
+        complete &= input_reference_leaf_paths(signatures, parameter, &mut leaves).is_ok();
         argument_leaves.extend(
             leaves
                 .into_iter()
@@ -16270,9 +16232,8 @@ pub(crate) fn callable_reference_origin_from_contract(
         else {
             unreachable!("reference leaf traversal only yields references");
         };
-        // See `call_reference_origin`: a declaration contract records the
-        // caller region it forwards.  It intentionally permits a structural
-        // projection whose referent differs from the source aggregate.
+        // A contract records caller regions, not referent equality: projecting
+        // &'a Aggregate to &'a Field retains every input in that same region.
         let candidates = argument_leaves
             .iter()
             .filter(|(_, _, candidate)| {
@@ -16283,7 +16244,8 @@ pub(crate) fn callable_reference_origin_from_contract(
             continue;
         }
         if candidates.is_empty() {
-            return CallReferenceOrigin::Opaque;
+            complete = false;
+            continue;
         }
         for (argument, argument_fields, _) in candidates {
             paths.push(CallReferencePath {
@@ -16293,7 +16255,12 @@ pub(crate) fn callable_reference_origin_from_contract(
             });
         }
     }
-    if paths.is_empty() { CallReferenceOrigin::None } else { CallReferenceOrigin::Paths(paths) }
+    match (complete, paths.is_empty()) {
+        (true, true) => CallReferenceOrigin::None,
+        (true, false) => CallReferenceOrigin::Paths(paths),
+        (false, true) => CallReferenceOrigin::Opaque,
+        (false, false) => CallReferenceOrigin::Partial(paths),
+    }
 }
 
 /// Input provenance can follow a stored reference through a shorter borrow of
@@ -16311,11 +16278,8 @@ pub(crate) fn input_reference_leaf_paths(
         if active.contains(ty) { return Ok(()); }
         active.push(ty.clone());
         let mut direct = vec![];
-        if reference_leaf_paths_active(signatures, ty, &mut vec![], &mut direct,
-            &mut std::collections::BTreeMap::new(), true).is_err() && direct.is_empty() {
-            active.pop();
-            return Err(());
-        }
+        let complete = reference_leaf_paths_active(signatures, ty, &mut vec![], &mut direct,
+            &mut std::collections::BTreeMap::new(), true).is_ok();
         for (fields, leaf) in direct {
             let mut path = prefix.to_vec();
             path.extend(fields);
@@ -16326,7 +16290,7 @@ pub(crate) fn input_reference_leaf_paths(
             }
         }
         active.pop();
-        Ok(())
+        if complete { Ok(()) } else { Err(()) }
     }
     visit(signatures, ty, &[], &mut vec![], leaves)
 }
@@ -16334,8 +16298,9 @@ pub(crate) fn input_reference_leaf_paths(
 /// Discover direct reference leaves through the sealed structural shapes that
 /// Typed Core can project. Nominal layouts are read from the frozen interface
 /// and instantiated with their canonical application arguments. An enum
-/// remains opaque when a payload path would name different regions across
-/// variants; fixed-array elements use a bounded homogeneous projection.
+/// retains an unresolved obligation when a payload path would name different
+/// regions across variants; independent known paths are still appended even
+/// when coverage is incomplete. Fixed arrays use a homogeneous projection.
 pub(crate) fn reference_leaf_paths(
     signatures: &ElaboratedInterface,
     ty: &Type,
@@ -16353,88 +16318,123 @@ fn reference_leaf_paths_active(
     active: &mut std::collections::BTreeMap<DefKey, Type>,
     input: bool,
 ) -> Result<(), ()> {
-    if crate::types::label::payload(ty).is_some() { return Ok(()); }
+    let mut collected = ReferenceLeaves::default();
+    collect_reference_leaf_paths(signatures, ty, path, &mut collected, active, input);
+    leaves.extend(collected.known);
+    if collected.unresolved.is_empty() { Ok(()) } else { Err(()) }
+}
+
+/// One traversal retains positively represented leaves independently of its
+/// coverage gaps. Gaps carry prefixes so an unknown enum alternative cannot
+/// accidentally certify the same payload path in another alternative.
+#[derive(Default)]
+struct ReferenceLeaves {
+    known: Vec<(Vec<u32>, Type)>,
+    unresolved: Vec<Vec<u32>>,
+}
+
+impl ReferenceLeaves {
+    fn unknown(&mut self, path: &[u32]) {
+        if !self.unresolved.iter().any(|known| reference_path_is_prefix(known, path)) {
+            self.unresolved.retain(|known| !reference_path_is_prefix(path, known));
+            self.unresolved.push(path.to_vec());
+        }
+    }
+
+    fn extend(&mut self, other: Self) {
+        self.known.extend(other.known);
+        for path in other.unresolved { self.unknown(&path); }
+    }
+}
+
+fn collect_reference_leaf_paths(
+    signatures: &ElaboratedInterface,
+    ty: &Type,
+    path: &mut Vec<u32>,
+    leaves: &mut ReferenceLeaves,
+    active: &mut std::collections::BTreeMap<DefKey, Type>,
+    input: bool,
+) {
+    if crate::types::label::payload(ty).is_some() { return; }
     let Type::Nominal { definition, arguments } = ty else {
-        return structural_reference_leaf_paths(signatures, ty, path, leaves, active, input);
+        return collect_structural_reference_leaf_paths(signatures, ty, path, leaves, active, input);
     };
-    if !type_may_contain_reference(signatures, ty) { return Ok(()); }
+    if !type_may_contain_reference(signatures, ty) { return; }
     // Repeated declarations are valid when consuming an already present
     // nested type argument (Vec<Vec<&T>>). A same-sized or growing recursive
     // layout is not a finite reference projection. Decreasing type shape provides
     // a structural termination measure without a guessed nesting limit.
-    if active.get(definition).is_some_and(|previous| reference_layout_weight(ty) >= reference_layout_weight(previous)) { return Err(()); }
+    if active.get(definition).is_some_and(|previous| reference_layout_weight(ty) >= reference_layout_weight(previous)) {
+        leaves.unknown(path);
+        return;
+    }
     let previous = active.insert(*definition, ty.clone());
-    let first = leaves.len();
-    let result = structural_reference_leaf_paths(signatures, ty, path, leaves, active, input)
-        .and_then(|()| {
-            // A generic resident can live in source-managed raw storage even
-            // when the nominal's physical fields contain only pointer bits.
-            // This is an application/type relation, never a privileged
-            // collection or marker spelling. Equal lifetimes do not imply
-            // equal referents: a physical field and a raw-backed resident
-            // can hold different loans, including after a later insertion.
-            if !matches!(signatures.definitions.get(definition), Some(ElaboratedHeader::Nominal { .. })) {
-                return Ok(());
+    let first = leaves.known.len();
+    collect_structural_reference_leaf_paths(signatures, ty, path, leaves, active, input);
+    if matches!(signatures.definitions.get(definition), Some(ElaboratedHeader::Nominal { .. })) {
+        // A generic resident can live in source-managed raw storage even
+        // when the nominal's physical fields contain only pointer bits.
+        // This is an application/type relation, never a privileged
+        // collection or marker spelling. Equal lifetimes do not imply
+        // equal referents: a physical field and a raw-backed resident
+        // can hold different loans, including after a later insertion.
+        for (index, argument) in arguments.iter().enumerate() {
+            let GenericArgument::Type(argument) = argument else { continue; };
+            // A compiler-issued Environment names proof-level access,
+            // not another resident in the owner's raw storage. Its
+            // capture dependencies live on the associated callable.
+            // This exemption is exact value evidence from this same
+            // nominal application, not a spelling or an unknown-type
+            // fallback. Physical fields were checked above and cannot
+            // use it to hide an unprojectable resident.
+            if matches!(argument, Type::Nominal { definition, .. }
+                if !signatures.definitions.contains_key(definition))
+                && arguments.iter().any(|value| matches!(value,
+                    GenericArgument::Type(value) if carries_callable_environment(value, argument))) {
+                continue;
             }
-            for (index, argument) in arguments.iter().enumerate() {
-                let GenericArgument::Type(argument) = argument else { continue; };
-                // A compiler-issued Environment names proof-level access,
-                // not another resident in the owner's raw storage. Its
-                // capture dependencies live on the associated callable.
-                // This exemption is exact value evidence from this same
-                // nominal application, not a spelling or an unknown-type
-                // fallback. Physical fields were checked above and cannot
-                // use it to hide an unprojectable resident.
-                if matches!(argument, Type::Nominal { definition, .. }
-                    if !signatures.definitions.contains_key(definition))
-                    && arguments.iter().any(|value| matches!(value,
-                        GenericArgument::Type(value) if carries_callable_environment(value, argument))) {
-                    continue;
-                }
-                let mut logical = vec![];
-                let prefix = path.len();
-                path.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
-                let traversed = reference_leaf_paths_active(signatures, argument, path, &mut logical, active, input);
-                path.truncate(prefix);
-                // Open residents make a result contract deferred until its
-                // realized call shape is available. Input traversal retains
-                // any physical leaves already found before this unknown
-                // region, so an open T cannot hide a Slice's outer borrow.
-                if traversed.is_err() && (!input || type_has_reference_storage(signatures, ty,
-                    &mut std::collections::BTreeSet::new(), true)) {
-                    return Err(());
-                }
-                // An open identity-only argument of a sealed physical input
-                // (Id<Tag> with only an integer field, for example) cannot
-                // invalidate another argument's known caller-region path.
-                // Raw storage and unresolved physical/referent residents
-                // remain deferred. Results always use strict traversal.
-                leaves.extend(logical);
+            let mut logical = ReferenceLeaves::default();
+            let prefix = path.len();
+            path.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
+            collect_reference_leaf_paths(signatures, argument, path, &mut logical, active, input);
+            path.truncate(prefix);
+            // Open residents make a result contract deferred until its
+            // realized call shape is available. Input traversal retains
+            // any physical leaves already found before this unknown
+            // region, so an open T cannot hide a Slice's outer borrow.
+            // An open identity-only argument of a sealed physical input
+            // (Id<Tag> with only an integer field, for example) cannot
+            // invalidate another argument's known caller-region path.
+            // Raw storage and unresolved physical/referent residents
+            // remain deferred. Results always use strict traversal.
+            if input && !logical.unresolved.is_empty()
+                && !type_has_reference_storage(signatures, ty, &mut std::collections::BTreeSet::new(), true) {
+                logical.unresolved.clear();
             }
-            let represented = leaves[first..].iter().filter_map(|(_, leaf)| match leaf {
-                Type::Reference { lifetime, .. } => Some(*lifetime),
-                _ => None,
-            }).collect::<std::collections::BTreeSet<_>>();
-            let raw_storage = arguments.iter().any(|argument| matches!(argument,
-                GenericArgument::Lifetime(lifetime) if represented.contains(lifetime)))
-                && type_has_raw_storage(signatures, ty, &mut std::collections::BTreeSet::new());
-            for (index, argument) in arguments.iter().enumerate() {
-                let GenericArgument::Lifetime(lifetime) = argument else { continue; };
-                // An ordinary borrowed view has no additional storage beyond
-                // its physical reference. A raw-backed owner can have both:
-                // retain that independent obligation even at one lifetime.
-                if represented.contains(lifetime) && !raw_storage { continue; }
-                let mut logical = path.clone();
-                logical.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
-                leaves.push((logical, Type::Reference {
-                    lifetime: *lifetime, mutability: Mutability::Shared, referent: Box::new(Type::Unit),
-                }));
-            }
-            Ok(())
-        });
+            leaves.extend(logical);
+        }
+        let represented = leaves.known[first..].iter().filter_map(|(_, leaf)| match leaf {
+            Type::Reference { lifetime, .. } => Some(*lifetime),
+            _ => None,
+        }).collect::<std::collections::BTreeSet<_>>();
+        let raw_storage = arguments.iter().any(|argument| matches!(argument,
+            GenericArgument::Lifetime(lifetime) if represented.contains(lifetime)))
+            && type_has_raw_storage(signatures, ty, &mut std::collections::BTreeSet::new());
+        for (index, argument) in arguments.iter().enumerate() {
+            let GenericArgument::Lifetime(lifetime) = argument else { continue; };
+            // An ordinary borrowed view has no additional storage beyond
+            // its physical reference. A raw-backed owner can have both:
+            // retain that independent obligation even at one lifetime.
+            if represented.contains(lifetime) && !raw_storage { continue; }
+            let mut logical = path.clone();
+            logical.extend([REFERENCE_PATH_LOGICAL_ARGUMENT, index as u32]);
+            leaves.known.push((logical, Type::Reference {
+                lifetime: *lifetime, mutability: Mutability::Shared, referent: Box::new(Type::Unit),
+            }));
+        }
+    }
     if let Some(previous) = previous { active.insert(*definition, previous); }
     else { active.remove(definition); }
-    result
 }
 
 fn carries_callable_environment(value: &Type, environment: &Type) -> bool {
@@ -16511,28 +16511,28 @@ fn type_has_reference_storage(signatures: &ElaboratedInterface, ty: &Type,
     }
 }
 
-fn structural_reference_leaf_paths(
+fn collect_structural_reference_leaf_paths(
     signatures: &ElaboratedInterface,
     ty: &Type,
     path: &mut Vec<u32>,
-    leaves: &mut Vec<(Vec<u32>, Type)>,
+    leaves: &mut ReferenceLeaves,
     active: &mut std::collections::BTreeMap<DefKey, Type>,
     input: bool,
-) -> Result<(), ()> {
+) {
     if let Some(fields) = crate::refinement::binding_pack_fields(ty) {
         for (index, field) in fields.iter().enumerate() {
             path.push(index as u32);
-            reference_leaf_paths_active(signatures, field, path, leaves, active, input)?;
+            collect_reference_leaf_paths(signatures, field, path, leaves, active, input);
             path.pop();
         }
-        return Ok(());
+        return;
     }
     match ty {
-        Type::Reference { .. } => leaves.push((path.clone(), ty.clone())),
+        Type::Reference { .. } => leaves.known.push((path.clone(), ty.clone())),
         Type::Tuple(fields) => {
             for (index, field) in fields.iter().enumerate() {
                 path.push(index as u32);
-                reference_leaf_paths_active(signatures, field, path, leaves, active, input)?;
+                collect_reference_leaf_paths(signatures, field, path, leaves, active, input);
                 path.pop();
             }
         }
@@ -16546,8 +16546,10 @@ fn structural_reference_leaf_paths(
             }) => {
                 for (index, field) in fields.iter().enumerate() {
                     path.push(index as u32);
-                    let field = instantiate_nominal_field_type(&field.ty, arguments)?;
-                    reference_leaf_paths_active(signatures, &field, path, leaves, active, input)?;
+                    match instantiate_nominal_field_type(&field.ty, arguments) {
+                        Ok(field) => collect_reference_leaf_paths(signatures, &field, path, leaves, active, input),
+                        Err(()) => leaves.unknown(path),
+                    }
                     path.pop();
                 }
             }
@@ -16564,6 +16566,7 @@ fn structural_reference_leaf_paths(
                 // one `&'a Result<A, E>` input.  Preserve such field paths;
                 // fail closed if a single position would name different
                 // regions in different variants.
+                let mut variants_collected = ReferenceLeaves::default();
                 let mut variant_leaves = std::collections::BTreeMap::new();
                 for variant in variants {
                     let fields = match &variant.payload {
@@ -16576,14 +16579,15 @@ fn structural_reference_leaf_paths(
                         }
                     };
                     for (index, field) in fields.into_iter().enumerate() {
-                        let field = instantiate_nominal_field_type(field, arguments)?;
                         path.push(index as u32);
-                        let mut field_leaves = vec![];
-                        let traversed =
-                            reference_leaf_paths_active(signatures, &field, path, &mut field_leaves, active, input);
+                        let mut field_leaves = ReferenceLeaves::default();
+                        match instantiate_nominal_field_type(field, arguments) {
+                            Ok(field) => collect_reference_leaf_paths(signatures, &field, path, &mut field_leaves, active, input),
+                            Err(()) => field_leaves.unknown(path),
+                        }
                         path.pop();
-                        traversed?;
-                        for (field_path, leaf) in field_leaves {
+                        for unknown in field_leaves.unresolved { variants_collected.unknown(&unknown); }
+                        for (field_path, leaf) in field_leaves.known {
                             let Some(existing) = variant_leaves.get(&field_path) else {
                                 variant_leaves.insert(field_path, leaf);
                                 continue;
@@ -16595,39 +16599,43 @@ fn structural_reference_leaf_paths(
                                     Type::Reference { lifetime: right, .. },
                                 ) if left == right
                             ) {
-                                return Err(());
+                                variants_collected.unknown(&field_path);
                             }
                         }
                     }
                 }
-                leaves.extend(variant_leaves);
+                // A gap at another payload path does not erase this leaf.
+                // A gap that could contain this exact path, or incompatible
+                // regions at this path, cannot provide a forwarding contract.
+                variants_collected.known.extend(variant_leaves.into_iter().filter(|(path, _)|
+                    !variants_collected.unresolved.iter().any(|unknown| reference_path_is_prefix(unknown, path))));
+                leaves.extend(variants_collected);
             }
             Some(ElaboratedHeader::Nominal {
                 layout: ElaboratedNominalLayout::Opaque,
                 ..
             })
-            | None => return Err(()),
-            _ => return Err(()),
+            | None => leaves.unknown(path),
+            _ => leaves.unknown(path),
         },
         Type::FixedArray { element, .. } => {
             if ty.fixed_array_length() == Some(0) || !type_may_contain_reference(signatures, element) {
-                return Ok(());
+                return;
             }
             // An unresolved extent remains opaque until the ordinary call
             // instantiation seals its shape. Concrete arrays use one symbolic
             // element path rather than N leaves and N² caller relations.
-            let _ = ty.fixed_array_length().ok_or(())?;
+            if ty.fixed_array_length().is_none() { leaves.unknown(path); return; }
             path.push(REFERENCE_PATH_ARRAY_ELEMENT);
-            let result = reference_leaf_paths_active(signatures, element, path, leaves, active, input);
+            collect_reference_leaf_paths(signatures, element, path, leaves, active, input);
             path.pop();
-            result?;
         }
         Type::Array(element) | Type::StaticData { element, .. } => {
             if type_may_contain_reference(signatures, element) {
-                return Err(());
+                leaves.unknown(path);
             }
         }
-        Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => return Err(()),
+        Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => leaves.unknown(path),
         // The pointer is a value, but its pointee is not a resident reference
         // leaf. Dereferencing/converting it must establish fresh unsafe
         // obligations rather than inherit a fictitious checked loan here.
@@ -16641,7 +16649,6 @@ fn structural_reference_leaf_paths(
         | Type::ConstGeneric { .. }
         | Type::Error => {}
     }
-    Ok(())
 }
 
 fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bool {
@@ -16922,6 +16929,62 @@ fn closure_scalar(name: &str) -> Option<ScalarType> {
 #[cfg(test)]
 mod invariant_call_lifetime_tests {
     use super::*;
+
+    #[test]
+    fn partial_reference_coverage_keeps_siblings_after_an_open_component() {
+        let signatures = ElaboratedInterface::default();
+        let a = inner(Lifetime::Generic(0));
+        let b = inner(Lifetime::Generic(1));
+        let result = Type::Tuple(vec![a.clone(), Type::Generic(2), b.clone()]);
+        let mut prefix = vec![7];
+        let mut leaves = vec![];
+        assert!(reference_leaf_paths(&signatures, &result, &mut prefix, &mut leaves).is_err());
+        assert_eq!(prefix, vec![7], "an incomplete child must restore its projection prefix");
+        assert_eq!(leaves, vec![(vec![7,0], a.clone()), (vec![7,2], b.clone())]);
+        let origin = callable_reference_origin_from_contract(&signatures, &[a,b], &result);
+        assert_eq!(origin, CallReferenceOrigin::Partial(vec![
+            CallReferencePath { result_fields: vec![0], argument: 0, argument_fields: vec![] },
+            CallReferencePath { result_fields: vec![2], argument: 1, argument_fields: vec![] },
+        ]));
+        assert_eq!(call_reference_shape(&signatures, &result, &origin), CallReferenceShape::OpaquePotentiallyReference);
+        let mut inputs = vec![];
+        assert!(input_reference_leaf_paths(&signatures, &result, &mut inputs).is_err());
+        assert_eq!(inputs.len(), 2, "known input siblings cannot settle the open component");
+    }
+
+    #[test]
+    fn enum_reference_gaps_and_conflicts_cannot_certify_another_variant_path() {
+        for source in [
+            "enum Choice<'a,'b,T> { Known(&'a i64,&'b i64), Other(T,&'b i64) } fn contract<'a,'b,T>(a:&'a i64,b:&'b i64) -> Choice<'a,'b,T> { Choice::Known(a,b) }",
+            "enum Choice<'a,'b> { Known(&'a i64,&'b i64), Other(&'b i64,&'b i64) } fn contract<'a,'b>(a:&'a i64,b:&'b i64) -> Choice<'a,'b> { Choice::Known(a,b) }",
+        ] {
+            let package = crate::PackageKey("partial-reference-paths@0.1.0".into());
+            let lexed = crate::LexedFile::lex(crate::FileKey::new(&package, "src/main.glorious"), source);
+            let scan = crate::DeclarationScan::scan(&lexed, source);
+            let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+            let signatures = ElaboratedInterface::elaborate(&interface);
+            assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+            let definition = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some("contract")).unwrap();
+            let ElaboratedHeader::Callable(contract) = &signatures.definitions[&definition.key] else { panic!("callable contract"); };
+            let origin = callable_reference_origin_from_contract(&signatures, &contract.parameters, &contract.result);
+            assert!(matches!(origin, CallReferenceOrigin::Partial(_)), "{origin:?}");
+            assert!(!origin.paths().iter().any(|path| path.result_fields == [0]), "{origin:?}");
+            assert!(origin.paths().iter().any(|path| path.result_fields == [1] && path.argument == 1), "{origin:?}");
+        }
+    }
+
+    #[test]
+    fn refining_reference_coverage_cannot_drop_a_previously_known_dependency() {
+        let first = CallReferencePath { result_fields: vec![0], argument: 0, argument_fields: vec![] };
+        let second = CallReferencePath { result_fields: vec![1], argument: 1, argument_fields: vec![] };
+        let contract = CallReferenceOrigin::Partial(vec![first.clone()]);
+        assert_eq!(contract.refine(CallReferenceOrigin::Opaque), contract);
+        assert_eq!(contract.refine(CallReferenceOrigin::Partial(vec![second.clone()])),
+            CallReferenceOrigin::Partial(vec![first.clone(), second.clone()]));
+        assert_eq!(contract.refine(CallReferenceOrigin::Paths(vec![second.clone()])),
+            CallReferenceOrigin::Paths(vec![first.clone(), second]));
+        assert_eq!(contract.refine(CallReferenceOrigin::External), CallReferenceOrigin::Paths(vec![first]));
+    }
 
     #[test]
     fn fixed_array_reference_paths_are_bounded_by_shape_not_extent() {

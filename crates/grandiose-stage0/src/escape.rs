@@ -665,6 +665,7 @@ impl Analyzer<'_> {
                     reference_shape,
                     &expression.ty,
                     values,
+                    references_complete,
                     expression.span,
                     "call",
                 )) };
@@ -827,16 +828,22 @@ impl Analyzer<'_> {
         shape: CallReferenceShape,
         result_ty: &Type,
         values: Vec<Value>,
+        references_complete: bool,
         span: Span,
         boundary: &str,
     ) -> Value {
+        if origin.is_deferred() && !references_complete
+            && matches!(shape, CallReferenceShape::OpaquePotentiallyReference)
+            && !contains_open_type_parameter(result_ty) {
+            self.error(span, "G5023", format!("reference-valued {boundary} has no complete frozen caller-region provenance"));
+        }
         match origin {
             CallReferenceOrigin::None => Value::None,
             CallReferenceOrigin::External => Value::ExternalBorrowed,
             // The raw-reference contract supplies validity independently of
             // local loans. Its selected lifetime is still checked by Core.
             CallReferenceOrigin::Unsafe => Value::ExternalBorrowed,
-            CallReferenceOrigin::Paths(paths) => {
+            CallReferenceOrigin::Paths(paths) | CallReferenceOrigin::Partial(paths) => {
                 let mut result = Value::None;
                 for path in paths {
                     let Some(argument) = values.get(path.argument as usize) else {
@@ -875,20 +882,7 @@ impl Analyzer<'_> {
                 seal_array_extents(self.signatures, result_ty, &mut result);
                 result
             }
-            CallReferenceOrigin::Opaque => {
-                if matches!(shape, CallReferenceShape::OpaquePotentiallyReference)
-                    && !contains_open_type_parameter(result_ty)
-                {
-                    self.error(
-                        span,
-                        "G5023",
-                        format!(
-                            "reference-valued {boundary} has no frozen caller-region provenance"
-                        ),
-                    );
-                }
-                Value::None
-            }
+            CallReferenceOrigin::Opaque => Value::None,
         }
     }
 
@@ -957,6 +951,7 @@ impl Analyzer<'_> {
             reference_shape,
             &expression.ty,
             values.clone(),
+            false,
             expression.span,
             "effect operation",
         ));

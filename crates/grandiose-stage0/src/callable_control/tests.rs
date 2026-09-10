@@ -788,4 +788,16 @@ fn returned_reference_coverage_requires_every_path_and_authenticated_input() {
     assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
     control.returns.clear();
     assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
+
+    // A specialized result may only demand a represented input sibling.
+    // Its other generic field cannot erase that authenticated projection,
+    // nor can the same evidence certify an actually open result shape.
+    let partial_type = Type::Tuple(vec![Type::Generic(0), reference.clone()]);
+    let specialized = Type::Tuple(vec![Type::Unit, reference]);
+    control.returns = vec![InvocationPayload { ty: partial_type.clone(),
+        source: payloads::PayloadSource::Argument { index: 0, path: vec![] } }];
+    assert!(control.resolve_returns(&specialized, &signatures, &(), &[()], &domain).references_complete);
+    assert!(!control.resolve_returns(&partial_type, &signatures, &(), &[()], &domain).references_complete);
+    assert!(!control.resolve_returns(&specialized, &signatures, &(), &[()],
+        &Domain { capture_known: true, reference_known: false }).references_complete);
 }
