@@ -5,6 +5,68 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 134: conditional retained-owner contracts at specialization
+
+The unchanged full-library root now reports **2 G5024 diagnostics**, down from
+11 (`target/conditional-minimum-library-root-final-v1.log`). Both remaining
+failures are the retained `item` in Inspect's next/next-back callbacks at
+`iterator_callbacks.glorious:68,87`. Library acceptance is not yet achieved.
+
+PlaceFlow's existing disposition analysis now retains an open effect row's
+conditional owner obligation instead of rejecting it before instantiation.
+The contract carries owner-relative transferred/opened paths, each residual
+state and the enclosing operation-handler ordering. The same quantity/layout
+rule checks source disposition and instantiated residents. Affine ordinary
+owners also retain replay obligations; permission to discard does not imply
+permission to copy. Known callable and borrowed-storage lanes remain separate.
+
+Ownership MIR transports this frozen source product. Every demanded concrete
+instance, including function-value targets and lifted bodies, must discharge it:
+cancellation needs zero-use permission, replay needs copying permission, and
+unknown rows/declarations fail closed. Closed empty rows and exact-once operation
+contracts do not invent cancellation. Specialized MIR's private discharge is
+bound to the exact source requirements and instance and checked by validation;
+its public lowering constructor also performs the discharge. Failures are source
+G5024 diagnostics in both Build and Check modes, not ignored backend errors.
+
+Verification:
+
+- The new generic retained-owner positive reproduces G5024 before the change
+  (`target/conditional-minimum-baseline-v1.log`). It now executes in fresh and
+  decoded VM and native O0/O2. Exact-once suspension and discardable cancellation
+  pass; optional/terminal cancellation and replay of linear or affine noncopy
+  owners reject through the new specialized obligation. Direct and first-class
+  targets are checked in Build and Check modes
+  (`target/conditional-minimum-entry-modes-v2.log`).
+- Partial-field transfer preserves the residual requirement: a remaining scalar
+  permits cancellation, a remaining Token rejects. The new partial group and
+  other targeted groups pass (`target/conditional-minimum-targeted-v1.log`),
+  apart from the separately retained observer failure below.
+- All 12 specialized-validator unit tests pass, including wrong-instance and
+  wrong-source discharge rejection (`target/conditional-minimum-validator-units-v1.log`).
+  All 22 revision/cache tests pass (`target/conditional-minimum-revision-v1.log`).
+- The last whole minimum-use run has **41 passing, 2 failing**
+  (`target/conditional-minimum-integration-v1.log`), before adding the separately
+  tested partial-field group. The old no-std `+` fixity/diagnostic mismatch remains.
+  The new `quantified_observer_calls_retain_their_conditional_owner_contract`
+  execution regression exposes G5017 universal-region leakage and G4304 at its
+  concrete caller; its source and execution assertion are preserved.
+
+The remaining library row-accounting failure is now localized: the receiver
+has an elided lifetime while its borrowed argument has a checked body region;
+the lexical Fn row recovery requires exact lifetime-head equality
+(`target/conditional-minimum-library-row-trace-v2.log`). Recovering the selected
+call contract must preserve its checked lifetime relation; erasing lifetimes
+or defaulting the missing row to empty would not be a repair. Temporary tracing
+is removed.
+
+This is a consumed request-local source/ownership contract, not the complete
+serialized guarded higher-order interface format. Full result-guard correlation,
+callback/loan replay composition, quantified call selection, native handlers,
+compiler/library conformance and self-hosted acceptance remain open. Cache is
+134; verifier 41, interface 22, native ABI 13, bytecode 72 and VM schema 116 are
+unchanged. No library source or public ownership bound was weakened.
+
 ## Cache 133: performance absence from shared executable control
 
 Tracing the library's retained-owner failures exposed an independent source

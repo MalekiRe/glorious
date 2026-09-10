@@ -151,6 +151,9 @@ impl SpecializedMir {
     }
 
     pub fn validate(&self) -> Result<(), SpecializedError> {
+        if !self.minimum_discharge.matches(&self.source_flow, self.source_definition, &self.instance) {
+            return Err(invalid("specialized minimum-use discharge does not match its source contract and instance"));
+        }
         if self.blocks.get(self.entry.0 as usize).is_none()
             || self.owners.len() != self.values.len()
         {
@@ -564,6 +567,21 @@ mod tests {
     }
     fn i64_argument() -> Vec<GenericArgument> {
         vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+    }
+
+    #[test]
+    fn conditional_minimum_discharge_is_bound_to_the_exact_instance_and_source() {
+        let source = "pub fn main<T,e: EffectRow>(value:T, body: () -> () / {| e}) -> T / {| e} { body(); value }";
+        let arguments = |ty| vec![GenericArgument::Type(ty), GenericArgument::EffectRow(EffectRow::empty())];
+        let mut body = fixture(source, arguments(Type::Scalar(ScalarType::I64)));
+        let other = fixture(source, arguments(Type::Scalar(ScalarType::I16)));
+        body.minimum_discharge = other.minimum_discharge;
+        assert!(body.validate().unwrap_err().0.contains("minimum-use discharge"));
+        let mut body = fixture(source, arguments(Type::Scalar(ScalarType::I64)));
+        let other = fixture("pub fn main<T,e: EffectRow>(value:T, body: () -> () / {| e}) -> T / {| e} { body(); { value } }",
+            arguments(Type::Scalar(ScalarType::I64)));
+        body.source_flow = other.source_flow;
+        assert!(body.validate().unwrap_err().0.contains("minimum-use discharge"));
     }
 
     #[test]

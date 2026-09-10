@@ -164,10 +164,10 @@ pub(super) fn executable(key: &InstanceKey) -> DefKey {
     }
 }
 
-/// Discharge addressability at the first boundary with closed generic types.
-/// Frozen ownership loans supply the obligations; do not reconstruct borrows
-/// from source or Core. Independent concrete validation checks the same rule.
-pub(super) fn check_addressability(
+/// Discharge source ownership obligations at the first closed generic boundary.
+/// Frozen loans and conditional residual owners supply the inputs; do not
+/// reconstruct borrows or dispositions from source or Core.
+pub(super) fn check_source_obligations(
     ownership: &OwnershipMir,
     instance: &InstanceKey,
     signatures: &ElaboratedInterface,
@@ -176,7 +176,10 @@ pub(super) fn check_addressability(
     let arguments = crate::service::materialization_body_arguments(instance, signatures)
         .map_err(SpecializedError)?;
     let mut substitution = Substitution { arguments: &arguments, solver: TraitSolver::new(signatures) };
-    fn check(body: &OwnershipMir, substitution: &mut Substitution<'_>) -> Result<(), SpecializedDiscoveryError> {
+    fn check(body: &OwnershipMir, substitution: &mut Substitution<'_>, instance: &InstanceKey,
+        signatures: &ElaboratedInterface) -> Result<(), SpecializedDiscoveryError> {
+        body.source_flow.discharge_minimum(body.definition, instance, substitution.arguments, signatures)
+            .map_err(|diagnostic| SpecializedDiscoveryError::MinimumUse { definition: body.definition, diagnostic })?;
         for loan in &body.loans {
             let Type::Reference { referent, .. } = &body.values[loan.destination.0 as usize].ty else {
                 return Err(SpecializedError("ownership loan lacks its reference type".into()).into());
@@ -186,10 +189,10 @@ pub(super) fn check_addressability(
                 return Err(SpecializedDiscoveryError::NonAddressableLabel { definition: body.definition, ty });
             }
         }
-        for closure in &body.closures { check(&closure.body, substitution)?; }
+        for closure in &body.closures { check(&closure.body, substitution, instance, signatures)?; }
         Ok(())
     }
-    check(ownership, &mut substitution)
+    check(ownership, &mut substitution, instance, signatures)
 }
 
 pub(super) fn declaration_key(
@@ -253,6 +256,8 @@ impl SpecializedMir {
         signatures: &ElaboratedInterface,
         primitives: Option<&BTreeMap<DefKey, PrimitiveRole>>,
     ) -> Result<Self, SpecializedError> {
+        let minimum_discharge = ownership.source_flow.discharge_minimum(ownership.definition, instance, arguments, signatures)
+            .map_err(|diagnostic| SpecializedError(format!("{}: {}", diagnostic.code, diagnostic.message)))?;
         let mut substitution = Substitution {
             arguments,
             solver: TraitSolver::new(signatures),
@@ -597,6 +602,7 @@ impl SpecializedMir {
             closures,
             source_bindings: ownership.source_bindings.clone(),
             source_flow: ownership.source_flow.clone(),
+            minimum_discharge,
             owners: ownership.owners.clone(),
             loans,
             blocks,

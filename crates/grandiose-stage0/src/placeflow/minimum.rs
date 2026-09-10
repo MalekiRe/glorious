@@ -1,4 +1,5 @@
-//! Ordinary owner obligations, separate from callable invocation quantities.
+//! Ordinary owner disposition and suspension obligations, separate from
+//! callable invocation quantities.
 //!
 //! `moved_places` is a may-move fact: a move on either predecessor makes a
 //! later read invalid. Minimum use needs the dual proof, so retain distinct
@@ -30,9 +31,111 @@ pub(super) struct MinimumBinding {
 }
 
 pub(super) struct MinimumHandler {
-    operations: Vec<(crate::EffectInstance, u32, bool)>,
+    operations: Vec<(crate::EffectInstance, u32, Quantity)>,
     retained: BTreeSet<String>,
     cancellations: Vec<(crate::EffectInstance, u32, Vec<MinimumDisposition>)>,
+}
+
+/// A generic call's cancellation requirement, with owner-relative paths.
+/// Local storage identities do not become generic interface parameters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct MinimumSuspension {
+    call: CoreId,
+    effects: crate::EffectRow,
+    ty: Type,
+    transferred: BTreeSet<Vec<u32>>,
+    opened: BTreeMap<Vec<u32>, Option<u32>>,
+    /// Innermost matching handler wins after effect argument substitution.
+    handlers: Vec<(Vec<(crate::EffectInstance, u32, Quantity)>, bool)>,
+    owner: String,
+    span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DischargedMinimum {
+    input: Option<crate::Digest>,
+    definition: crate::DefKey,
+    instance: crate::Digest,
+    requirements: Vec<MinimumSuspension>,
+}
+
+impl DischargedMinimum {
+    pub(crate) fn matches(&self, flow: &PlaceFlow, definition: crate::DefKey, instance: &crate::InstanceKey) -> bool {
+        self.input == flow.resource_input && self.definition == definition
+            && self.instance == instance.fingerprint() && self.requirements == flow.minimum_suspensions
+    }
+}
+
+impl PlaceFlow {
+    /// Instantiate the retained disposition, not the original Core body.
+    /// A closed instance must exclude cancellation/replay or prove each
+    /// residual resident permits disposal/copying by the same ownership rule.
+    pub(crate) fn discharge_minimum(
+        &self, definition: crate::DefKey, instance: &crate::InstanceKey,
+        arguments: &[crate::GenericArgument], signatures: &ElaboratedInterface,
+    ) -> Result<DischargedMinimum, FlowDiagnostic> {
+        let mut solver = crate::TraitSolver::new(signatures);
+        for requirement in &self.minimum_suspensions {
+            let failure = |detail: String| FlowDiagnostic {
+                code: "G5024", span: requirement.span,
+                message: format!("owner `{}` retains a conditional minimum-use obligation at call {}: {detail}",
+                    requirement.owner, requirement.call.0),
+            };
+            let row = crate::service::normalize_materialized_effect_row(
+                &crate::service::specialize_effect_row(&requirement.effects, arguments), &mut solver, 0)
+                .map_err(|error| failure(format!("effect row could not be closed: {error}")))?;
+            if !row.tails.is_empty() || !row.projections.is_empty() {
+                return Err(failure("effect row remains unknown".into()));
+            }
+            let mut handlers = Vec::new();
+            for (operations, retained) in &requirement.handlers {
+                let mut closed = Vec::new();
+                for (effect, operation, usage) in operations {
+                    let effect = crate::service::normalize_materialized_effect_row(
+                        &crate::service::specialize_effect_row(&crate::EffectRow::closed_instances([effect.clone()]), arguments),
+                        &mut solver, 0).map_err(|error| failure(format!("handler effect could not be closed: {error}")))?;
+                    if !effect.tails.is_empty() || !effect.projections.is_empty() || effect.effects.len() != 1 {
+                        return Err(failure("handler effect is not one closed operation family".into()));
+                    }
+                    closed.push((effect.effects.first().unwrap().clone(), *operation, *usage));
+                }
+                handlers.push((closed, *retained));
+            }
+            let mut can_abandon = false;
+            let mut can_repeat = false;
+            for effect in &row.effects {
+                let Some(crate::ElaboratedHeader::Effect(header)) = signatures.definitions.get(&effect.definition) else {
+                    return Err(failure("effect declaration is missing".into()));
+                };
+                for (operation, declaration) in header.operations.iter().enumerate() {
+                    let (usage, retained) = handlers.iter().rev().find_map(|(operations, retained)| {
+                        operations.iter().find(|(handled, selected, _)| handled == effect && *selected == operation as u32)
+                            .map(|(_, _, usage)| (*usage, *retained))
+                    }).unwrap_or((if declaration.terminal { Quantity::ZERO } else { declaration.resumption }, false));
+                    can_abandon |= !usage.requires_positive_use() && !retained;
+                    can_repeat |= usage.upper.is_none_or(|upper| upper > 1);
+                }
+            }
+            if !can_abandon && !can_repeat { continue; }
+            let ty = crate::service::normalize_materialized_type(
+                &crate::service::specialize_type(&requirement.ty, arguments), &mut solver)
+                .map_err(|error| failure(format!("owner type could not be closed: {error}")))?;
+            let state = MinimumDisposition {
+                transferred: requirement.transferred.iter().map(|fields| Projection { root: String::new(), fields: fields.clone() }).collect(),
+                opened: requirement.opened.iter().map(|(fields, variant)| (Projection { root: String::new(), fields: fields.clone() }, *variant)).collect(),
+            };
+            let context = MinimumContext { signatures: Some(signatures), solver: Some(&solver), lexical_bounds: &[], delegate_callables: false };
+            let root = Projection { root: String::new(), fields: vec![] };
+            if can_abandon && context.minimum_pending(&ty, &root, &state, 0, Quantity::ZERO) {
+                return Err(failure("this effect instantiation may cancel a retained owner that does not permit zero use".into()));
+            }
+            if can_repeat && context.minimum_pending(&ty, &root, &state, 0, Quantity::UNRESTRICTED) {
+                return Err(failure("this effect instantiation may replay a retained owner that does not permit copying".into()));
+            }
+        }
+        Ok(DischargedMinimum { input: self.resource_input, definition, instance: instance.fingerprint(),
+            requirements: self.minimum_suspensions.clone() })
+    }
 }
 
 impl Analyzer<'_> {
@@ -83,15 +186,13 @@ impl Analyzer<'_> {
         let operations = clauses
             .iter()
             .map(|clause| {
-                let can_cancel = match clause.resumption {
+                let usage = match clause.resumption {
                     crate::core::CoreHandlerResumption::Discard { .. }
-                    | crate::core::CoreHandlerResumption::Terminal => true,
-                    crate::core::CoreHandlerResumption::Explicit { quantity, .. } => {
-                        !quantity.requires_positive_use()
-                    }
-                    crate::core::CoreHandlerResumption::Tail { .. } => false,
+                    | crate::core::CoreHandlerResumption::Terminal => Quantity::ZERO,
+                    crate::core::CoreHandlerResumption::Explicit { quantity, .. } => quantity,
+                    crate::core::CoreHandlerResumption::Tail { .. } => Quantity::ONCE,
                 };
-                (clause.effect.clone(), clause.operation, can_cancel)
+                (clause.effect.clone(), clause.operation, usage)
             })
             .collect();
         self.minimum_handlers.push(MinimumHandler {
@@ -163,8 +264,8 @@ impl Analyzer<'_> {
                 handler
                     .operations
                     .iter()
-                    .any(|(handled, selected, cancel)| {
-                        handled == effect && *selected == operation && *cancel
+                    .any(|(handled, selected, usage)| {
+                        handled == effect && *selected == operation && !usage.requires_positive_use()
                     })
             },
         );
@@ -205,12 +306,7 @@ impl Analyzer<'_> {
     }
 
     pub(super) fn minimum_owned_by_callable_lane(&self, ty: &Type) -> bool {
-        matches!(ty, Type::Callable { .. })
-            || self.lexical_bounds.iter().any(|(subject, relation)| {
-                subject == ty
-                    && (crate::signature::is_intrinsic_callable_trait(relation)
-                        || crate::signature::is_intrinsic_label_trait(relation))
-            })
+        callable_lane(ty, self.lexical_bounds)
     }
 
     pub(super) fn check_minimum_call_suspensions(&mut self, call: CoreId, callee: CoreId, arguments: &[CoreId], span: Span) {
@@ -254,9 +350,26 @@ impl Analyzer<'_> {
             }
         };
         if !effects.tails.is_empty() || !effects.projections.is_empty() {
-            // An unknown outward operation can cancel this activation; no
-            // declaration proves that its continuation is positively used.
-            self.check_minimum_scope(&self.minimum_bindings.keys().cloned().collect(), span);
+            // An open row is a conditional contract, not permission to lose
+            // an owner. Preserve each guarded residual state for the closed
+            // instance to discharge before any executable is admitted.
+            for (owner, binding) in &self.minimum_bindings {
+                for state in &self.minimum_states {
+                    let place = Projection { root: owner.clone(), fields: vec![] };
+                    if !self.minimum_pending(&binding.ty, &place, state, 0)
+                        && !self.minimum_replay_pending(&binding.ty, &place, state) { continue; }
+                    let requirement = MinimumSuspension {
+                        call, effects: effects.clone(), ty: binding.ty.clone(), span: binding.span, owner: owner.clone(),
+                        transferred: state.transferred.iter().filter(|place| place.root == *owner)
+                            .map(|place| place.fields.clone()).collect(),
+                        opened: state.opened.iter().filter(|(place, _)| place.root == *owner)
+                            .map(|(place, variant)| (place.fields.clone(), *variant)).collect(),
+                        handlers: self.minimum_handlers.iter().map(|handler|
+                            (handler.operations.clone(), handler.retained.contains(owner))).collect(),
+                    };
+                    if !self.minimum_suspensions.contains(&requirement) { self.minimum_suspensions.push(requirement); }
+                }
+            }
         }
         for effect in &effects.effects {
             let operations = self
@@ -298,14 +411,49 @@ impl Analyzer<'_> {
         }
     }
 
-    fn minimum_quantity(&self, ty: &Type) -> Option<Quantity> {
-        let signatures = self.signatures?;
-        let solver = self.ownership_solver.get_or_init(|| {
+    fn minimum_context(&self) -> MinimumContext<'_> {
+        let solver = self.signatures.map(|signatures| self.ownership_solver.get_or_init(|| {
             self.frozen_solver.map_or_else(
                 || crate::TraitSolver::new(signatures),
                 crate::TraitSolver::fresh_query,
             )
-        });
+        }));
+        MinimumContext { signatures: self.signatures, solver, lexical_bounds: self.lexical_bounds, delegate_callables: true }
+    }
+
+    fn minimum_pending(&self, ty: &Type, place: &Projection, state: &MinimumDisposition, depth: usize) -> bool {
+        self.minimum_context().minimum_pending(ty, place, state, depth, Quantity::ZERO)
+    }
+
+    fn minimum_replay_pending(&self, ty: &Type, place: &Projection, state: &MinimumDisposition) -> bool {
+        // Borrowed storage and known callable invocation are owned by their
+        // existing loan/environment lanes. Ordinary affine owners still need
+        // copying permission when an open effect row is instantiated to replay.
+        !matches!(ty, Type::Reference { .. })
+            && self.minimum_context().minimum_pending(ty, place, state, 0, Quantity::UNRESTRICTED)
+    }
+}
+
+fn callable_lane(ty: &Type, bounds: &[(Type, crate::ElaboratedTraitReference)]) -> bool {
+    matches!(ty, Type::Callable { .. }) || bounds.iter().any(|(subject, relation)| {
+        subject == ty && (crate::signature::is_intrinsic_callable_trait(relation)
+            || crate::signature::is_intrinsic_label_trait(relation))
+    })
+}
+
+/// Shared disposition rule at source checking and concrete instantiation.
+/// Neither consumer reconstructs ownership transitions from another body walk.
+struct MinimumContext<'a> {
+    signatures: Option<&'a ElaboratedInterface>,
+    solver: Option<&'a crate::TraitSolver>,
+    lexical_bounds: &'a [(Type, crate::ElaboratedTraitReference)],
+    delegate_callables: bool,
+}
+
+impl MinimumContext<'_> {
+    fn minimum_quantity(&self, ty: &Type) -> Option<Quantity> {
+        let signatures = self.signatures?;
+        let solver = self.solver?;
         signatures
             .principal_use_interval_with_solver(ty, solver)
             .or_else(|| {
@@ -323,6 +471,7 @@ impl Analyzer<'_> {
         place: &Projection,
         state: &MinimumDisposition,
         depth: usize,
+        permission: Quantity,
     ) -> bool {
         if state
             .transferred
@@ -333,26 +482,21 @@ impl Analyzer<'_> {
         }
         if matches!(ty, Type::Projection { .. })
             && depth < 96
-            && let Some(signatures) = self.signatures
+            && self.signatures.is_some()
         {
-            let solver = self.ownership_solver.get_or_init(|| {
-                self.frozen_solver.map_or_else(
-                    || crate::TraitSolver::new(signatures),
-                    crate::TraitSolver::fresh_query,
-                )
-            });
+            let Some(solver) = self.solver else { return true; };
             if let Ok(normalized) = solver.fresh_query().normalize_type(ty.clone())
                 && normalized != *ty
             {
-                return self.minimum_pending(&normalized, place, state, depth + 1);
+                return self.minimum_pending(&normalized, place, state, depth + 1, permission);
             }
         }
         // Invoking a callable (including a field) has its own After/environment
         // calculus in UseFlow; it is not an ordinary nominal shell obligation.
-        if self.minimum_owned_by_callable_lane(ty)
+        if (self.delegate_callables && callable_lane(ty, self.lexical_bounds))
             || self
                 .minimum_quantity(ty)
-                .is_some_and(|q| q.contains(Quantity::ZERO))
+                .is_some_and(|q| q.contains(permission))
         {
             return false;
         }
@@ -362,7 +506,7 @@ impl Analyzer<'_> {
         let field_pending = |index: u32, ty: &Type| {
             let mut field = place.clone();
             field.fields.push(index);
-            self.minimum_pending(ty, &field, state, depth + 1)
+            self.minimum_pending(ty, &field, state, depth + 1, permission)
         };
         match ty {
             Type::Tuple(fields) => fields
@@ -382,6 +526,7 @@ impl Analyzer<'_> {
                         },
                         &MinimumDisposition::default(),
                         depth + 1,
+                        permission,
                     )
                 {
                     return false;
@@ -404,7 +549,7 @@ impl Analyzer<'_> {
                         .any(|index| field_pending(index, element))
             }
             Type::Array(element) => {
-                self.minimum_pending(element, place, &MinimumDisposition::default(), depth + 1)
+                self.minimum_pending(element, place, &MinimumDisposition::default(), depth + 1, permission)
             }
             Type::Nominal {
                 definition,
@@ -413,12 +558,7 @@ impl Analyzer<'_> {
                 let Some(signatures) = self.signatures else {
                     return false;
                 };
-                let solver = self.ownership_solver.get_or_init(|| {
-                    self.frozen_solver.map_or_else(
-                        || crate::TraitSolver::new(signatures),
-                        crate::TraitSolver::fresh_query,
-                    )
-                });
+                let Some(solver) = self.solver else { return true; };
                 let opening = state.opened.get(place);
                 if solver.has_manual_use_for(*definition) && opening.is_none() {
                     return true;
@@ -461,6 +601,9 @@ impl Analyzer<'_> {
         }
     }
 
+}
+
+impl Analyzer<'_> {
     pub(super) fn record_minimum_binding(&mut self, owner: &str, ty: &Type, span: Span) {
         if self.signatures.is_none() {
             return;
@@ -469,7 +612,8 @@ impl Analyzer<'_> {
             root: owner.to_owned(),
             fields: vec![],
         };
-        if self.minimum_pending(ty, &place, &MinimumDisposition::default(), 0) {
+        if self.minimum_pending(ty, &place, &MinimumDisposition::default(), 0)
+            || self.minimum_replay_pending(ty, &place, &MinimumDisposition::default()) {
             self.minimum_bindings.insert(
                 owner.to_owned(),
                 MinimumBinding {

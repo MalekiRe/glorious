@@ -2122,6 +2122,9 @@ impl StageZeroCompiler {
                 let diagnostic = match error {
                     crate::specialized_mir::SpecializedDiscoveryError::Invalid(error) => CompileDiagnostic::invariant("G7032", error.0),
                     crate::specialized_mir::SpecializedDiscoveryError::Limit(error) => CompileDiagnostic::resource("G7031", format!("instance discovery limit: {error:?}")),
+                    crate::specialized_mir::SpecializedDiscoveryError::MinimumUse { definition, diagnostic } =>
+                        CompileDiagnostic::source(diagnostic.code, diagnostic.message, Some(diagnostic.span))
+                            .with_fact("specialized_body", format!("{definition:?}")),
                     crate::specialized_mir::SpecializedDiscoveryError::NonAddressableLabel { definition, ty } => CompileDiagnostic::source(
                         "G4179", "generative labels are proof-only and cannot be addressed", None)
                         .with_fact("specialized_body", format!("{definition:?}"))

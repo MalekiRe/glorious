@@ -19,6 +19,7 @@ pub enum SpecializedDiscoveryError {
     Invalid(SpecializedError),
     Limit(crate::InstanceGraphError),
     NonAddressableLabel { definition: DefKey, ty: Type },
+    MinimumUse { definition: DefKey, diagnostic: crate::placeflow::FlowDiagnostic },
 }
 impl From<SpecializedError> for SpecializedDiscoveryError {
     fn from(error: SpecializedError) -> Self {
@@ -71,7 +72,7 @@ impl SpecializedProgram {
                     instance.callable
                 ))
             })?;
-            lower::check_addressability(&template.ownership, &instance, signatures)?;
+            lower::check_source_obligations(&template.ownership, &instance, signatures)?;
             let body = SpecializedMir::lower(
                 &template.ownership,
                 &template.result,

@@ -44,6 +44,17 @@ fn accepts(body: &str) {
     }
 }
 
+fn accepts_native(body: &str) {
+    let source = format!("{TOKEN}{body}");
+    for optimization in [0, 2] {
+        use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+        let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap()).unwrap();
+        // SAFETY: execute only this locally checked, closed source fixture.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
 fn rejects(body: &str) {
     let source = format!("{TOKEN}{body}");
     for optimization in ["0", "2"] {
@@ -57,6 +68,20 @@ fn rejects(body: &str) {
                 .any(|diagnostic| matches!(diagnostic.code, "G5024" | "G5001" | "G5003" | "G4223")),
             "{source}\n{failure:#?}"
         );
+    }
+}
+
+fn rejects_conditional(body: &str) {
+    let source = format!("{TOKEN}{body}");
+    for optimization in ["0", "2"] {
+        for mode in [CompilationMode::Build, CompilationMode::Check] {
+            let mut request = request(&source, optimization);
+            request.mode = mode;
+            let failure = StageZeroCompiler::new().compile(request).expect_err(&source);
+            assert!(failure.diagnostics().iter().any(|diagnostic|
+                diagnostic.code == "G5024" && diagnostic.message.contains("conditional minimum-use obligation")),
+                "{source}\n{failure:#?}");
+        }
     }
 }
 
@@ -820,6 +845,91 @@ fn cleanup_bearing_nonlocal_exits_do_not_fabricate_positive_uses() {
 }
 
 #[test]
+fn quantified_observer_calls_retain_their_conditional_owner_contract() {
+    accepts("fn observe<T,F,e: EffectRow>(value: T, observer: &mut F) -> T / {| e}
+        where for<'call> &'call mut F: Fn<(&'call T,),Output=(),Effects=e> {
+            observer(&value); value
+        }
+        pub fn main() -> i64 {
+            let mut observer = (value: &Token) -> () { () };
+            consume(observe(Token {}, &mut observer))
+        }");
+}
+
+#[test]
+fn generic_effect_rows_retain_conditional_owner_obligations() {
+    let pure = "fn quiet() {} fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} {
+        body(); value
+    } pub fn main() -> i64 { consume(retain<Token,{}>(Token {}, quiet)) }";
+    accepts(pure);
+    accepts_native(pure);
+    rejects_conditional("effect Ask { [0,1] ask() -> (); } fn ask() / Ask { Ask::ask() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} { body(); value }
+        pub fn main() -> i64 {
+            let retain_value: (Token, () -> () / Ask) -> Token / Ask = retain;
+            handle { consume(retain_value(Token {}, ask)) } { Ask::ask() with _ => 42 }
+        }");
+    accepts("effect Ask { [1,1] ask() -> (); } fn ask() / Ask { Ask::ask() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} { body(); value }
+        pub fn main() -> i64 { handle { consume(retain<Token,{Ask}>(Token {}, ask)) } {
+            Ask::ask() => ()
+        }}");
+    accepts("effect Ask { [0,1] ask() -> (); } fn ask() / Ask { Ask::ask() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} { body(); value }
+        pub fn main() -> i64 { handle { retain<i64,{Ask}>(42, ask) } {
+            Ask::ask() with _ => 42
+        }}");
+    rejects_conditional("effect Ask { [0,1] ask() -> (); } fn ask() / Ask { Ask::ask() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} {
+            body(); value
+        }
+        pub fn main() -> i64 { handle { consume(retain<Token,{Ask}>(Token {}, ask)) } {
+            Ask::ask() with _ => 42
+        }}");
+    rejects_conditional("effect Stop { stop() -> !; } fn stop() / Stop { Stop::stop() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} { body(); value }
+        pub fn main() -> i64 { handle { consume(retain<Token,{Stop}>(Token {}, stop)) } {
+            Stop::stop() => 42
+        }}");
+    rejects_conditional("effect Repeat { [2,2] again() -> (); } fn again() / Repeat { Repeat::again() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e} { body(); value }
+        pub fn main() -> i64 { handle { consume(retain<Token,{Repeat}>(Token {}, again)) } {
+            Repeat::again() with k => { k(()); k(()) }
+        }}");
+    rejects_conditional("struct Affine {} impl Use<[0,1]> for Affine {}
+        effect Repeat { [2,2] again() -> (); } fn again() / Repeat { Repeat::again() }
+        fn retain<T,e: EffectRow>(value: T, body: () -> () / {| e}) -> T / {| e}
+            where T: Use<[0,1]> { body(); value }
+        pub fn main() -> i64 { handle { retain<Affine,{Repeat}>(Affine {}, again); 42 } {
+            Repeat::again() with k => { k(()); k(()) }
+        }}");
+}
+
+#[test]
+fn conditional_residual_contracts_preserve_partial_owner_dispositions() {
+    accepts("effect Ask { [0,1] ask() -> (); } struct Pair<T> { first: T, second: i64 }
+        fn take_first<T,F,e: EffectRow>(pair: Pair<T>, body: &mut F) -> i64 / {| e}
+            where for<'call> &'call mut F: Fn<(T,),Output=(),Effects=e> {
+            body(pair.first); pair.second
+        }
+        pub fn main() -> i64 {
+            let mut body = (value: Token) -> () / Ask { consume(value); Ask::ask() };
+            let pair = Pair { first: Token {}, second: 42 };
+            handle { take_first(pair, &mut body) } { Ask::ask() with _ => 42 }
+        }");
+    rejects_conditional("effect Ask { [0,1] ask() -> (); } struct Pair<T> { first: T, second: T }
+        fn take_first<T,F,e: EffectRow>(pair: Pair<T>, body: &mut F) -> T / {| e}
+            where for<'call> &'call mut F: Fn<(T,),Output=(),Effects=e> {
+            body(pair.first); pair.second
+        }
+        pub fn main() -> i64 {
+            let mut body = (value: Token) -> () / Ask { consume(value); Ask::ask() };
+            let pair = Pair { first: Token {}, second: Token {} };
+            handle { consume(take_first(pair, &mut body)) } { Ask::ask() with _ => 42 }
+        }");
+}
+
+#[test]
 fn unused_effect_permissions_do_not_invent_owner_cancellation() {
     for callee in ["quiet()", "relay()", "{ let quiet = quiet; quiet() }"] {
         accepts(&format!("effect Ask {{ [0,1] ask() -> i64; }}
@@ -835,14 +945,7 @@ fn unused_effect_permissions_do_not_invent_owner_cancellation() {
         }
         pub fn main() -> i64 { retain<{}>(Token {}) }";
     accepts(generic);
-    let source = format!("{TOKEN}{generic}");
-    for optimization in [0, 2] {
-        use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
-        let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap()).unwrap();
-        // SAFETY: execute only this locally checked, closed source fixture.
-        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
-        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
-    }
+    accepts_native(generic);
 }
 
 #[test]

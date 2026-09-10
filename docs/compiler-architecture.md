@@ -1457,3 +1457,35 @@ transitive, aliased and generic unused-effect regressions without adding a new
 Core walker or granting zero use to retained linear owners. General guarded
 generic cancellation/resource contracts remain incomplete: the full library
 still reports its 11 G5024 obligations, and self-hosted acceptance remains open.
+
+## Conditional residual ownership at closed specialization
+
+PlaceFlow's existing owner disposition rule publishes an open call-row
+obligation using owner-relative transferred paths and selected constructor
+openings. Each residual state is retained; a move on another alternative cannot
+discharge it. Enclosing handler operations preserve ordering and continuation
+quantities so substitution cannot choose an outer handler over a matching inner
+one. Ordinary affine residents also retain copying obligations for replay.
+Known callable invocation and borrowed-storage analysis keep their own lanes.
+
+The generic ownership product transports these requirements without asserting
+that an unknown operation is harmless or that an owner is discardable. Concrete
+specialization closes the rows and resident types with the normal substitution
+and trait solver, then uses the same disposition/layout rule as source checking.
+Optional or terminal abandonment requires zero use; repeated resumption requires
+copying. Missing declarations and unresolved rows reject. A closed empty row or
+exact-once continuation can preserve a pending positive-use resident.
+
+Every demanded function-value or direct-call instance crosses this boundary;
+lifted bodies use the enclosing instance's actual substitutions. The specialized
+constructor discharges the requirements and retains a private proof bound to
+the source product, definition and exact instance. Independent structural
+validation rejects mismatched proof reuse. Check and Build consume the same
+specialization gate. No consumer reconstructs owner transitions from another
+Core walk, and neither source annotations nor a cache generation certify use.
+
+Cache 134 records this request-local conditional contract. It is not the full
+serialized guarded-interface format or complete callback/loan replay analysis.
+The library root now retains two quantified observer-row failures; their exact
+call-lifetime relation must survive selection before effect accounting can
+consume it. Full library and self-hosted acceptance remain unproved.

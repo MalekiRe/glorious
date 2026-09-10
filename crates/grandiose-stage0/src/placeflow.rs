@@ -16,6 +16,7 @@ mod minimum;
 mod drop;
 mod invocations;
 use minimum::{MinimumBinding, MinimumDisposition, MinimumHandler};
+pub(crate) use minimum::DischargedMinimum;
 
 /// A statically-selected subplace of one local.  PlaceFlow deliberately keeps
 /// dereferences out of this representation: their aliasing is not yet proven
@@ -640,6 +641,7 @@ pub struct PlaceFlow {
     /// lifted products without re-hashing the whole arena for every closure.
     resource_input: Option<crate::Digest>,
     checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
+    minimum_suspensions: Vec<minimum::MinimumSuspension>,
     /// Frozen per-callable loan/resource products from this exact Core arena.
     /// Escape and lowering share these; a closure body never borrows the
     /// enclosing callable's NLL journal as evidence for its own operations.
@@ -860,6 +862,7 @@ impl PlaceFlow {
             minimum_bindings: BTreeMap::new(),
             minimum_states: vec![MinimumDisposition::default()],
             minimum_handlers: vec![],
+            minimum_suspensions: vec![],
             normal_continuation: true,
             label_continuations: vec![],
             move_paths: MovePathArena::default(),
@@ -947,6 +950,7 @@ impl PlaceFlow {
         let mut flow = Self {
             resource_input: Some(resource_input.unwrap_or_else(|| body.semantic_fingerprint())),
             checked_borrows: a.checked_borrows,
+            minimum_suspensions: a.minimum_suspensions,
             closure_flows: BTreeMap::new(),
             continuations: Some(continuations.clone()),
             abort_primitive,
@@ -1052,6 +1056,7 @@ struct Analyzer<'a> {
     minimum_bindings: BTreeMap<String, MinimumBinding>,
     minimum_states: Vec<MinimumDisposition>,
     minimum_handlers: Vec<MinimumHandler>,
+    minimum_suspensions: Vec<minimum::MinimumSuspension>,
     move_paths: MovePathArena,
     bindings: PlaceBindingArena,
     /// Source spellings remain useful in frozen Core diagnostics, while

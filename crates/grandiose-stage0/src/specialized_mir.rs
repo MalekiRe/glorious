@@ -188,6 +188,7 @@ pub struct SpecializedMir {
     pub(crate) closures: Vec<SpecializedClosure>,
     pub(crate) source_bindings: BTreeMap<crate::placeflow::PlaceBindingOrigin, ControlValue>,
     pub(crate) source_flow: PlaceFlow,
+    pub(crate) minimum_discharge: crate::placeflow::DischargedMinimum,
     pub(crate) owners: Vec<Owner>,
     pub(crate) loans: Vec<Loan>,
     pub(crate) blocks: Vec<SpecializedBlock>,
