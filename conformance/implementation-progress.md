@@ -5,6 +5,94 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 137: constrained pattern subjects and dependent numeric defaulting
+
+The original float-conversion failure reduces to a nested enum pattern on an
+associated error type whose numeric receiver is still inferred. An explicit
+`f64` receiver succeeds, while its unsuffixed counterpart reports G4211 in
+`target/pattern-subject-baseline-v3.log`. The library iterator's G4202 likewise
+occurs inside `Result::Ok((10, 1))`, not its later `into_parts` destructuring.
+
+Structural pattern elaboration now uses the body's lexical projection query
+and retains a constrained subject in its decision when syntax supplies an open
+tuple, fixed-array or nominal shape. It emits the ordinary equality obligation
+between that shape and the original subject. Core consumes the decision, and
+completion coverage uses that same required shape. The equality still has to
+close before source checking can publish the body. `is`, completion/let and
+operation payload patterns share one entry point; implementation heads are not
+inferred from associated result names. Explicit pattern type projections also
+use the lexical query instead of constructing an unscoped solver.
+
+A second regression, `target/pattern-subject-numeric-baseline-v1.log`, shows
+why merely adding those equalities is insufficient: `(42, 1)` defaulted to an
+`i64` pair before the receiver default could expose its actual `(u8, u16)`
+associated result. Numeric defaulting now derives application/result dependencies
+from existing pending type equalities. It defaults independent inputs, propagates
+projection normalization and equality, then considers remaining result roots.
+The variable collector retains mixed-kind uncertainty; input regions, consts
+and rows do not become solved merely because their type roots default. Another
+projection's own inputs are not mistaken for result holes. Actual cyclic result
+dependencies remain unresolved. Body-region closure supplies a further normal
+propagation boundary, and unproved numeric results cannot be generalized into
+an accepted initializer.
+
+The destructor-transfer positive also exposed an ordinary call's final argument
+check using raw unification while a projection was still open. After its existing
+selected-declaration lifetime alignment, that equality now uses the shared
+deferred rule. It does not reopen or weaken the selected lifetime contract.
+
+Initial literal admission, pattern sealing and independent Core validation now
+share type/width checking. Check mode rejects out-of-range literals after the
+associated width becomes known; malformed patterns cannot wait for an executable
+verifier to reject them. Core independently checks completion, `is` and operation
+patterns against their actual structural subjects. The existing PlaceFlow
+custom-Drop checker remains the authoritative late ownership check, including
+borrowed-storage distinctions; no extra sealing-time destructor checker is kept.
+
+Verification:
+
+- `target/pattern-subject-final-boundaries-v1.log`: **93 passed** across effect
+  contracts (8), effect unions (16), structural patterns (9), pattern names
+  (11), projection normalization (15), and type integration (34). The projection
+  cases execute fresh/decoded VM O0/O2; the new closed nominal/tuple case also
+  executes generated native O0/O2. Negative cases retain required implementation
+  heads, later f32 context, lexical associated evidence, exhaustiveness and
+  unreachable-arm checks, and reject incompatible literal widths in Check/Build.
+- `target/pattern-subject-numeric-unit-v1.log`: **7 passed**, including dependency
+  direction/allocation-order independence, distinct projection inputs versus
+  true cyclic result dependencies, and open mixed-kind applications.
+- `target/pattern-subject-frozen-v2.log`: the new frozen Core group passes
+  literal-width and tuple-shape forgery rejection for completion, `is` and
+  operation payloads. The 26 existing unrelated fixture-variable warnings remain.
+- `target/pattern-subject-owned-disposition-v1.log`: the custom-Drop transfer
+  positive and deconstruction negative pass after removing the redundant new
+  sealing-time ownership check; the ordinary late resource producer rejects it.
+- `target/pattern-subject-final-library-root-v1.log`: **full_composition passes**
+  (42.48s), compiling all library fragments and executing the decoded root case.
+- `target/pattern-subject-final-library-float-v1.log`: **float_convert passes**
+  (84.66s), preserving all original source assertions and decoded execution.
+- `target/pattern-subject-final-library-iterator-v1.log`: the tuple-pattern error
+  is gone, but the original execution gate still fails (7.21s): G4403 mandatory
+  tail provenance at application byte 1488, G5006 conflicting borrow of
+  `backwards` at 4231, and G5023 missing frozen caller-region provenance at
+  2227 and 3353. No ownership or reference obligation is waived.
+
+The reduced diagnosis also found a separate generic ownership failure. Its
+complete positive source is retained as the active
+`minimum_use::projected_generic_pattern_fields_transfer_the_complete_owner`
+regression. Both fields of `Payload<Wrapper<T>>`'s associated tuple are moved
+into the returned tuple, but G5024 still charges the original `value` owner
+(`target/pattern-subject-generic-owner-v1.log`). This is not an ignored test or
+a passing acceptance gate; its pattern type is known, and the remaining
+owner-disposition boundary requires repair.
+
+Cache generation is **137**; interface, bytecode, verifier and runtime ABIs are
+unchanged. The previous full 32-case library sweep is not rerun or relabeled as
+passing. General pattern inference (including not-yet-known array remainder
+layouts), guarded interfaces/storage, higher-ranked input generalization,
+native handlers, the remaining library failures and full self-hosted acceptance
+remain open.
+
 ## Cache 136: scoped contextual effect inference and callable projection composition
 
 Contextual blocks now infer their row from the ordinary call/operation checker's

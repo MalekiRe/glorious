@@ -62,6 +62,13 @@ pub struct PatternBinding {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PatternDecision {
+    /// A structural pattern can constrain a body-local subject whose shape
+    /// is not yet known. Keep the required type at this decision boundary;
+    /// its equality obligation must be discharged before Typed Core freezes.
+    Constrained {
+        subject: Type,
+        decision: Box<PatternDecision>,
+    },
     Any,
     Bind(BinderKey),
     Literal(String),
@@ -104,6 +111,14 @@ pub struct PatternElaboration {
     pub plan: PatternPlan,
     pub diagnostics: Vec<PatternDiagnostic>,
     pub recovered: bool,
+    pub(crate) constraints: Vec<PatternTypeConstraint>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PatternTypeConstraint {
+    pub expected: Type,
+    pub actual: Type,
+    pub span: Span,
 }
 
 /// Elaborate one parser-owned pattern against a once-evaluated subject type.
@@ -139,7 +154,7 @@ pub fn elaborate_pattern_with_scope(
     module: &ModuleKey,
     scope: &PatternGenericScope,
 ) -> PatternElaboration {
-    elaborate_pattern_in_context(body, pattern, subject, index, signatures, module, scope, None)
+    elaborate_pattern_in_context(body, pattern, subject, index, signatures, module, scope, None, None)
 }
 
 pub(crate) fn elaborate_pattern_in_context(
@@ -151,6 +166,7 @@ pub(crate) fn elaborate_pattern_in_context(
     module: &ModuleKey,
     scope: &PatternGenericScope,
     inference: Option<&mut crate::InferContext>,
+    solver: Option<TraitSolver>,
 ) -> PatternElaboration {
     let mut elaborator = Elaborator {
         body,
@@ -159,6 +175,8 @@ pub(crate) fn elaborate_pattern_in_context(
         module,
         scope,
         inference,
+        solver: solver.unwrap_or_else(|| TraitSolver::new(signatures)),
+        constraints: vec![],
         bindings: vec![],
         binding_names: std::collections::BTreeSet::new(),
         discarded: vec![],
@@ -167,12 +185,19 @@ pub(crate) fn elaborate_pattern_in_context(
         recovered: false,
     };
     let decision = elaborator.pattern(pattern, subject.clone());
+    let subject = match &decision {
+        PatternDecision::Constrained { subject, .. } => subject.clone(),
+        _ => elaborator.inference.as_ref().map_or(subject.clone(), |inference| inference.resolve_type_structure(subject)),
+    };
     elaborator.diagnostics.sort_by(|left, right| {
         (left.span, left.code, &left.message).cmp(&(right.span, right.code, &right.message))
     });
     PatternElaboration {
         plan: PatternPlan {
-            refutable: match (&subject, &decision) {
+            refutable: match (&subject, match &decision {
+                PatternDecision::Constrained { decision, .. } => decision.as_ref(),
+                decision => decision,
+            }) {
                 (Type::FixedArray { .. }, PatternDecision::Array { elements: values, .. }) => values.iter().any(decision_refutable),
                 _ => decision_refutable(&decision),
             },
@@ -183,6 +208,7 @@ pub(crate) fn elaborate_pattern_in_context(
         },
         diagnostics: elaborator.diagnostics,
         recovered: elaborator.recovered,
+        constraints: elaborator.constraints,
     }
 }
 
@@ -192,6 +218,7 @@ pub(crate) fn elaborate_pattern_in_context(
 /// is used by effect-handler coverage as well as ordinary pattern consumers.
 fn decision_refutable(decision: &PatternDecision) -> bool {
     match decision {
+        PatternDecision::Constrained { decision, .. } => decision_refutable(decision),
         PatternDecision::Any | PatternDecision::Bind(_) => false,
         PatternDecision::Literal(_) | PatternDecision::Enum { .. } | PatternDecision::Error => true,
         PatternDecision::Tuple(values) => values.iter().any(decision_refutable),
@@ -252,6 +279,8 @@ struct Elaborator<'a> {
     module: &'a ModuleKey,
     scope: &'a PatternGenericScope,
     inference: Option<&'a mut crate::InferContext>,
+    solver: TraitSolver,
+    constraints: Vec<PatternTypeConstraint>,
     bindings: Vec<PatternBinding>,
     binding_names: std::collections::BTreeSet<String>,
     discarded: Vec<Type>,
@@ -263,6 +292,88 @@ struct Elaborator<'a> {
 impl Elaborator<'_> {
     fn pattern(&mut self, id: PatternId, subject: Type) -> PatternDecision {
         let subject = self.inference.as_ref().map_or(subject.clone(), |inference| inference.resolve_type_structure(subject));
+        let Some(subject) = self.normalize_pattern_type(self.body.pattern(id).span, subject) else {
+            return PatternDecision::Error;
+        };
+        if self.inference.is_some() && matches!(subject, Type::Infer(_) | Type::Projection { .. })
+            && let Some(required) = self.pattern_subject_constraint(id)
+        {
+            let inference = self.inference.as_mut().expect("body inference checked above");
+            if inference.unify(required.clone(), subject.clone()).is_err() {
+                if matches!(subject, Type::Projection { .. }) {
+                    self.constraints.push(PatternTypeConstraint {
+                        expected: required.clone(), actual: subject,
+                        span: self.body.pattern(id).span,
+                    });
+                } else {
+                    self.error(self.body.pattern(id).span, "G4201", "pattern shape contradicts the subject's type constraints");
+                    return PatternDecision::Error;
+                }
+            }
+            return PatternDecision::Constrained {
+                subject: required.clone(),
+                decision: Box::new(self.pattern_at_type(id, required)),
+            };
+        }
+        self.pattern_at_type(id, subject)
+    }
+
+    /// Syntax supplies a required shape, not an implementation-selection
+    /// witness. Unknown projection heads stay in ordinary body equalities;
+    /// independently known tuple fields/nominal names may constrain their
+    /// result without choosing or defaulting the head's arguments.
+    fn pattern_subject_constraint(&mut self, id: PatternId) -> Option<Type> {
+        let pattern = self.body.pattern(id).clone();
+        match pattern.kind {
+            PatternKind::Tuple(values) if values.is_empty() => Some(Type::Unit),
+            PatternKind::Tuple(values) => Some(Type::Tuple(values.iter()
+                .map(|_| self.inference.as_mut().unwrap().fresh()).collect())),
+            PatternKind::Literal(literal) if literal_is_numeric(&literal) => {
+                let inference = self.inference.as_mut().unwrap();
+                let ty = inference.fresh();
+                inference.constrain_numeric(ty.clone(), literal_type(&literal) == Type::Scalar(ScalarType::F64)).ok()?;
+                Some(ty)
+            }
+            PatternKind::Literal(literal) => Some(literal_type(&literal)),
+            PatternKind::Array { elements, rest: None } => Some(Type::fixed_array(
+                self.inference.as_mut().unwrap().fresh(), elements.len() as u64)),
+            PatternKind::Record { path, arguments, .. } | PatternKind::Enum { path, arguments, .. } => {
+                let direct = self.resolve_type(&path);
+                let definition = direct.or_else(|| path.split_last().and_then(|(_, path)| self.resolve_type(path)))
+                    .or_else(|| match self.index.resolve_path(DefinitionNamespace::Value, self.module, &path) {
+                        ResolutionState::Resolved(alias) => self.signatures.value_alias_enum_constructor(alias).map(|(definition, _)| definition),
+                        _ => None,
+                    })?;
+                self.nominal_subject_constraint(pattern.span, definition, &arguments)
+            }
+            PatternKind::Binding(name) => {
+                let ResolutionState::Resolved(alias) = self.index.resolve_path(DefinitionNamespace::Value, self.module, &[name]) else { return None; };
+                let (definition, _) = self.signatures.value_alias_enum_constructor(alias)?;
+                self.nominal_subject_constraint(pattern.span, definition, &[])
+            }
+            _ => None,
+        }
+    }
+
+    fn nominal_subject_constraint(&mut self, span: Span, definition: DefKey,
+        source: &[crate::HeaderGenericArgument]) -> Option<Type> {
+        let kinds = self.index.type_generic_kinds(definition)?.to_vec();
+        let arguments = if source.is_empty() {
+            let inference = self.inference.as_mut()?;
+            kinds.into_iter().map(|kind| match kind {
+                GenericKind::Type => GenericArgument::Type(inference.fresh()),
+                GenericKind::Lifetime => GenericArgument::Lifetime(inference.fresh_lifetime()),
+                GenericKind::EffectRow => GenericArgument::EffectRow(inference.fresh_effects()),
+                GenericKind::Const(kind) => inference.fresh_const(kind),
+            }).collect()
+        } else {
+            if source.len() != kinds.len() { return None; }
+            source.iter().zip(kinds).map(|(argument, kind)| self.generic_argument(span, argument, kind)).collect::<Option<Vec<_>>>()?
+        };
+        Some(self.signatures.normalize_type_aliases(Type::Nominal { definition, arguments }))
+    }
+
+    fn pattern_at_type(&mut self, id: PatternId, subject: Type) -> PatternDecision {
         let pattern = self.body.pattern(id).clone();
         match pattern.kind {
             PatternKind::Wildcard => {
@@ -320,19 +431,7 @@ impl Elaborator<'_> {
                     && self.inference.as_mut().is_some_and(|inference| inference.constrain_numeric(
                         subject.clone(), literal_ty == Type::Scalar(ScalarType::F64),
                     ).is_ok());
-                let matches_subject = inferred_numeric || literal_ty == subject
-                    || (literal_is_numeric(&literal)
-                        && matches!(&subject, Type::Scalar(scalar) if scalar_is_numeric(*scalar)));
-                let fits_width = match &subject {
-                    Type::Scalar(scalar) if crate::ConstKind::from_integer_scalar(*scalar).is_some() => {
-                        let (negative, token) = literal.strip_prefix('-').map_or((false, literal.as_str()), |token| (true, token));
-                        crate::IntegerConst::from_literal(*scalar, token, negative, 64).is_ok()
-                    }
-                    Type::Scalar(ScalarType::F32) => literal.replace('_', "").parse::<f32>().is_ok_and(f32::is_finite),
-                    Type::Scalar(ScalarType::F64) => literal.replace('_', "").parse::<f64>().is_ok_and(f64::is_finite),
-                    _ => true,
-                };
-                if !matches_subject || !fits_width {
+                if !inferred_numeric && !literal_pattern_matches_type(&literal, &subject) {
                     self.error(
                         pattern.span,
                         "G4201",
@@ -1056,7 +1155,12 @@ impl Elaborator<'_> {
             item_generic_kinds: item_kinds.to_vec(),
             item_arguments,
         };
-        match TraitSolver::new(self.signatures).normalize_type(projection) {
+        self.normalize_pattern_type(span, projection)
+    }
+
+    fn normalize_pattern_type(&mut self, span: Span, ty: Type) -> Option<Type> {
+        let ty = self.inference.as_ref().map_or(ty.clone(), |inference| inference.resolve_type_structure(ty));
+        match self.solver.normalize_type(ty) {
             Ok(value) => Some(value),
             Err(answer) => {
                 let (code, message) = match *answer {
@@ -1215,6 +1319,24 @@ fn binding_mode(ty: &Type) -> BindingMode {
         }
         _ => BindingMode::Borrow,
     }
+}
+
+/// Literal type/width admission is shared by initial pattern inference,
+/// sealing after dependent projections close, and independent Core checks.
+pub(crate) fn literal_pattern_matches_type(literal: &str, subject: &Type) -> bool {
+    let matches_subject = literal_type(literal) == *subject
+        || (literal_is_numeric(literal)
+            && matches!(subject, Type::Scalar(scalar) if scalar_is_numeric(*scalar)));
+    let fits_width = match subject {
+        Type::Scalar(scalar) if crate::ConstKind::from_integer_scalar(*scalar).is_some() => {
+            let (negative, token) = literal.strip_prefix('-').map_or((false, literal), |token| (true, token));
+            crate::IntegerConst::from_literal(*scalar, token, negative, 64).is_ok()
+        }
+        Type::Scalar(ScalarType::F32) => literal.replace('_', "").parse::<f32>().is_ok_and(f32::is_finite),
+        Type::Scalar(ScalarType::F64) => literal.replace('_', "").parse::<f64>().is_ok_and(f64::is_finite),
+        _ => true,
+    };
+    matches_subject && fits_width
 }
 
 fn literal_type(value: &str) -> Type {

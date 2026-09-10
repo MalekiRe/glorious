@@ -33,6 +33,41 @@ fn trailing_statements_discard_results_before_contextual_block_typechecking() {
 }
 
 #[test]
+fn frozen_pattern_subjects_reject_forged_literal_widths_and_shapes() {
+    for source in [
+        "pub fn main(value: u8) -> i64 { handle value { 42 => 42, _ => 0 } }",
+        "enum Test<Y, N> { Yes(Y), No(N) } pub fn main(value: u8) { value is 42; }",
+        "effect Probe { read(value: u8) -> i64; } pub fn main() -> i64 { handle Probe::read(42) { Probe::read(42) => 42, Probe::read(_) => 0 } }",
+    ] {
+        let core = core_for("frozen-pattern-subject@0.1.0", source);
+        assert!(core.diagnostics.is_empty(), "{source}\n{:?}", core.diagnostics);
+        assert!(core.validate().is_empty(), "{:?}", core.validate());
+        for replacement in [CorePattern::Literal("256".into()), CorePattern::Tuple(vec![CorePattern::Any])] {
+            let mut forged = core.clone();
+            let mut changed = 0;
+            let mut replace = |pattern: &mut CorePattern| {
+                if matches!(pattern, CorePattern::Literal(_)) { *pattern = replacement.clone(); changed += 1; }
+            };
+            for expression in &mut forged.expressions {
+                match &mut expression.kind {
+                    CoreKind::PatternTest { pattern, .. } => replace(pattern),
+                    CoreKind::Completion { clauses, .. } => {
+                        for clause in clauses { replace(&mut clause.pattern); }
+                    }
+                    CoreKind::Handle { clauses, .. } => {
+                        for clause in clauses { for pattern in &mut clause.patterns { replace(pattern); } }
+                    }
+                    _ => {}
+                }
+            }
+            assert!(changed > 0);
+            assert!(forged.validate().iter().any(|diagnostic| diagnostic.code == "G4183"
+                && diagnostic.message.contains("pattern")), "{:?}", forged.validate());
+        }
+    }
+}
+
+#[test]
 fn trailing_statement_discard_retains_the_returned_linear_owner_obligation() {
     let (core, signatures) = core_and_signatures_for("linear-statement-result@0.1.0",
         "struct Ticket {} impl Use<[1,1]> for Ticket {} fn make() -> Ticket { Ticket {} } pub fn main() { make(); }");

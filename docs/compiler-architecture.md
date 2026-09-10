@@ -1555,3 +1555,39 @@ capture formation uses its existing copy-or-move rule, not an invented &F bound.
 Cache 136 records this inference and formation correction. Generic symbolic
 row subtraction, higher-ranked input generalization, complete guarded interfaces,
 native handlers and full compiler/library/self-hosted acceptance remain open.
+
+## Constrained pattern subjects and dependent numeric defaults
+
+The shared structural pattern elaborator consumes the body's exact lexical
+projection solver and emits ordinary type equalities when a named nominal,
+tuple or fixed-array pattern supplies the required shape of an open subject.
+Its constrained decision retains that type at the point of inspection. Core
+conversion consumes the decision instead of requiring the original projection
+to have a concrete head already. Completion coverage uses the same constrained
+subject; the equality must still close before the body can be published.
+Neither a pattern name nor an associated result selects an implementation head.
+`is`, completion/let patterns and operation payloads share this entry point.
+The final ordinary call-argument equality now uses the same deferred rule after
+the selected call's existing lifetime alignment.
+
+Numeric defaulting consumes dependencies from those existing pending type
+equalities. Open application inputs are distinct from inferred result roots:
+default an independent numeric input, propagate normalization/equality, then
+consider the dependent result's default. Type, const, row and region uncertainty
+remain represented, and a different projection's own application is not a
+result variable. Real cyclic result dependencies remain unresolved. This reuses
+the type algebra's variable collector, not source order or another Core walk.
+Body-region closure supplies another propagation boundary; no unknown result
+is generalized merely because its numeric default is waiting.
+
+Pattern sealing and independent Core validation share literal type/width
+admission with initial elaboration. A width learned after projection selection
+must still fit every literal. Core also checks each completion, `is` and
+operation pattern against its actual structural subject. Existing custom-Drop
+and ownership checks remain in force after the type is known. These constraints
+do not grant field disposal or erase a destructor.
+
+Cache 137 records this source boundary; executable formats and runtime ABIs are
+unchanged. Float-conversion execution now passes, while the iterator source
+progresses to remaining ownership/provenance obligations. This is not complete
+pattern, library, guarded-interface, native-handler or self-hosted acceptance.

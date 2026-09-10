@@ -349,7 +349,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // missing Fn effect equalities remain symbolic instead of proving purity.
 // Cache 136 infers contextual rows from scoped invocation requirements and
 // retains symbolic callable projections and owned generic capture authority.
-pub const STAGE0_CACHE_GENERATION: u32 = 136;
+// Cache 137 retains pattern shape constraints through projection inference,
+// schedules dependent numeric defaults, and validates frozen pattern subjects.
+pub const STAGE0_CACHE_GENERATION: u32 = 137;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

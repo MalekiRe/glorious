@@ -55,6 +55,26 @@ fn accepts_native(body: &str) {
     }
 }
 
+#[test]
+fn projected_generic_pattern_fields_transfer_the_complete_owner() {
+    // The pattern's associated tuple shape is known. Moving every field
+    // must discharge the original aggregate, not leave a second owner debt.
+    accepts(r#"
+        trait Family { type Item; }
+        struct Wrapper<T> { value: T }
+        impl<T> Family for Wrapper<T> { type Item = (T, T); }
+        struct Payload<T> where T: Family { value: <T as Family>::Item }
+        fn inspect<T>(value: Payload<Wrapper<T>>) -> (T, T) {
+            let Payload { value: (first, second) } = value;
+            (first, second)
+        }
+        pub fn main() -> i64 {
+            let (first, second) = inspect<i64>(Payload<Wrapper<i64>> { value: (42, 0) });
+            first
+        }
+    "#);
+}
+
 fn rejects(body: &str) {
     let source = format!("{TOKEN}{body}");
     for optimization in ["0", "2"] {

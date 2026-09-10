@@ -1147,7 +1147,8 @@ impl TypedBody {
                     message: "Typed Core contains a recovered structural form".into(),
                 });
             }
-            if let Some(message) = core_structural_error(&expression.kind, &expression.ty) {
+            if let Some(message) = core_structural_error(&expression.kind, &expression.ty)
+                .or_else(|| pattern_subject_error(self, &expression.kind)) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4183",
                     span: expression.span,
@@ -1820,6 +1821,21 @@ fn pattern_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<String>
     None
 }
 
+fn pattern_subject_error(body: &TypedBody, kind: &CoreKind) -> Option<String> {
+    let valid = |pattern: &CorePattern, ty: &Type| collect_pattern_binding_types(pattern, ty, &mut vec![]).is_some();
+    let invalid = match kind {
+        CoreKind::PatternTest { subject, pattern, .. } => body.expressions.get(subject.0 as usize)
+            .is_some_and(|subject| !valid(pattern, &subject.ty)),
+        CoreKind::Completion { computation, clauses, .. } => body.expressions.get(computation.0 as usize)
+            .is_some_and(|subject| clauses.iter().any(|clause| !valid(&clause.pattern, &subject.ty))),
+        CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause|
+            clause.patterns.len() != clause.payload_types.len()
+                || clause.patterns.iter().zip(&clause.payload_types).any(|(pattern, ty)| !valid(pattern, ty))),
+        _ => false,
+    };
+    invalid.then(|| "Typed Core pattern does not match its subject's structural type or literal width".into())
+}
+
 fn completion_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<String> {
     let CoreKind::Completion {
         computation,
@@ -1901,7 +1917,8 @@ pub(crate) fn collect_pattern_binding_types(
     bindings: &mut Vec<(String, Type)>,
 ) -> Option<()> {
     match pattern {
-        CorePattern::Any | CorePattern::Literal(_) => Some(()),
+        CorePattern::Any => Some(()),
+        CorePattern::Literal(literal) => crate::pattern::literal_pattern_matches_type(literal, subject).then_some(()),
         CorePattern::Bind { name } => {
             bindings.push((name.clone(), subject.clone()));
             Some(())
@@ -3862,7 +3879,7 @@ impl TypedBody {
         let root = elaborator.expression_expected(body.root, None);
         // Generalization defaults numeric roots. Give delayed non-defaultable
         // obligations the same opportunity to constrain them as function bodies.
-        elaborator.propagate_pending_inference();
+        elaborator.finish_numeric_inference(true);
         let initializer_type = match elaborator
             .inference
             .generalize_result_type(elaborator.expressions[root.0 as usize].ty.clone())
@@ -4561,21 +4578,7 @@ impl Elaborator<'_> {
                 let subject_type = self.inference.resolve(
                     self.expressions[subject.0 as usize].ty.clone(),
                 );
-                let scope = self.pattern_generic_scope();
-                let elaboration = elaborate_pattern_in_context(
-                    self.body,
-                    pattern,
-                    subject_type.clone(),
-                    self.index,
-                    self.signatures,
-                    self.module,
-                    &scope,
-                    Some(&mut self.inference),
-                );
-                for diagnostic in elaboration.diagnostics {
-                    self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
-                }
-                self.recovered |= elaboration.recovered;
+                let elaboration = self.elaborate_body_pattern(pattern, subject_type.clone());
                 let names = elaboration
                     .plan
                     .bindings
@@ -7987,18 +7990,35 @@ impl Elaborator<'_> {
         self.pending_integer_defaults = defaults;
     }
 
+    fn finish_numeric_inference(&mut self, require_complete: bool) {
+        loop {
+            self.propagate_pending_inference();
+            let equalities = self.pending_rigid_equalities.iter()
+                .map(|equality| (equality.expected.clone(), equality.actual.clone())).collect::<Vec<_>>();
+            match self.inference.default_numeric_before_equalities(&equalities) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => {
+                    let span = self.body.expression(self.body.root).span;
+                    self.error(span, "G4116", "numeric literal constraints are incompatible");
+                    self.recovered = true;
+                    return;
+                }
+            }
+        }
+        if require_complete && self.inference.has_unresolved_numeric_constraints() {
+            let span = self.body.expression(self.body.root).span;
+            self.error(span, "G4116", "numeric literal type depends on an unresolved associated projection");
+            self.recovered = true;
+        }
+    }
+
     /// Typed Core is a frozen semantic boundary: body-local inference holes
     /// can help elaboration but cannot escape to PlaceFlow, MIR, or caches.
     fn seal_types(&mut self) {
         // Value types retain residual contracts across storage. Their uses
         // discharge those predicates; freezing must preserve their terms.
-        self.propagate_pending_inference();
-        if self.inference.finish_numeric_defaults().is_err() {
-            let span = self.body.expression(self.body.root).span;
-            self.error(span, "G4116", "numeric literal constraints are incompatible");
-            self.recovered = true;
-        }
-        self.propagate_pending_inference();
+        self.finish_numeric_inference(false);
         let mut requirements = self.pending_outlives.iter().map(|(bound, _)| bound.clone()).collect::<Vec<_>>();
         // Environment scope is an ordinary type-outlives obligation. Its
         // existential scope must be constrained with the other call regions,
@@ -8020,6 +8040,7 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         self.ambient_outlives.extend_from_slice(self.inference.body_regions().facts());
+        self.finish_numeric_inference(true);
         self.propagate_callable_effect_inference(false);
         let pending = std::mem::take(&mut self.pending_callable_bounds);
         let associated = std::mem::take(&mut self.pending_associated_checks);
@@ -8276,11 +8297,13 @@ impl Elaborator<'_> {
                 *reference_shape = call_reference_shape(self.signatures, result, reference_origin);
             }
             CoreKind::PatternTest {
+                subject,
                 pattern,
                 refinement,
                 ..
             } => {
-                self.zonk_pattern(pattern, span);
+                let subject = self.zonk_type(self.expressions[subject.0 as usize].ty.clone(), span);
+                self.zonk_pattern(pattern, &subject, span);
                 for (_, ty) in &mut refinement.binding_types {
                     *ty = self.zonk_type(ty.clone(), span);
                 }
@@ -8302,8 +8325,8 @@ impl Elaborator<'_> {
                         .cloned()
                         .map(|ty| self.zonk_type(ty, span))
                         .collect();
-                    for pattern in &mut clause.patterns {
-                        self.zonk_pattern(pattern, span);
+                    for (pattern, ty) in clause.patterns.iter_mut().zip(&clause.payload_types) {
+                        self.zonk_pattern(pattern, ty, span);
                     }
                     for (_, ty) in &mut clause.bindings {
                         *ty = self.zonk_type(ty.clone(), span);
@@ -8317,17 +8340,19 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            CoreKind::Completion { clauses, refinement_test, .. } => {
+            CoreKind::Completion { computation, clauses, refinement_test, .. } => {
+                let subject = self.zonk_type(self.expressions[computation.0 as usize].ty.clone(), span);
                 if let Some(environment) = refinement_test {
                     for (_, ty) in &mut environment.binding_types { *ty = self.zonk_type(ty.clone(), span); }
                 }
                 for clause in clauses {
-                    self.zonk_pattern(&mut clause.pattern, span);
+                    self.zonk_pattern(&mut clause.pattern, &subject, span);
                     for (_, ty) in &mut clause.bindings {
                         *ty = self.zonk_type(ty.clone(), span);
                     }
                     if let Some(refinement) = &mut clause.refinement {
-                        self.zonk_pattern(&mut refinement.pattern, span);
+                        let subject = self.zonk_type(self.expressions[refinement.subject.0 as usize].ty.clone(), span);
+                        self.zonk_pattern(&mut refinement.pattern, &subject, span);
                         for (_, ty) in &mut refinement.environment.binding_types {
                             *ty = self.zonk_type(ty.clone(), span);
                         }
@@ -8365,17 +8390,18 @@ impl Elaborator<'_> {
         }
     }
 
-    fn zonk_pattern(&mut self, pattern: &mut CorePattern, span: Span) {
+    fn zonk_pattern(&mut self, pattern: &mut CorePattern, subject: &Type, span: Span) {
         match pattern {
             CorePattern::Tuple(values) => {
-                for value in values {
-                    self.zonk_pattern(value, span);
+                let Type::Tuple(types) = subject else { return; };
+                for (value, ty) in values.iter_mut().zip(types) {
+                    self.zonk_pattern(value, ty, span);
                 }
             }
             CorePattern::Array { element, elements, .. } => {
                 *element = self.zonk_type(element.clone(), span);
                 for value in elements {
-                    self.zonk_pattern(value, span);
+                    self.zonk_pattern(value, element, span);
                 }
             }
             CorePattern::Record {
@@ -8393,12 +8419,17 @@ impl Elaborator<'_> {
                 }
                 for field in fields {
                     field.ty = self.zonk_type(field.ty.clone(), span);
-                    self.zonk_pattern(&mut field.pattern, span);
+                    self.zonk_pattern(&mut field.pattern, &field.ty, span);
+                }
+            }
+            CorePattern::Literal(literal) => {
+                if !crate::pattern::literal_pattern_matches_type(literal, subject) {
+                    self.error(span, "G4201", "literal pattern does not match the inferred subject type or width");
+                    self.recovered = true;
                 }
             }
             CorePattern::Any
             | CorePattern::Bind { .. }
-            | CorePattern::Literal(_)
             | CorePattern::Error => {}
         }
     }
@@ -8634,6 +8665,30 @@ impl Elaborator<'_> {
         self.error(span, code, message);
         self.recovered = true;
     }
+    /// All pattern entry points share the lexical normalizer and ordinary
+    /// equality solver. The decision's required subject is not evidence that
+    /// an unresolved associated projection has already normalized to it.
+    fn elaborate_body_pattern(&mut self, pattern: crate::PatternId, subject: Type)
+        -> crate::pattern::PatternElaboration {
+        let scope = self.pattern_generic_scope();
+        let solver = self.trait_query().fresh_query();
+        let mut elaboration = elaborate_pattern_in_context(
+            self.body, pattern, subject, self.index, self.signatures, self.module,
+            &scope, Some(&mut self.inference), Some(solver),
+        );
+        for diagnostic in &elaboration.diagnostics {
+            self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
+        }
+        self.recovered |= elaboration.recovered;
+        for constraint in std::mem::take(&mut elaboration.constraints) {
+            if self.unify_rigid_lifetimes(constraint.expected, constraint.actual, constraint.span).is_err() {
+                self.error(constraint.span, "G4201", "pattern does not match its required subject type");
+                self.recovered = true;
+            }
+        }
+        elaboration
+    }
+
     fn core_pattern(
         &mut self,
         decision: PatternDecision,
@@ -8641,8 +8696,11 @@ impl Elaborator<'_> {
         span: Span,
         bindings: Option<&std::collections::BTreeMap<crate::pattern::BinderKey, String>>,
     ) -> CorePattern {
-        let subject = self.inference.resolve(subject);
+        let subject = self.normalize_type_projections(subject);
         match decision {
+            PatternDecision::Constrained { subject, decision } => {
+                self.core_pattern(*decision, subject, span, bindings)
+            }
             PatternDecision::Any => CorePattern::Any,
             PatternDecision::Bind(key) => bindings
                 .and_then(|bindings| bindings.get(&key))
@@ -10920,7 +10978,10 @@ impl Elaborator<'_> {
             {
                 continue;
             }
-            if self.inference.unify(parameter.clone(), actual.clone()).is_err() {
+            // These parameters have already crossed the selected call's
+            // lifetime alignment. Their remaining type equality uses the
+            // same deferred projection rule as other value boundaries.
+            if self.unify_rigid_lifetimes(parameter.clone(), actual.clone(), span).is_err() {
                 let callable_lifetime_mismatch = matches!(
                     (&parameter, &actual),
                     (Type::Callable { .. }, Type::Callable { .. })
@@ -12546,6 +12607,7 @@ impl Elaborator<'_> {
         // Patterns and their bodies share the subject's inference variables;
         // numeric widths are finalized only after all body constraints arrive.
         let subject_ty = self.inference.resolve(self.expressions[subject.0 as usize].ty.clone());
+        let mut pattern_subject = subject_ty.clone();
         let refinement = match self.expressions[subject.0 as usize].kind.clone() {
             CoreKind::PatternTest {
                 subject,
@@ -12564,22 +12626,9 @@ impl Elaborator<'_> {
                     "mixed completion and operation handler arms",
                 );
             };
-            let scope = self.pattern_generic_scope();
-            let elaboration = elaborate_pattern_in_context(
-                self.body,
-                pattern,
-                subject_ty.clone(),
-                self.index,
-                self.signatures,
-                self.module,
-                &scope,
-                Some(&mut self.inference),
-            );
-            for diagnostic in &elaboration.diagnostics {
-                self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
-            }
-            if elaboration.recovered {
-                self.recovered = true;
+            let elaboration = self.elaborate_body_pattern(pattern, subject_ty.clone());
+            if matches!(self.inference.resolve_type_structure(pattern_subject.clone()), Type::Infer(_) | Type::Projection { .. }) {
+                pattern_subject = elaboration.plan.subject.clone();
             }
             if binding_mutability.is_some() {
                 for discarded in &elaboration.plan.discarded {
@@ -12760,7 +12809,8 @@ impl Elaborator<'_> {
             .iter()
             .map(|clause| clause.pattern.clone())
             .collect::<Vec<_>>();
-        let coverage = self.analyze_core_pattern_matrix(&patterns, &subject_ty);
+        let pattern_subject = self.normalize_type_projections(pattern_subject);
+        let coverage = self.analyze_core_pattern_matrix(&patterns, &pattern_subject);
         for index in coverage.unreachable {
             self.error(
                 core_clauses[index].span,
@@ -13183,22 +13233,7 @@ impl Elaborator<'_> {
             .copied()
             .zip(operation.signature.parameters.iter().cloned())
             .map(|(pattern, subject)| {
-                let scope = self.pattern_generic_scope();
-                let elaboration = elaborate_pattern_in_context(
-                    self.body,
-                    pattern,
-                    subject,
-                    self.index,
-                    self.signatures,
-                    self.module,
-                    &scope,
-                    Some(&mut self.inference),
-                );
-                for diagnostic in &elaboration.diagnostics {
-                    self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
-                }
-                self.recovered |= elaboration.recovered;
-                elaboration
+                self.elaborate_body_pattern(pattern, subject)
             })
             .collect::<Vec<_>>();
         // Payloads are elaborated independently, but their resolved binders
@@ -16177,6 +16212,8 @@ fn pattern_decision_subsumes(
 ) -> bool {
     use crate::pattern::PatternDecision;
     match (left, right) {
+        (PatternDecision::Constrained { decision, .. }, right) => pattern_decision_subsumes(decision, right),
+        (left, PatternDecision::Constrained { decision, .. }) => pattern_decision_subsumes(left, decision),
         (PatternDecision::Any | PatternDecision::Bind(_), _) => true,
         (PatternDecision::Literal(left), PatternDecision::Literal(right)) => left == right,
         (PatternDecision::Tuple(left), PatternDecision::Tuple(right)) => {
@@ -16244,6 +16281,7 @@ fn pattern_decision_subsumes(
 fn pattern_decision_irrefutable(decision: &crate::pattern::PatternDecision) -> bool {
     use crate::pattern::PatternDecision;
     match decision {
+        PatternDecision::Constrained { decision, .. } => pattern_decision_irrefutable(decision),
         PatternDecision::Any | PatternDecision::Bind(_) => true,
         PatternDecision::Tuple(values) => values.iter().all(pattern_decision_irrefutable),
         PatternDecision::Record { fields, .. } => fields
@@ -16261,6 +16299,9 @@ fn pattern_decision_covers_enum_constructor(
     definition: DefKey,
     variant: u32,
 ) -> bool {
+    if let PatternDecision::Constrained { decision, .. } = decision {
+        return pattern_decision_covers_enum_constructor(decision, definition, variant);
+    }
     matches!(
         decision,
         crate::pattern::PatternDecision::Enum {
@@ -16280,6 +16321,7 @@ fn pattern_decision_matches_value(
     value: &FinitePatternValue,
 ) -> Option<bool> {
     match (decision, value) {
+        (PatternDecision::Constrained { decision, .. }, value) => pattern_decision_matches_value(decision, value),
         (crate::pattern::PatternDecision::Any | crate::pattern::PatternDecision::Bind(_), _) => {
             Some(true)
         }

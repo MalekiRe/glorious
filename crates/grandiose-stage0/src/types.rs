@@ -97,6 +97,87 @@ mod inferred_effect_row_tests {
 mod numeric_constraint_tests {
     use super::*;
 
+    fn projected(head: Type) -> Type {
+        Type::Projection { subject: Box::new(head),
+            trait_definition: DefKey(Digest::of_bytes(b"numeric-default-dependency")),
+            trait_arguments: vec![], name: "Item".into(),
+            item_generic_kinds: vec![], item_arguments: vec![] }
+    }
+
+    #[test]
+    fn dependent_numeric_defaults_follow_equalities_not_allocation_or_operand_order() {
+        for output_first in [false, true] {
+            for reverse in [false, true] {
+                let mut inference = InferContext::default();
+                let a = inference.fresh();
+                let b = inference.fresh();
+                let (input, output) = if output_first { (b, a) } else { (a, b) };
+                inference.constrain_numeric(input.clone(), true).unwrap();
+                inference.constrain_numeric(output.clone(), false).unwrap();
+                let mut equality = (Type::Tuple(vec![output.clone()]), projected(input.clone()));
+                if reverse { equality = (equality.1, equality.0); }
+                assert_eq!(inference.default_numeric_before_equalities(&[equality]).unwrap(), 1);
+                assert_eq!(inference.zonk(input).unwrap(), Type::Scalar(ScalarType::F64));
+                assert!(inference.zonk(output.clone()).is_err());
+                // Stand in for the caller's normalization of the selected
+                // associated tuple and its ordinary field equality.
+                inference.unify(output.clone(), Type::Scalar(ScalarType::U8)).unwrap();
+                assert_eq!(inference.default_numeric_before_equalities(&[]).unwrap(), 0);
+                assert_eq!(inference.zonk(output).unwrap(), Type::Scalar(ScalarType::U8));
+            }
+        }
+    }
+
+    #[test]
+    fn projection_inputs_do_not_become_each_others_result_dependencies() {
+        let mut inference = InferContext::default();
+        let left = inference.fresh();
+        let right = inference.fresh();
+        inference.constrain_numeric(left.clone(), true).unwrap();
+        inference.constrain_numeric(right.clone(), true).unwrap();
+        assert_eq!(inference.default_numeric_before_equalities(&[(projected(left.clone()), projected(right.clone()))]).unwrap(), 2);
+        assert_eq!(inference.zonk(left).unwrap(), Type::Scalar(ScalarType::F64));
+        assert_eq!(inference.zonk(right).unwrap(), Type::Scalar(ScalarType::F64));
+
+        let left = inference.fresh();
+        let right = inference.fresh();
+        inference.constrain_numeric(left.clone(), false).unwrap();
+        inference.constrain_numeric(right.clone(), false).unwrap();
+        assert_eq!(inference.default_numeric_before_equalities(&[
+            (left.clone(), projected(right.clone())), (right.clone(), projected(left.clone())),
+        ]).unwrap(), 0, "a genuine cyclic result dependency stays unresolved");
+        assert!(inference.has_unresolved_numeric_constraints());
+    }
+
+    #[test]
+    fn dependent_defaults_retain_open_mixed_kind_application_inputs() {
+        let mut inference = InferContext::for_body();
+        let input = inference.fresh();
+        let output = inference.fresh();
+        inference.constrain_numeric(input.clone(), true).unwrap();
+        inference.constrain_numeric(output.clone(), false).unwrap();
+        let region = inference.fresh_lifetime();
+        let count = inference.fresh_const(ConstKind::Usize);
+        let row = inference.fresh_effects();
+        let application = projected(Type::Nominal {
+            definition: DefKey(Digest::of_bytes(b"mixed-numeric-inputs")),
+            arguments: vec![GenericArgument::Type(input), GenericArgument::Lifetime(region), count.clone(), GenericArgument::EffectRow(row.clone())],
+        });
+        let equality = (output.clone(), application);
+        assert_eq!(inference.default_numeric_before_equalities(&[equality.clone()]).unwrap(), 1);
+        assert_eq!(inference.default_numeric_before_equalities(&[equality.clone()]).unwrap(), 0);
+        inference.unify_lifetimes(region, Lifetime::Static).unwrap();
+        let one = GenericArgument::ConstInteger(IntegerConst::new(ScalarType::Usize, false, 1, 64).unwrap());
+        inference.unify_generic_arguments(vec![count], vec![one]).unwrap();
+        assert_eq!(inference.default_numeric_before_equalities(&[equality.clone()]).unwrap(), 0,
+            "an unknown row does not become a closed application");
+        inference.unify_effect_rows(row, EffectRow::empty()).unwrap();
+        // The caller now supplies the normalized associated result.
+        inference.unify(output.clone(), Type::Scalar(ScalarType::U16)).unwrap();
+        assert_eq!(inference.default_numeric_before_equalities(&[]).unwrap(), 0);
+        assert_eq!(inference.zonk(output).unwrap(), Type::Scalar(ScalarType::U16));
+    }
+
     #[test]
     fn known_numeric_context_wins_before_defaults_in_either_order() {
         for context_first in [false, true] {
@@ -691,6 +772,19 @@ pub enum TypeError {
     RegionConstraintLimit,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TypeVariableCollection {
+    Generalization,
+    ApplicationInputs,
+    ProjectionResults,
+}
+
+#[derive(Default)]
+struct CollectedTypeVariables {
+    roots: BTreeSet<InferVar>,
+    other_inference: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct InferContext {
     bindings: Vec<Option<Type>>,
@@ -755,6 +849,100 @@ impl InferContext {
     /// non-defaultable constraints. Ordinary unconstrained type variables
     /// remain unresolved; this is not a general inference fallback.
     pub fn finish_numeric_defaults(&mut self) -> Result<(), TypeError> {
+        self.default_numeric_except(&BTreeSet::new()).map(|_| ())
+    }
+
+    /// A projection equality makes the roots on its result side dependent
+    /// on its still-open application. Default application inputs first, then
+    /// let the caller normalize/unify again before defaulting result roots.
+    /// This is a dependency rule over ordinary equalities, not source order
+    /// or selection of an implementation from its associated result.
+    pub(crate) fn default_numeric_before_equalities(&mut self, equalities: &[(Type, Type)])
+        -> Result<usize, TypeError> {
+        let mut blocked = BTreeSet::new();
+        let mut pairs = equalities.iter().map(|(left, right)|
+            (GenericArgument::Type(left.clone()), GenericArgument::Type(right.clone()))).collect::<Vec<_>>();
+        while let Some((left, right)) = pairs.pop() {
+            let left = self.resolve_argument_structure(left);
+            let right = self.resolve_argument_structure(right);
+            let projection = |argument: &GenericArgument| matches!(argument,
+                GenericArgument::Type(Type::Projection { .. }) | GenericArgument::ConstProjection { .. });
+            if projection(&left) || projection(&right) {
+                for (application, result) in [(&left, &right), (&right, &left)] {
+                    if !projection(application) { continue; }
+                    let mut inputs = CollectedTypeVariables::default();
+                    let mut outputs = CollectedTypeVariables::default();
+                    self.collect_generic_argument_variables(application.clone(), &mut inputs, TypeVariableCollection::ApplicationInputs)?;
+                    self.collect_generic_argument_variables(result.clone(), &mut outputs, TypeVariableCollection::ProjectionResults)?;
+                    blocked.extend(outputs.roots.into_iter().filter(|output|
+                        inputs.other_inference || inputs.roots.iter().any(|input| input != output)));
+                }
+                continue;
+            }
+            match (left, right) {
+                (GenericArgument::Type(left), GenericArgument::Type(right)) => match (left, right) {
+                    (Type::Nominal { definition: a, arguments: left }, Type::Nominal { definition: b, arguments: right }) if a == b => {
+                        pairs.extend(left.into_iter().zip(right));
+                    }
+                    (Type::Tuple(left), Type::Tuple(right)) => {
+                        pairs.extend(left.into_iter().zip(right).map(|(a, b)| (GenericArgument::Type(a), GenericArgument::Type(b))));
+                    }
+                    (Type::Array(left), Type::Array(right))
+                    | (Type::StaticData { element: left, .. }, Type::StaticData { element: right, .. })
+                    | (Type::Reference { referent: left, .. }, Type::Reference { referent: right, .. })
+                    | (Type::RawPointer { pointee: left, .. }, Type::RawPointer { pointee: right, .. }) => {
+                        pairs.push((GenericArgument::Type(*left), GenericArgument::Type(*right)));
+                    }
+                    (Type::FixedArray { element: left, length: a }, Type::FixedArray { element: right, length: b }) => {
+                        pairs.push((GenericArgument::Type(*left), GenericArgument::Type(*right)));
+                        pairs.push((*a, *b));
+                    }
+                    (Type::Callable { contract: a, parameters: left, result: x, effects: e, .. },
+                     Type::Callable { contract: b, parameters: right, result: y, effects: f, .. }) => {
+                        pairs.extend(left.into_iter().zip(right).map(|(a, b)| (GenericArgument::Type(a), GenericArgument::Type(b))));
+                        pairs.push((GenericArgument::Type(*x), GenericArgument::Type(*y)));
+                        pairs.push((GenericArgument::EffectRow(e), GenericArgument::EffectRow(f)));
+                        pairs.extend(a.terms().into_iter().zip(b.terms()).map(|((a, _), (b, _))| (a, b)));
+                    }
+                    _ => {}
+                },
+                (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => {
+                    for a in &left.effects {
+                        for b in &right.effects {
+                            if a.definition == b.definition {
+                                pairs.extend(a.arguments.iter().cloned().zip(b.arguments.iter().cloned()));
+                            }
+                        }
+                    }
+                    // Row equality can keep several symbolic alternatives.
+                    // Protect result roots against every retained projection;
+                    // no matching assumption is manufactured by this pass.
+                    for (projections, effects) in [(&left.projections, &right), (&right.projections, &left)] {
+                        for projection in projections {
+                            let mut inputs = CollectedTypeVariables::default();
+                            self.collect_unresolved_type_variables((*projection.subject).clone(), &mut inputs, TypeVariableCollection::ApplicationInputs)?;
+                            for argument in projection.trait_arguments.iter().chain(&projection.item_arguments) {
+                                self.collect_generic_argument_variables(argument.clone(), &mut inputs, TypeVariableCollection::ApplicationInputs)?;
+                            }
+                            let mut outputs = CollectedTypeVariables::default();
+                            self.collect_effect_variables(effects.clone(), &mut outputs, TypeVariableCollection::ProjectionResults)?;
+                            blocked.extend(outputs.roots.into_iter().filter(|output|
+                                inputs.other_inference || inputs.roots.iter().any(|input| input != output)));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.default_numeric_except(&blocked)
+    }
+
+    pub(crate) fn has_unresolved_numeric_constraints(&mut self) -> bool {
+        self.numeric_constraints.keys().copied().collect::<Vec<_>>().into_iter()
+            .any(|variable| matches!(self.resolve(Type::Infer(variable)), Type::Infer(_)))
+    }
+
+    fn default_numeric_except(&mut self, blocked: &BTreeSet<InferVar>) -> Result<usize, TypeError> {
         let constraints = self.numeric_constraints.clone();
         // `bind` transfers evidence to the surviving root. Resolve again so
         // bindings supplied since the last literal are checked as well.
@@ -762,13 +950,16 @@ impl InferContext {
             self.constrain_numeric(Type::Infer(variable), floating)?;
         }
         let constraints = self.numeric_constraints.clone();
+        let mut resolved = 0;
         for (variable, floating) in constraints {
             if let Type::Infer(root) = self.resolve(Type::Infer(variable)) {
+                if blocked.contains(&root) { continue; }
                 let floating = floating || self.numeric_constraints.get(&root).copied().unwrap_or(false);
                 self.bind(root, Type::Scalar(if floating { ScalarType::F64 } else { ScalarType::I64 }))?;
+                resolved += 1;
             }
         }
-        Ok(())
+        Ok(resolved)
     }
 
     pub(crate) fn for_body() -> Self {
@@ -934,9 +1125,9 @@ impl InferContext {
         // Numeric literals are defaultable scalar choices, not parametric
         // values that can be generalized over every possible type.
         self.finish_numeric_defaults()?;
-        let mut variables = BTreeSet::new();
-        self.collect_unresolved_type_variables(value.clone(), &mut variables)?;
-        let variables = variables.into_iter().collect::<Vec<_>>();
+        let mut variables = CollectedTypeVariables::default();
+        self.collect_unresolved_type_variables(value.clone(), &mut variables, TypeVariableCollection::Generalization)?;
+        let variables = variables.roots.into_iter().collect::<Vec<_>>();
         for (index, variable) in variables.iter().enumerate() {
             self.bindings[variable.0 as usize] = Some(Type::Generic(index as u32));
         }
@@ -947,44 +1138,49 @@ impl InferContext {
     fn collect_unresolved_type_variables(
         &mut self,
         value: Type,
-        variables: &mut BTreeSet<InferVar>,
+        variables: &mut CollectedTypeVariables,
+        mode: TypeVariableCollection,
     ) -> Result<(), TypeError> {
         match self.resolve(value) {
             Type::Infer(variable) => {
-                variables.insert(variable);
+                variables.roots.insert(variable);
                 Ok(())
             }
             Type::Nominal { arguments, .. } => arguments.into_iter().try_for_each(|argument| {
-                self.collect_generic_argument_variables(argument, variables)
+                self.collect_generic_argument_variables(argument, variables, mode)
             }),
+            Type::Projection { .. } if mode == TypeVariableCollection::ProjectionResults => Ok(()),
             Type::Projection {
                 subject,
                 trait_arguments,
                 item_arguments,
                 ..
             } => {
-                self.collect_unresolved_type_variables(*subject, variables)?;
+                self.collect_unresolved_type_variables(*subject, variables, mode)?;
                 trait_arguments.into_iter().try_for_each(|argument| {
-                    self.collect_generic_argument_variables(argument, variables)
+                    self.collect_generic_argument_variables(argument, variables, mode)
                 })?;
                 item_arguments.into_iter().try_for_each(|argument| {
-                    self.collect_generic_argument_variables(argument, variables)
+                    self.collect_generic_argument_variables(argument, variables, mode)
                 })
             }
             Type::Tuple(values) => values
                 .into_iter()
-                .try_for_each(|value| self.collect_unresolved_type_variables(value, variables)),
-            Type::Array(value) => self.collect_unresolved_type_variables(*value, variables),
+                .try_for_each(|value| self.collect_unresolved_type_variables(value, variables, mode)),
+            Type::Array(value) => self.collect_unresolved_type_variables(*value, variables, mode),
             Type::FixedArray { element, length } => {
-                self.collect_unresolved_type_variables(*element, variables)?;
-                self.collect_generic_argument_variables(*length, variables)
+                self.collect_unresolved_type_variables(*element, variables, mode)?;
+                self.collect_generic_argument_variables(*length, variables, mode)
             }
             Type::StaticData { element, .. } => {
-                self.collect_unresolved_type_variables(*element, variables)
+                self.collect_unresolved_type_variables(*element, variables, mode)
             }
-            Type::Reference { referent, .. }
-            | Type::RawPointer { pointee: referent, .. } => {
-                self.collect_unresolved_type_variables(*referent, variables)
+            Type::Reference { lifetime, referent, .. } => {
+                variables.other_inference |= matches!(lifetime, Lifetime::Infer(_));
+                self.collect_unresolved_type_variables(*referent, variables, mode)
+            }
+            Type::RawPointer { pointee: referent, .. } => {
+                self.collect_unresolved_type_variables(*referent, variables, mode)
             }
             Type::Callable {
                 contract,
@@ -994,11 +1190,11 @@ impl InferContext {
                 ..
             } => {
                 parameters.into_iter().try_for_each(|parameter| {
-                    self.collect_unresolved_type_variables(parameter, variables)
+                    self.collect_unresolved_type_variables(parameter, variables, mode)
                 })?;
-                self.collect_unresolved_type_variables(*result, variables)?;
-                self.collect_effect_variables(effects, variables)?;
-                contract.terms().into_iter().try_for_each(|(argument, _)| self.collect_generic_argument_variables(argument, variables))
+                self.collect_unresolved_type_variables(*result, variables, mode)?;
+                self.collect_effect_variables(effects, variables, mode)?;
+                contract.terms().into_iter().try_for_each(|(argument, _)| self.collect_generic_argument_variables(argument, variables, mode))
             }
             _ => Ok(()),
         }
@@ -1007,21 +1203,27 @@ impl InferContext {
     fn collect_generic_argument_variables(
         &mut self,
         argument: GenericArgument,
-        variables: &mut BTreeSet<InferVar>,
+        variables: &mut CollectedTypeVariables,
+        mode: TypeVariableCollection,
     ) -> Result<(), TypeError> {
         match argument {
             GenericArgument::Type(value) => {
-                self.collect_unresolved_type_variables(value, variables)
+                self.collect_unresolved_type_variables(value, variables, mode)
             }
-            GenericArgument::EffectRow(value) => self.collect_effect_variables(value, variables),
+            GenericArgument::EffectRow(value) => self.collect_effect_variables(value, variables, mode),
+            GenericArgument::ConstInfer { .. } | GenericArgument::Lifetime(Lifetime::Infer(_)) => {
+                variables.other_inference = true;
+                Ok(())
+            }
+            GenericArgument::ConstProjection { .. } if mode == TypeVariableCollection::ProjectionResults => Ok(()),
             GenericArgument::ConstProjection {
                 subject,
                 trait_arguments,
                 ..
             } => {
-                self.collect_unresolved_type_variables(*subject, variables)?;
+                self.collect_unresolved_type_variables(*subject, variables, mode)?;
                 trait_arguments.into_iter().try_for_each(|argument| {
-                    self.collect_generic_argument_variables(argument, variables)
+                    self.collect_generic_argument_variables(argument, variables, mode)
                 })
             }
             _ => Ok(()),
@@ -1031,25 +1233,29 @@ impl InferContext {
     fn collect_effect_variables(
         &mut self,
         effects: EffectRow,
-        variables: &mut BTreeSet<InferVar>,
+        variables: &mut CollectedTypeVariables,
+        mode: TypeVariableCollection,
     ) -> Result<(), TypeError> {
         if let Some(variable) = effects.tails.iter().find_map(|tail| match tail {
             EffectTail::Infer(variable) => Some(*variable), _ => None,
         }) {
-            return Err(TypeError::UnresolvedEffect(variable));
+            if mode == TypeVariableCollection::Generalization {
+                return Err(TypeError::UnresolvedEffect(variable));
+            }
+            variables.other_inference = true;
         }
         for effect in effects.effects {
             for argument in effect.arguments {
-                self.collect_generic_argument_variables(argument, variables)?;
+                self.collect_generic_argument_variables(argument, variables, mode)?;
             }
         }
-        for projection in effects.projections {
-            self.collect_unresolved_type_variables(*projection.subject, variables)?;
+        for projection in effects.projections.into_iter().filter(|_| mode != TypeVariableCollection::ProjectionResults) {
+            self.collect_unresolved_type_variables(*projection.subject, variables, mode)?;
             for argument in projection.trait_arguments {
-                self.collect_generic_argument_variables(argument, variables)?;
+                self.collect_generic_argument_variables(argument, variables, mode)?;
             }
             for argument in projection.item_arguments {
-                self.collect_generic_argument_variables(argument, variables)?;
+                self.collect_generic_argument_variables(argument, variables, mode)?;
             }
         }
         Ok(())
