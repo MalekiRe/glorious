@@ -39,10 +39,11 @@ impl Analyzer<'_> {
         if !returned.references.is_complete() {
             self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
         }
+        let represented_paths = returned.references.paths().map(<[u32]>::to_vec).collect::<Vec<_>>();
         // Partial observations cannot suppress a normal path or authorize
         // disposal. They can still add positively observed result origins.
         if control.unknown || control.terminal_operation || control.cancellation {
-            self.preserve_invocation_returns(call, returned.payloads);
+            self.preserve_invocation_returns(call, returned.payloads, &represented_paths);
             return;
         }
         let incoming = self.capture_continuation();
@@ -75,7 +76,7 @@ impl Analyzer<'_> {
         }
         self.restore_continuation(&incoming);
         if control.normal {
-            self.preserve_invocation_returns(call, returned.payloads);
+            self.preserve_invocation_returns(call, returned.payloads, &represented_paths);
         }
         if control.outer_transfer {
             let abandoned = self.minimum_bindings.keys().cloned().collect();
@@ -91,15 +92,60 @@ impl Analyzer<'_> {
         &mut self,
         call: CoreId,
         returns: Vec<crate::callable_control::ResolvedPayload<invocations::Value>>,
+        represented_paths: &[Vec<u32>],
     ) {
         if returns.is_empty() { return; }
         // Snapshot the declared result before installing an additional
         // body-derived root: a partial input projection must not mask it.
         self.preserve_expression_result(call, call);
         let result = Self::result_owner(call);
+        let observed = format!("<invocation-return-{}>", call.0);
         for payload in returns {
-            self.record_known_payload_origins(&result, payload, call);
+            self.record_known_payload_origins(&observed, payload, call);
         }
+        let snapshots = self.reference_origins.iter()
+            .filter(|(key, _)| *key == &observed || key.starts_with(&(observed.clone() + ".")))
+            .map(|(key, origins)| (format!("{result}{}", &key[observed.len()..]), origins.clone()))
+            .collect::<Vec<_>>();
+        for (destination, origins) in snapshots {
+            for loan in origins.loans {
+                self.install_reference_alias(&destination, loan, call);
+            }
+        }
+        // The shared return relation proves which leaves occur on every
+        // normal alternative. It does not prove their storage identities:
+        // an unknown input target remains unknown in the projected snapshot.
+        for path in represented_paths {
+            let source = projection_key(&observed, path);
+            let destination = projection_key(&result, path);
+            let targets = self.reference_origins.get(&source).and_then(|origins| origins.targets.clone())
+                .map(|targets| targets.into_iter().map(|loan| ProjectionLoan {
+                    owner: Some(destination.clone()), ..loan
+                }).collect());
+            self.reference_origins.entry(destination).or_default().targets = targets;
+        }
+        let logical = self.logical.origins.iter()
+            .filter(|(key, _)| *key == &observed || key.starts_with(&(observed.clone() + ".")))
+            .map(|(key, regions)| (format!("{result}{}", &key[observed.len()..]), regions.clone()))
+            .collect::<Vec<_>>();
+        for (key, regions) in logical {
+            self.logical.origins.entry(key).or_default().extend(regions);
+        }
+        let under_observed = |owner: &str| owner == observed || owner.starts_with(&(observed.clone() + "."));
+        self.projection_loans.retain(|loan| !loan.owner.as_ref().is_some_and(|owner| under_observed(owner)));
+        self.reference_origins.retain(|owner, _| !under_observed(owner));
+        // Retain the temporary's ancestry transitively in the installed
+        // aliases, but no temporary resident survives result publication.
+        let ancestry = self.reborrow_parents.clone();
+        for parents in self.reborrow_parents.values_mut() {
+            let temporary = parents.iter().filter(|owner| under_observed(owner)).cloned().collect::<Vec<_>>();
+            for owner in temporary {
+                parents.remove(&owner);
+                if let Some(ancestors) = ancestry.get(&owner) { parents.extend(ancestors.iter().cloned()); }
+            }
+        }
+        self.reborrow_parents.retain(|owner, _| !under_observed(owner));
+        self.logical.origins.retain(|owner, _| !under_observed(owner));
         if self.reference_origins.keys().chain(self.logical.origins.keys())
             .any(|key| key == &result || key.starts_with(&(result.clone() + "."))) {
             self.pending_results.insert(call);

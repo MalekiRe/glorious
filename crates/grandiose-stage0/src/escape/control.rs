@@ -78,7 +78,7 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
-            Value::Reference { dependencies } => pending.push(dependencies),
+            Value::Reference { dependencies, .. } => pending.push(dependencies),
             Value::Control(brand) => {
                 labels.insert(*brand);
             }
@@ -116,7 +116,7 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
 
 pub(super) fn unrepresented_capture(value: &Value) -> bool {
     match value {
-        Value::Reference { dependencies } => unrepresented_capture(dependencies),
+        Value::Reference { dependencies, .. } => unrepresented_capture(dependencies),
         Value::None | Value::Region(_) => true,
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
             values.iter().any(unrepresented_capture),

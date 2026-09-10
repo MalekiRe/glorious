@@ -974,3 +974,56 @@ continues to retain the full loan union in its ordinary result aliases. Source
 resource products, Core contracts and runtime/verifier provenance remain separate
 boundaries. This is not complete guarded storage, generic operation-result
 authentication, native label/handler lowering or self-hosted acceptance.
+
+## Reference targets, retained loans and physical invocation stores
+
+PlaceFlow's existing reference-origin snapshot now carries retained loans and
+complete possible referent targets as separate relations. EscapeFlow transports
+the same distinction in its existing reference value, independently of reference
+authentication. Declared lifetime paths retain dependencies; they cannot claim
+that an input carrier is the returned reference's actual destination. The bound
+normal-return product can refine an authenticated leaf only when every return
+alternative supplies represented targets. An unknown incoming target or absent
+alternative prevents complete target coverage without erasing any observed loan.
+
+Aliases, aggregates, captures, patterns, result snapshots and continuation joins
+transport this product. Actual storage lookup, callable-owner projection and
+reference assignment consume the target relation; liveness, scope escape and
+carrier suspension consume the retained dependencies. Reborrowing a field
+projects the possible referents, not the storage of every retained carrier.
+Assignment snapshots its RHS before retiring old residents. Complete singleton
+local destinations permit strong replacement; multiple/captured destinations
+require weak joins. Unresolved local reference-containing accesses reject rather
+than treating a lifetime dependency as an address or silently dropping a store.
+Reference-free loads/writes use the existing owned-type proof for their absence
+of stored-reference obligations, not a scalar-specific exception.
+
+The shared invocation relation also publishes physical reference-handle may-stores
+through unique input access, alongside its existing logical-resident stores.
+PlaceFlow and EscapeFlow apply the same edges to their resident snapshots, retain
+the possible new backing loans and invalidate exact local targets. Shared handle
+copies retain backing storage without borrowing the old handle slot. Selected
+declarations keep independent named and omitted regions rigid before deriving
+store permission; actual captured inputs retain their established region
+relations. The existing directional outlives entailment, including declaration
+and parameter-implied bounds, is the authority for those edges.
+
+Symbolic input references in callable-control values retain a distinct referent
+identity. Their checked input projections can therefore supply a getter's
+conditional return contract after an unknown mutation prefix without inventing
+a physical caller address or certifying the preceding execution. Symbolic
+storage payloads remain boxed to keep recursive evaluator values compact.
+External reference targets denote only storage outside the current frame, never
+an exact local address. Generic logical-parameter seeding augments rather than
+erases that physical provenance.
+
+Control MIR assignment and Ownership MIR replacement use the established value
+representation compatibility relation already used for forwarding/call edges.
+Source/Core still establish directional lifetime legality; mutability, pointee
+shape, writable-place and ownership obligations remain independently checked.
+No new source coercion, runtime reference ABI or wire representation is added.
+
+This repairs the carrier/referent destination boundary and physical invocation
+may-stores, not complete guard-correlated storage. Unknown local access, arbitrary
+captured writes, operation-result coverage, native labels/handlers and full
+compiler/library/self-hosted acceptance remain separate open obligations.

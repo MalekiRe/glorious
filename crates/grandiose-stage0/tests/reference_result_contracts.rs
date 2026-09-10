@@ -187,11 +187,37 @@ fn authenticated_reference_results_keep_backing_storage_borrowed() {
 }
 
 #[test]
+fn returned_reference_destinations_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "#![no_std] struct Slot<'a> { value: &'a i64 } struct Carrier<'a,'b> { target: &'b mut Slot<'a> } fn get<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> { &mut *carrier.target } pub fn main() -> i64 { let first = 40; let second = 42; let mut slot = Slot { value: &first }; let mut carrier = Carrier { target: &mut slot }; let target = get(&mut carrier); *target = Slot { value: &second }; *get(&mut carrier).value }";
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: execute only this locally compiled and checked source.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
+}
+
+#[test]
 fn authenticated_partial_reference_results_execute_in_generated_code() {
     use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
     let source = format!("{AUTHENTICATED_INPUTS}\npub fn main() -> i64 {{ let value = 42; *select(0, &value) }}");
     for optimization in [0, 2] {
         let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: execute only this locally compiled and checked source.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
+}
+
+#[test]
+fn directional_reference_store_edges_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "#![no_std] struct Slot<'a> { value: &'a i64 } fn set<'a,'b>(slot: &mut Slot<'b>, value: &'a i64) where 'a: 'b { slot.value = value; } pub fn main() -> i64 { let first = 40; let second = 42; let mut slot = Slot { value: &first }; set(&mut slot, &second); *slot.value }";
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap())
             .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
         // SAFETY: execute only this locally compiled and checked source.
         let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();

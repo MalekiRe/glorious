@@ -64,6 +64,9 @@ impl<T: Clone> RegionGraph<T> {
 pub(crate) struct ResidentTransfer {
     pub destination: usize,
     pub destination_path: Vec<u32>,
+    /// Some projects a stored reference slot through the selected reference
+    /// input. None denotes the existing logical-resident relation.
+    pub destination_fields: Option<(Vec<u32>, crate::Type)>,
     pub source: usize,
     pub source_path: Vec<u32>,
 }
@@ -204,11 +207,11 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
 /// caller-facing type encodings both contain `Elided`.
 pub(crate) fn expression_transfers(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Vec<ResidentTransfer> {
     use crate::Type;
-    let Type::Callable { parameters: realized, .. } = &expression.ty else { return vec![]; };
-    let realized = parameter_transfers(signatures, realized);
-    if realized.is_empty() { return realized; }
-    let parameters = rigid_callable_signature(signatures, expression).map(|signature| signature.parameters);
-    parameters.as_deref().map(|parameters| parameter_transfers(signatures, parameters)).unwrap_or(realized)
+    let Type::Callable { parameters, contract, .. } = &expression.ty else { return vec![]; };
+    if let Some(signature) = rigid_callable_signature(signatures, expression) {
+        return parameter_transfers_with_outlives(signatures, &rigid_declaration_parameters(&signature.parameters), &signature.where_outlives);
+    }
+    parameter_transfers_with_outlives(signatures, parameters, &contract.residual.where_outlives)
 }
 
 pub(crate) fn call_origin(signatures: &crate::ElaboratedInterface, callee: &crate::core::CoreExpr) -> Option<crate::core::CallReferenceOrigin> {
@@ -223,11 +226,43 @@ fn rigid_callable_signature(signatures: &crate::ElaboratedInterface, expression:
     // their realized region equality, while declaration-local elision stays
     // separate from substituted residents in both functions and methods.
     let mut regions = BTreeMap::new();
-    let arguments = selected.arguments.iter().map(|argument| rigid_resident_argument(argument, &mut regions)).collect::<Vec<_>>();
+    let arguments = selected.arguments.iter().enumerate().map(|(index, argument)| match argument {
+        // A function's independently bound lifetimes are distinct permission
+        // variables even when the realized caller encodes both as Elided.
+        // Substituted type residents retain their existing shared region map.
+        // Caller equality cannot grant an operation the generic body lacked.
+        crate::GenericArgument::Lifetime(_) => crate::GenericArgument::Lifetime(crate::Lifetime::Placeholder(
+            crate::types::UniversalRegion { universe: u32::MAX - 1, index: index as u32 })),
+        argument => rigid_resident_argument(argument, &mut regions),
+    }).collect::<Vec<_>>();
     selected.signature.instantiate_generic(&arguments).ok()
 }
 
-pub(crate) fn parameter_transfers(signatures: &crate::ElaboratedInterface, parameters: &[crate::Type]) -> Vec<ResidentTransfer> {
+fn rigid_declaration_parameters(parameters: &[crate::Type]) -> Vec<crate::Type> {
+    // Omitted declaration regions are independently bound inputs. Their
+    // shared spelling (`Elided`) is not equality or permission to store an
+    // outer short borrow into another input's nested handle. Substituted
+    // resident regions have already been rigidified by declaration selection.
+    let mut next = 0;
+    parameters.iter().map(|parameter| {
+        let crate::GenericArgument::Type(parameter) = crate::types::regions::map_argument_regions(
+            crate::GenericArgument::Type(parameter.clone()), &mut |lifetime, depth| {
+                Some(if lifetime == crate::Lifetime::Elided && depth == 0 {
+                    let region = crate::Lifetime::Placeholder(crate::types::UniversalRegion {
+                        universe: u32::MAX - 2, index: next,
+                    });
+                    next += 1;
+                    region
+                } else { lifetime })
+            }).expect("rigid declaration-region mapping is total") else { unreachable!() };
+        parameter
+    }).collect()
+}
+
+pub(crate) fn parameter_transfers_with_outlives(signatures: &crate::ElaboratedInterface, parameters: &[crate::Type],
+    assumptions: &[crate::OutlivesPredicate]) -> Vec<ResidentTransfer> {
+    let mut assumptions = assumptions.to_vec();
+    for parameter in parameters { crate::OutlivesPredicate::implied_by_type(parameter, &mut assumptions); }
     let mut inputs = vec![];
     for (index, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
@@ -237,15 +272,30 @@ pub(crate) fn parameter_transfers(signatures: &crate::ElaboratedInterface, param
     }
     let mut transfers = vec![];
     for (destination, destination_path, destination_ty) in &inputs {
-        if !crate::core::reference_path_is_logical(destination_path) { continue; }
+        let physical = if crate::core::reference_path_is_logical(destination_path) {
+            None
+        } else {
+            let Some(deref) = destination_path.iter().rposition(|field| *field == crate::core::REFERENCE_PATH_DEREF) else { continue; };
+            // Every access to the replaceable handle must be unique. Merely
+            // containing a unique handle under a shared receiver cannot
+            // grant a write through that receiver.
+            if !destination_path.iter().enumerate().filter(|(_, field)| **field == crate::core::REFERENCE_PATH_DEREF)
+                .all(|(deref, _)| inputs.iter().any(|(input, path, ty)| input == destination
+                    && path == &destination_path[..deref]
+                    && matches!(ty, crate::Type::Reference { mutability: crate::Mutability::Unique, .. }))) { continue; }
+            Some(deref)
+        };
         for (source, source_path, source_ty) in &inputs {
-            if destination == source { continue; }
+            if destination == source && (physical.is_none() || destination_path == source_path) { continue; }
             let related = match (destination_ty, source_ty) {
-                (crate::Type::Reference { lifetime, .. }, crate::Type::Reference { lifetime: other, .. }) => lifetime == other,
+                (crate::Type::Reference { lifetime, .. }, crate::Type::Reference { lifetime: other, .. }) =>
+                    crate::OutlivesPredicate::Region { longer: *other, shorter: *lifetime }.proven_by(&assumptions),
                 _ => same_callable_abi(destination_ty, source_ty),
             };
             if !related { continue; }
-            transfers.push(ResidentTransfer { destination: *destination, destination_path: destination_path.clone(),
+            transfers.push(ResidentTransfer { destination: *destination,
+                destination_path: physical.map(|deref| destination_path[..deref].to_vec()).unwrap_or_else(|| destination_path.clone()),
+                destination_fields: physical.map(|deref| (destination_path[deref + 1..].to_vec(), destination_ty.clone())),
                 source: *source, source_path: source_path.clone() });
         }
     }
@@ -300,6 +350,34 @@ fn rigid_resident_type(ty: &crate::Type, regions: &mut BTreeMap<crate::Lifetime,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn independently_elided_inputs_cannot_store_short_access_loans() {
+        let reference = |referent| crate::Type::Reference {
+            mutability: crate::Mutability::Unique, lifetime: crate::Lifetime::Elided, referent: Box::new(referent),
+        };
+        let slot = reference(crate::Type::Tuple(vec![reference(crate::Type::Unit)]));
+        assert!(parameter_transfers_with_outlives(&crate::ElaboratedInterface::default(),
+            &rigid_declaration_parameters(&[slot, reference(crate::Type::Unit)]), &[]).is_empty());
+    }
+
+    #[test]
+    fn physical_reference_stores_require_unique_access_to_the_handle_slot() {
+        let reference = |mutability, lifetime, referent| crate::Type::Reference {
+            mutability, lifetime, referent: Box::new(referent),
+        };
+        let stored = reference(crate::Mutability::Shared, crate::Lifetime::Static, crate::Type::Unit);
+        let carrier = |mutability| reference(mutability, crate::Lifetime::Elided, crate::Type::Tuple(vec![stored.clone()]));
+        let signatures = crate::ElaboratedInterface::default();
+        let shared = parameter_transfers_with_outlives(&signatures, &[carrier(crate::Mutability::Shared), stored.clone()], &[]);
+        assert!(shared.is_empty(), "a shared carrier cannot authorize replacement of its handle field");
+        let unique = parameter_transfers_with_outlives(&signatures, &[carrier(crate::Mutability::Unique), stored.clone()], &[]);
+        assert_eq!(unique.len(), 1);
+        assert_eq!(unique[0].destination, 0);
+        assert_eq!(unique[0].destination_path, Vec::<u32>::new());
+        assert_eq!(unique[0].destination_fields, Some((vec![0], stored)));
+        assert_eq!(unique[0].source, 1);
+    }
 
     #[test]
     fn callable_residents_are_whole_values_not_physical_reference_leaves() {

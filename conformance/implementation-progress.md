@@ -5,6 +5,78 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 120: actual referent destinations and retained carrier loans
+
+The preceding active carrier-destination regression is repaired through the
+authoritative reference snapshots, not by bypassing the live-carrier guard.
+PlaceFlow's existing origin entries and EscapeFlow's existing reference values
+separate retained lifetime dependencies from complete possible physical targets.
+Every carrier loan remains live, while `*target` replaces the actual backing
+slot. Aliases, aggregates, captures, patterns, assignments and continuation joins
+transport both relations. Missing target coverage cannot authorize a strong
+update; partial/multiple destinations retain weak replacement provenance.
+
+Normal-result target refinement consumes the existing bound invocation payloads
+and per-path all-return coverage. Authentication alone does not invent an
+address. Symbolic input referents now supply the getter's conditional contract
+after an unknown mutation prefix through that same shared projection product.
+The symbolic storage payload is boxed: an initial inline representation overflowed
+the default test stack at the full-library root; the compact representation
+restores ordinary-stack diagnostic completion and has a size regression guard.
+
+The new helper-store negative exposed an actual acceptance bug: after
+`set(&mut slot, &second)`, the old analysis allowed `second = 43` before reading
+`slot.value`. The shared resident-invocation producer now emits physical
+reference-handle may-stores through uniquely accessible inputs, in addition to
+logical-resident stores. Both resource consumers retain the possible new backing
+loan and invalidate stale local target coverage. Shared handle copies do not
+borrow the replaceable source handle. Store permission uses the existing
+directional outlives proof, preserving independent declaration binders even when
+their realized caller spelling is elided. Actual capture/input region relations
+are not reinterpreted as independent declaration elision.
+
+The full-library recheck also exposed generic parameter seeding that erased
+physical provenance while adding logical regions, and declaration forwarding
+that unnecessarily discarded its known external storage class. These producers
+now retain both facts without certifying an exact caller address. The reduced
+generic variant-copy regression executes instead of acquiring external authority
+from a missing value. Unresolved local reference-containing access still rejects.
+
+Directional reference assignment reached a second real boundary mismatch:
+Control MIR and Ownership MIR required literal lifetime equality for stored
+values already checked against an outlives contract. Both now reuse the existing
+representation compatibility relation used by forwarded values and calls.
+Mutability, pointee and writable-place checks remain active. Source lifetime
+checking, VM/native reference representation and wire verification are unchanged.
+
+Final verification records **455 distinct passing checks**:
+
+- 383 compiler unit, 25 expected-reborrow, 12 reference-result-contract and
+  22 request/cache tests pass (`target/reference-target-final-gates-v46.log`).
+  Source positives run fresh/decoded VM O0/O2; negatives preserve carrier
+  suspension, short-lifetime rejection, new-backing loans and ambiguous-target
+  weak updates. Aggregate/capture transfers, generic enum payloads and shared
+  old-handle copies are included. Generated native O0/O2 checks cover both
+  returned-carrier replacement and directional-outlives assignment.
+- Thirteen capture-focused borrowed-callable tests pass
+  (`target/reference-target-final-captures-v47.log`), including returned owned
+  capture storage and quantified native receiver storage.
+
+The full-library root **still fails** with the same 61 diagnostic records and
+no suppression marker in 32.19 seconds
+(`target/reference-target-final-library-v48.log`). Traversal line-229 provenance,
+random API/array mismatches, graph typing, custom-Drop extraction, unsafe UTF-8,
+mandatory-tail provenance and minimum-use failures remain. No new full source
+matrix was run; the latest complete matrix remains the historical cache-114
+16 passing / 15 failing result. The native generic-label `MakeLabel` failure
+was not retested and is not claimed fixed. All 11,455 GSC-2 contracts remain
+open; these checks do not establish end-to-end conformance or bootstrap.
+
+Cache generation is 120; interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 remain unchanged. This is not complete guarded storage,
+native label/handler acceptance, a finished library or a self-hosted compiler.
+The following checkpoints describe earlier states.
+
 ## Active carrier-destination regression checkpoint (cache 119 unchanged)
 
 The remaining `nested_unique_reborrow_uses_the_carrier_access_region` failure

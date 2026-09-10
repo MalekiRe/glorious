@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 119 verification below,
+Updated from the current source and cache 120 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,27 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 120 repairs the active carrier-reborrow destination failure by separating
+actual referent targets from retained carrier loans in the existing resource
+snapshots. Shared normal-result projections transport target coverage, while
+the common resident-invocation producer now includes physical handle may-stores
+and directional outlives permission. The newly exposed helper-store mutation
+acceptance bug rejects; valid direct/returned/aggregate/captured replacements
+execute, including generated native O0/O2. Generic parameter provenance and
+compact symbolic control-storage representation are preserved.
+
+Final verification has 455 distinct passes across compiler unit, reborrow,
+reference-result, request/cache and capture-focused targets. The full-library
+root separately **still fails** with 61 diagnostic records and no suppression
+marker (`target/reference-target-final-library-v48.log`). Its traversal
+provenance, API/array, graph typing, custom-Drop, unsafe, mandatory-tail and
+minimum-use blockers remain. Native generic-label materialization was not
+retested or claimed fixed. The complete source matrix remains the historical
+16 passing / 15 failing result above. Guard-correlated storage, native handlers
+and full compiler/library/self-hosted acceptance remain open.
+
+The following cache 119 and earlier entries are historical.
 
 Cache 119 separates a returned reference's authenticated validity from its
 conservative loan debt in the existing shared return product and escape value

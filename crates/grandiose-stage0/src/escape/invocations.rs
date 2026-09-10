@@ -109,7 +109,9 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         fn project(value: Value, fields: &[u32]) -> Value {
             match value {
-                Value::Reference { dependencies } => authenticated_reference(project(*dependencies, fields)),
+                Value::Reference { dependencies, targets, authenticated } => Value::Reference {
+                    dependencies, targets: targets.map(|targets| Box::new(project(*targets, fields))), authenticated,
+                },
                 Value::Borrowed { root, storage, fields: mut prefix, mut capture_path } => {
                     if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
                     else { prefix.extend_from_slice(fields); }
@@ -126,7 +128,9 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, _: bool) -> Option<Value> {
         fn borrow(value: Value, projection: &crate::resident_invocations::CaptureProjection) -> Option<Value> {
             Some(match value {
-                Value::Reference { dependencies } => authenticated_reference(borrow(*dependencies, projection)?),
+                Value::Reference { dependencies, targets, authenticated } => Value::Reference {
+                    dependencies, targets: targets.and_then(|targets| borrow(*targets, projection)).map(Box::new), authenticated,
+                },
                 Value::Borrowed { root, storage: Some(storage), fields, mut capture_path } => {
                     capture_path.push(projection.clone());
                     Value::Borrowed { root, storage: Some(storage), fields, capture_path }
@@ -149,7 +153,7 @@ impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
 
 pub(super) fn reference_is_known(value: &Value) -> bool {
     match value {
-        Value::Reference { .. } => true,
+        Value::Reference { dependencies, authenticated, .. } => *authenticated || reference_is_known(dependencies),
         Value::Borrowed { .. } | Value::ExternalBorrowed => true,
         Value::Joined(values) | Value::Alternatives(values) =>
             !values.is_empty() && values.iter().all(reference_is_known),
@@ -313,6 +317,14 @@ impl Analyzer<'_> {
             self,
         );
         for store in relations.stores {
+            if let Some(fields) = store.destination_fields {
+                let destination = self.resolved_value(&store.destination);
+                if value_contains_external_reference(&reference_targets(&destination).unwrap_or(destination)) {
+                    self.report_external_store_escape(&store.source, span);
+                }
+                self.update_reference_resident(store.destination, &fields.value, store.source, &fields.ty, span, false);
+                continue;
+            }
             if value_contains_external_reference(&self.resolved_value(&store.destination)) {
                 self.report_external_store_escape(&store.source, span);
             }

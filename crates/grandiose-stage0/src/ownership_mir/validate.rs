@@ -313,7 +313,7 @@ impl OwnershipMir {
                         if !self.writable_place(place)? {
                             return Err(invalid("replacement lacks mutable place authority"));
                         }
-                        if self.checked_place_type(place)? != self.checked_type(*value)? {
+                        if !crate::control_mir::call_type_matches(self.checked_place_type(place)?, self.checked_type(*value)?) {
                             return Err(invalid("replacement type disagrees with place"));
                         }
                         self.validate_operand(OwnershipOperand {

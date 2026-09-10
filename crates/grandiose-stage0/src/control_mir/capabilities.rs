@@ -172,7 +172,11 @@ impl ControlCapabilityOperation {
                     && crate::types::label::payload(referent).is_none()),
             Self::ReadReference(value) => matches!(body.ty(*value)?, Type::Reference { referent, .. } if referent.as_ref() == result),
             Self::Move(place) | Self::ReadPlace(place) => place.ty(body)? == result,
-            Self::Assign { place, value } => result == &Type::Unit && place.ty(body)? == body.ty(*value)?,
+            // Source/Core establish the directional outlives obligation.
+            // A stored value crosses the same representation boundary as a
+            // forwarded value or call input; regions are not stored operands.
+            Self::Assign { place, value } => result == &Type::Unit
+                && super::call_type_matches(place.ty(body)?, body.ty(*value)?),
             Self::Label(id) => body.labels.get(id.0 as usize)
                 .is_some_and(|label| crate::types::label::matches_brand(result, label.brand)),
             Self::Resumption { handler, clause } => body.handlers.get(handler.0 as usize)

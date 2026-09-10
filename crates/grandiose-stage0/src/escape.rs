@@ -148,7 +148,13 @@ enum Value {
     /// The shared invocation relation authenticated this reference leaf on
     /// every normal return. Its possible loan dependencies remain separate
     /// from that validity evidence and are never erased by authentication.
-    Reference { dependencies: Box<Value> },
+    Reference {
+        dependencies: Box<Value>,
+        /// Complete possible referents, independently of retained region debt.
+        /// None is unknown, not a reference to every retained dependency.
+        targets: Option<Box<Value>>,
+        authenticated: bool,
+    },
     Region(BTreeSet<crate::placeflow::regions::Region>),
     Borrowed {
         root: String,
@@ -317,12 +323,11 @@ impl Analyzer<'_> {
         leaves.extend(crate::placeflow::regions::callable_paths(self.signatures, ty, false));
         if !leaves.iter().any(|(path, _)| crate::core::reference_path_is_logical(path)) { return value; }
         let external = matches!(value, Value::ExternalBorrowed);
-        if external { value = Value::None; }
+        // Logical generic residents augment the parameter's physical
+        // provenance. An incomplete nominal/variant layout cannot erase the
+        // caller-owned physical carrier while installing its logical slots.
         for (path, _) in leaves {
-            if !crate::core::reference_path_is_logical(&path) {
-                if external { put_value_at_path(&mut value, &path, Value::ExternalBorrowed); }
-                continue;
-            }
+            if !crate::core::reference_path_is_logical(&path) { continue; }
             let resident = if external { Value::ExternalBorrowed }
                 else { value_at_path(&value, &path).unwrap_or(Value::None) };
             let mut regions = logical_regions(&resident);
@@ -362,7 +367,11 @@ impl Analyzer<'_> {
                 Value::Variant(values) => Value::Variant(values.iter().map(|value| resolve(value, graph, active)).collect()),
                 Value::Alternatives(values) => Value::Alternatives(values.iter().map(|value| resolve(value, graph, active)).collect()),
                 Value::Joined(values) => join(values.iter().map(|value| resolve(value, graph, active)).collect()),
-                Value::Reference { dependencies } => authenticated_reference(resolve(dependencies, graph, active)),
+                Value::Reference { dependencies, targets, authenticated } => Value::Reference {
+                    dependencies: Box::new(resolve(dependencies, graph, active)),
+                    targets: targets.as_ref().map(|targets| Box::new(resolve(targets, graph, active))),
+                    authenticated: *authenticated,
+                },
                 Value::Array { length, element, fields } => Value::Array { length: *length,
                     element: Box::new(resolve(element, graph, active)),
                     fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
@@ -423,7 +432,14 @@ impl Analyzer<'_> {
                 // provenance for a local/unknown reference: those require a
                 // structural account of the referenced storage.
                 let value = self.value(value);
-                self.reference_path_value(&value, &[crate::core::REFERENCE_PATH_DEREF]).unwrap_or(Value::None)
+                match self.reference_path_value(&value, &[crate::core::REFERENCE_PATH_DEREF]) {
+                    Some(resident) => resident,
+                    None if crate::core::tail::tail_owned_type(self.signatures, &expression.ty, &mut vec![]) => Value::FrameIndependent,
+                    None => {
+                        self.error(expression.span, "G5023", "reference-containing load has unresolved referent storage");
+                        join(vec![Value::None, value])
+                    }
+                }
             }
             CoreKind::Move(value) => self.value(value),
             CoreKind::ReleaseAvailable(value) => {
@@ -663,6 +679,11 @@ impl Analyzer<'_> {
                     .map(<[u32]>::to_vec).collect::<Vec<_>>();
                 let returned = resolved.into_iter().flat_map(|result| result.payloads).filter_map(|payload|
                     control::known_payload(payload, &self.values, &mut self.control_captures, self.signatures)).collect::<Vec<_>>();
+                let reference_targets = reference_paths.iter().map(|path| {
+                    let targets = (!returned.is_empty()).then(|| returned.iter().map(|value|
+                        reference_targets(&value_at_path(value, path)?)).collect::<Option<Vec<_>>>()).flatten().map(join);
+                    (path.clone(), targets)
+                }).collect::<Vec<_>>();
                 let mut result = if matches!(reference_origin, CallReferenceOrigin::Opaque) && references_complete {
                     // The checked invocation relation supplies the complete
                     // result below. It is not an external/empty declaration.
@@ -682,8 +703,9 @@ impl Analyzer<'_> {
                     put_value_at_path(result.get_or_insert(Value::None), &path, value);
                 }
                 let mut result = join(result.into_iter().chain(returned).collect());
-                for path in reference_paths {
-                    if !authenticate_reference_path(&mut result, &path) {
+                for (path, targets) in reference_targets {
+                    if !map_reference_path(&mut result, &path, &mut |value|
+                        authenticated_reference_with_targets(value, targets.clone())) {
                         self.error(expression.span, "G5023", "authenticated invocation reference contradicts its retained result shape");
                     }
                 }
@@ -876,6 +898,7 @@ impl Analyzer<'_> {
                         );
                         continue;
                     };
+                    let value = declared_reference(value);
                     let mut updated = result.clone();
                     if put_value_at_path(&mut updated, &path.result_fields, value.clone()) {
                         result = updated;
@@ -906,13 +929,14 @@ impl Analyzer<'_> {
         };
         let reference = self.resolved_value(&value_at_path(value, &path[..deref])?);
         let resident = match reference {
-            Value::Reference { dependencies } => return self.reference_path_value(&dependencies, &path[deref..]),
+            Value::Logical { physical, .. } => return self.reference_path_value(&physical, &path[deref..]),
+            Value::Reference { targets, .. } => return self.reference_path_value(&*targets?, &path[deref..]),
             Value::ExternalBorrowed => Value::ExternalBorrowed,
             Value::Borrowed { storage, fields, capture_path, .. } => {
                 let owner = value_at_path(self.values.residents.get(&storage?)?, &fields)?;
                 invocations::capture_value_at_path(&owner, &capture_path)?
             }
-            Value::Joined(values) => return values.iter().map(|value|
+            Value::Joined(values) | Value::Alternatives(values) => return values.iter().map(|value|
                 self.reference_path_value(value, &path[deref..])).collect::<Option<Vec<_>>>().map(join),
             _ => return None,
         };
@@ -1090,7 +1114,11 @@ impl Analyzer<'_> {
             CoreKind::Field { base, index, .. } => self.reborrowed_value(base).map(|value| {
                 fn project(value: Value, index: u32) -> Value {
                     match value {
-                        Value::Reference { dependencies } => authenticated_reference(project(*dependencies, index)),
+                        Value::Reference { dependencies, targets, authenticated } => Value::Reference {
+                            dependencies,
+                            targets: targets.map(|targets| Box::new(project(*targets, index))),
+                            authenticated,
+                        },
                         Value::Borrowed { root, storage, mut fields, mut capture_path } => {
                             if let Some(capture) = capture_path.last_mut() { capture.fields.push(index); }
                             else { fields.push(index); }
@@ -1130,10 +1158,7 @@ impl Analyzer<'_> {
     }
 
     fn assign(&mut self, place: CorePlace, value: Value, span: Span) {
-        // Replacing a statically scalar resident cannot change any stored
-        // reference path. Still evaluate its reference operand below: an
-        // opaque generic carrier must not suppress computed-place effects.
-        let scalar_resident = matches!(place.ty(), Type::Scalar(_) | Type::Unit | Type::Never);
+        let resident_type = place.ty();
         if self.place_targets_external_storage(&place) {
             self.report_external_store_escape(&value, span);
         }
@@ -1164,45 +1189,70 @@ impl Analyzer<'_> {
                     if let CorePlace::Deref { reference, .. } = base {
                         fields.reverse();
                         let reference = self.value(*reference);
-                        if !scalar_resident { self.assign_reference_resident(reference, &fields, value, span); }
+                        self.assign_reference_resident(reference, &fields, value, &resident_type, span);
                     }
                 }
             }
             CorePlace::Deref { reference, .. } => {
                 let reference = self.value(reference);
-                if !scalar_resident { self.assign_reference_resident(reference, &[], value, span); }
+                self.assign_reference_resident(reference, &[], value, &resident_type, span);
             }
             CorePlace::Error => {}
         }
     }
 
-    fn assign_reference_resident(&mut self, reference: Value, projected: &[u32], value: Value, span: Span) {
-        fn targets(reference: Value, projected: &[u32], result: &mut BTreeSet<(u64, Vec<u32>, Vec<crate::resident_invocations::CaptureProjection>)>) {
+    fn assign_reference_resident(&mut self, reference: Value, projected: &[u32], value: Value, ty: &Type, span: Span) {
+        self.update_reference_resident(reference, projected, value, ty, span, true);
+    }
+
+    fn update_reference_resident(&mut self, reference: Value, projected: &[u32], value: Value, ty: &Type, span: Span, assignment: bool) {
+        fn targets(reference: Value, projected: &[u32], result: &mut BTreeSet<(u64, Vec<u32>, Vec<crate::resident_invocations::CaptureProjection>)>) -> Option<bool> {
             match reference {
                 Value::Borrowed { storage: Some(storage), mut fields, mut capture_path, .. } => {
                     if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(projected); }
                     else { fields.extend_from_slice(projected); }
                     result.insert((storage, fields, capture_path));
+                    Some(true)
                 }
-                Value::Joined(values) => for value in values { targets(value, projected, result); },
-                Value::Reference { dependencies } => targets(*dependencies, projected, result),
-                _ => {},
+                Value::Joined(values) | Value::Alternatives(values) => {
+                    let mut complete = (!values.is_empty()).then_some(true);
+                    for value in values {
+                        let incoming = targets(value, projected, result);
+                        complete = complete.zip(incoming).map(|(left, right)| left && right);
+                    }
+                    complete
+                }
+                Value::Reference { targets: Some(referents), .. } => targets(*referents, projected, result),
+                Value::Logical { physical, .. } => targets(*physical, projected, result),
+                Value::ExternalBorrowed => Some(false),
+                _ => None,
             }
         }
         let mut destinations = BTreeSet::new();
-        targets(self.resolved_value(&reference), projected, &mut destinations);
-        let exact = destinations.len() == 1;
+        let coverage = targets(self.resolved_value(&reference), projected, &mut destinations);
+        if coverage.is_none() && !crate::core::tail::tail_owned_type(self.signatures, ty, &mut vec![]) {
+            self.error(span, "G5021", "reference-containing assignment has unresolved referent storage");
+        }
+        let exact = assignment && coverage == Some(true) && destinations.len() == 1;
         for (storage, fields, capture_path) in destinations {
             let Some(resident) = self.values.residents.get_mut(&storage) else { continue; };
             if !capture_path.is_empty() {
-                if !invocations::replace_capture_value_at_path(resident, &fields, &capture_path, value.clone(), exact) {
+                let replacement = if assignment { value.clone() } else {
+                    declared_reference(value.clone())
+                };
+                if !invocations::replace_capture_value_at_path(resident, &fields, &capture_path, replacement, exact)
+                    && !crate::core::tail::tail_owned_type(self.signatures, ty, &mut vec![]) {
                     self.error(span, "G5021", "capture storage assignment lacks its sealed resident projection");
                 }
                 continue;
             }
             let replacement = if exact { value.clone() }
                 else { join(vec![value_at_path(resident, &fields).unwrap_or(Value::None), value.clone()]) };
-            if !replace_resident_path(resident, &fields, replacement) {
+            let replacement = if assignment { replacement } else {
+                declared_reference(replacement)
+            };
+            if !replace_resident_path(resident, &fields, replacement)
+                && !crate::core::tail::tail_owned_type(self.signatures, ty, &mut vec![]) {
                 self.error(span, "G5021", "reference projection assignment has no sealed resident provenance path");
             }
         }
@@ -1217,7 +1267,8 @@ impl Analyzer<'_> {
             CorePlace::Field { base, .. } => self.place_targets_external_storage(base),
             CorePlace::Deref { reference, .. } => {
                 let value = self.value(*reference);
-                value_contains_external_reference(&self.resolved_value(&value))
+                let resolved = self.resolved_value(&value);
+                value_contains_external_reference(&reference_targets(&resolved).unwrap_or(resolved))
             }
         }
     }
@@ -1393,31 +1444,70 @@ fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
     value_at_variant_path(value, path, false)
 }
 
+#[cfg(test)]
 fn authenticated_reference(value: Value) -> Value {
+    let targets = reference_targets(&value);
+    authenticated_reference_with_targets(value, targets)
+}
+
+fn reference_targets(value: &Value) -> Option<Value> {
+    match value {
+        Value::Reference { targets, .. } => targets.as_deref().cloned(),
+        Value::Borrowed { .. } | Value::ExternalBorrowed => Some(value.clone()),
+        Value::Logical { physical, .. } => reference_targets(physical),
+        Value::Joined(values) | Value::Alternatives(values) if !values.is_empty() =>
+            values.iter().map(reference_targets).collect::<Option<Vec<_>>>().map(join),
+        _ => None,
+    }
+}
+
+fn declared_reference(value: Value) -> Value {
+    fn entirely_external(value: &Value) -> bool {
+        match value {
+            Value::ExternalBorrowed => true,
+            Value::Reference { targets: Some(targets), .. } => entirely_external(targets),
+            Value::Joined(values) | Value::Alternatives(values) =>
+                !values.is_empty() && values.iter().all(entirely_external),
+            _ => false,
+        }
+    }
+    // Outside-this-frame is a storage class, not an exact caller address.
+    // A declaration forwarding only external referents preserves that class;
+    // any local, absent or unknown alternative still loses target coverage.
+    let targets = entirely_external(&value).then(|| Box::new(Value::ExternalBorrowed));
+    Value::Reference { dependencies: Box::new(value), targets, authenticated: false }
+}
+
+fn authenticated_reference_with_targets(value: Value, targets: Option<Value>) -> Value {
     // Repeated forwarding preserves one proof wrapper and the complete loan
     // union instead of nesting a new wrapper around each earlier invocation.
     fn dependencies(value: Value) -> Value {
         match value {
-            Value::Reference { dependencies: value } => dependencies(*value),
+            Value::Reference { dependencies: value, .. } => dependencies(*value),
             Value::Joined(values) => join(values.into_iter().map(dependencies).collect()),
             value => value,
         }
     }
-    Value::Reference { dependencies: Box::new(dependencies(value)) }
+    Value::Reference { dependencies: Box::new(dependencies(value)), targets: targets.map(Box::new), authenticated: true }
 }
 
 /// Apply a path authenticated by the bound invocation product to this result
 /// snapshot. Sparse declaration footprints are not alternative runtime values:
 /// a missing shell may retain unknown dependencies while the actual reference
 /// leaf has separately been proved on every normal result. No loan is removed.
+#[cfg(test)]
 fn authenticate_reference_path(value: &mut Value, path: &[u32]) -> bool {
+    map_reference_path(value, path, &mut authenticated_reference)
+}
+
+fn map_reference_path(value: &mut Value, path: &[u32], transform: &mut impl FnMut(Value) -> Value) -> bool {
     let Some((field, tail)) = path.split_first() else {
-        *value = authenticated_reference(std::mem::replace(value, Value::None));
+        *value = transform(std::mem::replace(value, Value::None));
         return true;
     };
     match value {
         Value::Joined(values) | Value::Alternatives(values) =>
-            return values.iter_mut().all(|value| authenticate_reference_path(value, path)),
+            return values.iter_mut().all(|value| map_reference_path(value, path, transform)),
         Value::ExternalBorrowed => return true,
         _ => {},
     }
@@ -1427,19 +1517,19 @@ fn authenticate_reference_path(value: &mut Value, path: &[u32]) -> bool {
             *value = Value::Logical { physical: Box::new(std::mem::replace(value, Value::None)), arguments: BTreeMap::new() };
         }
         let Value::Logical { arguments, .. } = value else { unreachable!() };
-        return authenticate_reference_path(arguments.entry(*argument).or_insert(Value::None), tail);
+        return map_reference_path(arguments.entry(*argument).or_insert(Value::None), tail, transform);
     }
     if let Value::Logical { physical, .. } = value {
-        return authenticate_reference_path(physical, path);
+        return map_reference_path(physical, path, transform);
     }
     if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
         if matches!(value, Value::None) {
             *value = Value::Array { length: None, element: Box::new(Value::None), fields: BTreeMap::new() };
         }
         return match value {
-            Value::Array { element, fields, .. } => authenticate_reference_path(element, tail)
-                && fields.values_mut().all(|value| authenticate_reference_path(value, tail)),
-            Value::Aggregate(values) => values.iter_mut().all(|value| authenticate_reference_path(value, tail)),
+            Value::Array { element, fields, .. } => map_reference_path(element, tail, transform)
+                && fields.values_mut().all(|value| map_reference_path(value, tail, transform)),
+            Value::Aggregate(values) => values.iter_mut().all(|value| map_reference_path(value, tail, transform)),
             _ => false,
         };
     }
@@ -1447,12 +1537,12 @@ fn authenticate_reference_path(value: &mut Value, path: &[u32]) -> bool {
     if matches!(value, Value::None) { *value = Value::Aggregate(vec![]); }
     let Value::Aggregate(fields) = value else {
         if let Value::Variant(fields) = value {
-            return fields.get_mut(*field as usize).is_some_and(|value| authenticate_reference_path(value, tail));
+            return fields.get_mut(*field as usize).is_some_and(|value| map_reference_path(value, tail, transform));
         }
         return false;
     };
     fields.resize(fields.len().max(*field as usize + 1), Value::None);
-    authenticate_reference_path(&mut fields[*field as usize], tail)
+    map_reference_path(&mut fields[*field as usize], tail, transform)
 }
 
 fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
@@ -1681,7 +1771,7 @@ fn merge_region_values(target: &mut Value, incoming: Value) {
 
 fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
     match value {
-        Value::Reference { dependencies } => logical_regions(dependencies),
+        Value::Reference { dependencies, .. } => logical_regions(dependencies),
         Value::Region(regions) => regions.clone(),
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
             values.iter().flat_map(logical_regions).collect(),
@@ -1696,7 +1786,7 @@ fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region>
 /// callable's own resident slot. Only an actual store connects their contents.
 fn contained_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
     match value {
-        Value::Reference { dependencies } => contained_regions(dependencies),
+        Value::Reference { dependencies, .. } => contained_regions(dependencies),
         Value::Closure { regions, .. } => regions.clone(),
         Value::CallableResident { footprint, resident_captures } => contained_regions(footprint).into_iter()
             .chain(resident_captures.iter().flat_map(|operand| contained_regions(&operand.value))).collect(),
@@ -1758,7 +1848,7 @@ fn type_has_variant_layout(signatures: &crate::ElaboratedInterface, ty: &Type, a
 
 fn frame_independent_value(value: &Value) -> bool {
     match value {
-        Value::Reference { dependencies } => frame_independent_value(dependencies),
+        Value::Reference { dependencies, .. } => frame_independent_value(dependencies),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::FrameIndependent | Value::ExternalBorrowed => true,
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
@@ -1792,7 +1882,7 @@ fn capture_dependency_roots(value: &Value) -> BTreeSet<String> {
 
 fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
     match value {
-        Value::Reference { dependencies } => collect_borrowed_roots(dependencies, roots),
+        Value::Reference { dependencies, .. } => collect_borrowed_roots(dependencies, roots),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::Borrowed { root, .. } => {
             roots.insert(root.clone());
@@ -1913,7 +2003,7 @@ fn effect_row_contains_open_type_parameter(row: &EffectRow) -> bool {
 /// body-local borrow cannot safely be written through the merged receiver.
 fn value_contains_external_reference(value: &Value) -> bool {
     match value {
-        Value::Reference { dependencies } => value_contains_external_reference(dependencies),
+        Value::Reference { dependencies, .. } => value_contains_external_reference(dependencies),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::ExternalBorrowed => true,
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
@@ -1938,7 +2028,7 @@ fn closure_captures(value: &Value) -> Vec<Capture> {
 
 fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
     match value {
-        Value::Reference { dependencies } => collect_closure_captures(dependencies, captures),
+        Value::Reference { dependencies, .. } => collect_closure_captures(dependencies, captures),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::Closure {
             captures: values, ..
@@ -1962,6 +2052,32 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn authenticated_referent_targets_do_not_replace_lifetime_dependencies() {
+        use super::*;
+        let backing = Value::Borrowed { root: "backing".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let carrier = Value::Borrowed { root: "carrier".into(), storage: Some(2), fields: vec![], capture_path: vec![] };
+        let reference = authenticated_reference_with_targets(join(vec![backing.clone(), carrier]), Some(backing.clone()));
+        assert_eq!(reference_targets(&reference), Some(backing));
+        assert_eq!(borrowed_roots(&reference), BTreeSet::from(["backing".into(), "carrier".into()]));
+        assert!(invocations::reference_is_known(&reference));
+        let unknown = authenticated_reference_with_targets(reference.clone(), None);
+        assert!(invocations::reference_is_known(&unknown));
+        assert!(reference_targets(&unknown).is_none());
+        assert!(reference_targets(&join(vec![reference, unknown])).is_none());
+    }
+
+    #[test]
+    fn declaration_targets_preserve_only_proved_external_storage_classes() {
+        let external = declared_reference(Value::ExternalBorrowed);
+        assert_eq!(reference_targets(&declared_reference(external.clone())), Some(Value::ExternalBorrowed));
+        let local = Value::Borrowed { root: "carrier".into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let mixed = declared_reference(join(vec![external.clone(), local]));
+        assert!(reference_targets(&mixed).is_none());
+        assert_eq!(borrowed_roots(&mixed), BTreeSet::from(["carrier".into()]));
+        assert!(reference_targets(&declared_reference(join(vec![external, Value::None]))).is_none());
+    }
+
     #[test]
     fn reference_authentication_retains_all_escape_debt_and_is_invalidated_by_replacement() {
         use super::*;

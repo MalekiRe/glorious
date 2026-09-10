@@ -149,6 +149,39 @@ fn returned_referent_keeps_its_carrier_suspended() {
 }
 
 #[test]
+fn returned_referent_targets_survive_aggregate_and_capture_transfers() {
+    accepts("struct Window<'a> { storage: &'a mut i64 } fn get<'a,'b>(value: &'b mut Window<'a>) -> &'b mut i64 { &mut *value.storage } pub fn main() -> i64 { let mut backing = 40; let mut window = Window { storage: &mut backing }; let handles = (get(&mut window),); *handles.0 = 42; backing }");
+    accepts("struct Window<'a> { storage: &'a mut i64 } fn get<'a,'b>(value: &'b mut Window<'a>) -> &'b mut i64 { &mut *value.storage } pub fn main() -> i64 { let mut backing = 40; let mut window = Window { storage: &mut backing }; let target = get(&mut window); let update = move (target) { *target = 42; }; update(); backing }");
+}
+
+#[test]
+fn alternative_referent_targets_keep_weak_replacement_provenance() {
+    accepts("struct Slot<'a> { value: &'a i64 } fn choose<'a,'b>(left: &'b mut Slot<'a>, right: &'b mut Slot<'a>, pick: i64) -> &'b mut Slot<'a> { handle pick { 0 => left, _ => right } } pub fn main() -> i64 { let first = 40; let second = 1; let replacement = 42; let mut left = Slot { value: &first }; let mut right = Slot { value: &second }; let mut pick = 1; pick = 0; let target = choose(&mut left, &mut right, pick); *target = Slot { value: &replacement }; *left.value + *right.value - 1 }");
+    rejects("struct Slot<'a> { value: &'a i64 } fn choose<'a,'b>(left: &'b mut Slot<'a>, right: &'b mut Slot<'a>, pick: i64) -> &'b mut Slot<'a> { handle pick { 0 => left, _ => right } } pub fn main() -> i64 { let first = 40; let second = 1; let mut replacement = 42; let mut left = Slot { value: &first }; let mut right = Slot { value: &second }; let mut pick = 1; pick = 0; let target = choose(&mut left, &mut right, pick); *target = Slot { value: &replacement }; replacement = 43; *left.value + *right.value - 1 }", &["G5007"]);
+}
+
+#[test]
+fn helper_replacement_cannot_leave_a_stale_reference_target() {
+    accepts("struct Slot<'a> { value: &'a i64 } fn set<'a>(slot: &mut Slot<'a>, value: &'a i64) { slot.value = value; } pub fn main() -> i64 { let first = 40; let second = 2; let mut slot = Slot { value: &first }; let old = slot.value; set(&mut slot, &second); *old + *slot.value }");
+    rejects("struct Slot<'a> { value: &'a i64 } fn set<'a>(slot: &mut Slot<'a>, value: &'a i64) { slot.value = value; } pub fn main() -> i64 { let first = 40; let mut second = 42; let mut slot = Slot { value: &first }; set(&mut slot, &second); second = 43; *slot.value }", &["G5007"]);
+}
+
+#[test]
+fn helper_reference_stores_respect_directional_outlives_contracts() {
+    accepts("struct Slot<'a> { value: &'a i64 } fn set<'a,'b>(slot: &mut Slot<'b>, value: &'a i64) where 'a: 'b { slot.value = value; } pub fn main() -> i64 { let first = 40; let second = 42; let mut slot = Slot { value: &first }; set(&mut slot, &second); *slot.value }");
+}
+
+#[test]
+fn helper_reference_stores_retain_longer_input_loans() {
+    rejects("struct Slot<'a> { value: &'a i64 } fn set<'a,'b>(slot: &mut Slot<'b>, value: &'a i64) where 'a: 'b { slot.value = value; } pub fn main() -> i64 { let first = 40; let mut second = 42; let mut slot = Slot { value: &first }; set(&mut slot, &second); second = 43; *slot.value }", &["G5007"]);
+}
+
+#[test]
+fn generic_borrowed_variant_payloads_keep_their_external_storage() {
+    accepts("enum Outcome<T,E> { Ok(T), Err(E) } fn copied<'a,T,E>(value: Outcome<&'a T,E>) -> Outcome<T,E> where T: Use<[0,*]> { handle value { Outcome::Ok(item) => Outcome::Ok(*item), Outcome::Err(error) => Outcome::Err(error) } } pub fn main() -> i64 { let backing = 42; let value: Outcome<&i64,()> = Outcome::Ok(&backing); handle copied(value) { Outcome::Ok(item) => item, Outcome::Err(_) => 0 } }");
+}
+
+#[test]
 fn imported_generic_reference_carriers_preserve_input_regions() {
     accepts_with_dependency("use views::{Window, get, relay}; pub fn main() -> i64 { let backing = 42; let mut carrier = Window { storage: &backing }; let result = get(relay(&mut carrier)); *result }",
         Some("pub struct Window<'a,T> { pub storage: &'a T } pub fn get<'a,T>(value: &Window<'a,T>) -> &'a T { value.storage } pub fn relay<'a,T>(value: &'a mut T) -> &'a mut T { value }"));

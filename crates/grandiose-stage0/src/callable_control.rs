@@ -111,6 +111,12 @@ impl ControlValue {
 pub enum ControlStorage {
     Slot { site: ControlSite, name: String },
     Field { base: Box<ControlStorage>, index: u32 },
+    /// The referent of a typed symbolic input reference is not the slot
+    /// holding its handle. Consumers instantiate this identity through the
+    /// ordinary checked input projection; it supplies no caller address.
+    /// Keep the symbolic payload indirect: this storage enum inhabits every
+    /// recursive evaluator value, including values with no referent identity.
+    Referent { reference: Box<ControlOrigin>, ty: Box<Type> },
 }
 
 fn resident(mut value: ControlValue, storage: ControlStorage) -> ControlValue {
@@ -1153,7 +1159,7 @@ fn input_value(origin: ControlOrigin, ty: Type, signature: &CallableSignature) -
                 [crate::GenericArgument::Type(_)]
             )
     });
-    ControlValue {
+    with_symbolic_referent(ControlValue {
         storage: None,
         shape: if label {
             ControlValueShape::Label(ControlLabelTarget::Symbolic(origin.clone()))
@@ -1162,7 +1168,28 @@ fn input_value(origin: ControlOrigin, ty: Type, signature: &CallableSignature) -
         },
         origin,
         ty,
+    })
+}
+
+fn with_symbolic_referent(mut value: ControlValue) -> ControlValue {
+    fn input_origin(origin: &ControlOrigin) -> bool {
+        match origin {
+            ControlOrigin::Parameter(_) | ControlOrigin::Capture(_) => true,
+            ControlOrigin::Field { base, .. } => input_origin(base),
+            _ => false,
+        }
     }
+    if let Type::Reference { referent, .. } = &value.ty
+        && matches!(value.shape, ControlValueShape::Unknown) && input_origin(&value.origin) {
+        let referent = with_symbolic_referent(ControlValue {
+            origin: ControlOrigin::Field { base: Box::new(value.origin.clone()), index: crate::core::REFERENCE_PATH_DEREF },
+            storage: Some(ControlStorage::Referent { reference: Box::new(value.origin.clone()), ty: Box::new(value.ty.clone()) }),
+            ty: (**referent).clone(),
+            shape: ControlValueShape::Unknown,
+        });
+        value.shape = ControlValueShape::Borrow(Box::new(referent));
+    }
+    value
 }
 fn same_interface(left: &ElaboratedInterface, right: &ElaboratedInterface) -> bool {
     left.definitions == right.definitions
@@ -2111,7 +2138,7 @@ fn project(value: &ControlValue, index: u32, ty: &Type) -> ControlValue {
             shape: ControlValueShape::Unknown,
         });
     projected.storage = value.storage.clone().map(|base| ControlStorage::Field { base: Box::new(base), index });
-    projected
+    with_symbolic_referent(projected)
 }
 fn erase_binders(pattern: &CorePattern) -> CorePattern {
     let mut pattern = pattern.clone();

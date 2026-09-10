@@ -603,6 +603,22 @@ mod tests {
     }
 
     #[test]
+    fn stored_reference_edges_use_representation_types_without_erasing_mutability() {
+        let mut mir = fixture();
+        let reference = |lifetime, mutability, referent| Type::Reference {
+            lifetime, mutability, referent: Box::new(referent),
+        };
+        mir.values[1].ty = reference(crate::Lifetime::Generic(0), crate::Mutability::Shared, Type::Scalar(ScalarType::I64));
+        mir.values[2].ty = reference(crate::Lifetime::Generic(1), crate::Mutability::Shared, Type::Scalar(ScalarType::I64));
+        let operation = ControlCapabilityOperation::Assign { place: ControlPlace::Local(ControlValue(1)), value: ControlValue(2) };
+        assert!(operation.validate(&mir, &Type::Unit).unwrap());
+        mir.values[2].ty = reference(crate::Lifetime::Generic(1), crate::Mutability::Unique, Type::Scalar(ScalarType::I64));
+        assert!(!operation.validate(&mir, &Type::Unit).unwrap());
+        mir.values[2].ty = reference(crate::Lifetime::Generic(1), crate::Mutability::Shared, Type::Scalar(ScalarType::Bool));
+        assert!(!operation.validate(&mir, &Type::Unit).unwrap());
+    }
+
+    #[test]
     fn rejects_phi_argument_type_mismatch() {
         let mut mir = fixture();
         let ControlTerminator::Goto(edge) = &mut mir.blocks[1].terminator else {

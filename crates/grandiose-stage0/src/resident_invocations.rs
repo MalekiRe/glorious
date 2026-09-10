@@ -76,6 +76,7 @@ pub(crate) trait Inputs {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct Store<V> {
     pub destination: V,
+    pub destination_fields: Option<Operand<Vec<u32>>>,
     pub source: V,
     pub source_is_callable: bool,
 }
@@ -168,7 +169,11 @@ pub(crate) fn derive<D: Inputs>(
             .iter()
             .map(|operand| operand.ty.clone())
             .collect::<Vec<_>>();
-        let transfers = regions::parameter_transfers(signatures, &types)
+        let outlives = match &callable.ty {
+            Type::Callable { contract, .. } => contract.residual.where_outlives.as_slice(),
+            _ => &[],
+        };
+        let transfers = regions::parameter_transfers_with_outlives(signatures, &types, outlives)
             .into_iter()
             .filter(|transfer| {
                 include_explicit || transfer.destination < count || transfer.source < count
@@ -216,6 +221,7 @@ fn add_stores<D: Inputs>(
         };
         stores.insert(Store {
             destination,
+            destination_fields: transfer.destination_fields.map(|(value, ty)| Operand { ty, value }),
             source,
             source_is_callable,
         });
@@ -478,6 +484,7 @@ mod tests {
         assert_eq!(
             relations.stores,
             vec![Store {
+                destination_fields: None,
                 destination: (1, vec![crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT, 0]),
                 source: (2, vec![]),
                 source_is_callable: false

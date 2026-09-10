@@ -4,6 +4,14 @@ use crate::{
     InterfaceSet, LexedFile, PackageKey,
 };
 
+#[test]
+fn symbolic_referent_storage_keeps_recursive_values_compact() {
+    // A referent must not inline Type into every evaluator stack frame. The
+    // ordinary slot is still the largest identity payload (plus enum padding).
+    assert!(std::mem::size_of::<ControlStorage>() <= std::mem::size_of::<(ControlSite, String)>()
+        + 2 * std::mem::size_of::<usize>());
+}
+
 struct Fixture {
     bodies: BTreeMap<DefKey, TypedBody>,
     signatures: BTreeMap<DefKey, CallableSignature>,
@@ -511,6 +519,35 @@ fn a_failed_work_checkpoint_returns_no_partial_control_product() {
     assert!(matches!(result, Err("cancelled")));
     assert_eq!(checkpoints, 3);
     assert!(charged > 0);
+}
+
+#[test]
+fn symbolic_input_referents_supply_a_getter_contract_after_mutation() {
+    let fixture = Fixture::new("#![no_std]
+        struct Slot<'a> { value: &'a i64 }
+        struct Carrier<'a,'b> { target: &'b mut Slot<'a> }
+        fn get<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> { &mut *carrier.target }
+        fn after<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> {
+            let mut marker = 0; marker = 1; get(carrier)
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let owner = fixture.names["after"];
+    assert!(summaries.get(CallableBrand::Named(owner)).unwrap().alternatives.iter()
+        .any(|alternative| matches!(alternative.outcome, ControlOutcome::Unknown(ControlUnknown::Unsupported("mutation")))));
+    let call = fixture.call_to(owner, fixture.names["get"]);
+    let bound = summaries.bind(&inputs).unwrap();
+    let control = bound.body(owner).unwrap();
+    let invocation = control.get(call).unwrap();
+    assert!(invocation.normal && !invocation.unknown);
+    assert_eq!(invocation.returns.len(), 1);
+    let payloads::PayloadSource::Reborrow { input, fields } = &invocation.returns[0].source else {
+        panic!("getter must retain its symbolic reborrow relation: {:?}", invocation.returns);
+    };
+    assert!(fields.is_empty());
+    assert_eq!(input.source, payloads::PayloadSource::Argument {
+        index: 0, path: vec![crate::core::REFERENCE_PATH_DEREF, 0],
+    });
 }
 
 #[test]

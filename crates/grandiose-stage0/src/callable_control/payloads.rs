@@ -320,6 +320,20 @@ fn value_path(origin: &ControlOrigin, input: &ControlValue) -> Option<Vec<u32>> 
 /// borrow's place. This traverses the shared abstract value, never Core.
 fn reborrow_path(value: &ControlValue, input: &ControlValue) -> Option<(Vec<u32>, Vec<u32>, Type)> {
     let ControlValueShape::Borrow(target) = &value.shape else { return None; };
+    // An opaque nominal input need not materialize every field in its value
+    // shape. Its typed reference projections still retain the exact symbolic
+    // referent identity established by the input/field producer.
+    let mut storage = target.storage.as_ref();
+    let mut fields = vec![];
+    while let Some(ControlStorage::Field { base, index }) = storage {
+        fields.push(*index);
+        storage = Some(base);
+    }
+    if let Some(ControlStorage::Referent { reference, ty }) = storage
+        && let Some(path) = value_path(reference, input) {
+        fields.reverse();
+        return Some((path, fields, (**ty).clone()));
+    }
     let mut pending = vec![(input, vec![])];
     while let Some((input, path)) = pending.pop() {
         match &input.shape {
