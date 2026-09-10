@@ -17,9 +17,50 @@ fn request(source: &str, level: &str) -> CompilationRequest {
 fn run(source: &str, expected: i64) {
     for level in ["0", "2"] {
         let artifact = StageZeroCompiler::new().compile(request(source, level))
-            .unwrap_or_else(|error| panic!("O{level}: {:#?}", error.diagnostics())).artifact.unwrap();
+            .unwrap_or_else(|error| panic!("O{level}: {source}: {:#?}", error.diagnostics())).artifact.unwrap();
         assert_eq!(artifact.run_i64().unwrap(), expected, "O{level} fresh");
         assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), expected, "O{level} decoded");
+    }
+}
+
+#[test]
+fn returned_capture_references_compose_through_receivers_and_products() {
+    for source in [
+        "pub fn main() -> i64 { let value = 42; let reference = &value; let task = move (reference) { reference }; let result = (&task)(); *result }",
+        "fn keep<T>(value:T) -> T { value } fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let value = 42; let (task,) = keep((make(&value),)); let result = task(); *result }",
+        "fn make<'a>(left:&'a i64, right:&'a i64) -> () -> (&'a i64,&'a i64) { move (left,right) { (left,right) } } pub fn main() -> i64 { let left = 20; let right = 22; let (a,b) = make(&left,&right)(); *a + *b }",
+        "fn make<'a>(value:&'a (i64,i64)) -> () -> &'a i64 { move (value) { &value.1 } } pub fn main() -> i64 { let value = (0,42); *make(&value)() }",
+        "fn make<'a>(value:&'a mut i64) -> () -> &'a mut i64 { move (value) { value } } pub fn main() -> i64 { let mut value = 41; let result = make(&mut value)(); *result = *result + 1; *result }",
+        "enum Choice { Left, Right } fn make<'a>(choice:Choice, left:&'a i64, right:&'a i64) -> () -> &'a i64 { move (choice,left,right) { handle choice { Choice::Left => left, Choice::Right => right } } } pub fn main() -> i64 { let left = 20; let right = 22; *make(Choice::Left,&left,&right)() + *make(Choice::Right,&left,&right)() }",
+    ] { run(source, 42); }
+}
+
+#[test]
+fn returned_capture_references_retain_escape_and_mutation_obligations() {
+    for (source, code) in [
+        ("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } fn bad() -> &i64 { let value = 42; make(&value)() } pub fn main() -> i64 { *bad() }", "G5013"),
+        ("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let mut value = 42; let result = make(&value)(); value = 0; *result }", "G5007"),
+    ] {
+        for level in ["0", "2"] {
+            let diagnostics = StageZeroCompiler::new().compile(request(source, level))
+                .expect_err("returned capture must keep its backing loan").diagnostics();
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == code), "{source}: {diagnostics:#?}");
+            let represented = source.find("make(&value)()").unwrap();
+            assert!(!diagnostics.iter().any(|diagnostic| diagnostic.code == "G5023"
+                && diagnostic.primary.as_ref().is_some_and(|span|
+                    span.start as usize >= represented && (span.start as usize) < represented + "make(&value)()".len())),
+                "the represented return must reach the actual resource obligation: {diagnostics:#?}");
+        }
+    }
+}
+
+#[test]
+fn returned_reference_provenance_does_not_grant_erased_receiver_authority() {
+    let source = "fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let value = 42; let task = make(&value); *(&task)() }";
+    for level in ["0", "2"] {
+        let diagnostics = StageZeroCompiler::new().compile(request(source, level))
+            .expect_err("the erased owned callable contract supplies no borrowed receiver permission").diagnostics();
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4180"), "{diagnostics:#?}");
     }
 }
 

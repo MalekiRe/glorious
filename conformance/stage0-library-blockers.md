@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 111 verification below,
+Updated from the current source and cache 112 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,28 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 112 admits captured-reference returns through the shared invocation
+relation's complete reference-coverage proof. Ownership and escape authenticate
+every non-static returned leaf against their existing input snapshots; incomplete
+observations cannot authorize opaque results. Invocation events now retain the
+evaluated receiver, while dispatch, fusion and payloads use a shared view through
+its borrows. This repairs the previous capture-path coordinate mismatch.
+
+The original factory-reference failure now passes unchanged, along with a unique
+reference transfer, across fresh/decoded VM, all-native and all three mixed
+partitions at native O0/O2. Source composition and escape/mutation negatives pass
+at source O0/O2. The checkpoint passes 354 unit, 28 borrowed-callable, 38 callable-
+control, 34 native and 22 request tests. Fusion remains 27 passes / one active
+native `InstallHandlerOwned` failure. Exact gates, including the corrected stale
+cache-test literal, are in `implementation-progress.md`.
+
+Arbitrary opaque callbacks, complete nominal/array result projection, general
+borrowed-referent sidecars, full helper-family and mandatory-tail activation fusion,
+cross-frame resumptions and guarded storage remain open. No broad source-library
+sweep was repeated; its latest matrix remains cache 105 above.
+
+The following cache 111 and earlier checkpoints are historical.
 
 Cache 111 / native ABI 10 implements typed generated capture loans across VM/native
 entry. Both engines share actual capture homes and initialization state; public

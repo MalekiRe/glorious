@@ -18,24 +18,31 @@ impl Analyzer<'_> {
         owner: Option<&str>,
         span: Span,
     ) {
-        let Some(control) = self.continuations.invocation(call).cloned() else {
-            return;
-        };
         let CoreKind::Call {
-            callee, arguments, ..
-        } = &self.body.expression(call).kind
+            callee, arguments, reference_shape, ..
+        } = self.body.expression(call).kind.clone()
         else {
             return;
         };
-        let callable = invocations::Value::callable(*callee, owner);
+        let result_ty = self.body.expression(call).ty.clone();
+        let Some(control) = self.continuations.invocation(call).cloned() else {
+            self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
+            return;
+        };
+        let callable = invocations::Value::callable(callee, owner);
         let arguments = arguments
             .iter()
             .map(|id| invocations::Value::core(*id))
             .collect::<Vec<_>>();
+        let empty = ElaboratedInterface::default();
+        let returned = control.resolve_returns(&result_ty, self.signatures.unwrap_or(&empty), &callable, &arguments, self);
+        if !returned.references_complete {
+            self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
+        }
         // Partial observations cannot suppress a normal path or authorize
         // disposal. They can still add positively observed result origins.
         if control.unknown || control.terminal_operation || control.cancellation {
-            self.preserve_invocation_returns(call, &control.returns, &callable, &arguments);
+            self.preserve_invocation_returns(call, returned.payloads);
             return;
         }
         let incoming = self.capture_continuation();
@@ -68,7 +75,7 @@ impl Analyzer<'_> {
         }
         self.restore_continuation(&incoming);
         if control.normal {
-            self.preserve_invocation_returns(call, &control.returns, &callable, &arguments);
+            self.preserve_invocation_returns(call, returned.payloads);
         }
         if control.outer_transfer {
             let abandoned = self.minimum_bindings.keys().cloned().collect();
@@ -83,9 +90,7 @@ impl Analyzer<'_> {
     fn preserve_invocation_returns(
         &mut self,
         call: CoreId,
-        returns: &[crate::callable_control::InvocationPayload],
-        callable: &invocations::Value,
-        arguments: &[invocations::Value],
+        returns: Vec<crate::callable_control::ResolvedPayload<invocations::Value>>,
     ) {
         if returns.is_empty() { return; }
         // Snapshot the declared result before installing an additional
@@ -93,7 +98,6 @@ impl Analyzer<'_> {
         self.preserve_expression_result(call, call);
         let result = Self::result_owner(call);
         for payload in returns {
-            let payload = crate::callable_control::resolve_payload(payload, callable, arguments, self);
             self.record_known_payload_origins(&result, payload, call);
         }
         if self.reference_origins.keys().chain(self.logical.origins.keys())

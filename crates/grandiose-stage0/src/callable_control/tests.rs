@@ -528,6 +528,34 @@ fn an_unconditional_coverage_gap_retains_observed_captured_return_dependencies()
 }
 
 #[test]
+fn borrowed_invocation_events_keep_the_evaluated_receiver_projection() {
+    let fixture = Fixture::new("#![no_std] fn main() -> i64 {
+        let value = 42; let reference = &value;
+        let task = move (reference) { reference };
+        let result = (&task)(); *result
+    }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let owner = fixture.names["main"];
+    let body = &fixture.bodies[&owner];
+    let call = body.expressions.iter().enumerate().find_map(|(index, expression)|
+        matches!(expression.kind, CoreKind::Call { .. }).then_some(CoreId(index as u32))).unwrap();
+    let control = bound.body(owner).unwrap();
+    let invocation = control.get(call).unwrap();
+    assert!(invocation.normal && !invocation.unknown);
+    assert!(matches!(&invocation.returns[0].source, payloads::PayloadSource::Capture { receiver_path, .. }
+        if receiver_path == &[crate::core::REFERENCE_PATH_DEREF]));
+    assert!(summaries.get(CallableBrand::Named(owner)).unwrap().alternatives.iter()
+        .flat_map(|path| &path.events).any(|event| matches!(event, ControlEvent::Invoke {
+            callee: ControlValue { shape: ControlValueShape::Borrow(_), .. }, ..
+        })));
+    assert!(matches!(bound.fusion_target(CallableBrand::Named(owner), &[], CallableBrand::Named(owner), call),
+        Some(FusionTarget::Callable { brand: CallableBrand::Closure(_), .. })),
+        "code selection must use the invocation view without erasing the receiver input");
+}
+
+#[test]
 fn payload_projection_shares_explicit_and_captured_inputs_without_erasing_unknowns() {
     use crate::resident_invocations::{CapturedInputs, Inputs, Operand};
     type Value = (u32, Vec<u32>);
@@ -623,4 +651,55 @@ fn payload_projection_shares_explicit_and_captured_inputs_without_erasing_unknow
         ),
         ResolvedPayload::Unknown(Type::Unit)
     ));
+}
+
+#[test]
+fn returned_reference_coverage_requires_every_path_and_authenticated_input() {
+    use crate::resident_invocations::{CapturedInputs, Operand};
+    struct Domain { capture_known: bool, reference_known: bool }
+    impl PayloadInputs for Domain {
+        type Value = ();
+        fn project(&self, _: &(), path: &[u32]) -> Option<()> { (!path.contains(&99)).then_some(()) }
+        fn captures(&self, _: &Operand<()>) -> CapturedInputs<()> {
+            CapturedInputs { operands: vec![Operand { ty: Type::Unit, value: () }], unresolved: !self.capture_known }
+        }
+        fn reborrow(&self, _: &(), _: &[u32]) -> Option<()> { Some(()) }
+    }
+    impl ReferenceInputs for Domain {
+        fn reference_known(&self, _: &()) -> bool { self.reference_known }
+    }
+    let signatures = ElaboratedInterface::default();
+    let reference = Type::Reference { mutability: crate::Mutability::Shared,
+        lifetime: crate::Lifetime::Elided, referent: Box::new(Type::Unit) };
+    let capture = InvocationPayload { ty: reference.clone(), source: payloads::PayloadSource::Capture {
+        receiver_path: vec![], callable_ty: Type::Unit, resident_ty: Type::Unit, path: vec![],
+    } };
+    let argument = InvocationPayload { ty: reference.clone(), source: payloads::PayloadSource::Argument { index: 0, path: vec![] } };
+    let result = Type::Tuple(vec![reference.clone(), reference.clone()]);
+    let mut control = InvocationControl { normal: true, returns: vec![InvocationPayload {
+        ty: result.clone(), source: payloads::PayloadSource::Aggregate(vec![capture.clone(), argument]),
+    }], ..Default::default() };
+    let domain = Domain { capture_known: true, reference_known: true };
+    assert!(control.resolve_returns(&result, &signatures, &(), &[()], &domain).references_complete);
+    control.unknown = true;
+    let partial = control.resolve_returns(&result, &signatures, &(), &[()], &domain);
+    assert!(!partial.references_complete);
+    assert_eq!(partial.payloads.len(), 1, "positive dependencies survive a coverage gap");
+    control.unknown = false;
+    for incomplete in [Domain { capture_known: false, reference_known: true },
+        Domain { capture_known: true, reference_known: false }] {
+        assert!(!control.resolve_returns(&result, &signatures, &(), &[()], &incomplete).references_complete);
+    }
+    assert!(!control.resolve_returns(&result, &signatures, &(), &[], &domain).references_complete);
+    control.returns.push(InvocationPayload::unknown(result.clone()));
+    assert!(!control.resolve_returns(&result, &signatures, &(), &[()], &domain).references_complete);
+    control.returns = vec![capture];
+    control.returns[0].ty = Type::Unit;
+    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
+    control.returns[0].ty = reference.clone();
+    let payloads::PayloadSource::Capture { path, .. } = &mut control.returns[0].source else { unreachable!() };
+    path.push(99);
+    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
+    control.returns.clear();
+    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
 }

@@ -19,6 +19,7 @@ use std::{collections::BTreeMap, sync::Arc};
 mod tests;
 mod payloads;
 pub(crate) use payloads::PayloadInputs;
+pub(crate) use payloads::ReferenceInputs;
 pub(crate) use payloads::{InvocationPayload, ResolvedPayload, resolve_payload};
 
 #[derive(Clone, Copy)]
@@ -91,6 +92,21 @@ pub struct ControlValue {
     pub shape: ControlValueShape,
 }
 
+impl ControlValue {
+    /// Invocation selects code through a borrowed receiver without replacing
+    /// the evaluated input snapshot. Payloads need the path back through that
+    /// snapshot; code-selection consumers need only the selected value.
+    fn invocation_receiver(&self) -> (&Self, Vec<u32>) {
+        let mut value = self;
+        let mut path = vec![];
+        while let ControlValueShape::Borrow(referent) = &value.shape {
+            path.push(crate::core::REFERENCE_PATH_DEREF);
+            value = referent;
+        }
+        (value, path)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlStorage {
     Slot { site: ControlSite, name: String },
@@ -161,6 +177,8 @@ pub enum ControlEvent {
     },
     Invoke {
         site: ControlSite,
+        /// The evaluated receiver, including borrow wrappers. Dispatch may
+        /// look through it; input payload paths remain relative to this value.
         callee: ControlValue,
         arguments: Vec<ControlValue>,
     },
@@ -479,6 +497,7 @@ impl InvocationControl {
     }
 
     fn observe_callee(&mut self, callable: CallableBrand, callee: Option<&ControlValue>) {
+        let callee = callee.map(|value| value.invocation_receiver().0);
         if let Some(ControlValue { shape: ControlValueShape::Label(
             ControlLabelTarget::Lexical { brand, activation }), .. }) = callee
             && activation.calls.is_empty() && activation.location.callable == callable {
@@ -594,7 +613,7 @@ impl BoundControlSummaries<'_> {
                     ControlEvent::Invoke { site: actual, callee, .. } if actual == site => Some(callee),
                     _ => None,
                 })?;
-                let target = match &callee.shape {
+                let target = match &callee.invocation_receiver().0.shape {
                     ControlValueShape::Callable { brand, generic_arguments, labels, .. } => FusionTarget::Callable {
                         brand: *brand, generic_arguments: generic_arguments.clone(), labels: labels.clone(),
                     },
@@ -1812,20 +1831,18 @@ impl Analyzer<'_, '_> {
         &mut self,
         frame: &Frame,
         id: CoreId,
-        mut callee: ControlValue,
+        callee: ControlValue,
         arguments: Vec<ControlValue>,
         result_ty: Type,
         mut state: State,
     ) -> Vec<State> {
-        while let ControlValueShape::Borrow(value) = callee.shape {
-            callee = *value;
-        }
         let site = frame.site(id);
         state.events.push(ControlEvent::Invoke {
             site: site.clone(),
             callee: callee.clone(),
             arguments: arguments.clone(),
         });
+        let callee = callee.invocation_receiver().0;
         match &callee.shape {
             ControlValueShape::Label(target) => {
                 let [value] = arguments.as_slice() else {

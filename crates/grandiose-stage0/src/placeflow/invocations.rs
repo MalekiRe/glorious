@@ -118,6 +118,14 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     }
 }
 
+impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
+    fn reference_known(&self, value: &Value) -> bool {
+        let (regions, loans) = self.invocation_origins(value);
+        !regions.is_empty() || !loans.is_empty()
+            || value.core.is_some_and(|core| self.external_reference_path(core))
+    }
+}
+
 impl Analyzer<'_> {
     pub(super) fn record_invocation_stores(
         &mut self,

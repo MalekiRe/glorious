@@ -53,10 +53,20 @@ fn mixed_returned_capture_references_preserve_their_backing_loan() {
     check_mixed_capture_source("fn make<'a>(value:&'a i64) -> () -> &'a i64 { move (value) { value } } pub fn main() -> i64 { let value = 42; let task = make(&value); *task() }");
 }
 
+#[test]
+fn mixed_returned_unique_capture_references_transfer_their_handle() {
+    check_mixed_capture_source("fn make<'a>(value:&'a mut i64) -> () -> &'a mut i64 { move (value) { value } } pub fn main() -> i64 { let mut value = 41; let result = make(&mut value)(); *result = *result + 1; *result }");
+}
+
 fn check_mixed_capture_source(source: &str) {
     let ir = compile(source);
     assert_eq!(ir.vm_program().run_i64().unwrap(), 42);
     assert_eq!(grandiose_stage0::decode_and_verify_program(&ir.vm_program().canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap_or_else(|error|
+            panic!("all-native O{optimization}: {source}: {error:#?}")), 42);
+    }
     for partition in 0..3 {
         let selected = ir.function_keys().iter().copied().filter(|key| {
             let captured = ir.function(*key).unwrap().captures != 0;

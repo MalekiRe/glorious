@@ -91,6 +91,55 @@ pub(crate) trait PayloadInputs {
     fn reborrow(&self, reference: &Self::Value, fields: &[u32]) -> Option<Self::Value>;
 }
 
+/// A storage-domain projection is not itself evidence that a reference has
+/// provenance. Resource consumers must authenticate the projected leaf in
+/// their existing loan/storage snapshot before it can settle a result gap.
+pub(crate) trait ReferenceInputs: PayloadInputs {
+    fn reference_known(&self, value: &Self::Value) -> bool;
+}
+
+pub(crate) struct ResolvedReturns<V> {
+    pub payloads: Vec<ResolvedPayload<V>>,
+    pub references_complete: bool,
+}
+
+impl InvocationControl {
+    /// Resolve normal results once, retaining positive dependencies even when
+    /// coverage is incomplete. Only complete invocation coverage AND every
+    /// non-static result leaf's authenticated projection discharge an opaque
+    /// declared reference contract. No return observations is not an absence
+    /// proof. Captures and explicit parameters obey the same rule.
+    pub(crate) fn resolve_returns<D: ReferenceInputs>(
+        &self, result: &Type, signatures: &ElaboratedInterface,
+        callable: &D::Value, arguments: &[D::Value], domain: &D,
+    ) -> ResolvedReturns<D::Value> {
+        let payloads = self.returns.iter()
+            .map(|payload| resolve_payload(payload, callable, arguments, domain))
+            .collect::<Vec<_>>();
+        let mut leaves = vec![];
+        let shape_known = crate::core::reference_leaf_paths(signatures, result, &mut vec![], &mut leaves).is_ok();
+        fn known<D: ReferenceInputs>(payload: &ResolvedPayload<D::Value>, path: &[u32],
+            signatures: &ElaboratedInterface, domain: &D) -> bool {
+            match payload {
+                ResolvedPayload::Inputs { ty, values } => {
+                    let mut input_leaves = vec![];
+                    crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut input_leaves).is_ok()
+                        && input_leaves.iter().any(|(fields, _)| fields == path)
+                        && !values.is_empty() && values.iter().all(|value|
+                            domain.project(value, path).is_some_and(|value| domain.reference_known(&value)))
+                }
+                ResolvedPayload::Aggregate(fields) => path.split_first().is_some_and(|(index, rest)|
+                    fields.get(*index as usize).is_some_and(|field| known(field, rest, signatures, domain))),
+                ResolvedPayload::Callable { .. } | ResolvedPayload::Unknown(_) => false,
+            }
+        }
+        let references_complete = !self.unknown && self.normal && !payloads.is_empty() && shape_known
+            && payloads.iter().all(|payload| leaves.iter().all(|(path, ty)|
+                matches!(ty, Type::Reference { lifetime: crate::Lifetime::Static, .. }) || known(payload, path, signatures, domain)));
+        ResolvedReturns { payloads, references_complete }
+    }
+}
+
 /// Instantiate one payload relation over a consumer's evaluated snapshots.
 /// Explicit and captured inputs use the same readonly projection interface as
 /// invocation stores. Missing projections remain unknown, not empty values.
@@ -300,12 +349,7 @@ impl BoundControlSummaries<'_> {
         callee: &ControlValue,
         arguments: &[ControlValue],
     ) -> InvocationPayload {
-        let mut callable = callee;
-        let mut receiver_path = vec![];
-        while let ControlValueShape::Borrow(value) = &callable.shape {
-            receiver_path.push(crate::core::REFERENCE_PATH_DEREF);
-            callable = value;
-        }
+        let (callable, receiver_path) = callee.invocation_receiver();
         // Missing receiver captures cannot establish a capture projection.
         // Explicit argument dependencies can still be retained positively.
         let captures = self.capture_inputs(callable).unwrap_or_default();

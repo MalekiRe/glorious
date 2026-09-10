@@ -640,19 +640,23 @@ impl Analyzer<'_> {
                     }
                     footprint.push(value);
                 }
-                let payloads = self.continuations.invocation(id).into_iter()
-                    .flat_map(|control| &control.returns).map(|payload|
-                        crate::callable_control::resolve_payload(payload, &callable, &values, self)).collect::<Vec<_>>();
-                let returned = payloads.into_iter().filter_map(|payload|
+                let resolved = self.continuations.invocation(id).map(|control|
+                    control.resolve_returns(&expression.ty, self.signatures, &callable, &values, self));
+                let references_complete = resolved.as_ref().is_some_and(|result| result.references_complete);
+                let returned = resolved.into_iter().flat_map(|result| result.payloads).filter_map(|payload|
                     control::known_payload(payload, &self.values, &mut self.control_captures, self.signatures)).collect::<Vec<_>>();
-                let mut result = self.reference_result_value(
+                let mut result = if matches!(reference_origin, CallReferenceOrigin::Opaque) && references_complete {
+                    // The checked invocation relation supplies the complete
+                    // result below. It is not an external/empty declaration.
+                    Value::None
+                } else { self.reference_result_value(
                     &reference_origin,
                     reference_shape,
                     &expression.ty,
                     values,
                     expression.span,
                     "call",
-                );
+                ) };
                 for (path, (footprint, resident_captures)) in callable_values {
                     let value = if resident_captures.is_empty() { join(footprint) }
                         else { Value::CallableResident { footprint: Box::new(join(footprint)), resident_captures } };

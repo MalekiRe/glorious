@@ -1608,7 +1608,6 @@ impl Analyzer<'_> {
                 let logical_arguments = arguments.clone();
                 let operands_complete = !self.continuations.is_abrupt(callee)
                     && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument));
-                self.reject_opaque_reference_result(reference_shape, &e.ty, e.span, "call");
                 if let CoreKind::Closure { environment, .. } =
                     self.body.expression(callee).kind.clone()
                 {

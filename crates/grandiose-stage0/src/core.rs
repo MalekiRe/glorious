@@ -371,8 +371,9 @@ pub struct CoreCompletionClause {
 /// Frozen provenance for a direct-reference result at a callable boundary.
 /// A reference-valued call must name every argument whose region it may
 /// forward, prove that it is external/static, or be explicitly opaque. The
-/// latter is rejected by ownership consumers rather than silently shortening
-/// a caller loan based on a callee implementation detail.
+/// latter remains an obligation for the sealed invocation/resource boundary:
+/// only a complete input relation can settle it, never a partial observation
+/// or a silently shortened caller loan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CallReferenceOrigin {
     /// The result has no direct reference component.

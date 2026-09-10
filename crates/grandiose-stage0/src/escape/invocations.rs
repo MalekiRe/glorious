@@ -76,6 +76,21 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     }
 }
 
+impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
+    fn reference_known(&self, value: &Value) -> bool {
+        fn known(value: &Value) -> bool {
+            match value {
+                Value::Borrowed { .. } | Value::ExternalBorrowed => true,
+                Value::Joined(values) | Value::Alternatives(values) =>
+                    !values.is_empty() && values.iter().all(known),
+                Value::Logical { physical, .. } => known(physical),
+                _ => false,
+            }
+        }
+        known(&self.resolved_value(value))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

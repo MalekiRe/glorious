@@ -5,6 +5,71 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 112: complete invocation-result reference coverage
+
+Normal-result projection now publishes resolved payloads and complete reference
+coverage together from the existing sealed invocation relation. Coverage requires
+complete invocation evidence and an authenticated input projection for every
+non-static reference leaf of every normal alternative. Captured and explicit
+inputs use the same rule. Missing type shapes, receiver captures, projections,
+actual input provenance or alternatives retain an opaque proof obligation.
+Partial observations still preserve their positive dependencies.
+
+Ownership and escape consume this shared resolution over their existing loan and
+storage snapshots. The former retains result aliases before releasing invocation
+temporaries; the latter checks their real backing owners at escape boundaries.
+Declared parameter-region contracts remain conservative unions; they are not
+replaced by narrower implementation observations. Core keeps its independently
+validated declaration evidence, while the bound resource phase settles the new
+complete invocation obligation. Ordinary loan lowering and independent executable
+reference/frame verification remain in use; no new runtime representation is added.
+
+Composition exposed an additional producer defect: invocation events stripped
+borrow wrappers before recording the callee, but consumers supplied the evaluated
+reference receiver. Events now retain that input; code selection, fusion,
+direct-label classification and payload projection share an explicit invocation
+view. Capture result paths therefore include the actual receiver dereferences.
+
+The original cache-111 factory-reference failure passes unchanged in the first
+focused gate (`target/returned-capture-reference-v2.log`): fresh/decoded VM and all
+three mixed partitions at native O0/O2. The subsequent focused source gate passes
+five tests (`target/returned-capture-source-v6.log`), including four positive
+receiver/product/reborrow sources and negative escape/mutation obligations at
+source O0/O2. Returning a body-local reference reports G5013; overwriting a retained
+backing owner reports G5007. An erased owned-only callable still cannot be invoked
+through a borrowed receiver; provenance does not grant G4180 receiver authority.
+
+Initial fixture scaffolding incorrectly expected that erased borrowed receiver
+to be legal; its exact source is retained as the receiver-authority rejection
+test. The valid inferred shared-receiver replacement exposed the actual event
+defect above, preserved and fixed through the producer. The v3/v4/v5 intermediate
+gates were not green; v5's temporary diagnostics were removed before verification.
+
+The final semantic/runtime gate (`target/returned-capture-final-v7.log`) passes
+all **354 unit, 28 borrowed-callable, 38 callable-control and 34 native tests**,
+none ignored. The positive source group now includes unique-handle transfer and
+branch-selected returns as well as the earlier four compositions. All six sources
+execute fresh/decoded VM at source O0/O2. Shared and unique factory-result runtime
+regressions execute fresh/decoded VM, all-native O0/O2 and three mixed partitions
+at native O0/O2. The original source-failing regression is unchanged and green.
+The existing mixed-capture composition helper also gains all-native coverage.
+
+That v7 command ended with a stale expected-cache literal in one request test:
+21 passed, one failed. Correcting the literal to match the actual cache-112
+identity gives all **22 request tests passing** in
+`target/returned-capture-cache-identity-v9.log`; no production behavior changed.
+Fusion passes **27 tests with the same one active native `InstallHandlerOwned`
+failure**, none ignored (`target/returned-capture-fusion-v8.log`). This checkpoint
+does not claim that failing target passed. Source-lock refresh and independent
+audit pass with 100 locked Glorious sources and all 11,455 public contracts still
+open; development tests are not self-hosting acceptance evidence.
+
+Cache generation is 112. Native ABI 10, bytecode 72, verifier 38 and schema 116
+are unchanged. Arbitrary opaque callbacks, complete nominal/array payload
+projection, guarded storage identities, native borrowed-referent initialization,
+native owned handlers and full fusion/resumption transfer remain open. The broad
+standard-library matrix has not been rerun by this checkpoint.
+
 ## Cache 111 / native ABI 10: mixed capture loans and initialized inspection
 
 Generated bindings now publish a typed capture/owned/value slot contract using

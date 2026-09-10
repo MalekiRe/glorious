@@ -635,10 +635,44 @@ Public external callback/result authority is unchanged.
 This supplies tested ordinary captured-callable execution in all-native and mixed
 closed graphs. General borrowed-referent initialization still needs an explicit
 generated storage contract; a reference handle's flags are not its referent's.
-The positive factory-produced callable returning a captured reference also remains
-rejected at source result-provenance freezing, before either runtime is selected.
 Native owned handlers, borrowed/cross-frame resumption transfer, full helper-family
 fusion and mandatory-tail activation fusion remain separate open obligations.
+
+## Complete normal-result reference coverage
+
+The existing body-sealed invocation product now resolves normal-result payloads
+and their reference coverage together. Complete control coverage, at least one
+represented normal result, and an authenticated projection for every non-static
+reference leaf of every return alternative are required to settle a declaration's
+opaque reference obligation. Captured and explicit inputs use the same relation.
+Missing shapes, captures, paths, input provenance or alternatives cannot establish
+coverage; positive dependencies remain available independently of that decision.
+
+Invocation events retain the evaluated receiver, including its borrow wrappers.
+The shared invocation view selects callable code without changing that input's
+coordinates. Payload projection records the receiver dereferences; code selection,
+direct-label classification and fusion query the same view. Previously, unwrapping
+the receiver before publishing the event silently made capture paths relative to
+the referent while consumers supplied the original reference handle.
+
+PlaceFlow authenticates the projected leaves against its existing loan/region
+snapshot and installs the resolved result aliases before releasing invocation
+temporaries. EscapeFlow consumes the same resolution rule over its existing
+storage values and retains the returned reference's actual backing owner. Neither
+consumer reconstructs closure code or turns an opaque declaration into an external
+reference. Ordinary declared parameter-region contracts remain conservative input
+unions; body-derived observations cannot erase them.
+
+Core's reference fields remain declaration evidence, not a forged captured-field
+ABI. Core validation still checks that evidence; the bound source resource phase
+settles its remaining invocation obligations. Lowering consumes the resulting
+ordinary loan products, and decoded/executable verification retains its independent
+reference and frame-provenance checks. No parallel source walker or new runtime
+reference representation is introduced.
+
+This admits the represented factory-produced callable returning a captured loan.
+It does not establish arbitrary opaque callbacks, complete nominal/array payload
+projection, guarded storage identities, or native borrowed-referent sidecars.
 
 ## Pattern inspection and resident initialization
 
