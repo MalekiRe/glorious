@@ -497,6 +497,8 @@ pub(crate) fn call_reference_shape(
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallReferencePath {
+    /// Reference leaves in the result, including residents reached through
+    /// explicit dereference components. These describe contents, not addresses.
     pub result_fields: Vec<u32>,
     pub argument: u32,
     /// Structural field indices, with REFERENCE_PATH_DEREF separating a
@@ -16221,7 +16223,7 @@ pub(crate) fn callable_reference_origin_from_contract(
     result: &Type,
 ) -> CallReferenceOrigin {
     let mut result_leaves = vec![];
-    let mut complete = reference_leaf_paths(signatures, result, &mut vec![], &mut result_leaves).is_ok();
+    let mut complete = reachable_reference_leaf_paths(signatures, result, &mut result_leaves, true).is_ok();
     if result_leaves.is_empty() {
         return if complete { CallReferenceOrigin::None } else { CallReferenceOrigin::Opaque };
     }
@@ -16308,26 +16310,42 @@ pub(crate) fn input_reference_leaf_paths(
     ty: &Type,
     leaves: &mut Vec<(Vec<u32>, Type)>,
 ) -> Result<(), ()> {
+    reachable_reference_leaf_paths(signatures, ty, leaves, false)
+}
+
+fn reachable_reference_leaf_paths(
+    signatures: &ElaboratedInterface,
+    ty: &Type,
+    leaves: &mut Vec<(Vec<u32>, Type)>,
+    result: bool,
+) -> Result<(), ()> {
     fn visit(signatures: &ElaboratedInterface, ty: &Type, prefix: &[u32],
-        active: &mut Vec<Type>, leaves: &mut Vec<(Vec<u32>, Type)>) -> Result<(), ()> {
-        if active.contains(ty) { return Ok(()); }
+        active: &mut Vec<Type>, leaves: &mut Vec<(Vec<u32>, Type)>, result: bool) -> Result<(), ()> {
+        if active.contains(ty) { return if result { Err(()) } else { Ok(()) }; }
+        if let Type::Nominal { definition, .. } = ty
+            && active.iter().any(|previous| matches!(previous,
+                Type::Nominal { definition: earlier, .. } if earlier == definition)
+                && reference_layout_weight(ty) >= reference_layout_weight(previous)) {
+            return Err(());
+        }
         active.push(ty.clone());
         let mut direct = vec![];
-        let complete = reference_leaf_paths_active(signatures, ty, &mut vec![], &mut direct,
-            &mut std::collections::BTreeMap::new(), true).is_ok();
+        let mut complete = reference_leaf_paths_active(signatures, ty, &mut vec![], &mut direct,
+            &mut std::collections::BTreeMap::new(), !result).is_ok();
         for (fields, leaf) in direct {
             let mut path = prefix.to_vec();
             path.extend(fields);
             leaves.push((path.clone(), leaf.clone()));
             if let Type::Reference { referent, .. } = leaf {
                 path.push(REFERENCE_PATH_DEREF);
-                let _ = visit(signatures, &referent, &path, active, leaves);
+                let nested = visit(signatures, &referent, &path, active, leaves, result).is_ok();
+                if result { complete &= nested; }
             }
         }
         active.pop();
         if complete { Ok(()) } else { Err(()) }
     }
-    visit(signatures, ty, &[], &mut vec![], leaves)
+    visit(signatures, ty, &[], &mut vec![], leaves, result)
 }
 
 /// Discover direct reference leaves through the sealed structural shapes that
@@ -16964,6 +16982,49 @@ fn closure_scalar(name: &str) -> Option<ScalarType> {
 #[cfg(test)]
 mod invariant_call_lifetime_tests {
     use super::*;
+
+    #[test]
+    fn returned_reference_contracts_retain_nested_residents_and_generic_gaps() {
+        let signatures = ElaboratedInterface::default();
+        let borrow = |ty| Type::Reference { mutability: Mutability::Shared,
+            lifetime: Lifetime::Generic(0), referent: Box::new(ty) };
+        let stored = inner(Lifetime::Generic(1));
+        let result = borrow(Type::Tuple(vec![stored.clone()]));
+        let outer = CallReferencePath { result_fields: vec![], argument: 0, argument_fields: vec![] };
+        let resident = CallReferencePath { result_fields: vec![REFERENCE_PATH_DEREF, 0],
+            argument: 0, argument_fields: vec![REFERENCE_PATH_DEREF, 0] };
+        assert_eq!(callable_reference_origin_from_contract(&signatures, &[result.clone()], &result),
+            CallReferenceOrigin::Paths(vec![outer.clone(), resident]));
+        let generic = borrow(Type::Generic(2));
+        assert_eq!(callable_reference_origin_from_contract(&signatures, &[generic.clone()], &generic),
+            CallReferenceOrigin::Partial(vec![outer.clone()]),
+            "an open referent must be revisited after its caller type is known");
+        assert_eq!(callable_reference_origin_from_contract(&signatures,
+            &[borrow(Type::Scalar(ScalarType::I64))], &result),
+            CallReferenceOrigin::Partial(vec![outer]),
+            "the outer lifetime cannot authenticate an unrelated inner region");
+    }
+
+    #[test]
+    fn recursive_return_residents_retain_finite_paths_without_claiming_complete_coverage() {
+        for source in [
+            "struct Link<'a> { next: &'a Link<'a> } fn borrow<'a>(value: &'a Link<'a>) -> &'a Link<'a> { value }",
+            "struct Link<'a,T> { next: &'a Link<'a,(T,)> } fn borrow<'a,T>(value: &'a Link<'a,T>) -> &'a Link<'a,T> { value }",
+        ] {
+            let package = crate::PackageKey("recursive-reference-results@0.1.0".into());
+            let lexed = crate::LexedFile::lex(crate::FileKey::new(&package, "src/main.glorious"), source);
+            let scan = crate::DeclarationScan::scan(&lexed, source);
+            let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+            let signatures = ElaboratedInterface::elaborate(&interface);
+            assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+            let definition = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some("borrow")).unwrap();
+            let ElaboratedHeader::Callable(contract) = &signatures.definitions[&definition.key] else { panic!("callable contract"); };
+            let origin = callable_reference_origin_from_contract(&signatures, &contract.parameters, &contract.result);
+            assert!(matches!(origin, CallReferenceOrigin::Partial(_)), "{origin:?}");
+            assert!(origin.paths().iter().any(|path| path.result_fields.is_empty()));
+            assert!(origin.paths().len() < 16, "recursive storage must not expand into unbounded paths: {origin:?}");
+        }
+    }
 
     #[test]
     fn partial_reference_coverage_keeps_siblings_after_an_open_component() {

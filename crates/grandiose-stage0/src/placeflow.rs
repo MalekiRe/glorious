@@ -3672,6 +3672,25 @@ impl Analyzer<'_> {
         if origins.is_known_empty() { return origins; }
         if let Some(deref) = fields.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) {
             let parents = self.reference_origins_from_value_path(id, &fields[..deref]);
+            // A declaration can describe stored reference contents without
+            // identifying the returned handle's physical address. These are
+            // ordinary result snapshots, copied with their containing value.
+            // An exact live target remains the authority for resident reads.
+            let coarse_targets = parents.targets.as_ref().is_some_and(|targets|
+                targets.iter().any(|target| target.external || target.indirect));
+            let declared = if parents.targets.is_none() || coarse_targets {
+                let owner = if self.pending_results.contains(&id) { Some(Self::result_owner(id)) }
+                    else { self.reference_origin_key(id) };
+                owner.and_then(|owner| {
+                    let key = projection_key(&owner, fields);
+                    let snapshot = self.origin_snapshot(&key);
+                    (self.reference_origins.contains_key(&key) || !snapshot.loans.is_empty()
+                        || snapshot.is_known_empty()).then_some(snapshot)
+                })
+            } else { None };
+            if parents.targets.is_none() && let Some(declared) = declared {
+                return declared;
+            }
             let empty = ElaboratedInterface::default();
             let mut leaves = vec![];
             let _ = crate::core::input_reference_leaf_paths(self.signatures.unwrap_or(&empty),
@@ -3680,8 +3699,10 @@ impl Analyzer<'_> {
             let Some((_, ty)) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
                 return ReferenceOrigins::default();
             };
-            return self.reference_resident_origins(parents, &fields[deref + 1..],
+            let mut residents = self.reference_resident_origins(parents, &fields[deref + 1..],
                 matches!(ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
+            if let Some(declared) = declared { residents.join(declared); }
+            return residents;
         }
         if self.pending_results.contains(&id) {
             return self.origin_snapshot(&projection_key(&Self::result_owner(id), fields));
@@ -3810,7 +3831,7 @@ impl Analyzer<'_> {
         let mut leaves = vec![];
         let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty),
             &self.body.expression(id).ty, &mut vec![], &mut leaves);
-        let Some((_, Type::Reference { mutability, .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
+        let Some((_, Type::Reference { .. })) = leaves.into_iter().find(|(path, _)| crate::core::reference_path_matches(path, fields)) else {
             return ReferenceOrigins::default();
         };
         let mut path = vec![];
@@ -3821,8 +3842,8 @@ impl Analyzer<'_> {
         path.reverse();
         path.extend_from_slice(fields);
         let CoreKind::Deref(reference) = self.body.expression(id).kind else { return ReferenceOrigins::default(); };
-        self.reference_resident_origins(self.reference_origins_from_value(reference), &path,
-            matches!(mutability, crate::Mutability::Unique))
+        path.insert(0, crate::core::REFERENCE_PATH_DEREF);
+        self.reference_origins_from_value_path(reference, &path)
     }
 
     fn partition_call_result(&self, call: CoreId, fields: &[u32], mut loan: ProjectionLoan) -> ProjectionLoan {

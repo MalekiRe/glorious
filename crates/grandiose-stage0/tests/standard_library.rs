@@ -82,6 +82,68 @@ fn request_with_boxed(application: &str, optimization: u8) -> CompilationRequest
 }
 
 #[test]
+fn nested_getter_results_keep_stored_reference_lifetimes() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = r#"use std::*;
+        fn from_box<'a>(owner: Box<&'a i64>) -> &'a i64 { *Box::as_ref(&owner) }
+        fn from_vec<'a>(owner: Vec<&'a i64>) -> &'a i64 { *Vec::get_unchecked(&owner, 0) }
+        pub fn main() -> i64 {
+            let item = 21;
+            let boxed = from_box(Box::new(&item));
+            let mut items = Vec::new();
+            Vec::push(&mut items, &item);
+            let resident = from_vec(items);
+            *boxed + *resident
+        }"#;
+    for optimization in [0, 2] {
+        let input = request_with_boxed(source, optimization);
+        let artifact = StageZeroCompiler::new().compile(input.clone())
+            .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_std_i64().unwrap(), 42);
+        let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(decoded.run_std_i64().unwrap(), 42);
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        // SAFETY: these fixtures use the locally checked bundled owner APIs.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
+fn nested_getter_results_preserve_static_siblings_and_deeper_reference_shapes() {
+    let source = r#"use std::*;
+        pub fn main() -> i64 {
+            let item = 39;
+            let text: Str<'static> = "abc";
+            let owner = Box::new((text, &item));
+            let pair = Box::as_ref(&owner);
+            as<i64>(Str::len(pair.0)) + *pair.1
+        }"#;
+    for optimization in [0, 2] {
+        let artifact = StageZeroCompiler::new().compile(request_with_boxed(source, optimization))
+            .unwrap_or_else(|error| panic!("O{optimization}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_std_i64().unwrap(), 42);
+        assert_eq!(grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_std_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn nested_getter_results_do_not_erase_local_backing() {
+    for source in [
+        "use std::*; fn bad<'a>() -> &'a i64 { let local=42; let owner=Box::new(&local); *Box::as_ref(&owner) } pub fn main() -> i64 { *bad() }",
+        "use std::*; fn finish(value:&i64) -> i64 { *value } pub fn main() -> i64 { let local=42; let mut owner=Vec::new(); Vec::push(&mut owner,&local); let resident= *Vec::get_unchecked(&owner,0); tail finish(resident) }",
+        "use std::*; fn bad<'a>(output:&mut &'a i64) -> () { let local=42; let owner=Box::new(&local); *output= *Box::as_ref(&owner); } pub fn main() -> i64 { 42 }",
+    ] {
+        for optimization in [0, 2] {
+            let error = StageZeroCompiler::new().compile(request_with_boxed(source, optimization))
+                .expect_err("loading a heap resident must not erase its local backing");
+            assert!(error.diagnostics().iter().any(|diagnostic|
+                matches!(diagnostic.code, "G4403" | "G5017" | "G5013" | "G5021")), "{source}\n{error:#?}");
+        }
+    }
+}
+
+#[test]
 fn box_consuming_apis_transfer_residents_without_running_the_old_destructor() {
     use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
     let source = r#"use std::*;

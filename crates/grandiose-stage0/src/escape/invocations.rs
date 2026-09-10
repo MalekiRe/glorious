@@ -113,8 +113,8 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, _: bool) -> Option<Value> {
         fn borrow(value: Value, projection: &crate::resident_invocations::CaptureProjection) -> Option<Value> {
             Some(match value {
-                Value::Reference { dependencies, targets, authenticated } => Value::Reference {
-                    dependencies, targets: targets.and_then(|targets| borrow(*targets, projection)).map(Box::new), authenticated,
+                Value::Reference { dependencies, targets, authenticated, .. } => Value::Reference {
+                    dependencies, targets: targets.and_then(|targets| borrow(*targets, projection)).map(Box::new), contents: None, authenticated,
                 },
                 Value::Borrowed { root, storage: Some(storage), fields, mut capture_path } => {
                     capture_path.push(projection.clone());

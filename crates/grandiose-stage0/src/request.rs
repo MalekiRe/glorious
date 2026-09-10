@@ -333,7 +333,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // capture storage instead of copying its resident into a new owner.
 // Cache 128 preserves empty and cyclic logical-region evidence and rigid
 // generic result independence without fabricating reference validity.
-pub const STAGE0_CACHE_GENERATION: u32 = 128;
+// Cache 129 carries nested reference-result contents separately from the
+// outer handle's lifetime debt and physical target authority.
+pub const STAGE0_CACHE_GENERATION: u32 = 129;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

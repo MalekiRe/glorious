@@ -5,6 +5,57 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 129: nested reference-result contents and heap getter reads
+
+The shared callable reference contract now retains reference leaves reached
+through returned referents. A getter's outer borrow and the stored reference's
+own lifetime remain distinct. Generic referents defer their missing paths until
+ordinary instantiation; recursive/growing layouts retain finite evidence without
+claiming complete coverage. The same interface layout traversal supplies both
+input and output paths.
+
+PlaceFlow carries those paths in its existing result/alias snapshots. EscapeFlow
+keeps declared resident contents beside the reference's existing dependencies
+and possible targets. Contents do not create an address or write permission.
+Exact live local storage wins over an old snapshot after replacement; an
+outside-frame storage class cannot erase a separately retained inner local loan.
+The old outer-handle-only declaration path is extended at its producer, not
+reconstructed from getter bodies or library names by a consumer.
+
+Verification:
+
+- Three new getter groups pass (`target/nested-result-getters-final-v1.log`).
+  Stored references survive retirement of their Box/Vec containers in fresh
+  and decoded VM plus generated native O0/O2. Static sibling composition passes
+  fresh/decoded VM O0/O2. Local backing still rejects at return, tail and store
+  boundaries. Restoring the pre-change semantic implementation reproduces the
+  new positive's G5023 loads and G5013 container-lifetime errors
+  (`target/nested-result-getter-baseline-v1.log`).
+- The previously failing Box consuming/getter regression now passes fresh,
+  decoded and native O0/O2, including exact destructor counts and zero live raw
+  allocation bytes (`target/nested-result-existing-box-v1.log`). Its original
+  source and assertions are unchanged.
+- All 20 reference-result integration tests pass, including replacement,
+  captured references and generated execution
+  (`target/nested-result-reference-integration-v1.log`). All 21 escape-domain
+  tests pass (`target/nested-result-escape-units-v1.log`).
+- Eight callable-lifetime unit tests and the additional recursive-result unit
+  pass (`target/nested-result-contract-units-v2.log`,
+  `target/nested-result-recursion-unit-v1.log`); all 22 revision/cache tests pass
+  (`target/nested-result-revision-v1.log`).
+- Full Core integration remains 276 passing with the same 9 known failures
+  (`target/nested-result-core-integration-v1.log`). The unchanged full-library
+  root still has the same 11 G5024 minimum-use errors
+  (`target/nested-result-library-root-v1.log`); library acceptance is not achieved.
+
+The branch-joined vector tail regression now passes nested-getter source checking
+but reaches G7042 executable tail-carrier preservation after mutation
+(`target/nested-result-branch-final-v1.log`). Generic
+callback tail preservation, the older tail ABI failure and diagnostic assertion,
+general logical write destinations, guarded resource contracts, native handlers,
+full conformance and self-hosting remain open. Cache generation is 129; interface
+22, native ABI 13, bytecode 72, verifier 38 and VM schema 116 are unchanged.
+
 ## Cache 128: logical dependency evidence at source escape boundaries
 
 The unchanged full-library root now has **11 diagnostics**, all G5024 minimum-use

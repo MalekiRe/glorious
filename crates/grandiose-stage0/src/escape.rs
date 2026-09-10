@@ -153,14 +153,17 @@ enum Value {
     /// across suspension, but can be overwritten by a body-local borrow in
     /// an aggregate projection.
     ExternalBorrowed,
-    /// The shared invocation relation authenticated this reference leaf on
-    /// every normal return. Its possible loan dependencies remain separate
-    /// from that validity evidence and are never erased by authentication.
+    /// A reference snapshot keeps validity, physical targets and declared
+    /// resident contents distinct. The shared invocation relation may prove
+    /// validity on every normal return without erasing any loan dependencies.
     Reference {
         dependencies: Box<Value>,
         /// Complete possible referents, independently of retained region debt.
         /// None is unknown, not a reference to every retained dependency.
         targets: Option<Box<Value>>,
+        /// Declared reference-containing resident snapshot. This does not
+        /// authorize addressing or replacing any retained loan's storage.
+        contents: Option<Box<Value>>,
         authenticated: bool,
     },
     Region(BTreeSet<crate::placeflow::regions::Region>),
@@ -404,9 +407,10 @@ impl Analyzer<'_> {
                     if values.is_empty() { return None; }
                     join(values)
                 }
-                Value::Reference { dependencies, targets, authenticated } => Value::Reference {
+                Value::Reference { dependencies, targets, contents, authenticated } => Value::Reference {
                     dependencies: Box::new(resolve(dependencies, graph, active).unwrap_or(Value::None)),
                     targets: targets.as_ref().map(|targets| Box::new(resolve(targets, graph, active).unwrap_or(Value::None))),
+                    contents: contents.as_ref().map(|contents| Box::new(resolve(contents, graph, active).unwrap_or(Value::None))),
                     authenticated: *authenticated,
                 },
                 Value::Array { length, element, fields } => Value::Array { length: *length,
@@ -970,7 +974,7 @@ impl Analyzer<'_> {
             // reference-free contribution is a represented empty target.
             if !map_reference_path(&mut result, &path, &mut |value|
                 if matches!(value, Value::None | Value::ReferenceFree) { Value::ReferenceFree }
-                else { Value::Reference { dependencies: Box::new(value), targets: Some(Box::new(Value::ReferenceFree)), authenticated: false } }) {
+                else { Value::Reference { dependencies: Box::new(value), targets: Some(Box::new(Value::ReferenceFree)), contents: None, authenticated: false } }) {
                 self.error(expression.span, "G5023", "absent invocation reference contradicts its retained result shape");
             }
         }
@@ -979,24 +983,41 @@ impl Analyzer<'_> {
     }
 
     fn reference_path_value(&self, value: &Value, path: &[u32]) -> Option<Value> {
+        Self::reference_path_value_in(value, path, &self.values)
+    }
+
+    fn reference_path_value_in(value: &Value, path: &[u32], values: &ValueEnvironment) -> Option<Value> {
         let Some(deref) = path.iter().position(|field| *field == crate::core::REFERENCE_PATH_DEREF) else {
             return value_at_path(value, path);
         };
-        let reference = self.resolved_value(&value_at_path(value, &path[..deref])?);
+        let reference = Self::resolved_value_in(&value_at_path(value, &path[..deref])?, values);
         let resident = match reference {
-            Value::Logical { physical, .. } => return self.reference_path_value(&physical, &path[deref..]),
-            Value::Reference { targets, .. } => return self.reference_path_value(&*targets?, &path[deref..]),
+            Value::Logical { physical, .. } => return Self::reference_path_value_in(&physical, &path[deref..], values),
+            Value::Reference { targets, contents, .. } => {
+                if let Some(value) = targets.as_ref().and_then(|targets| Self::reference_path_value_in(targets, &path[deref..], values)) {
+                    // Outside-frame is a storage class, not knowledge of
+                    // every reference subsequently stored in that storage.
+                    // A declared inner local loan must not disappear merely
+                    // because the outer handle can point outside this frame.
+                    if targets.as_ref().is_some_and(|targets| value_contains_external_reference(targets))
+                        && let Some(contents) = contents {
+                        return Some(join(vec![value, Self::reference_path_value_in(&contents, &path[deref + 1..], values)?]));
+                    }
+                    return Some(value);
+                }
+                return Self::reference_path_value_in(&*contents?, &path[deref + 1..], values);
+            }
             Value::ExternalBorrowed => Value::ExternalBorrowed,
             Value::ReferenceFree => Value::ReferenceFree,
             Value::Borrowed { storage, fields, capture_path, .. } => {
-                let owner = value_at_path(self.values.residents.get(&storage?)?, &fields)?;
+                let owner = value_at_path(values.residents.get(&storage?)?, &fields)?;
                 invocations::capture_value_at_path(&owner, &capture_path)?
             }
-            Value::Joined(values) | Value::Alternatives(values) => return values.iter().map(|value|
-                self.reference_path_value(value, &path[deref..])).collect::<Option<Vec<_>>>().map(join),
+            Value::Joined(alternatives) | Value::Alternatives(alternatives) => return alternatives.iter().map(|value|
+                Self::reference_path_value_in(value, &path[deref..], values)).collect::<Option<Vec<_>>>().map(join),
             _ => return None,
         };
-        self.reference_path_value(&resident, &path[deref + 1..])
+        Self::reference_path_value_in(&resident, &path[deref + 1..], values)
     }
 
     /// Evaluate strict children in source order through their first abrupt
@@ -1483,8 +1504,9 @@ fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
 fn project_borrowed_referent(value: Value, fields: &[u32]) -> Value {
     if fields.is_empty() { return value; }
     match value {
-        Value::Reference { dependencies, targets, authenticated } => Value::Reference {
-            dependencies, targets: targets.map(|targets| Box::new(project_borrowed_referent(*targets, fields))), authenticated,
+        Value::Reference { dependencies, targets, contents, authenticated } => Value::Reference {
+            dependencies, targets: targets.map(|targets| Box::new(project_borrowed_referent(*targets, fields))),
+            contents: contents.and_then(|contents| value_at_path(&contents, fields)).map(Box::new), authenticated,
         },
         Value::Borrowed { root, storage, fields: mut prefix, mut capture_path } => {
             if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
@@ -1533,10 +1555,11 @@ fn declared_reference(value: Value) -> Value {
     // A declaration forwarding only external referents preserves that class;
     // any local, absent or unknown alternative still loses target coverage.
     let targets = entirely_external(&value).then(|| Box::new(Value::ExternalBorrowed));
-    Value::Reference { dependencies: Box::new(value), targets, authenticated: false }
+    Value::Reference { dependencies: Box::new(value), targets, contents: None, authenticated: false }
 }
 
 fn authenticated_reference_with_targets(value: Value, targets: Option<Value>) -> Value {
+    let contents = declared_reference_contents(&value);
     if matches!(value, Value::ReferenceFree) { return value; }
     // Repeated forwarding preserves one proof wrapper and the complete loan
     // union instead of nesting a new wrapper around each earlier invocation.
@@ -1547,7 +1570,17 @@ fn authenticated_reference_with_targets(value: Value, targets: Option<Value>) ->
             value => value,
         }
     }
-    Value::Reference { dependencies: Box::new(dependencies(value)), targets: targets.map(Box::new), authenticated: true }
+    Value::Reference { dependencies: Box::new(dependencies(value)), targets: targets.map(Box::new), contents: contents.map(Box::new), authenticated: true }
+}
+
+fn declared_reference_contents(value: &Value) -> Option<Value> {
+    match value {
+        Value::Reference { contents, .. } => contents.as_deref().cloned(),
+        Value::Logical { physical, .. } => declared_reference_contents(physical),
+        Value::Joined(values) | Value::Alternatives(values) if !values.is_empty() =>
+            values.iter().map(declared_reference_contents).collect::<Option<Vec<_>>>().map(join),
+        _ => None,
+    }
 }
 
 /// Apply a path authenticated by the bound invocation product to this result
@@ -1814,6 +1847,19 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
         return put_value_at_path(arguments.entry(*argument).or_insert(Value::None), tail, replacement);
     }
     if let Value::Logical { physical, .. } = target { return put_value_at_path(physical, path, replacement); }
+    if path[0] == crate::core::REFERENCE_PATH_DEREF {
+        if let Value::Joined(values) | Value::Alternatives(values) = target {
+            return values.iter_mut().all(|value| put_value_at_path(value, path, replacement.clone()));
+        }
+        if !matches!(target, Value::Reference { .. }) {
+            *target = declared_reference(std::mem::replace(target, Value::None));
+        }
+        let Value::Reference { dependencies, contents, .. } = target else { return false; };
+        // Loaded residents retain their own lifetime debts. The containing
+        // reference must also retain those debts before any load occurs.
+        **dependencies = join(vec![(**dependencies).clone(), replacement.clone()]);
+        return put_value_at_path(contents.get_or_insert_with(|| Box::new(Value::None)), &path[1..], replacement);
+    }
     if let Value::Projected { fallback, fields } = target {
         if path[0] == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
             return put_value_at_path(fallback, &path[1..], replacement.clone())
@@ -2236,6 +2282,41 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn declared_resident_contents_keep_debt_without_creating_a_storage_target() {
+        use super::*;
+        let loan = |name: &str| Value::Borrowed { root: name.into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let mut value = declared_reference(loan("carrier"));
+        let resident = declared_reference(loan("resident"));
+        assert!(put_value_at_path(&mut value, &[crate::core::REFERENCE_PATH_DEREF, 0], resident.clone()));
+        assert_eq!(declared_reference_contents(&value), Some(Value::Aggregate(vec![resident])));
+        assert_eq!(borrowed_roots(&value), BTreeSet::from(["carrier".into(), "resident".into()]));
+        assert!(!frame_independent_value(&value));
+        assert!(reference_targets(&value).is_none());
+        let authenticated = authenticated_reference(value.clone());
+        assert_eq!(declared_reference_contents(&authenticated), declared_reference_contents(&value));
+        assert!(reference_targets(&authenticated).is_none());
+        assert!(declared_reference_contents(&join(vec![value, Value::None])).is_none());
+
+        let mut external = declared_reference(Value::ExternalBorrowed);
+        assert!(put_value_at_path(&mut external, &[crate::core::REFERENCE_PATH_DEREF], loan("local")));
+        assert_eq!(reference_targets(&external), Some(Value::ExternalBorrowed));
+        assert_eq!(borrowed_roots(&external), BTreeSet::from(["local".into()]));
+        assert!(!frame_independent_value(&external));
+        let deref = [crate::core::REFERENCE_PATH_DEREF];
+        let loaded = Analyzer::reference_path_value_in(&external, &deref, &ValueEnvironment::default()).unwrap();
+        assert_eq!(borrowed_roots(&loaded), BTreeSet::from(["local".into()]));
+        assert!(!frame_independent_value(&loaded), "an outside-frame address cannot erase an inner local debt");
+
+        let mut values = ValueEnvironment::default();
+        values.residents.insert(1, Value::ExternalBorrowed);
+        let exact = Value::Reference { dependencies: Box::new(loan("slot")),
+            targets: Some(Box::new(loan("slot"))), contents: Some(Box::new(loan("old"))), authenticated: true };
+        let loaded = Analyzer::reference_path_value_in(&exact, &deref, &values).unwrap();
+        assert_eq!(loaded, Value::ExternalBorrowed,
+            "an exact live slot must be read after replacement, not from an old declaration snapshot");
+    }
+
+    #[test]
     fn logical_region_cycles_retain_grounded_evidence_and_reject_missing_contents() {
         use super::*;
         let region = |index| crate::placeflow::regions::Region { site: "cycle".into(), path: vec![index] };
@@ -2332,7 +2413,7 @@ mod tests {
         let loan = |name: &str| Value::Borrowed { root: name.into(), storage: Some(1), fields: vec![], capture_path: vec![] };
         let original = Value::Logical {
             physical: Box::new(Value::Reference { dependencies: Box::new(loan("carrier")),
-                targets: Some(Box::new(loan("target"))), authenticated: true }),
+                targets: Some(Box::new(loan("target"))), contents: None, authenticated: true }),
             arguments: [(0, Value::Region([region.clone()].into()))].into(),
         };
         assert_eq!(project_borrowed_referent(original.clone(), &[]), original);

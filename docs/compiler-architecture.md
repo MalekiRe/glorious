@@ -1292,3 +1292,35 @@ missing preservation proof after indirect invocation. The branch-joined vector
 regression reaches unresolved nested getter storage. Their original execution
 assertions remain acceptance obligations; source admission does not waive either
 receiving boundary or the library's remaining minimum-use requirements.
+
+## Nested reference-result residents
+
+The interface-aware callable reference contract traverses returned referents as
+well as outer handles. Explicit dereference components distinguish a stored
+reference's own lifetime from the shorter borrow used to load it. Generic
+referents leave a partial contract for ordinary call instantiation to refine;
+recursive or growing referent layouts retain finite observed paths without
+claiming complete coverage. Input and output discovery share the same layout
+traversal and keep their distinct completeness obligations.
+
+PlaceFlow stores these nested result paths in its existing origin snapshots and
+transports them with aliases. EscapeFlow's reference value retains declared
+resident contents separately from both the handle's loan union and its possible
+physical targets. The containing value retains the inner debts before loading,
+while a copied stored reference need not retain its former container's shorter
+borrow. Logical region links remain in the existing storage graph. No lifetime
+relation becomes a physical address or permission for a strong update.
+
+Dereference reads exact live local storage when that identity is known, so a
+replacement cannot be hidden by an older declared snapshot. An outside-frame
+storage class cannot erase separately retained inner local debt. Unknown joins
+remain unknown, and writes without a complete destination still reject. Both
+resource consumers use the frozen callable contract rather than reconstructing
+the getter body or recognizing a library owner by name.
+
+This repairs nested heap-getter reads and the Box getter/ownership regression,
+including generated native execution. It does not establish arbitrary logical
+write destinations, complete guarded storage or executable tail preservation
+after mutation. The branch-joined vector regression now reaches the independent
+runtime tail verifier; full library minimum-use and self-hosting gates remain
+open.
