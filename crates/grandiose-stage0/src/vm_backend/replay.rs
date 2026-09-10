@@ -4,6 +4,41 @@ use super::*;
 
 type Homes = BTreeMap<usize, Arc<native_storage::NativeHome>>;
 
+/// One transition supplies both execution engines. Snapshot uses leave their
+/// original and decremented budget with the clause; the final use transfers
+/// the original, including its resident storage and capture-loan identities.
+pub(super) fn resume(frame: &mut RuntimeHandlerFrame, next_storage_id: &mut u64,
+    budget: &mut ExecutionBudget, returns_to_clause: bool,
+) -> Result<RuntimeContinuation, VmArtifactError> {
+    if frame.continuation == VmContinuationPolicy::Terminal {
+        return Err(VmArtifactError::HandlerResumeUnavailable);
+    }
+    let original = frame.suspended.pending().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+    if !frame.continuation.is_replay() {
+        return frame.suspended.take_pending().ok_or(VmArtifactError::HandlerResumeUnavailable);
+    }
+    // A non-returning snapshot transfer cannot abandon remaining required
+    // invocations. Only the final original can leave the clause permanently.
+    if !returns_to_clause && original.remaining_replays != 1 {
+        return Err(VmArtifactError::HandlerResumeUnavailable);
+    }
+    match original.remaining_replays {
+        0 => Err(VmArtifactError::HandlerResumeUnavailable),
+        1 => {
+            let original = frame.suspended.take_pending().expect("checked pending original");
+            if returns_to_clause { frame.suspended = RuntimeSuspension::Replayed; }
+            Ok(original)
+        }
+        _ => {
+            let snapshot = if frame.owned_payloads {
+                fork(original, frame.call_depth, &frame.shared_registers, next_storage_id, budget)?
+            } else { original.clone() };
+            frame.suspended.pending_mut().expect("checked pending original").remaining_replays -= 1;
+            Ok(snapshot)
+        }
+    }
+}
+
 pub(super) fn shared_registers(
     registers: &RuntimeRegisters,
     enabled: bool,
@@ -233,7 +268,10 @@ fn shallow_continuation(original: &RuntimeContinuation, budget: &mut ExecutionBu
             effect_arguments: frame.effect_arguments.clone(), operation: frame.operation,
             payload_destinations: frame.payload_destinations.clone(), continuation: frame.continuation,
             target: frame.target, owned_payloads: frame.owned_payloads,
-            shared_registers: frame.shared_registers.clone(), suspended: None,
+            shared_registers: frame.shared_registers.clone(),
+            suspended: if matches!(frame.suspended, RuntimeSuspension::Replayed) {
+                RuntimeSuspension::Replayed
+            } else { RuntimeSuspension::Active },
         }).collect(),
     })
 }
@@ -252,7 +290,7 @@ pub(super) fn fork(
     while index < nodes.len() {
         let source = nodes[index].0;
         for (handler, frame) in source.above.iter().enumerate() {
-            if let Some(saved) = &frame.suspended {
+            if let Some(saved) = frame.suspended.pending() {
                 budget.reserve_value("replayed continuation paths", nodes.len() + 1)?;
                 let copied = shallow_continuation(saved, budget)?;
                 nodes.push((saved, copied, Some((index, handler))));
@@ -312,7 +350,7 @@ pub(super) fn fork(
     }
     while let Some((_, fork, parent)) = nodes.pop() {
         if let Some((parent, handler)) = parent {
-            nodes[parent].1.above[handler].suspended = Some(fork);
+            nodes[parent].1.above[handler].suspended = RuntimeSuspension::Pending(fork);
         } else { return Ok(fork); }
     }
     Err(VmArtifactError::HandlerStateMismatch)
@@ -321,6 +359,62 @@ pub(super) fn fork(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_replay_transfers_original_storage_and_retires_its_budget() {
+        let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(), unsafe_execution: false,
+            limits: Default::default(), instructions: 0, allocated_elements: 0,
+        };
+        let definition = DefKey(Digest::of_bytes(b"final-replay-original"));
+        let layout = Arc::new(native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let home = native_storage::NativeHome::new(layout, &mut budget).unwrap();
+        home.store(&[], &VmValue::I64(42), &mut budget).unwrap();
+        let original = RuntimeContinuation {
+            target: 1, dst: 1,
+            registers: RuntimeRegisters {
+                values: vec![Some(VmValue::Resident(home.clone())), None],
+                native_homes: BTreeMap::from([(0, home.clone())]),
+                source_storage: BTreeMap::from([(0, 7)]), ..Default::default()
+            },
+            performed: RuntimePerformed { effect: definition, effect_arguments: vec![], operation: 0, payloads: None },
+            above: vec![], pending_leave: None, remaining_replays: 3, program: None,
+        };
+        let mut frame = RuntimeHandlerFrame {
+            id: 1, call_depth: 0, effect: definition, effect_arguments: vec![], operation: 0,
+            payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 3 },
+            target: 2, owned_payloads: true, shared_registers: BTreeMap::new(),
+            suspended: RuntimeSuspension::Pending(original),
+        };
+        let mut next_storage_id = 7;
+        let spent_child = RuntimeHandlerFrame { id: 2, suspended: RuntimeSuspension::Replayed, ..frame.clone() };
+        frame.suspended.pending_mut().unwrap().above.push(spent_child);
+        assert!(frame.take_canceled_continuation().is_err());
+        assert!(resume(&mut frame, &mut next_storage_id, &mut budget, false).is_err());
+        for remaining in [2, 1] {
+            let copied = resume(&mut frame, &mut next_storage_id, &mut budget, true).unwrap();
+            let copied_home = &copied.registers.native_homes[&0];
+            assert!(matches!(copied.above[0].suspended, RuntimeSuspension::Replayed));
+            assert!(!Arc::ptr_eq(copied_home, &home));
+            copied_home.clear(&[]);
+            assert!(home.is_initialized(&[]));
+            assert_eq!(frame.suspended.pending().unwrap().remaining_replays, remaining);
+            assert!(frame.take_canceled_continuation().is_err());
+        }
+        let allocated_before = budget.allocated_elements;
+        let mut tail_frame = frame.clone();
+        let tail_use = resume(&mut tail_frame, &mut next_storage_id, &mut budget, false).unwrap();
+        assert!(Arc::ptr_eq(&tail_use.registers.native_homes[&0], &home));
+        assert!(tail_frame.suspended.is_active());
+        let final_use = resume(&mut frame, &mut next_storage_id, &mut budget, true).unwrap();
+        assert!(Arc::ptr_eq(&final_use.registers.native_homes[&0], &home));
+        assert_eq!(final_use.registers.source_storage[&0], 7);
+        assert_eq!(budget.allocated_elements, allocated_before, "consuming the original must not allocate a replay copy");
+        assert!(matches!(frame.suspended, RuntimeSuspension::Replayed));
+        assert!(!frame.suspended.is_active(), "a spent clause must not handle its own effects");
+        assert!(resume(&mut frame, &mut next_storage_id, &mut budget, true).is_err());
+        assert!(frame.take_canceled_continuation().unwrap().is_none(), "final cleanup must not destroy the original again");
+    }
 
     #[test]
     fn replay_distinguishes_reserved_storage_and_rebases_internal_aliases() {
@@ -344,7 +438,9 @@ mod tests {
             native_homes: BTreeMap::from([(0, outer_home.clone())]),
             ..Default::default()
         };
-        let outer = shared_registers(&registers, true, &[], &mut budget).unwrap();
+        // Protected slots are declared by continuation ownership, even when
+        // vacant at capture. Other vacant slots belong to the retained scope.
+        let outer = shared_registers(&registers, true, &[1, 2], &mut budget).unwrap();
         assert!(outer.contains_key(&0));
         assert!(!outer.contains_key(&1));
         let aggregate = Arc::new(
@@ -398,13 +494,13 @@ mod tests {
             effect_arguments: vec![], operation: 0, payload_destinations: vec![],
             continuation: VmContinuationPolicy::Replay { uses: 2 }, target: 0,
             owned_payloads: true, shared_registers: BTreeMap::from([(1, Some(2))]),
-            suspended: Some(original.clone()),
+            suspended: RuntimeSuspension::Pending(original.clone()),
         });
         let copied = fork(&original, 0, &outer, &mut 2, &mut budget).unwrap();
         assert!(Arc::ptr_eq(&copied.registers.native_homes[&0], &outer_home));
         let copied_inner = &copied.registers.native_homes[&1];
         assert_eq!(copied.above[0].shared_registers[&1], Some(copied.registers.source_storage[&1]));
-        assert!(Arc::ptr_eq(&copied.above[0].suspended.as_ref().unwrap().registers.native_homes[&1], copied_inner));
+        assert!(Arc::ptr_eq(&copied.above[0].suspended.pending().unwrap().registers.native_homes[&1], copied_inner));
         assert!(!Arc::ptr_eq(copied_inner, &inner));
         assert_ne!(
             copied.registers.source_storage[&1],
@@ -500,6 +596,21 @@ mod tests {
             assert!(!Arc::ptr_eq(restored, &home));
             restored.clear(&[]);
             assert!(home.is_initialized(&[]));
+            let mut frame = RuntimeHandlerFrame {
+                id: 1, call_depth: 0, effect: definition, effect_arguments: vec![], operation: 0,
+                payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
+                target: 0, owned_payloads: true, shared_registers: outer,
+                suspended: RuntimeSuspension::Pending(original),
+            };
+            let snapshot = resume(&mut frame, &mut 1, &mut budget, true).unwrap();
+            assert!(!Arc::ptr_eq(snapshot.registers.capture_environment.as_ref().unwrap(), &environment));
+            let mut final_use = resume(&mut frame, &mut 2, &mut budget, true).unwrap();
+            assert!(Arc::ptr_eq(final_use.registers.capture_environment.as_ref().unwrap(), &environment));
+            assert!(!final_use.registers.detached_captures);
+            final_use.registers.release_capture_loan(&mut budget).unwrap();
+            let values = environment.values.borrow();
+            let VmValue::Resident(restored) = &values[0] else { panic!() };
+            assert!(Arc::ptr_eq(restored, &home));
         }
     }
 }

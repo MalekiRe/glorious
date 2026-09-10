@@ -22,7 +22,7 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 16;
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 17;
 pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:shared-resumable-frames-v1";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.

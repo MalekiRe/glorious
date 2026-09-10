@@ -5,6 +5,36 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 143: final replay consumes the original continuation
+
+The shared runtime frame now distinguishes active protected execution, a pending
+original continuation, and a spent replay clause. One transition used by both
+engines issues independent snapshots for the first n-1 invocations and transfers
+the original on the last. The clause retains no extra original to destroy when
+it closes. Non-returning snapshot transfer is allowed only for the final use;
+it cannot skip the outstanding exact invocation budget. Spent clauses do not
+become active effect delimiters merely because their snapshot is gone.
+
+All three replay-storage unit tests pass. They check independent early homes,
+original identity and unchanged allocation accounting on final use, storage
+brands, partial initialization, internal reference rebasing, copied or detached
+capture environments, final restoration into the original capture owner, nested
+spent markers, early-cancellation rejection and exhausted-budget rejection.
+The older reserved-slot fixture now supplies the protected ownership partition
+explicitly; vacancy alone is not ownership under the common cancellation/replay
+contract introduced in cache 141. Its original alias and mask assertions remain.
+Six focused source replay groups pass across fresh/decoded VM, all-native and
+both mixed partitions at O0/O2. The standalone/program replay policy test passes
+with its hostile under-use and over-use cases.
+The subsequent handler integration run passes all 33 supported cases through
+the same engine matrix; the known ordered-helper failure is explicitly excluded.
+
+Cache 143 and native ABI 17 change; verifier 45 and bytecode 74/schema 118 are
+unchanged. Ordered multi-invocation helper contracts, borrowed invocation,
+foreign-control admission, mandatory-tail handler fusion and complete
+zero-marshalling/performance acceptance remain open. This checkpoint does not
+claim that the preserved one-helper/two-invocation regression passes.
+
 ## Cache 142: quantity-derived replay-handle transport
 
 UseFlow's existing checked execution publishes body-bound occurrence permission

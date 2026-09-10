@@ -1806,3 +1806,25 @@ proof obligation, not an unordered invocation-count shortcut. Final replay must
 still be migrated to consume the original snapshot instead of copying every
 invocation. Borrowed invocation, mandatory-tail handler fusion and complete
 zero-marshalling/performance acceptance remain open.
+
+## Original continuation consumption on final replay
+
+The shared runtime delimiter state now distinguishes protected execution, a
+pending original continuation, and a spent replay clause. Issuing an early
+snapshot decrements the budget retained with that original. The final exact
+invocation takes the original storage and capture-loan identities without
+allocating a replay copy. Both execution engines and non-returning snapshot
+transfers consume this same transition; a non-returning transfer cannot abandon
+remaining required invocations.
+
+A spent clause is not an active effect delimiter. It cannot capture or retain
+new resumption authority, forward a nonexistent original, or replay again.
+Closing it destroys no extra snapshot. Abandonment and nested replay copying
+preserve this distinction, rather than treating absence of a continuation as
+permission to reactivate a delimiter. Earlier snapshots still use the existing
+ownership partition, initialization masks and shared rebasing map.
+
+Cache 143 and native ABI 17 record the runtime change; verifier 45 and bytecode
+74/schema 118 are unchanged. Ordered multi-invocation helper proofs, general
+borrowed invocation, foreign-control admission, mandatory-tail handler fusion
+and complete zero-marshalling/performance acceptance remain open.

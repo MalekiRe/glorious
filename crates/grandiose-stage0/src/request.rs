@@ -359,7 +359,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 141 preserves optional cancellation policy and checked helper disposal;
 // bytecode 73/schema 117 retain the common continuation ownership partition.
 // Cache 142 consumes sealed quantity-derived replay-handle transports.
-pub const STAGE0_CACHE_GENERATION: u32 = 142;
+// Cache 143 consumes the original continuation on the final exact replay.
+pub const STAGE0_CACHE_GENERATION: u32 = 143;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 74;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

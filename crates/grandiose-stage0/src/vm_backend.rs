@@ -10275,7 +10275,7 @@ fn retain_resumption(registers: &RuntimeRegisters, handlers: &[RuntimeHandlerFra
     };
     let VmValue::Resumption { frame: id, .. } = &value else { return Err(VmArtifactError::HandlerResumeUnavailable); };
     if !handlers.iter().any(|frame| frame.id == *id && frame.continuation.is_replay()
-        && frame.suspended.as_ref().is_some_and(|branch| branch.remaining_replays > 0)) {
+        && frame.suspended.pending().is_some_and(|branch| branch.remaining_replays > 0)) {
         return Err(VmArtifactError::HandlerResumeUnavailable);
     }
     Ok(value)
@@ -10316,7 +10316,7 @@ struct RuntimeHandlerFrame {
     owned_payloads: bool,
     /// Source allocations and SSA carriers already outside this delimiter.
     shared_registers: BTreeMap<u32, Option<u64>>,
-    suspended: Option<RuntimeContinuation>,
+    suspended: RuntimeSuspension,
 }
 
 /// SSA temporaries are restored with a continuation; live source storage is
@@ -10590,6 +10590,43 @@ impl DerefMut for RuntimeRegisters {
 }
 
 #[derive(Clone)]
+enum RuntimeSuspension {
+    /// The delimiter is executing its protected computation.
+    Active,
+    /// A clause owns this pending original continuation and its use budget.
+    Pending(RuntimeContinuation),
+    /// The final replay consumed the original. The clause still has to close
+    /// its delimiter, but there is no abandoned snapshot to destroy.
+    Replayed,
+}
+
+impl RuntimeSuspension {
+    fn is_active(&self) -> bool { matches!(self, Self::Active) }
+    fn pending(&self) -> Option<&RuntimeContinuation> {
+        if let Self::Pending(saved) = self { Some(saved) } else { None }
+    }
+    fn pending_mut(&mut self) -> Option<&mut RuntimeContinuation> {
+        if let Self::Pending(saved) = self { Some(saved) } else { None }
+    }
+    fn take_pending(&mut self) -> Option<RuntimeContinuation> {
+        if !matches!(self, Self::Pending(_)) { return None; }
+        let Self::Pending(saved) = std::mem::replace(self, Self::Active) else { unreachable!() };
+        Some(saved)
+    }
+}
+
+impl RuntimeHandlerFrame {
+    fn take_canceled_continuation(&mut self) -> Result<Option<RuntimeContinuation>, VmArtifactError> {
+        match (&self.suspended, self.continuation) {
+            (RuntimeSuspension::Replayed, VmContinuationPolicy::Replay { .. }) => Ok(None),
+            (RuntimeSuspension::Pending(_), VmContinuationPolicy::Optional | VmContinuationPolicy::Terminal) =>
+                Ok(self.suspended.take_pending()),
+            _ => Err(VmArtifactError::HandlerResumeUnavailable),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct RuntimeContinuation {
     target: usize,
     dst: u32,
@@ -10598,8 +10635,8 @@ struct RuntimeContinuation {
     above: Vec<RuntimeHandlerFrame>,
     pending_leave: Option<PendingLeave>,
     /// A replayable performance starts with the exact source-declared count.
-    /// Clause-side replay snapshots carry the decremented remainder back to
-    /// the handler, so bytecode cannot replay one capture forever.
+    /// The owning delimiter decrements this only when it issues a snapshot.
+    /// The last use takes this original and leaves a spent delimiter marker.
     remaining_replays: u32,
     /// Standalone artifacts have one execution frame. Programs additionally
     /// retain the complete caller/callee path, so a performance may cross an
@@ -13109,7 +13146,7 @@ fn execute_in_float_profile(
             VmInstruction::InstallHandlerOwned { continuation_owned, .. } => continuation_owned.clone(),
             _ => vec![],
         };
-        if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
+        if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.pending().is_some_and(|continuation| continuation.performed.payloads.is_some()))
             && !allowed_before_payload_claim(&instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
@@ -13909,7 +13946,7 @@ fn execute_in_float_profile(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let Some(index) = handlers.iter().rposition(|frame| {
-                    frame.suspended.is_none()
+                    frame.suspended.is_active()
                         && frame.effect == effect
                         && frame.effect_arguments == effect_arguments
                         && frame.operation == operation
@@ -13923,7 +13960,7 @@ fn execute_in_float_profile(
                 let above = handlers.split_off(index + 1);
                 if handlers
                     .iter()
-                    .filter(|handler| handler.suspended.is_some())
+                    .filter(|handler| handler.suspended.pending().is_some())
                     .count()
                     >= budget.limits.max_retained_continuations as usize
                 {
@@ -13950,7 +13987,7 @@ fn execute_in_float_profile(
                     registers[*destination as usize] = Some(value);
                     registers.native_write(*destination);
                 }
-                frame.suspended = Some(RuntimeContinuation {
+                frame.suspended = RuntimeSuspension::Pending(RuntimeContinuation {
                     target: pc + 1,
                     dst,
                     registers: saved,
@@ -13973,7 +14010,7 @@ fn execute_in_float_profile(
                 if !frame.owned_payloads || frame.payload_destinations != payloads {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
-                frame.suspended.as_mut().and_then(|continuation| continuation.performed.payloads.take())
+                frame.suspended.pending_mut().and_then(|continuation| continuation.performed.payloads.take())
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
             }
             VmInstruction::InstallHandlerOwned {
@@ -14014,12 +14051,12 @@ fn execute_in_float_profile(
                     target,
                     owned_payloads,
                     shared_registers: replay::shared_registers(&registers, owned_payloads, &continuation_owned, budget)?,
-                    suspended: None,
+                    suspended: RuntimeSuspension::Active,
                 })
             }
             VmInstruction::CompleteHandler { value } => {
                 let frame = handlers.last().ok_or(VmArtifactError::HandlerStackUnderflow)?;
-                if frame.suspended.is_some() {
+                if !frame.suspended.is_active() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if resumption_returns.last().is_some_and(|pending| {
@@ -14041,7 +14078,7 @@ fn execute_in_float_profile(
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
                 };
-                if frame.suspended.is_some() {
+                if !frame.suspended.is_active() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
             }
@@ -14054,8 +14091,8 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 let continuation = match frame.continuation {
-                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => frame.suspended.take(),
-                    VmContinuationPolicy::Replay { .. } => frame.suspended.clone(),
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => frame.suspended.take_pending(),
+                    VmContinuationPolicy::Replay { .. } => return Err(VmArtifactError::HandlerStateMismatch),
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
@@ -14063,9 +14100,6 @@ fn execute_in_float_profile(
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation.is_replay() {
-                    frame.suspended = None;
-                }
                 if frame.owned_payloads {
                     registers.retire_call_arguments(&[value]);
                 }
@@ -14102,18 +14136,7 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let replaying = frame.continuation.is_replay();
-                let continuation = if replaying {
-                    if frame.owned_payloads {
-                        frame.suspended.as_ref().map(|saved| replay::fork(saved, frame.call_depth,
-                            &frame.shared_registers, &mut next_storage_id, budget)).transpose()?
-                    } else { frame.suspended.clone() }
-                } else {
-                    frame.suspended.take()
-                }
-                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if replaying && continuation.remaining_replays == 0 {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
-                }
+                let continuation = replay::resume(frame, &mut next_storage_id, budget, true)?;
                 budget.reserve_allocation(registers.len())?;
                 // The clause snapshot must not retain the carrier just
                 // transferred to the resumed computation.
@@ -14140,14 +14163,7 @@ fn execute_in_float_profile(
                     .map(|frame| frame.id)
                     .chain(above.iter().map(|frame| frame.id))
                     .collect();
-                let mut return_handlers = handlers.clone();
-                if replaying {
-                    return_handlers
-                        .get_mut(index)
-                        .and_then(|frame| frame.suspended.as_mut())
-                        .expect("checked suspended replay handler")
-                        .remaining_replays -= 1;
-                }
+                let return_handlers = handlers.clone();
                 resumption_returns.push(RuntimeResumptionReturn {
                     pc: pc + 1,
                     dst,
@@ -14162,7 +14178,7 @@ fn execute_in_float_profile(
                 // above retains the suspended continuation for the next use.
                 handlers = active_handlers;
                 if replaying {
-                    handlers.last_mut().expect("active frame exists").suspended = None;
+                    handlers.last_mut().expect("active frame exists").suspended = RuntimeSuspension::Active;
                 }
                 handlers.extend(above);
                 registers = saved_registers;
@@ -14175,7 +14191,7 @@ fn execute_in_float_profile(
                 let Some(frame) = handlers.last() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.suspended.is_none() {
+                if frame.suspended.pending().is_none() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let signature = register_type(function, dst)?;
@@ -14196,15 +14212,7 @@ fn execute_in_float_profile(
                 let Some(index) = handlers.iter().rposition(|frame| frame.id == id) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                let continuation = match handlers[index].continuation {
-                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
-                        handlers[index].suspended.take()
-                    }
-                    VmContinuationPolicy::Terminal => {
-                        return Err(VmArtifactError::HandlerResumeUnavailable);
-                    }
-                }
-                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let continuation = replay::resume(&mut handlers[index], &mut next_storage_id, budget, false)?;
                 if handlers[index].owned_payloads {
                     registers.retire_call_arguments(&[value]);
                 }
@@ -14242,12 +14250,12 @@ fn execute_in_float_profile(
                 let Some(mut declined) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                let Some(continuation) = declined.suspended.take() else {
+                let Some(continuation) = declined.suspended.take_pending() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let payloads = continuation.performed.payloads.as_ref().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let Some(index) = handlers.iter().rposition(|frame| {
-                    frame.suspended.is_none()
+                    frame.suspended.is_active()
                         && frame.effect == continuation.performed.effect
                         && frame.effect_arguments == continuation.performed.effect_arguments
                         && frame.operation == continuation.performed.operation
@@ -14279,7 +14287,7 @@ fn execute_in_float_profile(
                     registers[*destination as usize] = Some(payload);
                     registers.native_write(*destination);
                 }
-                frame.suspended = Some(RuntimeContinuation {
+                frame.suspended = RuntimeSuspension::Pending(RuntimeContinuation {
                     target: continuation.target,
                     dst: continuation.dst,
                     registers: continuation.registers,
@@ -14293,16 +14301,10 @@ fn execute_in_float_profile(
                 continue;
             }
             VmInstruction::Cancel => {
-                let Some(frame) = handlers.pop() else {
+                let Some(mut frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation == VmContinuationPolicy::Consume {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
-                }
-                if frame.suspended.is_none() || frame.continuation.is_replay()
-                    && frame.suspended.as_ref().is_some_and(|branch| branch.remaining_replays != 0) {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
-                }
+                frame.take_canceled_continuation()?;
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     resumption_returns.clear();
                 }
@@ -15472,7 +15474,7 @@ fn abandon_program_handlers(
     while handlers.len() > retained_depth {
         budget.tick()?;
         let mut frame = handlers.pop().expect("checked handler suffix");
-        if let Some(suspended) = frame.suspended.take() {
+        if let Some(suspended) = frame.suspended.take_pending() {
             abandon_program_continuation(program, suspended, frame.call_depth,
                 frame.owned_payloads.then_some(frame.shared_registers),
                 current, current_callers, depth, budget, host)?;
@@ -15510,7 +15512,7 @@ fn abandon_program_continuation(
     while let Some((parent, _, _)) = pending.last_mut() {
         if let Some(mut frame) = parent.above.pop() {
             budget.tick()?;
-            if let Some(mut child) = frame.suspended.take() {
+            if let Some(mut child) = frame.suspended.take_pending() {
                 let parent_program = parent.program.as_ref().ok_or(VmArtifactError::HandlerStateMismatch)?;
                 synchronize_saved_source_storage(&mut child.registers, child.program.as_mut(),
                     &parent.registers, &parent_program.callers);
@@ -15666,7 +15668,7 @@ fn execute_program_in_float_profile(
             VmInstruction::InstallHandlerOwned { continuation_owned, .. } => continuation_owned.as_slice(),
             _ => &[],
         };
-        if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.as_ref().is_some_and(|continuation| continuation.performed.payloads.is_some()))
+        if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.pending().is_some_and(|continuation| continuation.performed.payloads.is_some()))
             && !allowed_before_payload_claim(instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
         }
@@ -16473,7 +16475,7 @@ fn execute_program_in_float_profile(
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let Some(index) = handlers.iter().rposition(|frame| {
-                    frame.suspended.is_none()
+                    frame.suspended.is_active()
                         && frame.effect == *effect
                         && frame.effect_arguments == *effect_arguments
                         && frame.operation == *operation
@@ -16487,7 +16489,7 @@ fn execute_program_in_float_profile(
                 let above = handlers.split_off(index + 1);
                 if handlers
                     .iter()
-                    .filter(|handler| handler.suspended.is_some())
+                    .filter(|handler| handler.suspended.pending().is_some())
                     .count()
                     >= budget.limits.max_retained_continuations as usize
                 {
@@ -16536,7 +16538,7 @@ fn execute_program_in_float_profile(
                     registers[*destination as usize] = Some(value);
                     registers.native_write(*destination);
                 }
-                handlers[index].suspended = Some(RuntimeContinuation {
+                handlers[index].suspended = RuntimeSuspension::Pending(RuntimeContinuation {
                     target: pc + 1,
                     dst: *dst,
                     registers: saved,
@@ -16559,7 +16561,7 @@ fn execute_program_in_float_profile(
                 if !frame.owned_payloads || frame.payload_destinations != *payloads {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
-                frame.suspended.as_mut().and_then(|continuation| continuation.performed.payloads.take())
+                frame.suspended.pending_mut().and_then(|continuation| continuation.performed.payloads.take())
                     .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
             }
             VmInstruction::InstallHandlerOwned {
@@ -16600,12 +16602,12 @@ fn execute_program_in_float_profile(
                     target: *target,
                     owned_payloads,
                     shared_registers: replay::shared_registers(&registers, owned_payloads, continuation_owned, budget)?,
-                    suspended: None,
+                    suspended: RuntimeSuspension::Active,
                 });
             }
             VmInstruction::CompleteHandler { value } => {
                 let frame = handlers.last().ok_or(VmArtifactError::HandlerStackUnderflow)?;
-                if frame.suspended.is_some() || frame.call_depth != callers.len() {
+                if !frame.suspended.is_active() || frame.call_depth != callers.len() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if resumption_returns.last().is_some_and(|pending| {
@@ -16634,7 +16636,7 @@ fn execute_program_in_float_profile(
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
                 };
-                if frame.suspended.is_some() {
+                if !frame.suspended.is_active() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
             }
@@ -16647,8 +16649,8 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
                 let continuation = match frame.continuation {
-                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => frame.suspended.take(),
-                    VmContinuationPolicy::Replay { .. } => frame.suspended.clone(),
+                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume => frame.suspended.take_pending(),
+                    VmContinuationPolicy::Replay { .. } => return Err(VmArtifactError::HandlerStateMismatch),
                     VmContinuationPolicy::Terminal => {
                         return Err(VmArtifactError::HandlerResumeUnavailable);
                     }
@@ -16656,9 +16658,6 @@ fn execute_program_in_float_profile(
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation.is_replay() {
-                    frame.suspended = None;
-                }
                 let resumed = transfer_to_resumed_frame(
                     resumed, &registers, &callers, frame.call_depth,
                     continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
@@ -16705,18 +16704,7 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let replaying = frame.continuation.is_replay();
-                let continuation = if replaying {
-                    if frame.owned_payloads {
-                        frame.suspended.as_ref().map(|saved| replay::fork(saved, frame.call_depth,
-                            &frame.shared_registers, &mut next_storage_id, budget)).transpose()?
-                    } else { frame.suspended.clone() }
-                } else {
-                    frame.suspended.take()
-                }
-                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if replaying && continuation.remaining_replays == 0 {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
-                }
+                let continuation = replay::resume(frame, &mut next_storage_id, budget, true)?;
                 budget.reserve_allocation(registers.len())?;
                 let resumed = transfer_to_resumed_frame(
                     resumed, &registers, &callers, frame.call_depth,
@@ -16747,14 +16735,7 @@ fn execute_program_in_float_profile(
                     .map(|frame| frame.id)
                     .chain(above.iter().map(|frame| frame.id))
                     .collect();
-                let mut return_handlers = handlers.clone();
-                if replaying {
-                    return_handlers
-                        .get_mut(index)
-                        .and_then(|frame| frame.suspended.as_mut())
-                        .expect("checked suspended replay handler")
-                        .remaining_replays -= 1;
-                }
+                let return_handlers = handlers.clone();
                 resumption_returns.push(RuntimeResumptionReturn {
                     pc: pc + 1,
                     dst: *dst,
@@ -16769,7 +16750,7 @@ fn execute_program_in_float_profile(
                 });
                 handlers = active_handlers;
                 if replaying {
-                    handlers.last_mut().expect("active frame exists").suspended = None;
+                    handlers.last_mut().expect("active frame exists").suspended = RuntimeSuspension::Active;
                 }
                 handlers.extend(above);
                 if let Some(program) = program {
@@ -16786,7 +16767,7 @@ fn execute_program_in_float_profile(
                 let Some(frame) = handlers.last() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.suspended.is_none() {
+                if frame.suspended.pending().is_none() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let signature = register_type(function, *dst)?;
@@ -16809,15 +16790,7 @@ fn execute_program_in_float_profile(
                 let Some(index) = handlers.iter().rposition(|frame| frame.id == id) else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                let continuation = match handlers[index].continuation {
-                    VmContinuationPolicy::Optional | VmContinuationPolicy::Consume | VmContinuationPolicy::Replay { .. } => {
-                        handlers[index].suspended.take()
-                    }
-                    VmContinuationPolicy::Terminal => {
-                        return Err(VmArtifactError::HandlerResumeUnavailable);
-                    }
-                }
-                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                let continuation = replay::resume(&mut handlers[index], &mut next_storage_id, budget, false)?;
                 // See the standalone-artifact interpreter above: an explicit
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.
@@ -16865,12 +16838,12 @@ fn execute_program_in_float_profile(
                 let Some(mut declined) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                let Some(continuation) = declined.suspended.take() else {
+                let Some(continuation) = declined.suspended.take_pending() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let payloads = continuation.performed.payloads.as_ref().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let Some(index) = handlers.iter().rposition(|frame| {
-                    frame.suspended.is_none()
+                    frame.suspended.is_active()
                         && frame.effect == continuation.performed.effect
                         && frame.effect_arguments == continuation.performed.effect_arguments
                         && frame.operation == continuation.performed.operation
@@ -16928,7 +16901,7 @@ fn execute_program_in_float_profile(
                     registers[*destination as usize] = Some(payload);
                     registers.native_write(*destination);
                 }
-                handlers[index].suspended = Some(RuntimeContinuation {
+                handlers[index].suspended = RuntimeSuspension::Pending(RuntimeContinuation {
                     target: continuation.target,
                     dst: continuation.dst,
                     registers: continuation.registers,
@@ -16945,16 +16918,11 @@ fn execute_program_in_float_profile(
                 let Some(mut frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuation == VmContinuationPolicy::Consume {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                if let Some(suspended) = frame.take_canceled_continuation()? {
+                    abandon_program_continuation(program, suspended, frame.call_depth,
+                        frame.owned_payloads.then_some(frame.shared_registers),
+                        &mut registers, &mut callers, depth, budget, host)?;
                 }
-                let suspended = frame.suspended.take().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if frame.continuation.is_replay() && suspended.remaining_replays != 0 {
-                    return Err(VmArtifactError::HandlerResumeUnavailable);
-                }
-                abandon_program_continuation(program, suspended, frame.call_depth,
-                    frame.owned_payloads.then_some(frame.shared_registers),
-                    &mut registers, &mut callers, depth, budget, host)?;
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     resumption_returns.clear();
                 }
@@ -17812,7 +17780,7 @@ fn execute_program_in_float_profile(
                     VmValue::Resumption { frame: id, .. } => {
                         if let Some(frame) = handlers.iter_mut().find(|frame| frame.id == id)
                             && frame.continuation == VmContinuationPolicy::Optional
-                            && let Some(suspended) = frame.suspended.take() {
+                            && let Some(suspended) = frame.suspended.take_pending() {
                             abandon_program_continuation(program, suspended, frame.call_depth,
                                 frame.owned_payloads.then(|| frame.shared_registers.clone()),
                                 &mut registers, &mut callers, depth, budget, host)?;
