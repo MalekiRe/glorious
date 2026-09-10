@@ -353,7 +353,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // schedules dependent numeric defaults, and validates frozen pattern subjects.
 // Cache 138 shares resumable resident frames across generated and VM execution;
 // fusion compares physical invocation inputs with their instantiated contracts.
-pub const STAGE0_CACHE_GENERATION: u32 = 138;
+// Cache 139 checks quantity execution for capability-consuming helpers and
+// derives resumption input/result contracts from the complete executable batch.
+pub const STAGE0_CACHE_GENERATION: u32 = 139;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -372,7 +374,9 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // including callable variance, generic consistency and operation specialization.
 // Verifier 41 checks every direct entry's callable behavior assumptions and
 // distinguishes prior address exposure from a borrow that has not executed.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 41;
+// Verifier 42 authenticates scoped resumption transport and single invocation
+// through checked ordinary helper bodies, including guaranteed-use branches.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 42;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

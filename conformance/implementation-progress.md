@@ -5,6 +5,33 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 139: checked resumption transport through ordinary helpers
+
+The executable control verifier derives symbolic caller-input and normal-result
+relations through its existing resident/control state. Direct helper calls retain
+the original handler authority, and their guaranteed invocation uses the same
+suspended-suffix transition as a local returning resumption. May invocation is
+not guaranteed use. The original producer rechecks contracts under the settled
+whole-program frame hypotheses, and decoding rebuilds the proofs. UseFlow runs
+the same checked-body quantity solver for capability-consuming helpers and factory
+results. VM return inference now consumes the complete executable batch.
+
+Five focused handler groups pass: ordinary transitive helper frames, returned
+resumption products, transformed completion with branch calls, source rejection
+of an ignored required resumption, and fresh/decoded rejection after removing an
+invocation from one helper branch. Positive cases compare fresh/decoded VM with
+all-native and both mixed partitions at O0/O2. Four helper-proof unit tests cover
+may/must branch distinctions, repeated-use refusal, unknown input layouts and
+final contract revalidation. Four resident-provenance tests pass, including
+caller/local namespace separation and stale-token instantiation.
+
+This is a bounded proof migration, not full native-handler acceptance: contracts
+currently permit at most one invocation of one caller capability and no local
+handler around that invocation. Ordered replay helpers, borrowed-resumption
+storage, mandatory-tail handler fusion and complete zero-marshalling/performance
+acceptance remain open. Cache 139 and verifier 42 change; bytecode 72 and native
+ABI 14 do not. The separate nominal-layout work remains outside this checkpoint.
+
 ## Cache 138: native resumable frames in the ordinary control runtime
 
 The owned-handler fusion regression previously stopped at native

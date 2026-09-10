@@ -12,12 +12,21 @@ use std::sync::Arc;
 const MAX_DEPTH: usize = 32;
 const MAX_NODES: usize = 4096;
 
+/// A capability supplied by the caller, in the current function's input
+/// namespace. It is neither a local handler id nor an unknown live token.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(super) struct InputPath {
+    pub(super) input: u32,
+    pub(super) fields: Vec<u32>,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(super) enum ResumptionValue {
     #[default]
     None,
     Unknown,
     Token(u32),
+    Input(InputPath),
     Product(Arc<BTreeMap<u32, ResumptionValue>>),
 }
 
@@ -32,6 +41,24 @@ impl ResumptionValue {
 
     pub(super) fn opaque(&self) -> Self {
         if self.contains() { Self::Unknown } else { Self::None }
+    }
+
+    pub(super) fn has_local_or_unknown(&self) -> bool {
+        match self {
+            Self::None | Self::Input(_) => false,
+            Self::Token(_) | Self::Unknown => true,
+            Self::Product(fields) => fields.values().any(Self::has_local_or_unknown),
+        }
+    }
+
+    pub(super) fn instantiate(&self, inputs: &[Self]) -> Self {
+        match self {
+            Self::Input(path) => inputs.get(path.input as usize)
+                .map_or(Self::Unknown, |value| value.project(&path.fields)),
+            Self::Product(fields) => Self::fields(fields.iter().map(|(field, value)|
+                (*field, value.instantiate(inputs))).collect()),
+            value => value.clone(),
+        }
     }
 
     pub(super) fn product(values: impl IntoIterator<Item = Self>) -> Self {
@@ -160,5 +187,19 @@ mod tests {
         let mut unknown = Value::None;
         unknown.replace(&vec![0; super::MAX_DEPTH + 1], Value::Token(2));
         assert_eq!(unknown, Value::Unknown);
+    }
+
+    #[test]
+    fn caller_input_paths_are_not_local_handler_brands() {
+        let mut input = Value::Input(super::InputPath { input: 0, fields: vec![1] });
+        input.expire(0);
+        assert!(!input.has_local_or_unknown());
+        assert_eq!(input.frame(), None);
+        let mut supplied = Value::product([Value::None, Value::Token(7)]);
+        assert_eq!(input.instantiate(&[supplied.clone()]), Value::Token(7));
+        supplied.expire(7);
+        assert_eq!(input.instantiate(&[supplied]), Value::Unknown);
+        assert_eq!(input.instantiate(&[]), Value::Unknown);
+        assert_eq!(input.join(&Value::Token(0)), Value::Unknown);
     }
 }

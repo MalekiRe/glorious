@@ -32,6 +32,7 @@ use crate::MemoryPrimitive;
 
 mod codec;
 mod execution;
+mod resumption_calls;
 pub(crate) mod float_env;
 pub use codec::{
     STAGE0_ARTIFACT_MAGIC, STAGE0_MAX_DECODE_FUNCTIONS, STAGE0_MAX_DECODE_INSTRUCTIONS,
@@ -6205,6 +6206,10 @@ struct VerifierPerformed {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
+    /// May history prevents a loop or later alias from hiding a second use.
+    may_invoked_resumption_inputs: BTreeSet<resumption_values::InputPath>,
+    /// Caller capabilities invoked on every path reaching this point.
+    invoked_resumption_inputs: BTreeSet<resumption_values::InputPath>,
     /// Addresses exposed on any executed predecessor. Unlike resident
     /// initialization this history cannot be reset by moving or killing a slot.
     address_exposed: Vec<bool>,
@@ -6457,15 +6462,18 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
 /// handler/resumption state machine, not a static-PC approximation. During
 /// lowering only the provisional `returns` bit is ignored; all type, storage,
 /// control and authority checks are unchanged.
-pub(crate) fn infer_function_returns(function: &VmFunction) -> Result<bool, VmArtifactError> {
+pub(crate) fn infer_program_returns(functions: &BTreeMap<DefKey, VmFunction>) -> Result<BTreeMap<DefKey, bool>, VmArtifactError> {
     // A lexical label can be invoked by a descendant ordinary call. Its
     // destination is therefore an externally enterable continuation, even
     // when the local verifier worklist has no ordinary predecessor for it.
-    Ok(verify_function_control(function, false, false, &tail_provenance::TransferProofs::default())?.returns
-        || vm_instructions_may_return(&function.instructions))
+    let proofs = tail_provenance::summaries(functions)?;
+    functions.iter().map(|(key, function)| Ok((*key,
+        verify_function_control(function, false, false, &proofs)?.returns
+            || vm_instructions_may_return(&function.instructions)))).collect()
 }
 
 struct VerifiedFunctionControl {
+    resumption_contract: resumption_calls::Contract,
     call_input_behaviors: BTreeMap<DefKey, Vec<tail_provenance::CallableBehavior>>,
     returns: bool,
     result_independent: bool,
@@ -6490,6 +6498,9 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     entry_behaviors: Option<&[tail_provenance::CallableBehavior]>, transfer_proofs: &tail_provenance::TransferProofs,
 ) -> Result<VerifiedFunctionControl, VmArtifactError> {
     let mut call_input_behaviors = BTreeMap::new();
+    let mut resumption_contract = resumption_calls::Contract::default();
+    let mut returned_resumptions = None::<ResumptionValue>;
+    let mut required_resumptions = None::<BTreeSet<resumption_values::InputPath>>;
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
     // the verifier boundary equally strict so two spellings of one effect
@@ -6579,6 +6590,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     let mut incoming: VerifierIncoming = vec![BTreeMap::new(); function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
         entry.insert(VerifierContext::default(), VerifierState {
+            may_invoked_resumption_inputs: BTreeSet::new(),
+            invoked_resumption_inputs: BTreeSet::new(),
             address_exposed: (0..function.registers.len()).map(|index| index < function.parameters as usize).collect(),
             last_instruction: None,
             may_initialized: initial.iter().map(|state| *state == Some(true)).collect(),
@@ -6597,7 +6610,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 .map(|index| (assume_parameter_invocations && index < function.parameters as usize)
                     || entry_behaviors.and_then(|inputs| inputs.get(index)).is_some_and(|input| input.invocation)).collect(),
             labels: vec![false; function.registers.len()],
-            resumptions: vec![ResumptionValue::None; function.registers.len()],
+            resumptions: if transfer_proofs.symbolic_resumption_inputs { resumption_calls::input_values(function) }
+                else { vec![ResumptionValue::None; function.registers.len()] },
             handlers: Vec::new(),
             pending_leave: None,
             resuming: false,
@@ -6660,7 +6674,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
         let captured_call = match instruction {
             VmInstruction::CallIndirect { dst, callee, arguments }
             | VmInstruction::CallIndirectOwned { dst, callee, arguments }
-                if states.resumptions.get(*callee as usize).is_some_and(ResumptionValue::contains) => {
+                if states.resumptions.get(*callee as usize).and_then(ResumptionValue::frame).is_some() => {
                 read(&states, *callee)?;
                 let [value] = arguments.as_slice() else { return Err(VmArtifactError::CallArity { expected: 1, found: arguments.len() as u32 }); };
                 let frame = states.resumptions[*callee as usize].frame().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
@@ -7739,6 +7753,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     // the result type declared by the compiler. Protocol
                     // signature checking and handler evidence are source-level
                     // facts, deliberately not duplicated by the artifact layer.
+                    for argument in arguments { verify_call_frame_resumption_transfer(&states, *argument)?; }
                     write(&mut states, *dst)?;
                 }
             }
@@ -7923,6 +7938,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
+                        may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
+                        invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
                         last_instruction: Some(pc),
                         may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
@@ -7960,7 +7977,6 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let continuations = frame.continuations.clone();
                 let found = register_type(function, *value)?;
                 if found != frame.resume_type {
                     return Err(VmArtifactError::TypeMismatch {
@@ -7975,56 +7991,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if frame.owned_payloads || resumption_consumes {
                     states.registers[*value as usize] = Some(false);
                 }
-                let resumption_return_result = vec![(frame.id, result)];
-                let mut resumed_handlers = states.handlers[..index].to_vec();
-                resumed_handlers.extend_from_slice(&states.handlers[index + 1..]);
-                resumed_handlers.push(states.handlers[index].clone());
-                resumed_handlers.last_mut().unwrap().payload_claim = None;
-                resumed_handlers
-                    .last_mut()
-                    .expect("active resumable handler exists")
-                    .continuations
-                    .clear();
-                // A shared clause can be reached from several performance
-                // sites. Every possible suspended suffix must satisfy the
-                // resumption ABI; checking only the first would miss paths.
-                for continuation in continuations {
-                    let mut handlers = resumed_handlers.clone();
-                    handlers.extend(continuation.above);
-                    let resumption_return_handler_ids =
-                        handlers.iter().map(|frame| frame.id).collect::<Vec<_>>();
-                    if resumption_return_handler_ids.iter().copied().collect::<BTreeSet<_>>().len()
-                        != resumption_return_handler_ids.len()
-                    {
-                        return Err(VmArtifactError::HandlerStateMismatch);
-                    }
-                    let mut resumed = VerifierState {
-                        last_instruction: Some(pc),
-                        may_initialized: continuation.may_initialized,
-                        registers: continuation.registers,
-                        storage_live: continuation.storage_live,
-                        source_storage: states.source_storage.clone(),
-                        reference_origins: continuation.reference_origins,
-                        frame_independent: continuation.frame_independent,
-                        referent_independent: continuation.referent_independent,
-                        local_labels: continuation.local_labels,
-                        destruction_preserves_frames: continuation.destruction_preserves_frames,
-                        invocation_preserves_frames: continuation.invocation_preserves_frames,
-                        address_exposed: continuation.address_exposed,
-                        labels: continuation.labels,
-                        resumptions: continuation.resumptions,
-                        handlers,
-                        pending_leave: continuation.pending_leave,
-                        resuming: true,
-                        resumption_return_handler_ids,
-                        resumption_return_result: resumption_return_result.clone(),
-                    };
-                    write(&mut resumed, continuation.dst)?;
-                    propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
-                }
-                if states.handlers[index].continuation == VmContinuationPolicy::Consume {
-                    states.handlers[index].continuations.clear();
-                }
+                resumption_calls::resume(function, pc, index, &resumption_calls::Invocation { parameter: found, result },
+                    true, &mut states, &mut incoming, &mut worklist)?;
                 write(&mut states, *dst)?;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -8130,6 +8098,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
+                        may_invoked_resumption_inputs: states.may_invoked_resumption_inputs.clone(),
+                        invoked_resumption_inputs: states.invoked_resumption_inputs.clone(),
                         last_instruction: Some(pc),
                         may_initialized: continuation.may_initialized,
                         registers: continuation.registers,
@@ -8737,13 +8707,20 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 expect_type(function, *right, VmType::Char)?;
                 write(&mut states, *dst)?
             }
-            VmInstruction::CallOwned { dst, arguments, .. }
-            | VmInstruction::Call { dst, arguments, .. } => {
+            VmInstruction::CallOwned { dst, callee, arguments }
+            | VmInstruction::Call { dst, callee, arguments } => {
                 for &argument in arguments {
                     read(&states, argument)?;
-                    verify_call_frame_resumption_transfer(&states, argument)?;
                 }
-                write(&mut states, *dst)?
+                let values = arguments.iter().map(|argument| states.resumptions[*argument as usize].clone()).collect::<Vec<_>>();
+                let result = if values.iter().any(ResumptionValue::contains) {
+                    let contract = transfer_proofs.resumption_calls.get(callee)
+                        .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                    resumption_calls::apply(function, pc, &values, contract, &mut states,
+                        &mut resumption_contract, &mut incoming, &mut worklist)?
+                } else { ResumptionValue::None };
+                write(&mut states, *dst)?;
+                states.resumptions[*dst as usize] = result;
             }
             VmInstruction::HostCallOwned { dst, capability, symbol, parameters, result, arguments, .. }
             | VmInstruction::HostCall {
@@ -8767,6 +8744,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 for (argument, expected) in arguments.iter().zip(parameters) {
                     read(&states, *argument)?;
+                    verify_call_frame_resumption_transfer(&states, *argument)?;
                     expect_type(function, *argument, expected.clone())?;
                 }
                 expect_type(function, *dst, result.clone())?;
@@ -8817,8 +8795,18 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 let Some((result, returns)) = declared_result else {
                     return Err(VmArtifactError::MalformedEncoding { message: "mandatory tail transfer requires a declared result destination" });
                 };
+                let inputs = arguments.iter().map(|argument| states.resumptions[*argument as usize].clone()).collect::<Vec<_>>();
+                let outgoing = if inputs.iter().any(ResumptionValue::contains) {
+                    let contract = transfer_proofs.resumption_calls.get(callee).ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                    resumption_calls::apply(function, pc, &inputs, contract, &mut states,
+                        &mut resumption_contract, &mut incoming, &mut worklist)?
+                } else { ResumptionValue::None };
+                if outgoing.has_local_or_unknown() { return Err(VmArtifactError::HandlerResumeUnavailable); }
                 if returns {
                     returned = Some(result.clone());
+                    returned_resumptions = Some(returned_resumptions.map_or_else(|| outgoing.clone(), |previous| previous.join(&outgoing)));
+                    required_resumptions = Some(required_resumptions.map_or_else(|| states.invoked_resumption_inputs.clone(), |previous|
+                        previous.intersection(&states.invoked_resumption_inputs).cloned().collect()));
                     result_independent &= transfer_proofs.independent_results.contains(callee)
                         && arguments.iter().all(|argument| tail_provenance::independent(function, &states, *argument)
                             && tail_provenance::destruction_preserving(function, &states, *argument));
@@ -8898,7 +8886,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 // ordinary function value. It may be invoked only through
                 // `ResumeSnapshot`, which proves the originating handler
                 // frame remains active.
-                if states.resumptions[*callee as usize].contains() {
+                if states.resumptions[*callee as usize].has_local_or_unknown() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let receiver = register_type(function, *callee)?;
@@ -8934,7 +8922,21 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         found,
                     });
                 }
-                write(&mut states, *dst)?
+                let symbolic = matches!(states.resumptions[*callee as usize], ResumptionValue::Input(_));
+                if let ResumptionValue::Input(path) = &states.resumptions[*callee as usize] {
+                    if !states.handlers.is_empty() || !states.may_invoked_resumption_inputs.insert(path.clone()) {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
+                    let [parameter] = parameters.as_slice() else { return Err(VmArtifactError::HandlerResumeUnavailable); };
+                    resumption_calls::record(path, &resumption_calls::Invocation {
+                        parameter: parameter.clone(), result: (**result).clone(),
+                    }, &mut resumption_contract)?;
+                    states.invoked_resumption_inputs.insert(path.clone());
+                }
+                write(&mut states, *dst)?;
+                if symbolic && resumption_calls::may_contain(result, &function.nominal_copy_descriptors) {
+                    states.resumptions[*dst as usize] = ResumptionValue::Unknown;
+                }
             }
             VmInstruction::Jump { target } => {
                 propagate_state(&mut incoming, &mut worklist, *target, &states)?;
@@ -9045,7 +9047,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 // Return leaves this activation (or exposes the value to the
                 // embedding host). A captured resumption is instead valid
                 // only while its branded handler frame remains live.
-                if states.resumptions[*value as usize].contains() {
+                if states.resumptions[*value as usize].has_local_or_unknown()
+                    || (!transfer_proofs.symbolic_resumption_inputs && states.resumptions[*value as usize].contains()) {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if states.resuming {
@@ -9067,6 +9070,10 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if !states.handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
+                let result = &states.resumptions[*value as usize];
+                returned_resumptions = Some(returned_resumptions.map_or_else(|| result.clone(), |previous| previous.join(result)));
+                required_resumptions = Some(required_resumptions.map_or_else(|| states.invoked_resumption_inputs.clone(), |previous|
+                    previous.intersection(&states.invoked_resumption_inputs).cloned().collect()));
                 result_independent &= tail_provenance::independent(function, &states, *value);
                 result_destruction_preserving &= tail_provenance::destruction_preserving(function, &states, *value);
                 let found = register_type(function, *value)?;
@@ -9127,7 +9134,9 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     }
     if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
-        Ok(VerifiedFunctionControl { call_input_behaviors, returns: returned.is_some(), result_independent,
+        resumption_contract.result = returned_resumptions.unwrap_or_default();
+        resumption_contract.required = required_resumptions.unwrap_or_default();
+        Ok(VerifiedFunctionControl { resumption_contract, call_input_behaviors, returns: returned.is_some(), result_independent,
             result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
             captures_intact_at_boundaries })
     } else {
@@ -9135,10 +9144,9 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     }
 }
 
-/// A captured resumption is frame-scoped control authority, not an ordinary
-/// callable argument. A lexical label, by contrast, deliberately supports
-/// generic facade calls: the executor restores its captured caller frame on
-/// invocation. Only resumptions are forbidden at ordinary call boundaries.
+/// An opaque consumer cannot certify retention or invocation of frame-scoped
+/// control authority. Direct checked helpers instead instantiate their body-
+/// derived contract through `resumption_calls::apply`.
 fn verify_call_frame_resumption_transfer(
     states: &VerifierState,
     register: u32,
@@ -9516,6 +9524,11 @@ fn propagate_state(
             // Labels/resumptions are capability may-taints, not readability.
             // An arm cannot erase authority carried on another predecessor.
             changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
+            let required = existing.invoked_resumption_inputs.intersection(&state.invoked_resumption_inputs).cloned().collect();
+            if existing.invoked_resumption_inputs != required { existing.invoked_resumption_inputs = required; changed = true; }
+            let previous = existing.may_invoked_resumption_inputs.len();
+            existing.may_invoked_resumption_inputs.extend(state.may_invoked_resumption_inputs.iter().cloned());
+            changed |= previous != existing.may_invoked_resumption_inputs.len();
             for (left, right) in existing.resumptions.iter_mut().zip(&state.resumptions) {
                 let joined = left.join(right);
                 if *left != joined { *left = joined; changed = true; }

@@ -17,9 +17,9 @@ const THREE_PERFORMANCES: &str = r#"
     }
 "#;
 
-fn candidate(source: &str) -> CandidateVmProgram {
+fn request(source: &str) -> CompilationRequest {
     let package = PackageKey("handler-reentry@0.1.0".into());
-    let request = CompilationRequest {
+    CompilationRequest {
             build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"handler-reentry")),
             mode: CompilationMode::Build,
             root_package: package.clone(),
@@ -33,7 +33,11 @@ fn candidate(source: &str) -> CandidateVmProgram {
             codegen_options: Default::default(),
             capability_manifest: vec![],
             runtime_manifest: None,
-        };
+        }
+}
+
+fn candidate(source: &str) -> CandidateVmProgram {
+    let request = request(source);
     let outcome = StageZeroCompiler::new().compile(request.clone()).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -74,6 +78,67 @@ fn one_clause_resumes_three_distinct_performance_sites() {
 #[test]
 fn explicit_resumption_returns_the_transformed_completion_result() {
     candidate("effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask(k) => k(40) + 1 } }");
+}
+
+#[test]
+fn ordinary_helpers_transport_and_invoke_the_same_resumption_authority() {
+    let program = candidate("effect Ask { [1,1] ask() -> i64; }
+        fn apply<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { task(value) }
+        fn relay<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { apply(task,value) }
+        pub fn main() -> i64 { handle Ask::ask() {
+            Ask::ask() with k => relay(k,40) + 2
+        } }");
+    assert!(program.functions.values().filter(|function| function.instructions.iter().any(|instruction|
+        matches!(instruction, VmInstruction::CallOwned { arguments, .. }
+            if arguments.iter().any(|argument| matches!(function.registers[*argument as usize], VmType::Callable { .. }))))).count() >= 2,
+        "the proof must support ordinary executable frames, not require source inlining");
+}
+
+#[test]
+fn ordinary_helpers_return_resumption_products_to_their_live_owner() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        fn keep<T>(value:T) -> T { value }
+        pub fn main() -> i64 { handle Ask::ask() {
+            Ask::ask() with k => { let returned = keep((7,k)); returned.1(40) + 2 }
+        } }");
+}
+
+#[test]
+fn ordinary_helpers_preserve_completion_abi_and_branch_invocations() {
+    candidate("struct Answer { value:i64 } effect Ask { [1,1] ask() -> i64; }
+        fn apply<F,R>(task:F, choice:i64) -> R where F:Fn<(i64,),Output=R,Effects={}> {
+            handle choice { 0 => task(40), _ => task(40) }
+        }
+        pub fn main() -> i64 { let answer = handle Ask::ask() {
+            value => Answer { value:value + 2 }, Ask::ask() with k => apply(k,0)
+        }; answer.value }");
+}
+
+#[test]
+fn ordinary_helpers_cannot_erase_a_required_resumption_invocation() {
+    let source = "effect Ask { [1,1] ask() -> i64; }
+        fn ignore<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> { 42 }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => ignore(k) } }";
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(format!("{error:?}").contains("G5012"), "{error:?}");
+}
+
+#[test]
+fn decoded_helper_mutation_cannot_forge_a_guaranteed_resumption() {
+    let mut program = candidate("effect Ask { [1,1] ask() -> i64; }
+        fn apply<F>(task:F, choice:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            handle choice { 0 => task(42), _ => task(42) }
+        }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => apply(k,0) } }");
+    let helper = program.functions.values_mut().find(|function|
+        function.parameters == 2 && function.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. }))).unwrap();
+    assert_eq!(helper.instructions.iter().filter(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })).count(), 2);
+    let call = helper.instructions.iter_mut().find(|instruction| matches!(instruction, VmInstruction::CallIndirectOwned { .. })).unwrap();
+    let VmInstruction::CallIndirectOwned { dst, .. } = call else { unreachable!() };
+    *call = VmInstruction::ConstI64 { dst:*dst, value:42 };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(verify_vm_program(program.clone()).is_err(), "removing a helper invocation must leave the handler suspended");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&program)).is_err());
 }
 
 #[test]

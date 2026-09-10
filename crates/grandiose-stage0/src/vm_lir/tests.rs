@@ -3,11 +3,12 @@ use super::*;
 fn fixture(source: &str) -> VmLirProgram {
     let runtime = crate::runtime_mir::tests::fixture(source);
     let function = lower::lower_function(&runtime).unwrap();
-    let program = VmLirProgram {
+    let mut program = VmLirProgram {
         entry: function.definition,
         functions: BTreeMap::from([(function.definition, function)]),
         callable_environments: BTreeMap::new(),
     };
+    program.infer_returns().unwrap();
     program.validate().unwrap();
     program
 }

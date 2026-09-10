@@ -1,4 +1,4 @@
-//! Invocation result bindings and execution of checked callable bodies.
+//! Invocation input/result bindings and execution of checked callable bodies.
 //! This reuses the quantity solver, with the original capability keys, rather
 //! than deriving invocation counts from the control producer's may-outcomes.
 use super::*;
@@ -307,7 +307,7 @@ impl<'a> Analyzer<'a> {
         (self.repeat(span, summary, closure.invocation), result)
     }
 
-    pub(super) fn factory_call(
+    pub(super) fn checked_body_call(
         &mut self,
         id: CoreId,
         callable: &Binding,
@@ -326,13 +326,17 @@ impl<'a> Analyzer<'a> {
                 .map(|payload| self.payload_binding(payload, span))
                 .collect(),
         );
-        if !result.has_capability() {
+        let produces_capability = result.has_capability();
+        if !produces_capability && !arguments.iter().any(Binding::has_capability) {
             return None;
         }
         let Some((definition, source)) = control
             .declared_function
             .and_then(|definition| self.use_body(definition).map(|source| (definition, source)))
         else {
+            // An unknown consumer still uses the declared outgoing contract.
+            // Only a retained producer result requires its defining body here.
+            if !produces_capability { return None; }
             self.error(
                 span,
                 "G5013",

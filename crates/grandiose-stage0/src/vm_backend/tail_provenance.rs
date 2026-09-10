@@ -6,6 +6,8 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct TransferProofs {
+    pub(super) resumption_calls: BTreeMap<DefKey, resumption_calls::Contract>,
+    pub(super) symbolic_resumption_inputs: bool,
     pub(super) label_dispatches: BTreeMap<DefKey, label_dispatch::Shim>,
     preserving_calls: BTreeSet<DefKey>,
     conditional_preserving_calls: BTreeSet<DefKey>,
@@ -146,7 +148,10 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
     if !needs_frame_proofs(functions) {
         // Ordinary calls and structurally owned tail carriers do not consume
         // this proof. Avoid re-verifying unrelated programs for an unused fact.
-        return Ok(TransferProofs { label_dispatches, ..TransferProofs::default() });
+        let mut proofs = TransferProofs { label_dispatches, ..TransferProofs::default() };
+        resumption_calls::publish(functions, &mut proofs);
+        resumption_calls::validate(functions, &mut proofs)?;
+        return Ok(proofs);
     }
     let mut proofs = TransferProofs {
         label_dispatches,
@@ -158,7 +163,10 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
         independent_results: functions.keys().copied().collect(),
         preserving_result_destruction: functions.keys().copied().collect(),
         entry_behaviors: BTreeMap::new(),
+        resumption_calls: BTreeMap::new(),
+        symbolic_resumption_inputs: false,
     };
+    resumption_calls::publish(functions, &mut proofs);
     let mut callers = BTreeMap::<DefKey, BTreeSet<DefKey>>::new();
     for (caller, function) in functions {
         for instruction in &function.instructions {
@@ -223,6 +231,7 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
             if queued.insert(*caller) { pending.push(*caller); }
         }
     }
+    resumption_calls::validate(functions, &mut proofs)?;
     Ok(proofs)
 }
 

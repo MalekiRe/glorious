@@ -1657,3 +1657,36 @@ zero-marshalling/performance accounting and foreign-control admission remain
 separate obligations. Full source/library and self-hosted acceptance also remain
 open. The earlier generated-stack descriptions document superseded checkpoints,
 not a second active representation alongside these shared resident frames.
+
+## Caller-owned resumption inputs through checked helpers
+
+The existing executable control verifier now runs under symbolic capability
+inputs as well as concrete local handler tokens. Structural input paths retain
+their caller namespace through aliases, products and ordinary result relations;
+they are not local handler brands. A helper may return the caller's capability
+to its still-live owner, but cannot return a locally captured or unknown token.
+Opaque foreign/effect transfers remain unproved, and borrowed storage does not
+acquire an owned callable input path merely from its type.
+
+The whole-program transfer product publishes finite helper contracts for input
+invocation and result transport. May-invocation history and guaranteed invocation
+on every normal path are separate facts in the same control state. Direct calls
+instantiate those contracts with their actual capabilities. Both direct resumption
+instructions and helper invocation audit suspended suffixes with the same control
+transition; only guaranteed invocation discharges a one-shot continuation. The
+producer rechecks published contracts after frame-preservation hypotheses settle.
+Decoded graphs reconstruct this evidence rather than trusting source annotations.
+
+UseFlow's existing checked-body quantity execution now covers capability-consuming
+helpers as well as factory results, with the original caller capability keys.
+The former factory-only entry condition is removed. Runtime MIR-to-VM return
+inference runs on the complete executable batch because a helper's resumption can
+make the caller's completion reachable. No source inlining or new runtime bridge
+substitutes for ordinary helper activation.
+
+Cache 139 and verifier 42 record this proof boundary; native ABI 14 and portable
+bytecode 72 are unchanged. This initial contract admits at most one invocation of
+one input capability, with no helper-local active delimiter around it. Ordered
+multiple invocations, borrowed capability storage and arbitrary recursive helper
+proofs remain open. Missing evidence rejects; an unordered may-call set cannot
+certify replay counts or delimiter order.

@@ -42,13 +42,25 @@ impl VmLirProgram {
                 }
             }
         }
-        let program = Self {
+        let mut program = Self {
             entry: source.entry(),
             functions,
             callable_environments,
         };
+        program.infer_returns()?;
         program.validate()?;
         Ok(program)
+    }
+
+    /// Return behavior can depend on ordinary helpers that invoke a captured
+    /// continuation. Infer it only after the complete executable batch exists.
+    pub(super) fn infer_returns(&mut self) -> Result<(), VmArtifactError> {
+        let functions = self.functions.iter().map(|(key, function)| Ok((*key, function.emit()?)))
+            .collect::<Result<BTreeMap<_, _>, VmArtifactError>>()?;
+        for (key, returns) in crate::vm_backend::infer_program_returns(&functions)? {
+            self.functions.get_mut(&key).expect("same executable batch").returns |= returns;
+        }
+        Ok(())
     }
 }
 
@@ -308,8 +320,7 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
         entry: VmLirBlockId(source.entry.0),
         blocks,
     };
-    function.returns = crate::vm_backend::infer_function_returns(&function.emit()?)?
-        || (source.result != crate::Type::Never && function.blocks.iter().any(|block|
-            matches!(block.terminator, VmLirTerminator::TailCall { .. })));
+    function.returns = source.result != crate::Type::Never && function.blocks.iter().any(|block|
+            matches!(block.terminator, VmLirTerminator::TailCall { .. }));
     Ok(function)
 }

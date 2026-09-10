@@ -1151,7 +1151,7 @@ impl Analyzer<'_> {
         let binding = self.binding_for_value(callee, environment);
         let inputs = arguments.iter().map(|argument| self.binding_for_value(*argument, environment)).collect::<Vec<_>>();
         if !matches!(binding, Binding::Closure(_) | Binding::Choice(_))
-            && let Some((body, result)) = self.factory_call(id, &binding, &inputs, span) {
+            && let Some((body, result)) = self.checked_body_call(id, &binding, &inputs, span) {
             self.result_values.insert(id, result);
             return self.compose(span, summary, body);
         }
