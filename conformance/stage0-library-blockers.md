@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 118 verification below,
+Updated from the current source and cache 119 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,22 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 119 separates a returned reference's authenticated validity from its
+conservative loan debt in the existing shared return product and escape value
+snapshot. This closes the active generic-getter proof gap from cache 118 while
+retaining unresolved fields, logical dependencies and every possible caller loan.
+The reference-contract target now has ten passing tests, including VM O0/O2,
+generated native O0/O2 and local escape/replacement/aliasing negatives.
+
+The integration records 440 distinct passing checks and two existing failing
+tests: native generic-label materialization and carrier-reborrow access. The
+full-library root separately **still fails** with 61 diagnostic records and no
+suppression marker (`target/reference-authentication-library-v10.log`). The source
+matrix remains the historical 16 passing / 15 failing result above. Exact scope
+and open obligations are recorded in `implementation-progress.md`.
+
+The following cache 118 and earlier entries are historical.
 
 Cache 118 repairs the authoritative invocation reference contract so unresolved
 generic coverage no longer erases positively known caller paths. Calls and

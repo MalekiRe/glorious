@@ -145,6 +145,10 @@ enum Value {
     /// across suspension, but can be overwritten by a body-local borrow in
     /// an aggregate projection.
     ExternalBorrowed,
+    /// The shared invocation relation authenticated this reference leaf on
+    /// every normal return. Its possible loan dependencies remain separate
+    /// from that validity evidence and are never erased by authentication.
+    Reference { dependencies: Box<Value> },
     Region(BTreeSet<crate::placeflow::regions::Region>),
     Borrowed {
         root: String,
@@ -358,6 +362,7 @@ impl Analyzer<'_> {
                 Value::Variant(values) => Value::Variant(values.iter().map(|value| resolve(value, graph, active)).collect()),
                 Value::Alternatives(values) => Value::Alternatives(values.iter().map(|value| resolve(value, graph, active)).collect()),
                 Value::Joined(values) => join(values.iter().map(|value| resolve(value, graph, active)).collect()),
+                Value::Reference { dependencies } => authenticated_reference(resolve(dependencies, graph, active)),
                 Value::Array { length, element, fields } => Value::Array { length: *length,
                     element: Box::new(resolve(element, graph, active)),
                     fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active))).collect() },
@@ -653,7 +658,9 @@ impl Analyzer<'_> {
                 }
                 let resolved = self.continuations.invocation(id).map(|control|
                     control.resolve_returns(&expression.ty, self.signatures, &callable, &values, self));
-                let references_complete = resolved.as_ref().is_some_and(|result| result.references_complete);
+                let references_complete = resolved.as_ref().is_some_and(|result| result.references.is_complete());
+                let reference_paths = resolved.as_ref().into_iter().flat_map(|result| result.references.paths())
+                    .map(<[u32]>::to_vec).collect::<Vec<_>>();
                 let returned = resolved.into_iter().flat_map(|result| result.payloads).filter_map(|payload|
                     control::known_payload(payload, &self.values, &mut self.control_captures, self.signatures)).collect::<Vec<_>>();
                 let mut result = if matches!(reference_origin, CallReferenceOrigin::Opaque) && references_complete {
@@ -674,7 +681,14 @@ impl Analyzer<'_> {
                         else { Value::CallableResident { footprint: Box::new(join(footprint)), resident_captures } };
                     put_value_at_path(result.get_or_insert(Value::None), &path, value);
                 }
-                join(result.into_iter().chain(returned).collect())
+                let mut result = join(result.into_iter().chain(returned).collect());
+                for path in reference_paths {
+                    if !authenticate_reference_path(&mut result, &path) {
+                        self.error(expression.span, "G5023", "authenticated invocation reference contradicts its retained result shape");
+                    }
+                }
+                seal_array_extents(self.signatures, &expression.ty, &mut result);
+                result
             }
             CoreKind::Perform { .. } => match self.performed_value(id) {
                 Some(PerformedValue::Invoked { result, .. }) => result.unwrap_or(Value::None),
@@ -892,6 +906,7 @@ impl Analyzer<'_> {
         };
         let reference = self.resolved_value(&value_at_path(value, &path[..deref])?);
         let resident = match reference {
+            Value::Reference { dependencies } => return self.reference_path_value(&dependencies, &path[deref..]),
             Value::ExternalBorrowed => Value::ExternalBorrowed,
             Value::Borrowed { storage, fields, capture_path, .. } => {
                 let owner = value_at_path(self.values.residents.get(&storage?)?, &fields)?;
@@ -1075,6 +1090,7 @@ impl Analyzer<'_> {
             CoreKind::Field { base, index, .. } => self.reborrowed_value(base).map(|value| {
                 fn project(value: Value, index: u32) -> Value {
                     match value {
+                        Value::Reference { dependencies } => authenticated_reference(project(*dependencies, index)),
                         Value::Borrowed { root, storage, mut fields, mut capture_path } => {
                             if let Some(capture) = capture_path.last_mut() { capture.fields.push(index); }
                             else { fields.push(index); }
@@ -1169,6 +1185,7 @@ impl Analyzer<'_> {
                     result.insert((storage, fields, capture_path));
                 }
                 Value::Joined(values) => for value in values { targets(value, projected, result); },
+                Value::Reference { dependencies } => targets(*dependencies, projected, result),
                 _ => {},
             }
         }
@@ -1376,6 +1393,68 @@ fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
     value_at_variant_path(value, path, false)
 }
 
+fn authenticated_reference(value: Value) -> Value {
+    // Repeated forwarding preserves one proof wrapper and the complete loan
+    // union instead of nesting a new wrapper around each earlier invocation.
+    fn dependencies(value: Value) -> Value {
+        match value {
+            Value::Reference { dependencies: value } => dependencies(*value),
+            Value::Joined(values) => join(values.into_iter().map(dependencies).collect()),
+            value => value,
+        }
+    }
+    Value::Reference { dependencies: Box::new(dependencies(value)) }
+}
+
+/// Apply a path authenticated by the bound invocation product to this result
+/// snapshot. Sparse declaration footprints are not alternative runtime values:
+/// a missing shell may retain unknown dependencies while the actual reference
+/// leaf has separately been proved on every normal result. No loan is removed.
+fn authenticate_reference_path(value: &mut Value, path: &[u32]) -> bool {
+    let Some((field, tail)) = path.split_first() else {
+        *value = authenticated_reference(std::mem::replace(value, Value::None));
+        return true;
+    };
+    match value {
+        Value::Joined(values) | Value::Alternatives(values) =>
+            return values.iter_mut().all(|value| authenticate_reference_path(value, path)),
+        Value::ExternalBorrowed => return true,
+        _ => {},
+    }
+    if *field == crate::core::REFERENCE_PATH_LOGICAL_ARGUMENT {
+        let Some((argument, tail)) = tail.split_first() else { return false; };
+        if !matches!(value, Value::Logical { .. }) {
+            *value = Value::Logical { physical: Box::new(std::mem::replace(value, Value::None)), arguments: BTreeMap::new() };
+        }
+        let Value::Logical { arguments, .. } = value else { unreachable!() };
+        return authenticate_reference_path(arguments.entry(*argument).or_insert(Value::None), tail);
+    }
+    if let Value::Logical { physical, .. } = value {
+        return authenticate_reference_path(physical, path);
+    }
+    if *field == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+        if matches!(value, Value::None) {
+            *value = Value::Array { length: None, element: Box::new(Value::None), fields: BTreeMap::new() };
+        }
+        return match value {
+            Value::Array { element, fields, .. } => authenticate_reference_path(element, tail)
+                && fields.values_mut().all(|value| authenticate_reference_path(value, tail)),
+            Value::Aggregate(values) => values.iter_mut().all(|value| authenticate_reference_path(value, tail)),
+            _ => false,
+        };
+    }
+    if *field == crate::core::REFERENCE_PATH_DEREF { return false; }
+    if matches!(value, Value::None) { *value = Value::Aggregate(vec![]); }
+    let Value::Aggregate(fields) = value else {
+        if let Value::Variant(fields) = value {
+            return fields.get_mut(*field as usize).is_some_and(|value| authenticate_reference_path(value, tail));
+        }
+        return false;
+    };
+    fields.resize(fields.len().max(*field as usize + 1), Value::None);
+    authenticate_reference_path(&mut fields[*field as usize], tail)
+}
+
 fn replace_resident_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
     if let Value::Alternatives(values) = target {
         let mut assigned = false;
@@ -1518,7 +1597,7 @@ fn array_values<'a>(length: Option<u64>, element: &'a Value, fields: &'a BTreeMa
 }
 
 fn seal_array_extents(signatures: &crate::ElaboratedInterface, ty: &Type, value: &mut Value) {
-    if let Value::Alternatives(values) = value {
+    if let Value::Alternatives(values) | Value::Joined(values) = value {
         for value in values { seal_array_extents(signatures, ty, value); }
         return;
     }
@@ -1602,6 +1681,7 @@ fn merge_region_values(target: &mut Value, incoming: Value) {
 
 fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
     match value {
+        Value::Reference { dependencies } => logical_regions(dependencies),
         Value::Region(regions) => regions.clone(),
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
             values.iter().flat_map(logical_regions).collect(),
@@ -1616,6 +1696,7 @@ fn logical_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region>
 /// callable's own resident slot. Only an actual store connects their contents.
 fn contained_regions(value: &Value) -> BTreeSet<crate::placeflow::regions::Region> {
     match value {
+        Value::Reference { dependencies } => contained_regions(dependencies),
         Value::Closure { regions, .. } => regions.clone(),
         Value::CallableResident { footprint, resident_captures } => contained_regions(footprint).into_iter()
             .chain(resident_captures.iter().flat_map(|operand| contained_regions(&operand.value))).collect(),
@@ -1677,6 +1758,7 @@ fn type_has_variant_layout(signatures: &crate::ElaboratedInterface, ty: &Type, a
 
 fn frame_independent_value(value: &Value) -> bool {
     match value {
+        Value::Reference { dependencies } => frame_independent_value(dependencies),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::FrameIndependent | Value::ExternalBorrowed => true,
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
@@ -1710,6 +1792,7 @@ fn capture_dependency_roots(value: &Value) -> BTreeSet<String> {
 
 fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
     match value {
+        Value::Reference { dependencies } => collect_borrowed_roots(dependencies, roots),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::Borrowed { root, .. } => {
             roots.insert(root.clone());
@@ -1830,6 +1913,7 @@ fn effect_row_contains_open_type_parameter(row: &EffectRow) -> bool {
 /// body-local borrow cannot safely be written through the merged receiver.
 fn value_contains_external_reference(value: &Value) -> bool {
     match value {
+        Value::Reference { dependencies } => value_contains_external_reference(dependencies),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::ExternalBorrowed => true,
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) => {
@@ -1854,6 +1938,7 @@ fn closure_captures(value: &Value) -> Vec<Capture> {
 
 fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
     match value {
+        Value::Reference { dependencies } => collect_closure_captures(dependencies, captures),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::Closure {
             captures: values, ..
@@ -1877,6 +1962,43 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reference_authentication_retains_all_escape_debt_and_is_invalidated_by_replacement() {
+        use super::*;
+        let local = Value::Borrowed { root: "local".into(), storage: None, fields: vec![], capture_path: vec![] };
+        let mut result = join(vec![Value::Aggregate(vec![Value::None, local]),
+            Value::Aggregate(vec![Value::None, Value::ExternalBorrowed])]);
+        assert!(authenticate_reference_path(&mut result, &[1]));
+        let reference = value_at_path(&result, &[1]).unwrap();
+        assert!(invocations::reference_is_known(&reference));
+        assert_eq!(borrowed_roots(&reference), BTreeSet::from(["local".into()]));
+        assert!(value_contains_external_reference(&reference));
+        assert!(!frame_independent_value(&reference));
+        assert!(!invocations::reference_is_known(&value_at_path(&result, &[0]).unwrap()));
+        assert!(!invocations::reference_is_known(&join(vec![reference, Value::None])),
+            "a separate unknown return alternative must invalidate authentication");
+        assert!(replace_resident_path(&mut result, &[1], Value::None));
+        assert!(!invocations::reference_is_known(&value_at_path(&result, &[1]).unwrap()),
+            "replacing a handle cannot retain the old reference's proof");
+    }
+
+    #[test]
+    fn reference_authentication_keeps_sparse_array_loans_and_logical_regions() {
+        use super::*;
+        let region = crate::placeflow::regions::Region { site: "logical".into(), path: vec![0] };
+        let a = Value::Borrowed { root: "a".into(), storage: None, fields: vec![], capture_path: vec![] };
+        let b = Value::Borrowed { root: "b".into(), storage: None, fields: vec![], capture_path: vec![] };
+        let mut value = Value::Array { length: Some(4), element: Box::new(join(vec![a, Value::Region([region.clone()].into())])),
+            fields: [(2, b)].into() };
+        assert!(authenticate_reference_path(&mut value, &[crate::core::REFERENCE_PATH_ARRAY_ELEMENT]));
+        assert_eq!(contained_regions(&value), BTreeSet::from([region]));
+        let value = Analyzer::resolved_value_in(&value, &ValueEnvironment::default());
+        assert_eq!(borrowed_roots(&value), BTreeSet::from(["a".into(), "b".into()]));
+        assert!(invocations::reference_is_known(&value_at_path(&value, &[0]).unwrap()));
+        assert!(invocations::reference_is_known(&value_at_path(&value, &[2]).unwrap()));
+        assert!(!frame_independent_value(&value));
+    }
+
     #[test]
     fn callable_containment_is_not_aliasing_of_the_captured_owner_region() {
         use super::*;

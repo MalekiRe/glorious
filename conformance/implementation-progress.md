@@ -5,6 +5,58 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 119: authenticated reference leaves retain their loan debt
+
+The active cache-118 generic getter failed because its valid physical reference
+was joined with conservative unresolved logical-region debt. Whole-result
+reference coverage could not authenticate that one field while a different
+generic field remained open. The shared bound invocation return product now
+retains per-path reference authentication alongside complete-result coverage.
+Every authenticated path requires known invocation coverage and a represented,
+checked input projection on every normal-return alternative.
+
+EscapeFlow transports that validity in its existing reference-value snapshot
+without dropping the declaration's possible input loans or logical residents.
+Reference validity is distinct from the conservative dependency union. Source
+projection, reborrow, storage replacement, escape/tail checks and captured-control
+queries consume the same value; no separate Core walker or side fact table is
+introduced. PlaceFlow uses the same coverage product for result admission and
+retains its ordinary complete loan union. Unknown fields remain unknown and an
+unknown returning alternative cannot acquire authentication.
+
+The formerly failing source and its success requirement are unchanged and now
+execute fresh/decoded VM O0/O2. The expanded reference-contract target has ten
+passing tests, including short resident lifetimes, capture and replacement
+composition, direct/captured/replaced local escape rejection, backing-storage
+mutation rejection, distinct unique outputs and generated native source O0/O2
+execution (`target/reference-authentication-source-final-v11.log`). Invalid callers
+must report actual `G5013`/`G5017` obligations; secondary diagnostics in recovered
+caller Core are not proof failures in the independently valid generic helpers.
+
+Verification records **440 distinct passing checks and two active test failures**:
+
+- 373 unit, eight effect-contract and 22 request checks pass
+  (`target/reference-authentication-integration-v8.log`). New unit guards require
+  per-path agreement across every return, preserve sparse-array/logical-region
+  and local-loan debts, reject unknown coverage and invalidate overwritten proofs.
+- The ten reference-contract tests above and five returned-capture checks pass
+  (`target/reference-authentication-captures-v6.log`).
+- Normal-result tests have eight passes and the unchanged native generic-label
+  `MakeLabel` failure (`target/reference-authentication-normal-results-v7.log`).
+- Expected reborrows have 14 passes and the unchanged carrier-access `G5004`
+  failure (`target/reference-authentication-reborrows-v9.log`), already reproduced
+  before these changes at `1263ea85`. Neither failing success assertion is relaxed.
+
+The full-library root **still fails** with 61 diagnostic records and no
+suppression marker in 30.53 seconds (`target/reference-authentication-library-v10.log`).
+The remaining traversal line-229 provenance, random API/array mismatches, graph
+result type, custom-Drop extraction, unsafe UTF-8, mandatory-tail and minimum-use
+obligations are not fixed by authenticating a known reference. No new full source
+matrix, native handler/label acceptance or GSC-2 completion is claimed.
+
+Cache generation is 119; interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 remain unchanged. The following checkpoints are historical.
+
 ## Cache 118: known reference paths with deferred coverage
 
 The actual sorting failure began at `SliceMut::split_at`: an unresolved logical

@@ -932,9 +932,9 @@ returned-reference coverage. Generic coverage remains deferred, not certified.
 Input collection cannot settle an unknown physical component merely by finding
 another known leaf. The shared return proof can authenticate a known input
 projection independently of its siblings, but still requires complete output
-shape and checked reference evidence. A joined physical borrow and unresolved
-logical-region dependency do not yet supply that evidence for every generic
-getter; that active source regression is not a supported completeness claim.
+shape and checked reference evidence. The initial migration still failed to
+authenticate a generic getter whose physical borrow was joined with unresolved
+logical-region debt; the following boundary addresses that remaining distinction.
 MIR transports the existing contract product and its fingerprint; runtime
 provenance and wire-verifier representations are unchanged.
 
@@ -942,3 +942,35 @@ This repairs the generic erased-view result boundary exposed by sorting and
 graph, not complete nominal/handler provenance or library execution. General
 handler payload discovery, guarded storage, native label materialization and
 the full-library acceptance gate remain open.
+
+## Reference validity and retained invocation debt
+
+The bound invocation product's `ReferenceCoverage` now publishes authenticated
+normal-result paths as well as whole-result completeness. A path requires a
+known invocation, at least one normal return and an authenticated input projection
+on every returning alternative. An unrelated open result field does not erase
+that path; unknown invocation coverage, a missing input or an unrepresented
+alternative cannot certify it. The same shared layout and input-adapter rules
+derive the paths and the complete-result decision. There is no second Core
+provenance walk or independently populated result table.
+
+EscapeFlow carries this reference validity in its existing value snapshot,
+separately from the reference's conservative dependency union. The declaration's
+possible input loans, logical residents and body-derived payload debts remain
+present. Authentication does not turn an unresolved dependency into a valid
+reference, remove it, or claim that the entire aggregate is known. It records
+that this particular result leaf is a reference independently of those debts.
+This repairs the generic getter described in the preceding checkpoint.
+
+Projection and reborrowing transport that value evidence; replacing the handle
+replaces its proof. A later unknown branch still prevents complete authentication.
+Array elements keep their homogeneous/sparse provenance representation. Lifetime,
+tail, external-store and control-escape queries inspect all retained dependencies,
+and dereference still needs the existing backing-storage projection. Validity
+does not create a referent identity or permission to ignore a live loan.
+
+PlaceFlow consumes the same coverage product for opaque-result admission and
+continues to retain the full loan union in its ordinary result aliases. Source
+resource products, Core contracts and runtime/verifier provenance remain separate
+boundaries. This is not complete guarded storage, generic operation-result
+authentication, native label/handler lowering or self-hosted acceptance.

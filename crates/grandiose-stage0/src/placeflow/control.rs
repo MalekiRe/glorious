@@ -36,7 +36,7 @@ impl Analyzer<'_> {
             .collect::<Vec<_>>();
         let empty = ElaboratedInterface::default();
         let returned = control.resolve_returns(&result_ty, self.signatures.unwrap_or(&empty), &callable, &arguments, self);
-        if !returned.references_complete {
+        if !returned.references.is_complete() {
             self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
         }
         // Partial observations cannot suppress a normal path or authorize

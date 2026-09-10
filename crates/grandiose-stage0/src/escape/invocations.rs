@@ -109,6 +109,7 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         fn project(value: Value, fields: &[u32]) -> Value {
             match value {
+                Value::Reference { dependencies } => authenticated_reference(project(*dependencies, fields)),
                 Value::Borrowed { root, storage, fields: mut prefix, mut capture_path } => {
                     if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
                     else { prefix.extend_from_slice(fields); }
@@ -125,6 +126,7 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, _: bool) -> Option<Value> {
         fn borrow(value: Value, projection: &crate::resident_invocations::CaptureProjection) -> Option<Value> {
             Some(match value {
+                Value::Reference { dependencies } => authenticated_reference(borrow(*dependencies, projection)?),
                 Value::Borrowed { root, storage: Some(storage), fields, mut capture_path } => {
                     capture_path.push(projection.clone());
                     Value::Borrowed { root, storage: Some(storage), fields, capture_path }
@@ -141,16 +143,18 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
 
 impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
     fn reference_known(&self, value: &Value) -> bool {
-        fn known(value: &Value) -> bool {
-            match value {
-                Value::Borrowed { .. } | Value::ExternalBorrowed => true,
-                Value::Joined(values) | Value::Alternatives(values) =>
-                    !values.is_empty() && values.iter().all(known),
-                Value::Logical { physical, .. } => known(physical),
-                _ => false,
-            }
-        }
-        known(&self.resolved_value(value))
+        reference_is_known(&self.resolved_value(value))
+    }
+}
+
+pub(super) fn reference_is_known(value: &Value) -> bool {
+    match value {
+        Value::Reference { .. } => true,
+        Value::Borrowed { .. } | Value::ExternalBorrowed => true,
+        Value::Joined(values) | Value::Alternatives(values) =>
+            !values.is_empty() && values.iter().all(reference_is_known),
+        Value::Logical { physical, .. } => reference_is_known(physical),
+        _ => false,
     }
 }
 

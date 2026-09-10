@@ -134,3 +134,67 @@ fn partial_generic_results_preserve_distinct_unique_reference_outputs() {
         }
     "#);
 }
+
+const AUTHENTICATED_INPUTS: &str = r#"#![no_std]
+    struct Mixed<'a,T> { resident: T, known: &'a i64 }
+    fn forward<'a,T>(value: Mixed<'a,T>) -> Mixed<'a,T> { value }
+    fn get<'a,T>(value: Mixed<'a,T>) -> &'a i64 where T: Use<[0,*]> { value.known }
+    fn select<'a,T>(resident: T, value: &'a i64) -> &'a i64 where T: Use<[0,*]> {
+        get(forward(Mixed { resident: resident, known: value }))
+    }
+"#;
+
+#[test]
+fn authenticated_reference_fields_compose_with_captures_replacement_and_short_residents() {
+    for body in [
+        "fn relay<'a>(value: &'a i64) -> &'a i64 { let local = 0; select(&local, value) } pub fn main() -> i64 { let value = 42; *relay(&value) }",
+        "fn capture<'a,T>(value: Mixed<'a,T>) -> () -> &'a i64 where T: Use<[0,*]> { let result = get(forward(value)); move (result) { result } } pub fn main() -> i64 { let value = 42; let task = capture(Mixed { resident: 0, known: &value }); *task() }",
+        "pub fn main() -> i64 { let first = 0; let last = 42; let mut value = forward(Mixed { resident: 0, known: &first }); value.known = &last; *get(value) }",
+    ] { accepts(&format!("{AUTHENTICATED_INPUTS}\n{body}")); }
+}
+
+#[test]
+fn authenticated_reference_fields_do_not_erase_local_escape_or_replacement_obligations() {
+    for body in [
+        "fn bad<'a,T>(resident: T, fallback: &'a i64) -> &'a i64 where T: Use<[0,*]> { let local = 0; select(resident, &local) } pub fn main() -> i64 { let value = 42; *bad(0, &value) }",
+        "fn bad<'a,T>(resident: T, fallback: &'a i64) -> () -> &'a i64 where T: Use<[0,*]> { let local = 0; let result = select(resident, &local); move (result) { result } } pub fn main() -> i64 { let value = 42; *bad(0, &value)() }",
+        "fn bad<'a,T>(resident: T, fallback: &'a i64) -> &'a i64 where T: Use<[0,*]> { let local = 0; let mut value = forward(Mixed { resident: resident, known: fallback }); value.known = &local; get(value) } pub fn main() -> i64 { let value = 42; *bad(0, &value) }",
+    ] {
+        let source = format!("{AUTHENTICATED_INPUTS}\n{body}");
+        for optimization in ["0", "2"] {
+            let error = StageZeroCompiler::new().compile(request(&source, optimization))
+                .expect_err("reference authentication cannot erase an escaping local loan");
+            assert!(error.diagnostics().iter().any(|diagnostic|
+                matches!(diagnostic.code, "G5013" | "G5017")), "{body}: {:#?}", error.diagnostics());
+            // A rejected caller may already contain recovered lifetime/type
+            // metadata. The independently valid generic helpers must retain
+            // their reference proof; the caller must report the local escape.
+            assert!(!error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5023"
+                && diagnostic.primary.as_ref().is_some_and(|span| (span.start as usize) < AUTHENTICATED_INPUTS.len())),
+                "valid helper reference proof was lost: {body}: {:#?}", error.diagnostics());
+        }
+    }
+}
+
+#[test]
+fn authenticated_reference_results_keep_backing_storage_borrowed() {
+    let source = format!("{AUTHENTICATED_INPUTS}\npub fn main() -> i64 {{ let mut value = 42; let reference = select(0, &value); value = 0; *reference }}");
+    for optimization in ["0", "2"] {
+        let error = StageZeroCompiler::new().compile(request(&source, optimization))
+            .expect_err("authentication is not permission to mutate borrowed storage");
+        assert!(error.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5007")), "{:#?}", error.diagnostics());
+    }
+}
+
+#[test]
+fn authenticated_partial_reference_results_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = format!("{AUTHENTICATED_INPUTS}\npub fn main() -> i64 {{ let value = 42; *select(0, &value) }}");
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: execute only this locally compiled and checked source.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
+}

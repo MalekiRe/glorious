@@ -766,28 +766,30 @@ fn returned_reference_coverage_requires_every_path_and_authenticated_input() {
         ty: result.clone(), source: payloads::PayloadSource::Aggregate(vec![capture.clone(), argument]),
     }], ..Default::default() };
     let domain = Domain { capture_known: true, reference_known: true };
-    assert!(control.resolve_returns(&result, &signatures, &(), &[()], &domain).references_complete);
+    assert!(control.resolve_returns(&result, &signatures, &(), &[()], &domain).references.is_complete());
     control.unknown = true;
     let partial = control.resolve_returns(&result, &signatures, &(), &[()], &domain);
-    assert!(!partial.references_complete);
+    assert!(!partial.references.is_complete());
+    assert_eq!(partial.references.paths().count(), 0, "observations do not certify coverage");
     assert_eq!(partial.payloads.len(), 1, "positive dependencies survive a coverage gap");
     control.unknown = false;
     for incomplete in [Domain { capture_known: false, reference_known: true },
         Domain { capture_known: true, reference_known: false }] {
-        assert!(!control.resolve_returns(&result, &signatures, &(), &[()], &incomplete).references_complete);
+        assert!(!control.resolve_returns(&result, &signatures, &(), &[()], &incomplete).references.is_complete());
     }
-    assert!(!control.resolve_returns(&result, &signatures, &(), &[], &domain).references_complete);
+    assert!(!control.resolve_returns(&result, &signatures, &(), &[], &domain).references.is_complete());
     control.returns.push(InvocationPayload::unknown(result.clone()));
-    assert!(!control.resolve_returns(&result, &signatures, &(), &[()], &domain).references_complete);
+    assert!(!control.resolve_returns(&result, &signatures, &(), &[()], &domain).references.is_complete());
+    assert_eq!(control.resolve_returns(&result, &signatures, &(), &[()], &domain).references.paths().count(), 0);
     control.returns = vec![capture];
     control.returns[0].ty = Type::Unit;
-    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
+    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references.is_complete());
     control.returns[0].ty = reference.clone();
     let payloads::PayloadSource::Capture { path, .. } = &mut control.returns[0].source else { unreachable!() };
     path.push(99);
-    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
+    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references.is_complete());
     control.returns.clear();
-    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references_complete);
+    assert!(!control.resolve_returns(&reference, &signatures, &(), &[], &domain).references.is_complete());
 
     // A specialized result may only demand a represented input sibling.
     // Its other generic field cannot erase that authenticated projection,
@@ -796,8 +798,46 @@ fn returned_reference_coverage_requires_every_path_and_authenticated_input() {
     let specialized = Type::Tuple(vec![Type::Unit, reference]);
     control.returns = vec![InvocationPayload { ty: partial_type.clone(),
         source: payloads::PayloadSource::Argument { index: 0, path: vec![] } }];
-    assert!(control.resolve_returns(&specialized, &signatures, &(), &[()], &domain).references_complete);
-    assert!(!control.resolve_returns(&partial_type, &signatures, &(), &[()], &domain).references_complete);
+    assert!(control.resolve_returns(&specialized, &signatures, &(), &[()], &domain).references.is_complete());
+    assert!(!control.resolve_returns(&partial_type, &signatures, &(), &[()], &domain).references.is_complete());
+    assert_eq!(control.resolve_returns(&partial_type, &signatures, &(), &[()], &domain).references.paths().collect::<Vec<_>>(), vec![&[1][..]]);
     assert!(!control.resolve_returns(&specialized, &signatures, &(), &[()],
-        &Domain { capture_known: true, reference_known: false }).references_complete);
+        &Domain { capture_known: true, reference_known: false }).references.is_complete());
+}
+
+#[test]
+fn reference_path_authentication_intersects_every_return_alternative() {
+    use crate::resident_invocations::{CapturedInputs, Operand};
+    struct Domain(std::collections::BTreeSet<Vec<u32>>);
+    impl PayloadInputs for Domain {
+        type Value = Vec<u32>;
+        fn project(&self, value: &Vec<u32>, path: &[u32]) -> Option<Vec<u32>> {
+            Some(value.iter().chain(path).copied().collect())
+        }
+        fn captures(&self, _: &Operand<Vec<u32>>) -> CapturedInputs<Vec<u32>> {
+            CapturedInputs { operands: vec![], unresolved: true }
+        }
+        fn reborrow(&self, _: &Vec<u32>, _: &[u32]) -> Option<Vec<u32>> { None }
+    }
+    impl ReferenceInputs for Domain {
+        fn reference_known(&self, value: &Vec<u32>) -> bool { self.0.contains(value) }
+    }
+    let reference = Type::Reference { mutability: crate::Mutability::Shared,
+        lifetime: crate::Lifetime::Elided, referent: Box::new(Type::Unit) };
+    let result = Type::Tuple(vec![Type::Generic(0), reference.clone(), reference]);
+    let mut control = InvocationControl { normal: true,
+        returns: (0..2).map(|index| InvocationPayload { ty: result.clone(),
+            source: payloads::PayloadSource::Argument { index, path: vec![] } }).collect(), ..Default::default() };
+    let domain = Domain([vec![0,1], vec![0,2], vec![1,1]].into());
+    let signatures = ElaboratedInterface::default();
+    let inputs = [vec![0], vec![1]];
+    let resolved = control.resolve_returns(&result, &signatures, &vec![], &inputs, &domain);
+    assert!(!resolved.references.is_complete());
+    assert_eq!(resolved.references.paths().collect::<Vec<_>>(), vec![&[1][..]],
+        "the second leaf is missing in one returning alternative");
+    control.normal = false;
+    assert_eq!(control.resolve_returns(&result, &signatures, &vec![], &inputs, &domain).references.paths().count(), 0);
+    control.normal = true;
+    assert_eq!(control.resolve_returns(&result, &signatures, &vec![], &inputs[..1], &domain).references.paths().count(), 0,
+        "an absent input cannot authenticate either output leaf");
 }

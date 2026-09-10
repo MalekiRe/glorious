@@ -119,7 +119,23 @@ pub(crate) trait ReferenceInputs: PayloadInputs {
 
 pub(crate) struct ResolvedReturns<V> {
     pub payloads: Vec<ResolvedPayload<V>>,
-    pub references_complete: bool,
+    pub references: ReferenceCoverage,
+}
+
+/// Authenticated reference leaves of every represented normal result. Known
+/// paths survive an unrelated open field, but no path is certified when
+/// invocation coverage or one of its returning alternatives is unknown.
+pub(crate) struct ReferenceCoverage {
+    paths: std::collections::BTreeSet<Vec<u32>>,
+    complete: bool,
+}
+
+impl ReferenceCoverage {
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &[u32]> {
+        self.paths.iter().map(Vec::as_slice)
+    }
+
+    pub(crate) fn is_complete(&self) -> bool { self.complete }
 }
 
 impl InvocationControl {
@@ -155,10 +171,13 @@ impl InvocationControl {
                 ResolvedPayload::Callable { .. } | ResolvedPayload::Unknown(_) => false,
             }
         }
-        let references_complete = !self.unknown && self.normal && !payloads.is_empty() && shape_known
-            && payloads.iter().all(|payload| leaves.iter().all(|(path, ty)|
-                matches!(ty, Type::Reference { lifetime: crate::Lifetime::Static, .. }) || known(payload, path, signatures, domain)));
-        ResolvedReturns { payloads, references_complete }
+        let invocation_covered = !self.unknown && self.normal && !payloads.is_empty();
+        let paths = leaves.iter().filter(|(path, _)| invocation_covered
+            && payloads.iter().all(|payload| known(payload, path, signatures, domain)))
+            .map(|(path, _)| path.clone()).collect::<std::collections::BTreeSet<_>>();
+        let complete = invocation_covered && shape_known && leaves.iter().all(|(path, ty)|
+            matches!(ty, Type::Reference { lifetime: crate::Lifetime::Static, .. }) || paths.contains(path));
+        ResolvedReturns { payloads, references: ReferenceCoverage { paths, complete } }
     }
 }
 
