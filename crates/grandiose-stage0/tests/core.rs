@@ -7654,6 +7654,12 @@ fn escapeflow_fails_closed_on_a_forged_nested_aggregate_projection_path() {
         panic!("nested assignment must retain a field place")
     };
     *field_count = 2;
+    let stale = EscapeFlow::analyze(&core, &flow);
+    assert!(stale.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4180"),
+        "a changed layout cannot reuse the earlier typed resource product: {stale:#?}");
+    // Re-derive the malformed input so the independent resident-path check
+    // below is still exercised, rather than masked by the stale-input gate.
+    let flow = PlaceFlow::analyze(&core);
     let escapes = EscapeFlow::analyze(&core, &flow);
     assert!(
         escapes
@@ -7739,6 +7745,7 @@ fn contextual_binding_pack_arguments_activate_source_binders() {
         "visit(42 is found) { found }",
         "visit((40, 2) is (left, right)) { left + right }",
         "let owner = Owner { value: 21 }; let observed = visit(owner is found) { found.value }; let moved = owner; observed + moved.value",
+        "let pair = (Owner { value: 40 }, Owner { value: 2 }); visit(pair is (left, right)) { left.value + right.value }",
         "let test = identity(42 is found); visit(test) { found }",
     ] {
         let source = format!("use std::*; struct Owner {{ value: i64 }} impl Use<[0, 1]> for Owner {{}} fn identity<T>(value: T) -> T {{ value }} fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64>, N: Use<[0,1]> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} pub fn main() -> i64 {{ {main} }}");

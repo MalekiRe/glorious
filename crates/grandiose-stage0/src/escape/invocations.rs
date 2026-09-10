@@ -108,23 +108,7 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn project(&self, value: &Value, path: &[u32]) -> Option<Value> { Inputs::project(self, value, path) }
     fn captures(&self, callable: &Operand<Value>) -> CapturedInputs<Value> { Inputs::captures(self, callable) }
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
-        fn project(value: Value, fields: &[u32]) -> Value {
-            match value {
-                Value::Reference { dependencies, targets, authenticated } => Value::Reference {
-                    dependencies, targets: targets.map(|targets| Box::new(project(*targets, fields))), authenticated,
-                },
-                Value::Borrowed { root, storage, fields: mut prefix, mut capture_path } => {
-                    if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
-                    else { prefix.extend_from_slice(fields); }
-                    Value::Borrowed { root, storage, fields: prefix, capture_path }
-                }
-                Value::Joined(values) => join(values.into_iter().map(|value| project(value, fields)).collect()),
-                Value::Alternatives(values) => Value::Alternatives(values.into_iter().map(|value| project(value, fields)).collect()),
-                Value::Logical { physical, .. } => project(*physical, fields),
-                value => value,
-            }
-        }
-        Some(project(self.resolved_value(reference), fields))
+        Some(project_borrowed_referent(self.resolved_value(reference), fields))
     }
     fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, _: bool) -> Option<Value> {
         fn borrow(value: Value, projection: &crate::resident_invocations::CaptureProjection) -> Option<Value> {

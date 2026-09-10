@@ -5,6 +5,67 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 123: checked borrow access and actual captured provenance
+
+The captured-target regression had compared an actual captured root (`state`)
+with the isolated closure's formal loan root (`target`). PlaceFlow now publishes
+checked access for the exact Core borrow instead. The same producer covers
+branded borrowed-refinement bindings, retaining their actual field projections
+and evaluated temporary owners. EscapeFlow consumes the selected callable's
+access product while preserving actual captured storage and all escape debt.
+The old global event-name set and root-suffix matching are removed.
+
+The resource product now seals full semantic Typed Core input, not just local
+continuation shape. Lifted bodies share that arena seal. Escape, quantity and
+ownership/lowering consumers reject stale typed input, including changes to
+local identities and field layouts that do not change control flow. The forged
+layout regression checks both stale-product rejection and independent rejection
+after fresh analysis; its original malformed-path assertion is retained.
+
+Escape requires an admitted loan product. Rejected borrows do not publish access,
+and their original ownership errors propagate without a control-lifetime proof
+or spurious unknown-result diagnostics. Explicit/refinement/invocation reborrows
+also share one target projection over the existing escape value domain. Retained
+loans and logical region links remain separate from projected referent fields,
+including dependencies introduced by later region stores.
+
+Focused verification records **96 distinct passing checks and one active source
+acceptance failure**:
+
+- Three new unit checks cover exact/missing/stale access, rejected unique loans,
+  temporary escape debt and retained logical regions
+  (`target/captured-borrow-access-final-unit-v16.log`,
+  `target/captured-borrow-access-projection-v18.log`).
+- The expected-reborrow target has 32 passes and one failure, none ignored
+  (`target/captured-borrow-access-final-reborrows-v20.log`). New moved, borrowed
+  and nested captured-reference updates execute fresh/decoded VM O0/O2. Generated
+  captured-reference reborrowing executes native O0/O2; temporary evaluation is
+  checked for exactly one effect before projection. Invalid mutability and live
+  captured-loan mutation remain rejected. The unchanged active generic captured
+  replacement fixture now fails only with G5008, not G5016; conservative captured
+  region matching still retains an outer handle as possible stored debt.
+- All thirteen capture-focused borrowed-callable checks pass
+  (`target/captured-borrow-access-final-captures-v21.log`).
+- All twenty reference-result-contract and twenty-two request/cache checks pass
+  (`target/captured-borrow-access-reference-contracts-v19.log`,
+  `target/captured-borrow-access-final-request-v13.log`).
+- Six focused Core checks cover incoming/external references, malformed storage,
+  stale resource input and non-Copy refinement-field composition
+  (`target/captured-borrow-access-final-escape-v12.log`,
+  `target/captured-borrow-access-final-binding-v14.log`,
+  `target/captured-borrow-access-final-refinement-v22.log`).
+
+No full-library root, complete source matrix or native generic-label gate was
+rerun in this focused checkpoint. The latest root evidence remains cache 122's
+**59 diagnostic records**, and the historical cache-114 source matrix remains
+16 passing / 15 failing. Neither is a new cache-123 acceptance result. Captured
+storage-region permission, the remaining library blockers and all 11,455 GSC-2
+contracts remain open. Full compiler conformance, library completion and
+self-hosting are not achieved.
+
+Cache generation is 123. Interface 21, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 are unchanged. Earlier checkpoints below are historical.
+
 ## Cache 122: writable reference slots and read-only invocation coverage
 
 The active helper-created static-view regression from cache 121 now executes.

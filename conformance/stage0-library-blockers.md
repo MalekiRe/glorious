@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 122 verification below,
+Updated from the current source and cache 123 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,32 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 123 replaces diagnostic-root matching with checked borrow access from the
+existing PlaceFlow loan producer. Explicit and borrowed-refinement accesses name
+their exact Core subjects, fields and temporary owners. Escape keeps actual
+captured storage identities and uses the appropriate callable's access proof.
+Full typed-input seals reject stale resource facts, and rejected loan products
+retain their original errors without publishing escape/control-lifetime proof.
+Reborrow projection preserves logical links and retained debt.
+
+The focused checkpoint has 96 distinct passing checks and one active acceptance
+failure. Moved, borrowed and nested captured-reference updates execute VM
+fresh/decoded O0/O2; generated captured-reference reborrowing executes native
+O0/O2. The unchanged generic captured-target replacement now fails only with
+G5008: the G5016 formal/actual loan mismatch is repaired. Captured storage-region
+matching still retains an outer handle as possible stored debt. The next repair
+must retain actual body-region constraints or complete guarded mutation outcomes
+at their authoritative boundary, not equate all omitted regions or discard
+possible incoming loans to clear this diagnostic.
+
+The full-library root was not rerun; its latest evidence is cache 122's 59
+diagnostic records, not a fresh cache-123 result. The full source matrix and
+native generic-label gate were also not rerun. API/array, graph, custom-Drop,
+unsafe, mandatory-tail, minimum-use and full compiler/library/self-hosted
+acceptance remain open. See `implementation-progress.md` for exact gate scope.
+
+The following cache 122 and earlier entries are historical.
 
 Cache 122 repairs the active helper-created static-view replacement through
 the shared invocation storage relation. Writable physical reference slots are

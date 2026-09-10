@@ -552,6 +552,80 @@ pub struct FlowEvent {
     /// reconstructing projection paths from syntax.
     pub place: Option<MoveFact>,
 }
+
+/// Permission for one exact Core borrow, produced by the normal loan checks.
+/// The permission is independent of an invocation's actual referent identity:
+/// lifted bodies use formal inputs while escape checking retains real captures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CheckedBorrow {
+    pub subject: CoreId,
+    /// Additional projections of a borrowed refinement binding.
+    pub fields: Vec<u32>,
+    /// The existing rvalue owner must be evaluated before borrowing it.
+    pub temporary: Option<CoreId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum BorrowSite {
+    Expression(CoreId),
+    Refinement(RefinementBrand, String),
+}
+
+#[cfg(test)]
+mod checked_borrow_tests {
+    use super::*;
+
+    fn reborrow_body(unique_input: bool, unique_borrow: bool) -> TypedBody {
+        let scalar = Type::Scalar(crate::ScalarType::I64);
+        let reference = |unique| Type::Reference { lifetime: crate::Lifetime::Elided,
+            mutability: if unique { crate::Mutability::Unique } else { crate::Mutability::Shared },
+            referent: Box::new(scalar.clone()) };
+        let span = Span { file: crate::FileKey(crate::Digest::of_bytes(b"checked-borrow")), start: 0, end: 1 };
+        TypedBody { safety: crate::Safety::Safe, unsafe_scopes: BTreeSet::new(), unsafe_implementations: BTreeSet::new(),
+            parameters: vec![("input".into(), reference(unique_input))],
+            expressions: vec![
+                crate::core::CoreExpr { kind: CoreKind::Local("input".into()), ty: reference(unique_input), span },
+                crate::core::CoreExpr { kind: CoreKind::Deref(CoreId(0)), ty: scalar.clone(), span },
+                crate::core::CoreExpr { kind: CoreKind::Borrow { unique: unique_borrow, value: CoreId(1) }, ty: reference(unique_borrow), span },
+            ], root: CoreId(2), diagnostics: vec![], recovered: false }
+    }
+
+    #[test]
+    fn exact_borrow_access_replaces_name_journals_and_rejects_missing_or_stale_facts() {
+        let mut body = reborrow_body(true, false);
+        let mut flow = PlaceFlow::analyze(&body);
+        assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+        assert_eq!(flow.checked_borrow(CoreId(2)), Some(CheckedBorrow { subject: CoreId(1), fields: vec![], temporary: None }));
+        assert!(flow.checked_borrow(CoreId(1)).is_none());
+        flow.events.clear();
+        assert!(crate::EscapeFlow::analyze(&body, &flow).diagnostics.is_empty(), "diagnostic spellings are not borrow permission");
+        let mut absent = flow.clone();
+        absent.checked_borrows.clear();
+        assert!(crate::EscapeFlow::analyze(&body, &absent).diagnostics.iter().any(|error| error.code == "G5016"));
+        body.expressions[0].kind = CoreKind::Local("changed".into());
+        assert!(crate::EscapeFlow::analyze(&body, &flow).diagnostics.iter().any(|error| error.code == "G4180"));
+        let invalid = reborrow_body(false, true);
+        let flow = PlaceFlow::analyze(&invalid);
+        assert!(flow.diagnostics.iter().any(|error| error.code == "G5006"));
+        assert!(flow.checked_borrow(CoreId(2)).is_none(), "a failed loan check cannot publish permission");
+        let escape = crate::EscapeFlow::analyze(&invalid, &flow);
+        assert!(escape.diagnostics.iter().any(|error| error.code == "G5006"));
+        assert!(!escape.diagnostics.iter().any(|error| error.code == "G5023"), "a rejected borrow is not an executed unknown input");
+    }
+
+    #[test]
+    fn checked_rvalue_borrow_retains_its_evaluated_temporary_and_escape_debt() {
+        let mut body = reborrow_body(true, false);
+        body.expressions[1].kind = CoreKind::Literal("42".into());
+        let flow = PlaceFlow::analyze(&body);
+        assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+        assert_eq!(flow.checked_borrow(CoreId(2)).unwrap().temporary, Some(CoreId(1)));
+        let escape = crate::EscapeFlow::analyze(&body, &flow);
+        assert!(escape.diagnostics.iter().any(|error| error.code == "G5013"
+            && error.message.contains("<borrowed-temporary-1>")), "{escape:?}");
+        assert!(!escape.diagnostics.iter().any(|error| error.code == "G5016"), "{escape:?}");
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlowDiagnostic {
     pub code: &'static str,
@@ -560,6 +634,11 @@ pub struct FlowDiagnostic {
 }
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
+    /// Full typed input for borrow/storage facts, stronger than the local
+    /// continuation graph's control-only dependency projection. Shared by
+    /// lifted products without re-hashing the whole arena for every closure.
+    resource_input: Option<crate::Digest>,
+    checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
     /// Frozen per-callable loan/resource products from this exact Core arena.
     /// Escape and lowering share these; a closure body never borrows the
     /// enclosing callable's NLL journal as evidence for its own operations.
@@ -608,9 +687,18 @@ pub struct PlaceFlow {
     pub diagnostics: Vec<FlowDiagnostic>,
 }
 impl PlaceFlow {
+    pub(crate) fn checked_borrow(&self, expression: CoreId) -> Option<CheckedBorrow> {
+        self.checked_borrows.get(&BorrowSite::Expression(expression)).cloned()
+    }
+    pub(crate) fn checked_refinement_borrow(&self, brand: RefinementBrand, name: &str) -> Option<CheckedBorrow> {
+        self.checked_borrows.get(&BorrowSite::Refinement(brand, name.to_owned())).cloned()
+    }
     pub(crate) fn continuations_for(&self, body: &TypedBody)
         -> Result<&crate::core_continuations::CoreContinuations, crate::CoreDiagnostic>
     {
+        if self.resource_input != Some(body.semantic_fingerprint()) {
+            return Err(crate::core_continuations::input_error(body, "ownership resource facts do not match this Typed Core body"));
+        }
         self.continuations.as_ref().ok_or_else(||
             crate::core_continuations::input_error(body, "ownership product has no frozen continuation facts"))?
             .bind(body)
@@ -647,7 +735,7 @@ impl PlaceFlow {
         continuations: std::sync::Arc<crate::core_continuations::CoreContinuations>,
     ) -> Self {
         Self::analyze_root_with_captures(body, body.root, &body.parameters, &[], Some(signatures), bounds,
-            effect_bindings, Some(solver), abort_primitive, Some(continuations), true)
+            effect_bindings, Some(solver), abort_primitive, Some(continuations), true, None)
     }
 
     /// Analyze one lifted callable body as an independent storage owner.
@@ -694,7 +782,7 @@ impl PlaceFlow {
         abort_primitive: Option<crate::DefKey>,
     ) -> Self {
         Self::analyze_root_with_captures(body, root, parameters, &[], signatures, bounds,
-            effect_bindings, frozen_solver, abort_primitive, None, true)
+            effect_bindings, frozen_solver, abort_primitive, None, true, None)
     }
 
     /// A borrowed capture names its caller-owned referent in Core. Its source
@@ -715,7 +803,7 @@ impl PlaceFlow {
         let modes = environment.captures.iter().map(|capture| capture.mode).collect::<Vec<_>>();
         Self::analyze_root_with_captures(body, root, &abi, &modes, signatures,
             &parent.lexical_bounds, &parent.lexical_effect_bindings, solver, parent.abort_primitive,
-            parent.continuations.clone(), false)
+            parent.continuations.clone(), false, parent.resource_input)
     }
 
     fn analyze_root_with_captures(
@@ -730,6 +818,7 @@ impl PlaceFlow {
         abort_primitive: Option<crate::DefKey>,
         continuations: Option<std::sync::Arc<crate::core_continuations::CoreContinuations>>,
         include_closures: bool,
+        resource_input: Option<crate::Digest>,
     ) -> Self {
         let continuations = match continuations {
             Some(facts) => facts.bind(body).map(|_| facts.clone()),
@@ -760,6 +849,7 @@ impl PlaceFlow {
                         if !implementation.negative && implementation.relation.definition
                             == crate::resolution::language_drop_trait_definition()))),
             projection_loans: vec![],
+            checked_borrows: BTreeMap::new(),
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
             capture_types: BTreeMap::new(),
@@ -854,6 +944,8 @@ impl PlaceFlow {
             })
             .collect();
         let mut flow = Self {
+            resource_input: Some(resource_input.unwrap_or_else(|| body.semantic_fingerprint())),
+            checked_borrows: a.checked_borrows,
             closure_flows: BTreeMap::new(),
             continuations: Some(continuations.clone()),
             abort_primitive,
@@ -919,6 +1011,7 @@ struct Analyzer<'a> {
     /// Every precise source loan, including a whole-local loan.  Whole-local
     /// entries are mirrored in `states` for the legacy compact summary.
     projection_loans: Vec<ProjectionLoan>,
+    checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
     /// Child reference binding -> suspended parent binding.  This is kept
     /// separate from the loan identity because a child may end nonlexically
     /// while the parent loan remains available again.
@@ -1619,7 +1712,7 @@ impl Analyzer<'_> {
                 let binding = self.reserve_binding(&name);
                 let initializer_owner = format!("<let-initializer-{}>", id.0);
                 let previous_ephemeral = self.ephemeral_borrow_owner.replace(initializer_owner.clone());
-                if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind.clone()
+                if let CoreKind::Borrow { unique, value: borrowed } = self.body.expression(value).kind.clone()
                 {
                     // `name` owns the region instead of creating a forever
                     // live temporary loan. Evaluate the borrowed place first;
@@ -1629,17 +1722,15 @@ impl Analyzer<'_> {
                     // `let child = &*parent` cannot release `parent` merely
                     // because only `child` is used after a handler boundary.
                     let mut borrow_live = live_after.clone();
-                    self.collect_local_uses(value, &mut borrow_live);
-                    if let Some(reference) = self.reborrow_reference(value) {
+                    self.collect_local_uses(borrowed, &mut borrow_live);
+                    if let Some(reference) = self.reborrow_reference(borrowed) {
                         self.visit_reference_handle(reference, &borrow_live);
-                    } else if self.projection(value).is_some() {
-                        self.read_place(value, self.body.expression(value).span);
+                    } else if self.projection(borrowed).is_some() {
+                        self.read_place(borrowed, self.body.expression(borrowed).span);
                     } else {
-                        self.visit_with_live_after(borrowed_place_base(self.body, value), &borrow_live);
+                        self.visit_with_live_after(borrowed_place_base(self.body, borrowed), &borrow_live);
                     }
-                    if !self.reborrow_place(value, unique, e.span, binding.clone()) {
-                        self.borrow_place(value, unique, e.span, Some(binding.clone()));
-                    }
+                    self.check_borrow(value, borrowed, unique, e.span, binding.clone());
                 } else if let CoreKind::Closure { environment, .. } =
                     self.body.expression(value).kind.clone()
                 {
@@ -1762,9 +1853,7 @@ impl Analyzer<'_> {
                     return;
                 }
                 let owner = Self::result_owner(id);
-                if !self.reborrow_place(value, unique, e.span, owner.clone()) {
-                    self.borrow_place(value, unique, e.span, Some(owner.clone()));
-                }
+                self.check_borrow(id, value, unique, e.span, owner.clone());
                 if self.reference_origins.contains_key(&owner) { self.pending_results.insert(id); }
             }
             CoreKind::Deref(value) => {
@@ -2915,7 +3004,19 @@ impl Analyzer<'_> {
         }
     }
 
-    fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: Option<String>) {
+    fn check_borrow(&mut self, borrow: CoreId, value: CoreId, unique: bool, span: Span, owner: String) {
+        let errors = self.diagnostics.len();
+        let temporary = if self.reborrow_place(value, unique, span, owner.clone()) { None }
+            else { self.borrow_place(value, unique, span, Some(owner)) };
+        if self.diagnostics.len() == errors {
+            self.checked_borrows.insert(BorrowSite::Expression(borrow), CheckedBorrow { subject: value, fields: vec![], temporary });
+        } else {
+            self.checked_borrows.remove(&BorrowSite::Expression(borrow));
+        }
+    }
+
+    fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: Option<String>) -> Option<CoreId> {
+        let mut temporary = None;
         let place = match self.projection(id) {
             Some(place) => place,
             None => {
@@ -2923,6 +3024,7 @@ impl Analyzer<'_> {
                 // once. Give that same storage a frozen identity and retain
                 // its borrowed fields and Drop observations until cleanup.
                 let base = borrowed_place_base(self.body, id);
+                temporary = Some(base);
                 let root = borrowed_temporary_root(base);
                 self.activate_binding(&root, root.clone(), PlaceBindingOrigin::Temporary { expression: base });
                 self.states.insert(root.clone(), LocalState::Initialized);
@@ -2933,7 +3035,12 @@ impl Analyzer<'_> {
                 self.projection(id).expect("the temporary's field path has an initialized root")
             }
         };
+        if let Some(binding) = self.bindings.get(&place.root)
+            && let PlaceBindingOrigin::Temporary { expression } = self.bindings.entries[binding.0 as usize].origin {
+            temporary = Some(expression);
+        }
         self.borrow_projection(place, unique, span, owner);
+        temporary
     }
 
     fn borrow_projection(&mut self, place: Projection, unique: bool, span: Span, owner: Option<String>) {
@@ -3907,9 +4014,12 @@ impl Analyzer<'_> {
         for (name, fields) in binders {
             let Some((_, ty)) = types.iter().find(|(spelling, _)| spelling == &name) else { continue; };
             let owner = self.resolve_name(&name);
+            let errors = self.diagnostics.len();
+            let access = CheckedBorrow { subject: refinement.subject, fields: fields.clone(), temporary: None };
             if crate::core::refinement_binding_type(ty.clone()) == *ty {
                 let origins = self.reference_origins_from_value_path(refinement.subject, &fields);
                 self.install_reference_snapshot(&owner, origins, refinement.subject);
+                continue;
             } else if let Some(mut place) = self.projection(refinement.subject) {
                 place.fields.extend_from_slice(&fields);
                 self.borrow_projection(place, false, self.body.expression(refinement.subject).span, Some(owner));
@@ -3934,6 +4044,9 @@ impl Analyzer<'_> {
                         "borrowed refinement requires a tracked subject place".into());
                 }
             }
+            let site = BorrowSite::Refinement(refinement.environment.brand, name);
+            if self.diagnostics.len() == errors { self.checked_borrows.insert(site, access); }
+            else { self.checked_borrows.remove(&site); }
         }
     }
 

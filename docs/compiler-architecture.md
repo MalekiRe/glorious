@@ -1109,3 +1109,39 @@ between captured-input loan identities and isolated closure resource products,
 alongside conservative captured-region store permission. That regression remains
 an acceptance requirement, not a waived diagnostic. Complete guarded storage,
 native labels/handlers and compiler/library/self-hosted acceptance remain open.
+
+## Checked borrow access and instantiated capture provenance
+
+PlaceFlow publishes checked access for each explicit Core borrow and each
+branded borrowed-refinement binding through its existing loan checks. A record
+names the exact subject, any additional refinement fields and the existing
+evaluated rvalue owner. Rejected loans publish no permission. EscapeFlow consumes
+that per-callable product before constructing the borrowed value; it no longer
+compares instantiated captured roots with the diagnostic spellings of formal
+input loans. The former global borrow-event name set and suffix matching are
+removed. Captured values retain their actual storage identities and debts.
+
+Resource products bind the complete semantic Typed Core input, independently of
+the local continuation product's narrower control-shape dependency projection.
+Lifted products share the enclosing arena seal rather than re-hashing it for
+each closure. Escape, quantity and ownership/lowering entry points validate
+that seal. A changed local name or layout cannot reuse an earlier borrow proof.
+Escape analysis requires an admitted loan product: it retains the original
+ownership failures and publishes no control-lifetime result for rejected input,
+rather than treating a failed borrow as an executed unknown call operand.
+
+Explicit, refinement and invocation reborrows share the same escape-value target
+projection. It projects actual referents without projecting or deleting retained
+loan dependencies; logical region links remain available for later stores.
+Borrowed refinement fields no longer receive an unprojected whole-subject value.
+Rvalue borrows evaluate their recorded owner once and retain its local escape
+obligation. Missing access evidence is not caller-owned or temporary authority.
+
+This repairs the formal/actual captured-loan mismatch, including moved, borrowed
+and nested capture execution. The generic captured-target replacement regression
+still fails on conservative storage-region matching (G5008): its loan-access
+failure is gone, but complete captured mutation permission is not established.
+Distinct body-region constraints and guarded storage outcomes still require
+authoritative producer/consumer integration. No runtime reference representation
+or source lifetime guarantee changes, and full compiler/library/self-hosted
+acceptance remains open.

@@ -320,7 +320,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 21;
 // missing targets, and binds evaluated initializer results to shared control.
 // Cache 122 publishes writable reference slots independently of incoming loans
 // and consumes positively proved read-only invocation/cleanup coverage.
-pub const STAGE0_CACHE_GENERATION: u32 = 122;
+// Cache 123 binds exact explicit/refinement borrow accesses to the typed
+// resource input, independently of instantiated captured referent names.
+pub const STAGE0_CACHE_GENERATION: u32 = 123;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

@@ -89,16 +89,21 @@ impl EscapeFlow {
                 code: error.code, span: error.span, message: error.message,
             }], ..Self::default() },
         };
+        // This phase requires an admitted loan product. A rejected borrow
+        // deliberately has no checked access; interpreting that as an
+        // executed call operand would manufacture unrelated provenance gaps.
+        // Retain the actual failure, and publish no control-lifetime proof.
+        if !flow.diagnostics.is_empty() {
+            return Self { diagnostics: flow.diagnostics.iter().map(|error| EscapeDiagnostic {
+                code: error.code, span: error.span, message: error.message.clone(),
+            }).collect(), ..Self::default() };
+        }
         let mut analyzer = Analyzer {
             body,
             continuations,
             signatures,
             closure_flows: flow.closure_flows(),
-            // A direct borrow must already have entered the ownership flow.
-            // Retaining these roots lets us fail closed if Core ever grows a
-            // reference-producing operation without teaching PlaceFlow about
-            // it first.
-            loan_roots: frozen_loan_roots(flow),
+            loan_flow: flow,
             values: ValueEnvironment::default(),
             labels: vec![],
             control_captures: BTreeMap::new(),
@@ -310,20 +315,11 @@ struct Analyzer<'a> {
     body: &'a TypedBody,
     continuations: &'a crate::core_continuations::CoreContinuations,
     signatures: &'a crate::ElaboratedInterface,
-    loan_roots: BTreeSet<String>,
+    loan_flow: &'a PlaceFlow,
     values: ValueEnvironment,
     labels: Vec<LabelBoundary>,
     control_captures: BTreeMap<EnvironmentBrand, BTreeSet<ControlBrand>>,
     diagnostics: Vec<EscapeDiagnostic>,
-}
-
-fn frozen_loan_roots(flow: &PlaceFlow) -> BTreeSet<String> {
-    flow.events.iter().filter_map(|event| match &event.kind {
-        crate::placeflow::FlowEventKind::BorrowShared(root)
-        | crate::placeflow::FlowEventKind::BorrowUnique(root)
-        | crate::placeflow::FlowEventKind::Reborrow(root) => Some(root.clone()),
-        _ => None,
-    }).collect()
 }
 
 impl Analyzer<'_> {
@@ -434,15 +430,18 @@ impl Analyzer<'_> {
                 self.value(value);
                 Value::None
             }
-            CoreKind::Borrow { value, .. } => {
-                let base = crate::placeflow::borrowed_place_base(self.body, value);
-                if self.has_frozen_loan_root(&crate::placeflow::borrowed_temporary_root(base)) {
+            CoreKind::Borrow { .. } => {
+                let Some(access) = self.loan_flow.checked_borrow(id) else {
+                    self.error(expression.span, "G5016", "borrow has no checked access in its frozen callable loan product");
+                    return Value::None;
+                };
+                if let Some(base) = access.temporary {
                     // Borrowing does not skip the rvalue's strict evaluation:
                     // nested calls, assignments and suspension still occur.
                     let resident = self.value(base);
                     self.values.insert(crate::placeflow::borrowed_temporary_root(base), resident);
                 }
-                self.borrowed_value(value)
+                self.borrowed_value(access)
             }
             CoreKind::Deref(value) => {
                 // Loading an incoming reference-bearing value preserves its
@@ -566,7 +565,7 @@ impl Analyzer<'_> {
                     self.labels = outer_labels;
                     return Value::None;
                 };
-                let outer_loan_roots = std::mem::replace(&mut self.loan_roots, frozen_loan_roots(flow));
+                let outer_loan_flow = std::mem::replace(&mut self.loan_flow, flow);
                 for (name, ty) in &parameters {
                     self.values.define(name.clone(), parameter_value(ty));
                 }
@@ -574,7 +573,7 @@ impl Analyzer<'_> {
                 let returned_snapshot = self.resolved_value(&returned);
                 self.values = outer_values;
                 self.labels = outer_labels;
-                self.loan_roots = outer_loan_roots;
+                self.loan_flow = outer_loan_flow;
 
                 // Formation does not execute the body or insert hypothetical
                 // external arguments into captured storage. Invocation applies
@@ -767,13 +766,13 @@ impl Analyzer<'_> {
                 for (index, clause) in clauses.into_iter().enumerate() {
                     self.values = incoming.clone();
                     self.bind_pattern_value(&clause.pattern, computation.clone());
-                    if index == 0 && refinement_test.is_some() {
+                    if index == 0 && let Some(refinement) = &refinement_test {
                         let mut types = vec![];
                         let _ = crate::core::collect_pattern_binding_types(&clause.pattern,
                             &self.body.expression(subject).ty, &mut types);
                         for (name, ty) in types {
                             if crate::core::refinement_binding_type(ty.clone()) != ty {
-                                let borrowed = self.borrowed_value(subject);
+                                let borrowed = self.refinement_borrowed_value(refinement.brand, &name, expression.span);
                                 self.values.insert(name, borrowed);
                             }
                         }
@@ -793,7 +792,7 @@ impl Analyzer<'_> {
                             &self.body.expression(refinement.subject).ty, &mut types);
                         for (name, ty) in types {
                             if crate::core::refinement_binding_type(ty.clone()) != ty {
-                                let borrowed = self.borrowed_value(refinement.subject);
+                                let borrowed = self.refinement_borrowed_value(refinement.environment.brand, &name, expression.span);
                                 self.values.insert(name, borrowed);
                             }
                         }
@@ -1054,14 +1053,21 @@ impl Analyzer<'_> {
         }
     }
 
-    fn borrowed_value(&mut self, id: CoreId) -> Value {
+    fn refinement_borrowed_value(&mut self, brand: crate::core::RefinementBrand, name: &str, span: Span) -> Value {
+        let Some(access) = self.loan_flow.checked_refinement_borrow(brand, name) else {
+            self.error(span, "G5016", "refinement borrow has no checked access in its frozen callable loan product");
+            return Value::None;
+        };
+        self.borrowed_value(access)
+    }
+
+    fn borrowed_value(&mut self, access: crate::placeflow::CheckedBorrow) -> Value {
+        let value = self.borrowed_subject_value(access.subject, access.temporary);
+        project_borrowed_referent(value, &access.fields)
+    }
+
+    fn borrowed_subject_value(&mut self, id: CoreId, temporary: Option<CoreId>) -> Value {
         if let Some(value) = self.reborrowed_value(id) {
-            for root in borrowed_roots(&self.resolved_value(&value)) {
-                if !self.has_frozen_loan_root(&root) {
-                    self.error(self.body.expression(id).span, "G5016",
-                        format!("reference to `{root}` has no frozen NLL loan fact"));
-                }
-            }
             return value;
         }
         let mut fields = vec![];
@@ -1081,8 +1087,8 @@ impl Analyzer<'_> {
             if external_reborrow {
                 return Value::ExternalBorrowed;
             }
-            let root = crate::placeflow::borrowed_temporary_root(crate::placeflow::borrowed_place_base(self.body, id));
-            if self.has_frozen_loan_root(&root) {
+            if let Some(base) = temporary {
+                let root = crate::placeflow::borrowed_temporary_root(base);
                 // A real local storage owner, not an external/static loan.
                 // Return, suspension and mandatory-tail checks still reject
                 // any value that carries this root across its boundary.
@@ -1096,28 +1102,8 @@ impl Analyzer<'_> {
             );
             return Value::None;
         };
-        // Every Core borrow of a stable place should have a matching
-        // PlaceFlow event. Keep this fail-closed until a future region source
-        // explicitly teaches both passes about a new kind of loan.
-        if !self.has_frozen_loan_root(&root) {
-            self.error(
-                self.body.expression(id).span,
-                "G5016",
-                format!("reference to `{root}` has no frozen NLL loan fact"),
-            );
-        }
         let storage = self.values.bindings.get(&root).copied();
         Value::Borrowed { root, storage, fields, capture_path: vec![] }
-    }
-
-    fn has_frozen_loan_root(&self, spelling: &str) -> bool {
-        self.loan_roots.iter().any(|root| {
-            root == spelling
-                || root
-                    .strip_prefix(spelling)
-                    .and_then(|suffix| suffix.strip_prefix('#'))
-                    .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
-        })
     }
 
     /// A projected enum/record payload still belongs to the incoming loan.
@@ -1138,23 +1124,7 @@ impl Analyzer<'_> {
     fn reborrowed_value(&mut self, id: CoreId) -> Option<Value> {
         match self.body.expression(id).kind.clone() {
             CoreKind::Field { base, index, .. } => self.reborrowed_value(base).map(|value| {
-                fn project(value: Value, index: u32) -> Value {
-                    match value {
-                        Value::Reference { dependencies, targets, authenticated } => Value::Reference {
-                            dependencies,
-                            targets: targets.map(|targets| Box::new(project(*targets, index))),
-                            authenticated,
-                        },
-                        Value::Borrowed { root, storage, mut fields, mut capture_path } => {
-                            if let Some(capture) = capture_path.last_mut() { capture.fields.push(index); }
-                            else { fields.push(index); }
-                            Value::Borrowed { root, storage, fields, capture_path }
-                        }
-                        Value::Joined(values) => join(values.into_iter().map(|value| project(value, index)).collect()),
-                        value => value,
-                    }
-                }
-                project(value, index)
+                project_borrowed_referent(value, &[index])
             }),
             CoreKind::Deref(reference) => {
                 let value = self.value(reference);
@@ -1474,6 +1444,29 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
 
 fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
     value_at_variant_path(value, path, false)
+}
+
+/// Reborrowing selects referents, not retained loan/region dependencies.
+/// Keep the logical graph live so a later store remains visible through the
+/// projected reference. Explicit, refinement and invocation borrows share it.
+fn project_borrowed_referent(value: Value, fields: &[u32]) -> Value {
+    if fields.is_empty() { return value; }
+    match value {
+        Value::Reference { dependencies, targets, authenticated } => Value::Reference {
+            dependencies, targets: targets.map(|targets| Box::new(project_borrowed_referent(*targets, fields))), authenticated,
+        },
+        Value::Borrowed { root, storage, fields: mut prefix, mut capture_path } => {
+            if let Some(capture) = capture_path.last_mut() { capture.fields.extend_from_slice(fields); }
+            else { prefix.extend_from_slice(fields); }
+            Value::Borrowed { root, storage, fields: prefix, capture_path }
+        }
+        Value::Joined(values) => join(values.into_iter().map(|value| project_borrowed_referent(value, fields)).collect()),
+        Value::Alternatives(values) => Value::Alternatives(values.into_iter().map(|value| project_borrowed_referent(value, fields)).collect()),
+        Value::Logical { physical, arguments } => Value::Logical {
+            physical: Box::new(project_borrowed_referent(*physical, fields)), arguments,
+        },
+        value => value,
+    }
 }
 
 #[cfg(test)]
@@ -2195,6 +2188,27 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn reborrow_projection_retains_logical_debt_and_future_region_contents() {
+        use super::*;
+        let region = crate::placeflow::regions::Region { site: "resident".into(), path: vec![] };
+        let loan = |name: &str| Value::Borrowed { root: name.into(), storage: Some(1), fields: vec![], capture_path: vec![] };
+        let original = Value::Logical {
+            physical: Box::new(Value::Reference { dependencies: Box::new(loan("carrier")),
+                targets: Some(Box::new(loan("target"))), authenticated: true }),
+            arguments: [(0, Value::Region([region.clone()].into()))].into(),
+        };
+        assert_eq!(project_borrowed_referent(original.clone(), &[]), original);
+        let projected = project_borrowed_referent(original, &[1, 2]);
+        assert_eq!(logical_regions(&projected), BTreeSet::from([region.clone()]));
+        let targets = reference_targets(&projected).unwrap();
+        assert!(matches!(targets, Value::Borrowed { fields, .. } if fields == [1, 2]));
+        let mut values = ValueEnvironment::default();
+        values.regions.insert(region, loan("later"), merge_region_values);
+        let resolved = Analyzer::resolved_value_in(&projected, &values);
+        assert_eq!(borrowed_roots(&resolved), BTreeSet::from(["carrier".into(), "later".into()]));
+    }
+
     #[test]
     fn declared_reference_writes_revoke_variant_absence_without_erasing_debt() {
         use super::*;

@@ -50,6 +50,41 @@ fn scalar_updates_through_a_borrowed_carrier_preserve_reference_provenance() {
 }
 
 #[test]
+fn captured_reference_reborrows_use_their_own_checked_callable_access() {
+    for action in [
+        "let update = move (pointer) { bump(pointer); }; update();",
+        "let update = () -> () { bump(pointer); }; update();",
+        "let outer = move (pointer) { let inner = move (pointer) { bump(pointer); }; inner(); }; outer();",
+    ] {
+        accepts(&captured_reference_program(action));
+    }
+    rejects("fn write(value: &mut i64) { *value = 42; } pub fn main() -> i64 { let value = 41; let pointer = &value; let update = move (pointer) { write(pointer); }; update(); value }", &["G4107", "G5017", "G5006"]);
+    rejects("fn read(value: &i64) -> i64 { *value } pub fn main() -> i64 { let mut value = 41; let pointer = &mut value; let delayed = move (pointer) { read(pointer) }; value = 42; delayed() }", &["G5007", "G5006", "G5008"]);
+}
+
+fn captured_reference_program(action: &str) -> String {
+    format!("fn bump(value: &mut i64) {{ *value = *value + 1; }} pub fn main() -> i64 {{ let mut value = 41; let pointer = &mut value; {action} value }}")
+}
+
+#[test]
+fn checked_borrow_temporaries_evaluate_once_before_projection() {
+    accepts("fn fresh(count: &mut i64) -> (i64, i64) { *count = *count + 1; (40, 2) } pub fn main() -> i64 { let mut count = 0; let value = &fresh(&mut count); value.0 + value.1 + count - 1 }");
+}
+
+#[test]
+fn checked_captured_reference_reborrows_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = captured_reference_program("let update = move (pointer) { bump(pointer); }; update();");
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(&source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: compile and execute only the locally checked safe program.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
 fn expected_shared_reborrow_releases_before_later_unique_mutation() {
     accepts("fn read(value: &i64) -> i64 { *value } pub fn main() -> i64 { let mut value = 10; let unique = &mut value; let a = read(unique); let b = read(unique); *unique = a + b + 22; *unique }");
 }
