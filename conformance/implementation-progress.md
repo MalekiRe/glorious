@@ -5,6 +5,42 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 125: strict evaluation of computed field subjects
+
+The active nested-output capture fixture from cache 124 now executes unchanged,
+including both direct and `Envelope<T>` associated outputs, fresh/decoded VM
+O0/O2. PlaceFlow had visited a field's base only when it was a dereference;
+`call(&mut wrapped).value` therefore skipped the call and its argument loan.
+Every computed field subject now uses the existing subject-evaluation rule.
+Static local projections retain their ordinary place path, and an abrupt
+computed subject does not proceed to field access. No alternate loan proof,
+source rewrite or borrow-access exception was added.
+
+Focused verification has 46 passing checks, none ignored:
+
+- The unchanged selected generic capture-method group passes
+  (`target/computed-field-capture-v1.log`).
+- A Core regression observes exactly one projected argument-loan event and
+  rejects a conflicting live shared borrow (`target/computed-field-core-final-v4.log`).
+  Temporarily selecting the old evaluation path made this same test fail with
+  zero loan events (`target/computed-field-old-path-proof.log`); the correction
+  was restored before final verification.
+- Computed nested fields preserve exactly-once side effects and a helper's
+  nonlocal label exit in fresh/decoded VM O0/O2, and reject conflicting argument
+  loans. Generated native O0/O2 also verifies exactly-once evaluation
+  (`target/computed-field-execution-final-v3.log`).
+- All 20 reference-result-contract and 22 request/cache checks pass
+  (`target/computed-field-contracts-final-v1.log`).
+
+The full-library root and complete source matrix were not rerun for this focused
+resource-boundary repair. Cache 124's root still has 36 typing diagnostic records;
+the nine baseline Core failures, native-owned-handler failure and remaining
+compiler/library/self-hosted requirements are not discharged by these checks.
+Next work returns to the visible library/API and typing blockers.
+
+Cache generation is 125. Interface 22, native ABI 12, bytecode 72, verifier 38
+and VM schema 116 are unchanged. Earlier entries are historical.
+
 ## Cache 124: closed body regions and directional invocation contracts
 
 The previously active generic captured-target replacement now executes at VM

@@ -67,6 +67,27 @@ fn captured_reference_program(action: &str) -> String {
 }
 
 #[test]
+fn computed_field_subjects_preserve_strict_effects_and_argument_loans() {
+    let prefix = "struct Product { value: (i64,i64) } fn fresh(count: &mut i64) -> Product { *count = *count + 1; Product { value: (40,2) } }";
+    accepts(&format!("{prefix} pub fn main() -> i64 {{ let mut count = 0; let value = fresh(&mut count).value.0; value + count + 1 }}"));
+    accepts("struct Product { value: (i64,i64) } fn leave<L>(done: L) -> Product where L: Label<i64> { done(42) } pub fn main() -> i64 { @done: i64 { leave(@done).value.0 } }");
+    rejects(&format!("{prefix} pub fn main() -> i64 {{ let mut count = 0; let shared = &count; let value = fresh(&mut count).value.0; *shared + value }}"), &["G5004", "G5006", "G5007"]);
+}
+
+#[test]
+fn computed_field_subjects_execute_once_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "struct Product { value: (i64,i64) } fn fresh(count: &mut i64) -> Product { *count = *count + 1; Product { value: (40,2) } } pub fn main() -> i64 { let mut count = 0; let value = fresh(&mut count).value.0; value + count + 1 }";
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: only the locally compiled safe regression is executed.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
 fn checked_borrow_temporaries_evaluate_once_before_projection() {
     accepts("fn fresh(count: &mut i64) -> (i64, i64) { *count = *count + 1; (40, 2) } pub fn main() -> i64 { let mut count = 0; let value = &fresh(&mut count); value.0 + value.1 + count - 1 }");
 }

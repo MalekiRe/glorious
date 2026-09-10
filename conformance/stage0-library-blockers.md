@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 124 verification below,
+Updated from the current source and cache 125 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,23 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 125 repairs the active nested-output capture execution failure. Computed
+field subjects now use the existing PlaceFlow subject-evaluation rule, so
+`call(&mut wrapped).value` checks the call's strict argument loans and effects.
+Static local fields keep their existing place path; nonlocal exits stop before
+field access. The unchanged nested-output source executes fresh/decoded VM O0/O2.
+Focused checks cover exactly-once VM/native side effects, conflicting loans,
+nonlocal helper exits, Core loan events and the existing reference/cache suites:
+46 passing checks, none ignored. No missing borrow proof is waived.
+
+The full-library root and complete source matrix were not rerun. Latest root
+evidence remains cache 124's 36 typing diagnostic records; array/API, graph,
+custom-Drop and unsafe-call blockers remain the next focus. Baseline Core,
+native-handler, minimum-use, mandatory-tail and compiler/library/self-hosted
+acceptance remain open. See `implementation-progress.md` for gate scope.
+
+The following cache 124 and earlier entries are historical.
 
 Cache 124 repairs generic captured-target replacement through closed body-region
 constraints shared by invocation stores and both resource consumers. The original

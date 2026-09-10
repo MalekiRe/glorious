@@ -2123,8 +2123,13 @@ impl Analyzer<'_> {
                 self.visit_sequence(&fields, live_after);
             }
             CoreKind::Field { .. } => {
-                if self.reborrow_reference(id).is_some() {
+                // A field may select an evaluated rvalue as well as a local
+                // place or a dereferenced handle. Use the existing subject
+                // evaluation rule for every computed base: selecting a field
+                // cannot omit its call operands, loans or control transfers.
+                if self.projection(id).is_none() {
                     self.visit_pattern_subject(id, live_after, e.span);
+                    if !self.normal_continuation { return; }
                 }
                 if let Type::Reference { mutability, .. } = &e.ty {
                     let unique = matches!(mutability, crate::Mutability::Unique);

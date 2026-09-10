@@ -1194,3 +1194,18 @@ library composition or self-hosting. Those acceptance requirements remain open.
 The new nested-output generic capture execution fixture still reaches missing
 checked borrow access at its caller argument; structural output selection is
 repaired, but that source/resource boundary remains an active regression.
+
+## Strict computed field subjects
+
+PlaceFlow's existing subject-evaluation rule now covers every computed field
+base, not only dereferenced handles. A static local projection is still a place;
+a call, constructor or other computed base must first evaluate its strict inputs
+and publish their ordinary loan/control facts. Nonlocal completion stops before
+field access. Nested fields reuse that rule without evaluating their base twice.
+Escape and lowering consume the resulting existing products; no missing access
+record becomes permission and no second argument-provenance walk is introduced.
+
+This repairs the nested-output capture fixture left open above. Targeted tests
+also prove conflicting argument-loan rejection, exactly-once VM/native side
+effects, and nonlocal helper exits through a projected result. It does not
+complete guarded storage outcomes, library composition or native handlers.

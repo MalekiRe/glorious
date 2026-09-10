@@ -325,7 +325,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 124/interface 22 preserve closed body-region identities, their
 // directional constraints and local-storage bounds through capture contracts,
 // validation and specialization. Runtime region representation is unchanged.
-pub const STAGE0_CACHE_GENERATION: u32 = 124;
+// Cache 125 checks strict computed field subjects through the same resource
+// evaluation path as dereferenced and inspected subjects.
+pub const STAGE0_CACHE_GENERATION: u32 = 125;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

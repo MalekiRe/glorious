@@ -196,6 +196,26 @@ fn frozen_invocation_prerequisites_preserve_free_caller_regions() {
 }
 
 #[test]
+fn computed_field_subjects_check_their_strict_argument_loans() {
+    let prefix = "struct ResultValue { value: i64 } fn make(value: &mut i64) -> ResultValue { ResultValue { value: *value } }";
+    let (core, signatures) = core_and_signatures_for("computed-field-borrow@0.1.0", &format!(
+        "{prefix} fn main() -> i64 {{ let mut value = 42; make(&mut value).value }}"));
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+    assert_eq!(flow.events.iter().filter(|event| event.place.is_some() && matches!(&event.kind,
+        FlowEventKind::BorrowUnique(name) if name == "value")).count(), 1,
+        "computed field must evaluate its argument loan exactly once: {:?}", flow.events);
+
+    let (core, signatures) = core_and_signatures_for("computed-field-conflict@0.1.0", &format!(
+        "{prefix} fn main() -> i64 {{ let mut value = 42; let shared = &value; let result = make(&mut value).value; *shared }}"));
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.iter().any(|error| matches!(error.code, "G5004" | "G5006" | "G5007")),
+        "a field projection skipped a conflicting argument loan: {:?}", flow.diagnostics);
+}
+
+#[test]
 fn structural_callable_output_inference_cannot_capture_quantified_regions() {
     let (core, signatures) = core_and_signatures_for("nested-output-region-leak@0.1.0", r#"
         struct Envelope<T> { value: T }
