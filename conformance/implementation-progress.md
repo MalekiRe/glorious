@@ -5,6 +5,44 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 126: literal element evidence and inferred array extents
+
+Array elaboration now retains the literal's length without needing an expected
+fixed-array type. Unannotated locals, generic identity calls and nested literals
+therefore supply ordinary const-generic evidence. Explicit legacy `Array<T>`
+contexts still select their existing bootstrap carrier; no fixed/dynamic type
+equivalence or later AST reconstruction was introduced. Contextual octet literals
+constrain the selected standard `Slice` element through ordinary inference before
+calling the existing manifest-bound wrapper. Rigid generic and incompatible
+element types remain rejected. Partial type resolution no longer loses solved
+elements merely because a region or another component is still open.
+
+Focused verification:
+
+- Both new regressions fail on the previous producer: unresolved `Slice<T>`
+  falls back to `Bytes`, and an inferred array loses its extent
+  (`target/literal-element-baseline-v2.log`, `target/literal-array-baseline.log`).
+- Two Core byte-element groups pass, including the actual unannotated Vec
+  context and rigid/u16 rejection (`target/literal-core-final.log`).
+- Two inferred-array groups pass: nested/generic/empty arrays and length
+  rejection in fresh/decoded VM O0/O2, plus generated native O0/O2
+  (`target/literal-array-execution-v2.log`).
+- Generic byte-slice inference executes in fresh/decoded VM and generated native
+  O0/O2 (`target/literal-byte-execution-v1.log`).
+- The legacy array service filter has 12 passing tests and one failing existing
+  diagnostic assertion (`target/literal-legacy-array-v1.log`). The latter expects
+  G5015 but receives the earlier G5017 for its enum-local borrow; restoring the
+  complete pre-change Core implementation reproduces it
+  (`target/literal-legacy-negative-baseline.log`). Its source/assertions remain
+  unchanged. All 22 request/cache checks pass (`target/literal-request-final.log`).
+
+The unchanged random source gate now clears these typing failures but still
+fails G5024 for `array_from_fn`'s output owner (`target/literal-random-v1.log`).
+It is not a passing library gate. The full composition root and complete matrix
+were not rerun; graph, custom-Drop, unsafe-call, ownership, handler and self-hosted
+acceptance remain open. Cache generation is 126; interface 22, native ABI 12,
+bytecode 72, verifier 38 and VM schema 116 are unchanged.
+
 ## Cache 125: strict evaluation of computed field subjects
 
 The active nested-output capture fixture from cache 124 now executes unchanged,

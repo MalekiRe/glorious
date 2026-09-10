@@ -53,6 +53,21 @@ fn contextual_byte_slice_literals_retain_element_evidence_across_open_regions() 
     assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4107"), "{:?}", core.diagnostics);
 }
 
+#[test]
+fn contextual_byte_slice_literals_infer_open_element_types() {
+    let core = core_for("contextual-byte-slice-inference@0.1.0",
+        "use std::*; pub fn main() { let mut bytes = Vec::with_capacity(16); Vec::extend_from_slice(&mut bytes, b\"abc\"); }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|value| matches!(&value.ty,
+        Type::StaticData { element, .. }
+        if **element == Type::Scalar(ScalarType::U8))));
+    assert!(!core.expressions.iter().any(|value| matches!(value.ty, Type::Scalar(ScalarType::Bytes))));
+
+    let core = core_for("contextual-byte-slice-rigid-element@0.1.0",
+        "use std::*; pub fn main<T>(bytes: Slice<T>) -> Ordering { Slice::lex_compare(bytes, b\".\") }");
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4107"), "{:?}", core.diagnostics);
+}
+
 fn freeze_initializers(
     interface: &grandiose_stage0::PackageInterface,
     source: &str,

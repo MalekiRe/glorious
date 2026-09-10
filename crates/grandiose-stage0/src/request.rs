@@ -327,7 +327,9 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // validation and specialization. Runtime region representation is unchanged.
 // Cache 125 checks strict computed field subjects through the same resource
 // evaluation path as dereferenced and inspected subjects.
-pub const STAGE0_CACHE_GENERATION: u32 = 125;
+// Cache 126 retains inferred array literal extents and lets contextual octet
+// literals supply u8 evidence to the ordinary Slice element inference cell.
+pub const STAGE0_CACHE_GENERATION: u32 = 126;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 72;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

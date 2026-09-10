@@ -1,6 +1,6 @@
 # Stage0 and standard-library blocker map
 
-Updated from the current source and cache 125 verification below,
+Updated from the current source and cache 126 verification below,
 with the earlier independent read-only compiler audits retained. This is a prioritized
 implementation map, not an exhaustive conformance inventory: earlier failures
 still mask later ones. The language and standard-library specifications remain
@@ -14,6 +14,23 @@ not proof that every generic API in it was exercised.
 The 176-test bootstrap library API suite is a different, narrower test target.
 
 ### Latest implementation checkpoint
+
+Cache 126 repairs the literal typing failures exposed by random: unannotated
+arrays retain their const extent, and octet literals supply `u8` to unresolved
+standard Slice element cells through ordinary inference. Generic/nested/empty
+arrays and generic byte views execute fresh/decoded VM O0/O2, with generated
+native coverage. Explicit legacy Array contexts remain supported; incompatible
+lengths and rigid/non-byte elements reject. The legacy array filter has 12 passes
+and one independently reproduced pre-change diagnostic assertion failure.
+
+The unchanged random root now reaches one ownership diagnostic: G5024 for
+`output` in `array_from_fn` (`target/literal-random-v1.log`). This remains an
+active library failure. Full composition and the source matrix were not rerun;
+their historical results below are not current passing evidence. Graph,
+custom-Drop, unsafe-call, minimum-use, native-handler and self-hosted acceptance
+remain open. See `implementation-progress.md` for the exact focused gate scope.
+
+The following cache 125 and earlier entries are historical.
 
 Cache 125 repairs the active nested-output capture execution failure. Computed
 field subjects now use the existing PlaceFlow subject-evaluation rule, so

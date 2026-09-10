@@ -5350,7 +5350,7 @@ impl Elaborator<'_> {
     /// `Bool` as `Result<(), ()>`, so its ordinary `true` and `false`
     /// spellings must build that nominal carrier when a Bool is expected.
     fn literal_expected(&mut self, text: String, expected: Option<Type>, span: Span) -> CoreId {
-        let expected = expected.map(|ty| self.inference.zonk(ty.clone()).unwrap_or(ty));
+        let expected = expected.map(|ty| self.inference.resolve_type_structure(ty));
         // A string literal is compiler-emitted immutable data, but `Str` is
         // intentionally an ordinary source-defined view rather than another
         // compiler scalar. When the expected type is the distributed
@@ -5379,7 +5379,7 @@ impl Elaborator<'_> {
         if text.starts_with("b\"")
             && expected
                 .as_ref()
-                .is_some_and(|expected| self.is_standard_static_u8_slice(expected))
+                .is_some_and(|expected| self.constrain_standard_byte_slice(expected))
         {
             let raw = self.alloc(
                 CoreKind::Literal(text),
@@ -5459,7 +5459,7 @@ impl Elaborator<'_> {
         )
     }
 
-    fn is_standard_static_u8_slice(&self, expected: &Type) -> bool {
+    fn constrain_standard_byte_slice(&mut self, expected: &Type) -> bool {
         let ResolutionState::Resolved(definition) = self.index.resolve_path(
             DefinitionNamespace::Type,
             self.module,
@@ -5467,18 +5467,14 @@ impl Elaborator<'_> {
         ) else {
             return false;
         };
-        matches!(
-            expected,
-            Type::Nominal { definition: actual, arguments }
-                if actual == &definition
-                    && matches!(
-                        arguments.as_slice(),
-                        [
-                            GenericArgument::Lifetime(_),
-                            GenericArgument::Type(Type::Scalar(ScalarType::U8)),
-                        ]
-                    )
-        )
+        let Type::Nominal { definition: actual, arguments } = expected else { return false; };
+        if actual != &definition { return false; }
+        let [GenericArgument::Lifetime(_), GenericArgument::Type(element)] = arguments.as_slice() else { return false; };
+        // Octet data supplies element evidence even when an earlier operand
+        // left the selected Slice's element unresolved. Ordinary unification
+        // may solve that cell; it cannot specialize a rigid caller parameter
+        // or turn a differently typed slice into a byte view.
+        self.inference.unify(element.clone(), Type::Scalar(ScalarType::U8)).is_ok()
     }
 
     /// Resolve the compiler-selected literal wrapper from the standard
@@ -5790,7 +5786,11 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
     ) -> CoreId {
-        let fixed = matches!(&expected, Some(Type::FixedArray { .. }));
+        let expected = expected.map(|ty| self.inference.resolve_type_structure(ty));
+        // A source array literal intrinsically has its element count. Only
+        // an explicit bootstrap Array<T> context selects the legacy dynamic
+        // carrier; an absent or unresolved context must not erase the extent.
+        let fixed = !matches!(&expected, Some(Type::Array(_)));
         let expected_element = match expected {
             Some(Type::Array(element) | Type::FixedArray { element, .. }) => Some(*element),
             _ => None,

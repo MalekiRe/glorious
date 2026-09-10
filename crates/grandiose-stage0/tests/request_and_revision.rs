@@ -96,8 +96,8 @@ fn authority_tag_changes_cannot_deduplicate_distinct_revision_worlds() {
 fn authority_tag_correction_invalidates_the_previous_canonical_cache_generation() {
     let (mut current, _) = authority_tag_requests();
     current.build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-test"));
-    assert_eq!(current.build.cache_generation, 125);
-    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 125);
+    assert_eq!(current.build.cache_generation, 126);
+    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 126);
     let mut stale = current.clone();
     stale.build.cache_generation = 2;
     assert_ne!(
@@ -324,7 +324,7 @@ fn stage_zero_build_identity_advances_the_vm_artifact_boundary() {
     assert_eq!(identity.verifier_generation, STAGE0_VERIFIER_GENERATION);
     assert_eq!(STAGE0_BYTECODE_GENERATION, 72);
     assert_eq!(STAGE0_VERIFIER_GENERATION, 38);
-    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 125);
+    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 126);
     assert_eq!(grandiose_stage0::vm_backend::llvm::LLVM_NATIVE_ABI_GENERATION, 12);
     assert_eq!(grandiose_stage0::STAGE0_VM_SCHEMA, 116);
     assert_eq!(grandiose_stage0::STAGE0_LANGUAGE_GENERATION, 4);

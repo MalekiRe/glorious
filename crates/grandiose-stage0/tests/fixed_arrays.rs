@@ -58,6 +58,26 @@ fn rejects(source: &str) {
 }
 
 #[test]
+fn unannotated_array_literals_retain_lengths_through_generic_calls() {
+    accepts("fn keep<T,const N: usize>(value: [T;N]) -> [T;N] { value } pub fn main() -> i64 { let values = [20,22]; let [a,b] = keep(values); a+b }");
+    accepts("fn keep<T>(value: T) -> T { value } fn pair(value: [[i64;1];2]) -> i64 { let [[a],[b]] = value; a+b } pub fn main() -> i64 { let values = keep([[20],[22]]); pair(values) }");
+    accepts("fn empty<const N: usize>(value: [i64;N]) -> i64 { 42 } pub fn main() -> i64 { let values = []; empty(values) }");
+    rejects("fn pair(value: [i64;2]) -> i64 { 42 } pub fn main() -> i64 { let values = [1,2,3]; pair(values) }");
+}
+
+#[test]
+fn unannotated_nested_array_literals_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "fn keep<T>(value: T) -> T { value } fn pair(value: [[i64;1];2]) -> i64 { let [[a],[b]] = value; a+b } pub fn main() -> i64 { let values = keep([[20],[22]]); pair(values) }";
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap()).unwrap();
+        // SAFETY: compile and execute only the locally checked safe fixture.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
 fn fixed_array_literals_patterns_and_const_inference_execute() {
     accepts(
         "fn keep<T,const N: usize>(value: [T;N]) -> [T;N] { value } pub fn main() -> i64 { let [a,b]: [i64;2] = keep([20,22]); a + b }",

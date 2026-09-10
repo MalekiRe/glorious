@@ -3780,6 +3780,29 @@ fn static_literal_views_satisfy_generic_lifetime_call_contexts() {
 }
 
 #[test]
+fn byte_literals_supply_generic_slice_elements_in_vm_and_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = r#"use std::*;
+        fn keep<'a,T>(bytes: Slice<'a,T>) -> Slice<'a,T> { bytes }
+        pub fn main() -> i64 {
+            let bytes = keep(b"\x00\xff");
+            as<i64>(Slice::len(&bytes)) + 40
+        }"#;
+    for optimization in [0, 2] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.to_string());
+        let artifact = StageZeroCompiler::new().compile(input.clone()).unwrap().artifact.unwrap();
+        let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        assert_eq!(artifact.run_std_i64().unwrap(), 42);
+        assert_eq!(decoded.run_std_i64().unwrap(), 42);
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        // SAFETY: only the locally checked fixture and trusted bundled library run.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
 fn generic_literal_view_contexts_do_not_promote_local_string_borrows_to_static() {
     let source = r#"
         use std::*;

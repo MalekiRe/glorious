@@ -1209,3 +1209,23 @@ This repairs the nested-output capture fixture left open above. Targeted tests
 also prove conflicting argument-loan rejection, exactly-once VM/native side
 effects, and nonlocal helper exits through a projected result. It does not
 complete guarded storage outcomes, library composition or native handlers.
+
+## Literal type evidence
+
+Core literal elaboration supplies intrinsic element and extent evidence before
+ordinary type/const inference freezes it. An array literal retains its exact
+length even in an unresolved or absent expected context; only an explicit
+bootstrap `Array<T>` context selects the legacy carrier. Later generic calls,
+patterns, materialization and runtime layout consume the existing fixed-array
+type rather than recovering a length from expression syntax.
+
+A contextual octet literal first resolves the selected standard Slice identity,
+then unifies its element with `u8` through the existing inference context. It
+still constructs sealed static data and invokes the manifest-bound wrapper as
+an ordinary Core call. A rigid or incompatible element cannot acquire byte-view
+authority. Partial resolution exposes solved components without defaulting
+unrelated holes; full zonking and the existing layout/provenance validators
+remain required at persistence and execution boundaries.
+
+This repairs these contextual literal producers, not all bootstrap literal
+extensions, library ownership contracts or full compiler/self-hosted acceptance.
