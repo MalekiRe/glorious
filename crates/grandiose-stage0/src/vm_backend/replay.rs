@@ -280,14 +280,20 @@ fn shallow_handler(frame: &RuntimeHandlerFrame, scope: &RuntimeHandlerScope) -> 
     }
 }
 
+#[derive(Default)]
+struct ControlIdentities {
+    performances: BTreeMap<usize, Arc<Cell<u32>>>,
+    returns: BTreeMap<usize, Arc<()>>,
+}
+
 fn shallow_continuation(original: &RuntimeContinuation, scope: &RuntimeHandlerScope,
-    authorities: &mut BTreeMap<usize, Arc<Cell<u32>>>, budget: &mut ExecutionBudget)
+    authorities: &mut ControlIdentities, budget: &mut ExecutionBudget)
     -> Result<RuntimeContinuation, VmArtifactError>
 {
     budget.reserve_value("replayed handler suffix", original.above.len())?;
     budget.reserve_value("replayed resumption returns", original.above_returns.len())?;
     let authority = Arc::as_ptr(&original.remaining_uses) as usize;
-    let remaining_uses = authorities.entry(authority)
+    let remaining_uses = authorities.performances.entry(authority)
         .or_insert_with(|| Arc::new(Cell::new(original.remaining_uses.get()))).clone();
     Ok(RuntimeContinuation {
         target: original.target, dst: original.dst, registers: original.registers.clone(),
@@ -297,6 +303,8 @@ fn shallow_continuation(original: &RuntimeContinuation, scope: &RuntimeHandlerSc
         above_returns: original.above_returns.iter().map(|pending| {
             budget.reserve_value("replayed clause handlers", pending.handlers.len())?;
             Ok(RuntimeResumptionReturn {
+                identity: authorities.returns.entry(Arc::as_ptr(&pending.identity) as usize)
+                    .or_insert_with(|| Arc::new(())).clone(),
                 pc: pending.pc, dst: pending.dst, handler_id: pending.handler_id,
                 registers: pending.registers.clone(), program: pending.program.clone(),
                 resumed_handler_ids: pending.resumed_handler_ids.clone(),
@@ -332,7 +340,7 @@ pub(super) fn fork(
 ) -> Result<RuntimeContinuation, VmArtifactError> {
     // Flatten and rebuild iteratively so nesting retained handlers does not
     // turn a checked replay into unbounded Rust-stack recursion.
-    let mut authorities = BTreeMap::new();
+    let mut authorities = ControlIdentities::default();
     let mut nodes = vec![(original, shallow_continuation(original, scope, &mut authorities, budget)?, None)];
     let mut index = 0;
     while index < nodes.len() {
@@ -386,7 +394,7 @@ pub(super) fn fork(
                 }
             }
             for outside in &mut handler.scope.outside_pending {
-                if let Some(copied) = authorities.get(&(Arc::as_ptr(outside) as usize)) { *outside = copied.clone(); }
+                if let Some(copied) = authorities.performances.get(&(Arc::as_ptr(outside) as usize)) { *outside = copied.clone(); }
             }
         }
     }
@@ -395,7 +403,7 @@ pub(super) fn fork(
             let destination = if let Some(pending) = pending {
                 &mut nodes[parent].1.above_returns[pending].handlers[handler]
             } else { &mut nodes[parent].1.above[handler] };
-            destination.suspended = RuntimeSuspension::Pending(fork);
+            destination.suspended = RuntimeSuspension::new_pending(fork);
         } else { return Ok(fork); }
     }
     Err(VmArtifactError::HandlerStateMismatch)
@@ -425,7 +433,7 @@ mod tests {
             let frame = RuntimeHandlerFrame {
                 id: 1, scope: child_scope, effect: child.performed.effect, effect_arguments: vec![], operation: 0,
                 payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
-                target: 0, owned_payloads: true, suspended: RuntimeSuspension::Pending(child),
+                target: 0, owned_payloads: true, suspended: RuntimeSuspension::new_pending(child),
             };
             let mut original = empty_continuation(RuntimeRegisters::default());
             let mut scope = RuntimeHandlerScope::new(&original.registers, &[], &[], BTreeMap::new(), &mut budget).unwrap();
@@ -433,10 +441,21 @@ mod tests {
             if outside { scope.outside_pending.push(original_authority.clone()); }
             original.above.push(frame.clone());
             original.above_returns.push(RuntimeResumptionReturn {
+                identity: Arc::new(()),
                 pc: 0, dst: 0, handler_id: 1, registers: RuntimeRegisters::default(),
                 handlers: vec![frame], program: None, resumed_handler_ids: vec![1],
             });
+            original.above_returns.push(original.above_returns[0].clone());
+            budget.limits.max_retained_continuations = 2;
+            check_runtime_control_limits(&original.above, &original.above_returns, &mut budget).unwrap();
+            budget.limits.max_retained_continuations = 1;
+            assert!(matches!(check_runtime_control_limits(&original.above, &original.above_returns, &mut budget),
+                Err(VmArtifactError::ContinuationLimit { limit: 1 })));
+            budget.limits.max_retained_continuations = 2;
             let mut copied = fork(&original, &scope, &mut 0, &mut budget).unwrap();
+            assert!(Arc::ptr_eq(&copied.above_returns[0].identity, &copied.above_returns[1].identity));
+            assert!(!Arc::ptr_eq(&copied.above_returns[0].identity, &original.above_returns[0].identity));
+            check_runtime_control_limits(&copied.above, &copied.above_returns, &mut budget).unwrap();
             let above = copied.above[0].suspended.pending().unwrap();
             let returned = copied.above_returns[0].handlers[0].suspended.pending().unwrap();
             assert!(Arc::ptr_eq(&above.remaining_uses, &returned.remaining_uses));
@@ -459,7 +478,7 @@ mod tests {
         let frame = RuntimeHandlerFrame {
             id: 1, scope, effect: original.performed.effect, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], continuation: VmContinuationPolicy::Consume,
-            target: 0, owned_payloads: true, suspended: RuntimeSuspension::Pending(original.clone()),
+            target: 0, owned_payloads: true, suspended: RuntimeSuspension::new_pending(original.clone()),
         };
         let helper = RuntimeRegisters::default();
         let caller = RuntimeProgramCaller { definition: original.performed.effect, registers: registers.clone(),
@@ -534,7 +553,7 @@ mod tests {
             id: 1, scope, effect: definition, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 3 },
             target: 2, owned_payloads: true,
-            suspended: RuntimeSuspension::Pending(original),
+            suspended: RuntimeSuspension::new_pending(original),
         };
         let mut next_storage_id = 7;
         let spent_child = RuntimeHandlerFrame { id: 2, suspended: RuntimeSuspension::Replayed, ..frame.clone() };
@@ -560,6 +579,8 @@ mod tests {
         assert!(Arc::ptr_eq(&tail_use.registers.native_homes[&0], &home));
         assert!(tail_frame.suspended.is_spent());
         let mut older_view = frame.clone();
+        assert!(std::ptr::eq(frame.suspended.pending().unwrap(), older_view.suspended.pending().unwrap()),
+            "ordinary clause views share the retained image as well as its budget");
         let final_use = resume(&mut frame, &mut next_storage_id, &mut budget, true).unwrap();
         assert!(Arc::ptr_eq(&final_use.registers.native_homes[&0], &home));
         assert_eq!(final_use.registers.source_storage[&0], 7);
@@ -653,7 +674,7 @@ mod tests {
             effect_arguments: vec![], operation: 0, payload_destinations: vec![],
             continuation: VmContinuationPolicy::Replay { uses: 2 }, target: 0,
             owned_payloads: true,
-            suspended: RuntimeSuspension::Pending(original.clone()),
+            suspended: RuntimeSuspension::new_pending(original.clone()),
         });
         let scope = RuntimeHandlerScope::new(&original.registers, &[], &[], outer, &mut budget).unwrap();
         let copied = fork(&original, &scope, &mut 2, &mut budget).unwrap();
@@ -762,7 +783,7 @@ mod tests {
                 id: 1, scope, effect: definition, effect_arguments: vec![], operation: 0,
                 payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
                 target: 0, owned_payloads: true,
-                suspended: RuntimeSuspension::Pending(original),
+                suspended: RuntimeSuspension::new_pending(original),
             };
             let snapshot = resume(&mut frame, &mut 1, &mut budget, true).unwrap();
             assert!(!Arc::ptr_eq(snapshot.registers.capture_environment.as_ref().unwrap(), &environment));

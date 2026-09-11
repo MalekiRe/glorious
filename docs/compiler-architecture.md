@@ -2591,3 +2591,25 @@ copied budgets, actual-path reference transport, protected Drop and payload
 mutation. Bytecode 75/schema 119 are unchanged. Retained-control limits and local
 label-transfer composition remain under milestone review; this checkpoint does
 not claim general guarded source analysis or full compiler/library conformance.
+
+## Retained control graph limits
+
+The shared runtime's remaining-control limit counts pending performances and
+returning-resumption edges across the complete retained graph. Ordinary views
+retain their identities, while the existing replay identity map creates distinct
+internal edges and preserves copied aliases. A spent pending view has no live
+authority; its running continuation's return edge still counts. Runtime branch
+transitions check this product and active handler depth before further execution.
+The previous top-level pending-handler count is removed.
+
+Ordinary handler views share their immutable pending image rather than recursively
+cloning retained subgraphs. Mutable packet access uses copy-on-write metadata;
+final consumption still transfers the original resident storage and one shared
+use authority. This is not source Copy, an alternate continuation budget or a
+new native value representation.
+
+Cache 170 verifies exact low/enough limits in fresh/decoded VM and native/mixed
+O0/O2, branch/replay alias identity, protected cleanup, and the existing bounded
+1,000-iteration handler/tail cycle. Verifier 51, native ABI 20/control v2 and
+bytecode 75/schema 119 are unchanged. Local-label transfer composition remains
+under milestone review. The counters do not claim exact allocator/RSS accounting.

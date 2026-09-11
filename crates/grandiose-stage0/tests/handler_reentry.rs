@@ -80,6 +80,32 @@ fn one_clause_resumes_three_distinct_performance_sites() {
 }
 
 #[test]
+fn returning_resumptions_share_the_retained_control_limit_across_engines() {
+    use grandiose_stage0::VmExecutionLimits;
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmError, LlvmTarget};
+    let ir = StageZeroCompiler::new().compile_llvm(request(THREE_PERFORMANCES), LlvmTarget::host().unwrap()).unwrap();
+    let program = ir.vm_program();
+    let low = VmExecutionLimits { max_retained_continuations: 2, ..Default::default() };
+    let enough = VmExecutionLimits { max_retained_continuations: 3, ..Default::default() };
+    assert!(matches!(program.run_i64_with_limits(low), Err(VmArtifactError::ContinuationLimit { limit: 2 })));
+    assert_eq!(program.run_i64_with_limits(enough).unwrap(), 42);
+    let decoded = decode_and_verify_program(&program.canonical_bytes()).unwrap();
+    assert!(matches!(decoded.run_i64_with_limits(low), Err(VmArtifactError::ContinuationLimit { limit: 2 })));
+    assert_eq!(decoded.run_i64_with_limits(enough).unwrap(), 42);
+    let graph = decode_program(&program.canonical_bytes()).unwrap();
+    for selected in [std::collections::BTreeSet::new(), std::collections::BTreeSet::from([graph.entry]),
+        graph.functions.keys().copied().filter(|key| *key != graph.entry).collect()] {
+        let mixed = ir.with_vm_functions(selected).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe { mixed.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert!(matches!(native.run_i64_with_limits(low),
+                Err(LlvmError::Runtime(VmArtifactError::ContinuationLimit { limit: 2 }))));
+            assert_eq!(native.run_i64_with_limits(enough).unwrap(), 42);
+        }
+    }
+}
+
+#[test]
 fn explicit_resumption_returns_the_transformed_completion_result() {
     candidate("effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask(k) => k(40) + 1 } }");
 }

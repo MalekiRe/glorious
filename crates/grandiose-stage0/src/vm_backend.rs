@@ -2100,7 +2100,8 @@ pub struct VmExecutionLimits {
     pub max_native_allocation_bytes: u64,
     pub max_call_depth: u32,
     pub max_handler_depth: u32,
-    /// Maximum suspended handler continuations retained at once.
+    /// Maximum live pending performances plus returning-resumption edges.
+    /// Multiple ordinary views of the same retained edge count only once.
     pub max_retained_continuations: u32,
     pub max_instructions: u64,
     /// Largest materialized aggregate or handler payload, in value elements.
@@ -10854,14 +10855,16 @@ impl DerefMut for RuntimeRegisters {
 enum RuntimeSuspension {
     /// The delimiter is executing its protected computation.
     Active,
-    /// A clause owns this pending original continuation and its use budget.
-    Pending(RuntimeContinuation),
+    /// Clause views share this pending image and its use budget. Metadata
+    /// access may detach the image, but never the performance's authority.
+    Pending(Arc<RuntimeContinuation>),
     /// The final use consumed the original. The clause still has to close
     /// its delimiter, but there is no abandoned snapshot to destroy.
     Replayed,
 }
 
 impl RuntimeSuspension {
+    fn new_pending(saved: RuntimeContinuation) -> Self { Self::Pending(Arc::new(saved)) }
     fn is_active(&self) -> bool { matches!(self, Self::Active) }
     fn is_spent(&self) -> bool {
         matches!(self, Self::Replayed)
@@ -10871,12 +10874,12 @@ impl RuntimeSuspension {
         if let Self::Pending(saved) = self && saved.remaining_uses.get() != 0 { Some(saved) } else { None }
     }
     fn pending_mut(&mut self) -> Option<&mut RuntimeContinuation> {
-        if let Self::Pending(saved) = self && saved.remaining_uses.get() != 0 { Some(saved) } else { None }
+        if let Self::Pending(saved) = self && saved.remaining_uses.get() != 0 { Some(Arc::make_mut(saved)) } else { None }
     }
     fn take_pending(&mut self) -> Option<RuntimeContinuation> {
         self.pending()?.remaining_uses.set(0);
         let Self::Pending(saved) = std::mem::replace(self, Self::Replayed) else { unreachable!() };
-        Some(saved)
+        Some(Arc::unwrap_or_clone(saved))
     }
 }
 
@@ -10962,6 +10965,9 @@ fn synchronize_return_source_storage(
 /// retained replay snapshot.
 #[derive(Clone)]
 struct RuntimeResumptionReturn {
+    /// Ordinary snapshots alias this return edge; a checked replay creates an
+    /// independent edge. Resource accounting counts authority, not every view.
+    identity: Arc<()>,
     pc: usize,
     dst: u32,
     /// The captured delimiter may precede newer call-site handlers.
@@ -10977,6 +10983,43 @@ struct RuntimeResumptionReturn {
     /// an inner operation has cancelled. Only frames restored for this exact
     /// continuation are permitted to cross the clause-return edge.
     resumed_handler_ids: Vec<u64>,
+}
+
+/// Bound the entire retained control graph, including clause-return paths
+/// inside a suspended branch. Counting only currently pending handlers loses
+/// every consumed one-shot whose resumed computation has not returned yet.
+fn check_runtime_control_limits(
+    handlers: &[RuntimeHandlerFrame], returns: &[RuntimeResumptionReturn], budget: &mut ExecutionBudget,
+) -> Result<(), VmArtifactError> {
+    if handlers.len() > budget.limits.max_handler_depth as usize {
+        return Err(VmArtifactError::HandlerDepthLimit { limit: budget.limits.max_handler_depth });
+    }
+    enum Node<'a> { Pending(&'a RuntimeContinuation), Return(&'a RuntimeResumptionReturn) }
+    let mut pending = Vec::new();
+    pending.extend(handlers.iter().filter_map(|frame| frame.suspended.pending()).map(Node::Pending));
+    pending.extend(returns.iter().map(Node::Return));
+    let mut performances = BTreeSet::new();
+    let mut returning = BTreeSet::new();
+    while let Some(node) = pending.pop() {
+        budget.tick()?;
+        let (frames, returns) = match node {
+            Node::Pending(saved) => {
+                if !performances.insert(Arc::as_ptr(&saved.remaining_uses) as usize) { continue; }
+                (&saved.above, saved.above_returns.as_slice())
+            }
+            Node::Return(saved) => {
+                if !returning.insert(Arc::as_ptr(&saved.identity) as usize) { continue; }
+                (&saved.handlers, &[][..])
+            }
+        };
+        if performances.len() + returning.len() > budget.limits.max_retained_continuations as usize {
+            return Err(VmArtifactError::ContinuationLimit { limit: budget.limits.max_retained_continuations });
+        }
+        budget.reserve_value("retained control audit", pending.len() + frames.len() + returns.len())?;
+        pending.extend(frames.iter().filter_map(|frame| frame.suspended.pending()).map(Node::Pending));
+        pending.extend(returns.iter().map(Node::Return));
+    }
+    Ok(())
 }
 
 /// A view of an actual ordinary call path. Dynamic handlers can outlive a
@@ -14309,16 +14352,6 @@ fn execute_in_float_profile(
                     });
                 };
                 let above = handlers.split_off(index + 1);
-                if handlers
-                    .iter()
-                    .filter(|handler| handler.suspended.pending().is_some())
-                    .count()
-                    >= budget.limits.max_retained_continuations as usize
-                {
-                    return Err(VmArtifactError::ContinuationLimit {
-                        limit: budget.limits.max_retained_continuations,
-                    });
-                }
                 let above_returns = take_crossed_resumption_returns(&mut resumption_returns, &above, budget)?;
                 let frame = &mut handlers[index];
                 if frame.owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
@@ -14339,7 +14372,7 @@ fn execute_in_float_profile(
                     registers[*destination as usize] = Some(value);
                     registers.native_write(*destination);
                 }
-                frame.suspended = RuntimeSuspension::Pending(RuntimeContinuation {
+                frame.suspended = RuntimeSuspension::new_pending(RuntimeContinuation {
                     target: pc + 1,
                     dst,
                     registers: saved,
@@ -14356,6 +14389,7 @@ fn execute_in_float_profile(
                     program: None,
                 });
                 pc = frame.target as usize;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::ClaimEffectPayloads { payloads } => {
@@ -14482,6 +14516,7 @@ fn execute_in_float_profile(
                 handlers.extend(above);
                 resumption_returns.extend(above_returns);
                 pc = target;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::ResumeReturn { dst, value } => {
@@ -14525,6 +14560,7 @@ fn execute_in_float_profile(
                     .collect();
                 let return_handlers = handlers.clone();
                 resumption_returns.push(RuntimeResumptionReturn {
+                    identity: Arc::new(()),
                     pc: pc + 1,
                     dst,
                     handler_id: handlers[index].id,
@@ -14544,6 +14580,7 @@ fn execute_in_float_profile(
                 registers[continuation_dst as usize] = Some(resumed);
                 registers.native_write(continuation_dst);
                 pc = target;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -14605,6 +14642,7 @@ fn execute_in_float_profile(
                 handlers.extend(above);
                 resumption_returns.extend(above_returns);
                 pc = target;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::PrepareInvocation { dst, src, fields, reborrow } => {
@@ -14658,7 +14696,7 @@ fn execute_in_float_profile(
                     registers[*destination as usize] = Some(payload);
                     registers.native_write(*destination);
                 }
-                frame.suspended = RuntimeSuspension::Pending(RuntimeContinuation {
+                frame.suspended = RuntimeSuspension::new_pending(RuntimeContinuation {
                     target: continuation.target,
                     dst: continuation.dst,
                     registers: continuation.registers,
@@ -14670,6 +14708,7 @@ fn execute_in_float_profile(
                     program: None,
                 });
                 pc = frame.target as usize;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::Cancel => {
@@ -16862,16 +16901,6 @@ fn execute_program_in_float_profile(
                     });
                 };
                 let above = handlers.split_off(index + 1);
-                if handlers
-                    .iter()
-                    .filter(|handler| handler.suspended.pending().is_some())
-                    .count()
-                    >= budget.limits.max_retained_continuations as usize
-                {
-                    return Err(VmArtifactError::ContinuationLimit {
-                        limit: budget.limits.max_retained_continuations,
-                    });
-                }
                 if handlers[index].owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                 let owner = handler_owner_branch(&handlers[index].scope.owner,
                     RuntimeBranch { definition, registers: &registers, callers: &callers }, &resumption_returns)
@@ -16914,7 +16943,7 @@ fn execute_program_in_float_profile(
                     registers[*destination as usize] = Some(value);
                     registers.native_write(*destination);
                 }
-                handlers[index].suspended = RuntimeSuspension::Pending(RuntimeContinuation {
+                handlers[index].suspended = RuntimeSuspension::new_pending(RuntimeContinuation {
                     target: pc + 1,
                     dst: *dst,
                     registers: saved,
@@ -16931,6 +16960,7 @@ fn execute_program_in_float_profile(
                     program: Some(continuation_program),
                 });
                 pc = handler_target as usize;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::ClaimEffectPayloads { payloads } => {
@@ -17075,6 +17105,7 @@ fn execute_program_in_float_profile(
                 registers.native_write(dst);
                 handlers.extend(above);
                 pc = target;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::ResumeReturn { dst, value } => {
@@ -17122,6 +17153,7 @@ fn execute_program_in_float_profile(
                     .collect();
                 let return_handlers = handlers.clone();
                 resumption_returns.push(RuntimeResumptionReturn {
+                    identity: Arc::new(()),
                     pc: pc + 1,
                     dst: *dst,
                     handler_id: handlers[index].id,
@@ -17145,6 +17177,7 @@ fn execute_program_in_float_profile(
                 registers[continuation_dst as usize] = Some(resumed);
                 registers.native_write(continuation_dst);
                 pc = target;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -17217,6 +17250,7 @@ fn execute_program_in_float_profile(
                 registers.native_write(dst);
                 handlers.extend(above);
                 pc = target;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::PrepareInvocation { dst, src, fields, reborrow } => {
@@ -17294,7 +17328,7 @@ fn execute_program_in_float_profile(
                     registers[*destination as usize] = Some(payload);
                     registers.native_write(*destination);
                 }
-                handlers[index].suspended = RuntimeSuspension::Pending(RuntimeContinuation {
+                handlers[index].suspended = RuntimeSuspension::new_pending(RuntimeContinuation {
                     target: continuation.target,
                     dst: continuation.dst,
                     registers: continuation.registers,
@@ -17306,6 +17340,7 @@ fn execute_program_in_float_profile(
                     program: continuation_program,
                 });
                 pc = handler_target as usize;
+                check_runtime_control_limits(&handlers, &resumption_returns, budget)?;
                 continue;
             }
             VmInstruction::Cancel => {

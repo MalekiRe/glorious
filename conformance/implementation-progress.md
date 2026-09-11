@@ -5,6 +5,28 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 170: retained-control budgets across saved branches
+
+The shared runtime counts both pending performances and returning-resumption
+edges throughout the retained control graph. Ordinary views share identities;
+checked replay creates independent internal identities while preserving aliases.
+Restoring deep handlers also checks the active-depth limit. The former count of
+only currently pending handler frames is removed. Pending continuation images
+are shared between ordinary views, with copy-on-write metadata access and no
+source Copy or duplicated native backing merely to retain another view.
+
+The preserved three-performance regression now fails with the exact retained
+limit error at two and completes at three, through fresh/decoded VM, native and
+both mixed directions at O0/O2. Six storage/replay units and seven cross-branch
+helper gates pass. The 1,000-iteration completed-handler tail cycle still passes
+with eight calls/handlers/retained continuations and 128 KiB native storage;
+measured resident-entry allocations and copied bytes remain zero.
+
+Cache is 170; verifier 51, native ABI 20/control v2 and bytecode 75/schema 119 are
+unchanged. Local-label transfer composition remains under milestone review.
+These bounds are control and native-resident limits, not exact Rust metadata/RSS
+accounting or complete compiler/library conformance.
+
 ## Cache 169: helper-local delimiters and owned resumption branches
 
 The existing executable verifier closes local resumption trace dependencies
