@@ -2725,3 +2725,20 @@ checking; the new unique-capture double-projection rejection test remains active
 and fails because source acceptance precedes a runtime second-move rejection.
 Repairing source carrier ownership without conflating it with resumption-use
 budgets and borrowed invocation remains the next boundary obligation.
+
+## Source ownership of materialized callable carriers
+
+PlaceFlow consumes the same sealed resident-use query before deciding whether
+an ordinary value occurrence copies or moves storage. Materialized callable
+environments no longer bypass its existing move-path rules merely because their
+invocations also carry quantitative obligations. Direct aliases and aggregate
+projections preserve canonical place identities, including typed annotations.
+Borrowed invocation still retains the source carrier through its existing
+receiver-acquisition relation; it is not an ordinary owning occurrence.
+
+Cache 175 closes the concrete unique-capture double-transfer regression. Its
+positive matrix also checks repeated invocation after one affine transfer.
+Opaque callable and resumption contracts retain the existing quantitative lane;
+missing environment evidence does not grant Copy or establish physical absence.
+The source and execution gates above do not prove complete guarded ownership
+through every opaque/generic control boundary.

@@ -2781,7 +2781,7 @@ impl Analyzer<'_> {
             .and_then(|signatures| {
                 let solver = self.ownership_solver.get_or_init(|| self.frozen_solver
                     .map_or_else(|| crate::TraitSolver::new(signatures), crate::TraitSolver::fresh_query));
-                signatures.principal_use_interval_with_solver(ty, solver).or_else(|| {
+                solver.resident_use(ty).or_else(|| signatures.principal_use_interval_with_solver(ty, solver)).or_else(|| {
                     signatures.principal_use_interval_with_bounds_and_solver(ty, self.lexical_bounds, solver)
                 })
             })
@@ -2842,15 +2842,18 @@ impl Analyzer<'_> {
     }
 
     fn ordinary_value_moves_place(&self, ty: &Type) -> bool {
-        // Callable invocation has a separate quantitative-use analysis.
-        // A unique reference used as an owned value, however, is transferred:
-        // later projections must not read its vacated carrier. Explicit
-        // dereference/reborrow contexts use visit_reference_handle instead.
+        // Invocation count is separate from ownership of a materialized
+        // callable's sealed capture environment. An ordinary occurrence of
+        // that resident transfers its carrier just like other owned storage;
+        // the invocation/reference paths below retain their own access rules.
+        // Opaque callable and resumption contracts still use the quantitative
+        // lane; absence of an environment is not proof of resident Copy.
         self.signatures.is_some()
-            && !self.minimum_owned_by_callable_lane(ty)
-            && matches!(ty, Type::Nominal { .. } | Type::Tuple(_) | Type::Array(_) | Type::FixedArray { .. }
+            && (matches!(ty, Type::Callable { contract, .. } if contract.environment.is_some())
+                || !self.minimum_owned_by_callable_lane(ty)
+                    && matches!(ty, Type::Nominal { .. } | Type::Tuple(_) | Type::Array(_) | Type::FixedArray { .. }
                 | Type::Generic(_) | Type::Projection { .. }
-                | Type::Reference { mutability: crate::Mutability::Unique, .. })
+                | Type::Reference { mutability: crate::Mutability::Unique, .. }))
     }
 
     fn visit_closure_environment(

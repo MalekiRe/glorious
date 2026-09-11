@@ -107,6 +107,9 @@ fn projected_stateful_callable_copies_have_independent_environments() {
             let mut count=0; let task=move (count) { count=count+1; count };
             let wrapped=Wrapped { value:task }; let first=wrapped.value; let second=wrapped.value;
             first()+first()+second()+38 }",
+        "pub fn main() -> i64 { let mut value = 21; let reference = &mut value;
+            let task = move (reference) { *reference }; let wrapped = (task,);
+            let first = wrapped.0; first()+first() }",
     ] {
         assert_callable_ownership_across_engines(source);
     }
@@ -114,15 +117,24 @@ fn projected_stateful_callable_copies_have_independent_environments() {
 
 #[test]
 fn projected_callable_residents_do_not_duplicate_owned_unique_references() {
-    let source = "pub fn main() -> i64 { let mut value = 21; let reference = &mut value;
-        let task = move (reference) { *reference }; let wrapped = (task,);
-        let first = wrapped.0; let second = wrapped.0; first()+second() }";
-    let diagnostics = match StageZeroCompiler::new().compile(request(source, "0")) {
-        Err(error) => error.diagnostics(),
-        Ok(outcome) => panic!("accepted duplicate unique-capture projection; execution: {:?}",
-            outcome.artifact.unwrap().run_i64()),
-    };
-    assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5001" | "G5003")), "{diagnostics:#?}");
+    for source in [
+        "pub fn main() -> i64 { let mut value = 21; let reference = &mut value;
+            let task = move (reference) { *reference }; let wrapped = (task,);
+            let first = wrapped.0; let second = wrapped.0; first()+second() }",
+        "pub fn main() -> i64 { let mut value = 21; let reference = &mut value;
+            let task: () -> i64 = move (reference) { *reference }; let wrapped = (task,);
+            let first = wrapped.0; let second = wrapped.0; first()+second() }",
+        "pub fn main() -> i64 { let mut value = 21; let reference = &mut value;
+            let task = move (reference) { *reference }; let first = task; let second = task;
+            first()+second() }",
+    ] {
+        let diagnostics = match StageZeroCompiler::new().compile(request(source, "0")) {
+            Err(error) => error.diagnostics(),
+            Ok(outcome) => panic!("{source}: accepted duplicate unique-capture projection; execution: {:?}",
+                outcome.artifact.unwrap().run_i64()),
+        };
+        assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5001" | "G5003")), "{source}: {diagnostics:#?}");
+    }
 }
 
 #[test]

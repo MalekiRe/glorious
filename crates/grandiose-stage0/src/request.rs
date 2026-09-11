@@ -377,7 +377,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 172 retains executed clause inputs and explicit clause-storage ownership.
 // Cache 173 preserves source Copy acquisition after reference/projection views.
 // Cache 174 queries sealed resident quantity before selecting ownership transfers.
-pub const STAGE0_CACHE_GENERATION: u32 = 174;
+// Cache 175 checks ordinary ownership transfers of materialized callable residents.
+pub const STAGE0_CACHE_GENERATION: u32 = 175;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

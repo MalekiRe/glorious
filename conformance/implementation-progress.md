@@ -5,6 +5,24 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Source ownership of materialized callable carriers
+
+Cache 175 resolves the unique-capture source rejection gap recorded below.
+PlaceFlow now uses the shared resident-use query for Copy permission, and sends
+ordinary occurrences of materialized, sealed callable environments through its
+existing move-path checks. Invocation count remains distinct from moving the
+owning carrier; explicit reference access and prepared invocation retain their
+own rules. Opaque callable and resumption contracts retain their quantitative
+lane, not an invented empty-environment or Copy proof.
+
+Three duplicate-transfer negatives pass, covering tuple projections, explicit
+callable annotations and direct aliases. The four-source ownership matrix passes
+fresh VM, decoded VM and LLVM O0/O2, including repeated borrowed invocation after
+one valid affine transfer. The shared/unique borrowed-callback regression gates
+pass, as do 14 PlaceFlow unit checks and the resumption-alias VM/decoded/native/
+mixed gate. This is a source-carrier boundary correction, not full guarded
+resource, language/library, or self-hosting acceptance.
+
 ## Resident permission before ownership transfer selection
 
 Cache 174 fixes the active stateful tuple-projection regression from cache 173.
@@ -21,7 +39,7 @@ stateful tuple, nested-tuple and record programs pass fresh VM, decoded VM and
 LLVM O0/O2, checking independent copied environments and persistent state across
 repeated calls.
 
-The added unique-capture negative regression is an active source-checking failure:
+At cache 174, the added unique-capture negative regression exposed a source-checking failure:
 ordinary projection of an affine callable is treated as an observation by
 PlaceFlow, while callable-use checking tracks invocation rather than the owning
 carrier transfer. The compiler accepts two moves and execution rejects the second
