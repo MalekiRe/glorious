@@ -2,9 +2,15 @@
 use super::*;
 use crate::resident_invocations::{CapturedInputs, Inputs, Operand};
 
+/// An occurrence in a strict input list, not a cache keyed by Core identity.
+pub(super) struct EvaluatedOperand {
+    pub expression: CoreId,
+    pub owner: String,
+    pub operand: Operand<Value>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(super) struct Value {
-    core: Option<CoreId>,
     owners: BTreeSet<String>,
     path: Vec<u32>,
     fallback_regions: BTreeSet<regions::Region>,
@@ -12,26 +18,12 @@ pub(super) struct Value {
 }
 
 impl Value {
-    pub(super) fn core(id: CoreId) -> Self {
+    pub(super) fn resident(owner: &str) -> Self {
         Self {
-            core: Some(id),
-            owners: BTreeSet::new(),
+            owners: BTreeSet::from([owner.to_owned()]),
             path: vec![],
             fallback_regions: BTreeSet::new(),
             fallback_origins: None,
-        }
-    }
-
-    pub(super) fn callable(id: CoreId, owner: Option<&str>) -> Self {
-        match owner {
-            Some(owner) => Self {
-                core: None,
-                owners: BTreeSet::from([owner.to_owned()]),
-                path: vec![],
-                fallback_regions: BTreeSet::new(),
-                fallback_origins: None,
-            },
-            None => Self::core(id),
         }
     }
 }
@@ -79,7 +71,6 @@ impl Inputs for Analyzer<'_> {
                 Operand {
                     ty,
                     value: Value {
-                        core: None,
                         owners: roots,
                         path: vec![],
                         fallback_regions: if missing {
@@ -105,7 +96,7 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn captures(&self, callable: &Operand<Value>) -> CapturedInputs<Value> { Inputs::captures(self, callable) }
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         let (regions, origins) = self.invocation_reference_origins(reference);
-        Some(Value { core: None, owners: BTreeSet::new(), path: vec![],
+        Some(Value { owners: BTreeSet::new(), path: vec![],
             fallback_regions: regions,
             fallback_origins: Some(origins.project_referent(fields)),
         })
@@ -114,7 +105,7 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
         let (regions, origins) = self.invocation_reference_origins(receiver);
         if origins.loans.is_empty() || (unique && origins.loans.iter().any(|loan| !loan.unique)) { return None; }
         let targets = origins.targets.clone();
-        Some(Value { core: None, owners: BTreeSet::new(), path: vec![], fallback_regions: regions,
+        Some(Value { owners: BTreeSet::new(), path: vec![], fallback_regions: regions,
             fallback_origins: Some(origins.map(|mut loan| {
                 if targets.as_ref().is_some_and(|targets| targets.contains(&loan)) {
                     loan.capture_path.push(projection.clone());
@@ -129,9 +120,7 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
 impl crate::callable_control::ReferenceInputs for Analyzer<'_> {
     fn reference_known(&self, value: &Value) -> bool {
         let (regions, origins) = self.invocation_reference_origins(value);
-        !origins.is_known_empty() && (!regions.is_empty() || !origins.loans.is_empty()
-            || value.core.is_some_and(|core| self.external_reference_path(core))
-        )
+        !origins.is_known_empty() && (!regions.is_empty() || !origins.loans.is_empty())
     }
     fn reference_empty(&self, value: &Value) -> bool { self.invocation_reference_origins(value).1.is_known_empty() }
 }
@@ -140,27 +129,23 @@ impl Analyzer<'_> {
     pub(super) fn record_invocation_stores(
         &mut self,
         callee: CoreId,
-        owner: Option<&str>,
-        arguments: &[CoreId],
+        callable: &Value,
+        arguments: &[EvaluatedOperand],
         call: CoreId,
     ) {
         if self.continuations.invocation(call).is_some_and(|control| control.storage_read_only()) { return; }
         let Some(signatures) = self.signatures else {
             return;
         };
-        let callee_value = Value::callable(callee, owner);
         let arguments = arguments
             .iter()
-            .map(|argument| Operand {
-                ty: self.body.expression(*argument).ty.clone(),
-                value: Value::core(*argument),
-            })
+            .map(|argument| argument.operand.clone())
             .collect::<Vec<_>>();
         let relations = crate::resident_invocations::derive(
             signatures,
             &self.body.body_regions,
             self.body.expression(callee),
-            callee_value,
+            callable.clone(),
             &arguments,
             self,
         );
@@ -378,16 +363,10 @@ impl Analyzer<'_> {
         (regions, origins.loans)
     }
 
-    fn invocation_reference_origins(
+    pub(super) fn invocation_reference_origins(
         &self,
         value: &Value,
     ) -> (BTreeSet<regions::Region>, ReferenceOrigins) {
-        if let Some(core) = value.core {
-            return (
-                self.logical_regions_from_value_path(core, &value.path),
-                self.reference_origins_from_value_path(core, &value.path),
-            );
-        }
         let mut regions = value.fallback_regions.clone();
         let mut origins = value.fallback_origins.clone();
         if let Some(fallback) = origins.as_mut() {
@@ -438,10 +417,7 @@ impl Analyzer<'_> {
         (regions, loans)
     }
 
-    fn invocation_owners(&self, value: &Value) -> BTreeSet<String> {
-        if let Some(core) = value.core {
-            return self.callable_origin_owners(core, &value.path);
-        }
+    pub(super) fn invocation_owners(&self, value: &Value) -> BTreeSet<String> {
         if let Some(deref) = value
             .path
             .iter()
@@ -458,28 +434,6 @@ impl Analyzer<'_> {
             .owners
             .iter()
             .map(|owner| projection_key(owner, &value.path))
-            .collect()
-    }
-
-    pub(super) fn callable_origin_owners(&self, value: CoreId, path: &[u32]) -> BTreeSet<String> {
-        if let Some(deref) = path
-            .iter()
-            .position(|field| *field == crate::core::REFERENCE_PATH_DEREF)
-        {
-            return self
-                .reference_origins_from_value_path(value, &path[..deref])
-                .targets.into_iter().flatten()
-                .map(|loan| loan.resident_key(&path[deref + 1..]))
-                .collect();
-        }
-        let owner = if self.pending_results.contains(&value) {
-            Some(Self::result_owner(value))
-        } else {
-            self.reference_origin_key(value)
-        };
-        owner
-            .into_iter()
-            .map(|owner| projection_key(&owner, path))
             .collect()
     }
 
@@ -519,7 +473,7 @@ impl Analyzer<'_> {
     pub(super) fn record_factory_capture_origins(
         &mut self,
         owner: &str,
-        argument: CoreId,
+        argument: &Value,
         path: &[u32],
         ty: &Type,
     ) {
@@ -535,9 +489,10 @@ impl Analyzer<'_> {
         for (fields, _) in leaves {
             let source = path.iter().chain(&fields).copied().collect::<Vec<_>>();
             let key = projection_key(&root, &fields);
-            let origins = ReferenceOrigins::unknown(self.reference_loans_from_value_path(argument, &source));
+            let projected = Inputs::project(self, argument, &source).expect("resident projection");
+            let (regions, origins) = self.invocation_reference_origins(&projected);
+            let origins = ReferenceOrigins::unknown(origins.loans);
             self.merge_reference_snapshot(key.clone(), origins);
-            let regions = self.logical_regions_from_value_path(argument, &source);
             if !regions.is_empty() {
                 self.logical.origins.entry(key).or_default().extend(regions);
             }

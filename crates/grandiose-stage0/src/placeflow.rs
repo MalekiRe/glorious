@@ -593,6 +593,38 @@ mod checked_borrow_tests {
     }
 
     #[test]
+    fn shared_core_nodes_acquire_distinct_reference_residents_at_each_strict_position() {
+        for aggregate in [false, true] {
+            let mut body = reborrow_body(false, false);
+            let reference = body.parameters[0].1.clone();
+            let span = body.expressions[0].span;
+            body.parameters.push(("second".into(), reference.clone()));
+            let product = Type::Tuple(vec![reference.clone()]);
+            let input_ty = if aggregate { product.clone() } else { reference.clone() };
+            body.expressions = vec![
+                crate::core::CoreExpr { kind: CoreKind::Local("input".into()), ty: reference.clone(), span },
+                crate::core::CoreExpr { kind: CoreKind::Let { name: "saved".into(), value: CoreId(0) }, ty: Type::Unit, span },
+                crate::core::CoreExpr { kind: CoreKind::Local("saved".into()), ty: reference.clone(), span },
+                crate::core::CoreExpr { kind: CoreKind::Local("second".into()), ty: reference.clone(), span },
+                crate::core::CoreExpr { kind: CoreKind::Assign { place: CorePlace::Local { name: "saved".into(), ty: reference.clone() }, value: CoreId(3) }, ty: Type::Unit, span },
+                crate::core::CoreExpr { kind: CoreKind::Tuple(vec![CoreId(2)]), ty: product, span },
+                crate::core::CoreExpr { kind: CoreKind::Tuple(vec![if aggregate { CoreId(5) } else { CoreId(2) }, CoreId(4), if aggregate { CoreId(5) } else { CoreId(2) }]), ty: Type::Tuple(vec![input_ty.clone(), Type::Unit, input_ty.clone()]), span },
+                crate::core::CoreExpr { kind: CoreKind::Block(vec![CoreId(1), CoreId(6)]), ty: Type::Tuple(vec![input_ty.clone(), Type::Unit, input_ty]), span },
+            ];
+            body.root = CoreId(7);
+            assert!(body.validate().is_empty(), "{:?}", body.validate());
+            let flow = PlaceFlow::analyze(&body);
+            assert!(flow.diagnostics.is_empty(), "{aggregate}: {:?}", flow.diagnostics);
+            for (field, source) in [(0, "input"), (2, "second")] {
+                let owner = format!("<expression-result-7>.{field}{}", if aggregate { ".0" } else { "" });
+                let roots = flow.active_loans.iter().filter(|loan| loan.owner.as_ref() == Some(&owner))
+                    .map(|loan| loan.root.as_str()).collect::<BTreeSet<_>>();
+                assert_eq!(roots, BTreeSet::from([source]), "{aggregate}: {owner}: {:?}", flow.active_loans);
+            }
+        }
+    }
+
+    #[test]
     fn exact_borrow_access_replaces_name_journals_and_rejects_missing_or_stale_facts() {
         let mut body = reborrow_body(true, false);
         let mut flow = PlaceFlow::analyze(&body);
@@ -1630,6 +1662,12 @@ impl Analyzer<'_> {
     /// exit.  Dynamic handler exits receive the same continuation set and are
     /// joined conservatively below.
     fn visit_with_live_after(&mut self, id: CoreId, live_after: &BTreeSet<String>) {
+        // A shared Core node can execute at another strict position after a
+        // store. Its previous result has already been acquired by consumers;
+        // it is not a memoized value for this new occurrence.
+        if self.pending_results.remove(&id) {
+            self.retire_resident(&Self::result_owner(id), self.body.expression(id).span);
+        }
         let incoming_results = self.pending_results.clone();
         self.visit_expression(id, live_after);
         if self.pending_results != incoming_results && !self.pending_results.contains(&id) {
@@ -1649,7 +1687,10 @@ impl Analyzer<'_> {
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Error => {}
-            CoreKind::Constant { .. } => self.apply_invocation_control(id, None, e.span),
+            CoreKind::Constant { .. } => {
+                self.preserve_expression_result(id, id);
+                self.apply_invocation_control(id, &invocations::Value::resident(&Self::result_owner(id)), &[], e.span);
+            }
             CoreKind::Closure { environment, .. } => {
                 let owner = self.nonretaining_call_owner.clone();
                 self.visit_closure_environment(&environment, e.span, owner.as_deref());
@@ -1786,6 +1827,7 @@ impl Analyzer<'_> {
                 // checked against a live reborrow.
                 let mut rhs_live = live_after.clone();
                 self.collect_place_uses(&place, &mut rhs_live);
+                self.collect_local_uses(value, &mut rhs_live);
                 self.visit_with_live_after(value, &rhs_live);
                 // The destination is evaluated only after a normally
                 // completed RHS. A terminal RHS or escaping label transfer
@@ -1795,13 +1837,16 @@ impl Analyzer<'_> {
                 if self.continuations.is_abrupt(value) {
                     return;
                 }
+                let input = self.retain_evaluated_operand(value, false);
+                let mut destination_live = live_after.clone();
+                destination_live.insert(input.owner.clone());
                 if let CorePlace::Deref { reference, .. } = &place {
                     self.restore_whole_referent_hole(&place, e.span);
                     // The capability may itself be computed (a call, block,
                     // or completion). Evaluate it without moving a static
                     // reference carrier, and retain its result loan through
                     // the store just as for an ordinary dereference.
-                    self.visit_reference_handle(*reference, live_after);
+                    self.visit_reference_handle(*reference, &destination_live);
                     if self.continuations.is_abrupt(*reference) {
                         return;
                     }
@@ -1815,7 +1860,7 @@ impl Analyzer<'_> {
                     }
                     if let CorePlace::Deref { reference, .. } = destination {
                         fields.reverse();
-                        self.visit_reference_handle(*reference, live_after);
+                        self.visit_reference_handle(*reference, &destination_live);
                         if self.continuations.is_abrupt(*reference) {
                             return;
                         }
@@ -1823,7 +1868,9 @@ impl Analyzer<'_> {
                     }
                 }
                 self.assign_place(&place, e.span);
-                self.record_assigned_reference_origin(&place, value);
+                self.record_assigned_reference_origin(&place, &input);
+                self.release_minimum_owners(&BTreeSet::from([input.owner.clone()]));
+                self.release_evaluated_operands(&[input], e.span);
             }
             CoreKind::Move(v) => {
                 if !self.open_whole_referent_hole(v, e.span) {
@@ -1854,7 +1901,8 @@ impl Analyzer<'_> {
                 // compact LocalState permanently uniquely borrowed.
                 let owner = format!("<temporary-intrinsic-{}>", id.0);
                 let previous = self.ephemeral_borrow_owner.replace(owner.clone());
-                self.visit_sequence(&arguments, live_after);
+                let inputs = self.visit_sequence(&arguments, live_after);
+                self.release_evaluated_operands(&inputs, e.span);
                 self.release_owner_loans(&owner, e.span);
                 self.ephemeral_borrow_owner = previous;
             }
@@ -1887,7 +1935,6 @@ impl Analyzer<'_> {
                 reference_shape,
                 ..
             } => {
-                let logical_arguments = arguments.clone();
                 let operands_complete = !self.continuations.is_abrupt(callee)
                     && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument));
                 if let CoreKind::Closure { environment, .. } =
@@ -1901,8 +1948,9 @@ impl Analyzer<'_> {
                     let mut during_call = live_after.clone();
                     during_call.insert(owner.clone());
                     self.visit_closure_environment(&environment, e.span, Some(owner.as_str()));
-                    self.visit_sequence(&arguments, &during_call);
-                    if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, Some(&owner), &arguments, id, e.span); }
+                    let inputs = self.visit_sequence(&arguments, &during_call);
+                    if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, &invocations::Value::resident(&owner), &inputs, id, e.span); }
+                    self.release_evaluated_operands(&inputs, e.span);
                     self.release_owner_loans(&owner, e.span);
                 } else {
                     if matches!(reference_shape, CallReferenceShape::None) {
@@ -1918,20 +1966,23 @@ impl Analyzer<'_> {
                         }
                         let mut during_call = live_after.clone();
                         during_call.insert(owner.clone());
-                        self.visit_call_operands(callee, &arguments, &during_call);
-                        if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, None, &logical_arguments, id, e.span); }
+                        let inputs = self.visit_call_operands(callee, &arguments, &during_call);
+                        if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, &inputs[0].operand.value, &inputs[1..], id, e.span); }
+                        self.release_evaluated_operands(&inputs, e.span);
                         self.release_owner_loans(&owner, e.span);
                         self.ephemeral_borrow_owner = previous;
                         self.nonretaining_call_owner = previous_capture;
                     } else {
-                        self.visit_call_operands(callee, &arguments, live_after);
-                        if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, None, &logical_arguments, id, e.span); }
+                        let inputs = self.visit_call_operands(callee, &arguments, live_after);
+                        if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, &inputs[0].operand.value, &inputs[1..], id, e.span); }
+                        self.release_evaluated_operands(&inputs, e.span);
                     }
                 }
             }
             CoreKind::Perform {
                 arguments,
                 reference_shape,
+                reference_origin,
                 effect,
                 operation,
                 ..
@@ -1946,10 +1997,13 @@ impl Analyzer<'_> {
                     e.span,
                     "effect operation",
                 );
-                self.visit_sequence(&arguments, live_after);
+                let inputs = self.visit_sequence(&arguments, live_after);
                 if arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
+                    self.record_call_reference_origin(&Self::result_owner(id), id, &inputs, reference_origin);
+                    self.pending_results.insert(id);
                     self.check_minimum_suspension(&effect, operation, e.span);
                 }
+                self.release_evaluated_operands(&inputs, e.span);
             }
             CoreKind::Handle {
                 computation,
@@ -2127,14 +2181,28 @@ impl Analyzer<'_> {
                     self.refinements = incoming_refinements;
                 }
             }
-            CoreKind::Tuple(values) | CoreKind::Array(values) => {
-                self.visit_sequence(&values, live_after);
-            }
-            CoreKind::Record { fields, .. } => {
-                self.visit_sequence(&fields, live_after);
-            }
-            CoreKind::Enum { fields, .. } => {
-                self.visit_sequence(&fields, live_after);
+            CoreKind::Tuple(fields) | CoreKind::Array(fields)
+            | CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                let inputs = self.visit_sequence(&fields, live_after);
+                if self.normal_continuation {
+                    let result = Self::result_owner(id);
+                    if inputs.iter().all(|input| self.origin_snapshot(&input.owner).is_known_empty()) {
+                        self.install_reference_snapshot(&result, ReferenceOrigins::empty(), id);
+                    }
+                    for (index, input) in inputs.iter().enumerate() {
+                        self.copy_resident_origins(&format!("{result}.{index}"), &input.owner, id);
+                    }
+                    // Absent variant payloads have a positive empty proof.
+                    let empty = ElaboratedInterface::default();
+                    let mut leaves = vec![];
+                    let _ = crate::core::reference_leaf_paths(self.signatures.unwrap_or(&empty), &e.ty, &mut vec![], &mut leaves);
+                    for (path, _) in leaves {
+                        let origins = self.reference_origins_from_value_path(id, &path);
+                        if origins.is_known_empty() { self.install_reference_snapshot(&projection_key(&result, &path), origins, id); }
+                    }
+                    self.pending_results.insert(id);
+                }
+                self.release_evaluated_operands(&inputs, e.span);
             }
             CoreKind::Field { .. } => {
                 // A field may select an evaluated rvalue as well as a local
@@ -2185,45 +2253,59 @@ impl Analyzer<'_> {
                 });
             }
             CoreKind::Block(values) if id == self.body.root => {
-                self.visit_sequence_with_discarded_prefix(&values, live_after, true)
+                self.visit_sequence_with_discarded_prefix(&values, live_after, true);
             }
             CoreKind::Block(values) => self.visit_scoped_sequence(id, &values, live_after),
         }
         self.release_dead_loans(live_after, e.span);
     }
 
-    fn visit_call_operands(&mut self, callee: CoreId, arguments: &[CoreId], live_after: &BTreeSet<String>) {
+    fn visit_call_operands(&mut self, callee: CoreId, arguments: &[CoreId], live_after: &BTreeSet<String>) -> Vec<invocations::EvaluatedOperand> {
         if matches!(self.body.expression(callee).ty, Type::Reference { .. }) {
             let mut during_arguments = live_after.clone();
             for argument in arguments { self.collect_local_uses(*argument, &mut during_arguments); }
             self.visit_reference_handle(callee, &during_arguments);
+            if !self.normal_continuation { return vec![]; }
+            self.use_deref_reference(callee, self.body.expression(callee).span,
+                matches!(self.body.expression(callee).ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
+            let receiver = self.retain_evaluated_operand(callee,
+                matches!(self.body.expression(callee).ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
             let mut receiver_live = live_after.clone();
-            self.collect_local_uses(callee, &mut receiver_live);
-            self.visit_sequence(arguments, &receiver_live);
+            receiver_live.insert(receiver.owner.clone());
+            let mut inputs = vec![receiver];
+            inputs.extend(self.visit_sequence(arguments, &receiver_live));
             // A strict argument can transfer to an enclosing label. The
             // receiver is not invoked on that edge, even though its handle
             // was evaluated before the argument.
-            if !self.normal_continuation { return; }
-            self.use_deref_reference(callee, self.body.expression(callee).span,
-                matches!(self.body.expression(callee).ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
+            if self.normal_continuation {
+                self.check_reference_access(&inputs[0].owner, true,
+                    self.invocation_reference_origins(&inputs[0].operand.value).1, &[],
+                    self.body.expression(callee).span,
+                    matches!(self.body.expression(callee).ty, Type::Reference { mutability: crate::Mutability::Unique, .. }));
+                self.release_minimum_owners(&BTreeSet::from([inputs[0].owner.clone()]));
+            }
+            inputs
         } else {
             let values = std::iter::once(callee).chain(arguments.iter().copied()).collect::<Vec<_>>();
-            self.visit_sequence(&values, live_after);
+            self.visit_sequence(&values, live_after)
         }
     }
 
-    fn finish_invocation_inputs(&mut self, callee: CoreId, owner: Option<&str>, arguments: &[CoreId], call: CoreId, span: Span) {
-        self.record_invocation_stores(callee, owner, arguments, call);
+    fn finish_invocation_inputs(&mut self, callee: CoreId, callable: &invocations::Value, arguments: &[invocations::EvaluatedOperand], call: CoreId, span: Span) {
+        self.record_invocation_stores(callee, callable, arguments, call);
+        let CoreKind::Call { reference_origin, .. } = self.body.expression(call).kind.clone() else { unreachable!("invocation inputs"); };
+        self.record_call_reference_origin(&Self::result_owner(call), call, arguments, reference_origin);
+        self.pending_results.insert(call);
         if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
         else { self.check_minimum_call_suspensions(call, span); }
-        self.apply_invocation_control(call, owner, span);
+        self.apply_invocation_control(call, callable, arguments, span);
     }
 
-    fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
-        self.visit_sequence_with_discarded_prefix(values, live_after, false);
+    fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) -> Vec<invocations::EvaluatedOperand> {
+        self.visit_sequence_with_discarded_prefix(values, live_after, false)
     }
 
-    fn visit_sequence_with_discarded_prefix(&mut self, values: &[CoreId], live_after: &BTreeSet<String>, discard_prefix: bool) {
+    fn visit_sequence_with_discarded_prefix(&mut self, values: &[CoreId], live_after: &BTreeSet<String>, discard_prefix: bool) -> Vec<invocations::EvaluatedOperand> {
         // A strict child which cannot normally complete leaves the current
         // lexical continuation. Core retains the syntactic suffix for
         // diagnostics and IDE tools, but ownership must not treat that dead
@@ -2253,8 +2335,10 @@ impl Analyzer<'_> {
             self.collect_local_uses(*value, &mut future);
         }
         let mut operand_owners = BTreeSet::new();
+        let mut inputs = vec![];
         for (index, (value, mut future)) in reachable.iter().zip(suffixes).enumerate() {
             if !self.normal_continuation { break; }
+            future.extend(operand_owners.iter().cloned());
             // Strict operands remain owned by their parent operation. Only
             // a non-tail block expression discards its result at this point;
             // give that temporary an exact statement-long loan owner. Unit
@@ -2272,19 +2356,77 @@ impl Analyzer<'_> {
                 self.release_owner_loans(&owner, self.body.expression(*value).span);
                 self.ephemeral_borrow_owner = previous;
             } else {
-                self.visit_with_live_after(*value, &future);
+                let mut acquiring = future.clone();
+                if !discard_prefix { self.collect_local_uses(*value, &mut acquiring); }
+                self.visit_with_live_after(*value, &acquiring);
             }
-            if !discard_prefix && index + 1 < values.len() && !self.continuations.is_abrupt(*value) {
+            if !discard_prefix && self.normal_continuation && !self.continuations.is_abrupt(*value) {
                 // Once evaluated, an operand is no longer in its source
                 // place, but its owner remains resident until the enclosing
                 // operation runs. A later transfer/cancellation must prove
                 // that abandoning this operand is authorized too.
-                operand_owners.insert(self.retain_minimum_operand(*value));
+                let input = self.retain_evaluated_operand(*value, false);
+                operand_owners.insert(input.owner.clone());
+                inputs.push(input);
+                future.extend(operand_owners.iter().cloned());
+                self.release_dead_loans(&future, self.body.expression(*value).span);
             }
         }
         if reachable.last().is_none_or(|value| !self.continuations.is_abrupt(*value)) {
             self.release_minimum_owners(&operand_owners);
         }
+        inputs
+    }
+
+    fn copy_resident_origins(&mut self, destination: &str, source: &str, expression: CoreId) {
+        let prefix = source.to_owned() + ".";
+        let references = self.reference_origins.keys()
+            .filter(|key| key.as_str() == source || key.starts_with(&prefix))
+            .map(|key| (format!("{destination}{}", &key[source.len()..]), self.origin_snapshot(key)))
+            .collect::<Vec<_>>();
+        let logical = self.logical.origins.iter()
+            .filter(|(key, _)| key.as_str() == source || key.starts_with(&prefix))
+            .map(|(key, regions)| (format!("{destination}{}", &key[source.len()..]), regions.clone()))
+            .collect::<Vec<_>>();
+        for (key, origins) in references { self.install_reference_snapshot(&key, origins, expression); }
+        for (key, regions) in logical { self.logical.origins.entry(key).or_default().extend(regions); }
+    }
+
+    fn retain_evaluated_operand(&mut self, expression: CoreId, borrowed_view: bool) -> invocations::EvaluatedOperand {
+        let owner = self.retain_minimum_operand(expression);
+        self.record_resident_reference_origins(&owner, expression, borrowed_view);
+        invocations::EvaluatedOperand {
+            expression,
+            operand: crate::resident_invocations::Operand {
+                ty: self.body.expression(expression).ty.clone(),
+                value: invocations::Value::resident(&owner),
+            },
+            owner,
+        }
+    }
+
+    fn release_evaluated_operands(&mut self, inputs: &[invocations::EvaluatedOperand], span: Span) {
+        for input in inputs {
+            self.retire_resident(&input.owner, span);
+        }
+    }
+
+    fn retire_resident(&mut self, root: &str, span: Span) {
+        let under = |owner: &str| owner == root || owner.starts_with(&(root.to_owned() + "."));
+        let owners = self.projection_loans.iter().filter_map(|loan| loan.owner.as_ref())
+            .filter(|owner| under(owner)).cloned().collect::<BTreeSet<_>>();
+        for owner in owners { self.release_owner_loans(&owner, span); }
+        // Outgoing values inherit upstream debt, not a dependency on the
+        // retired temporary's namespace (which may be reused by Core results).
+        let outgoing = self.reborrow_parents.iter().filter(|(owner, _)| !under(owner))
+            .map(|(owner, parents)| (owner.clone(), parents.iter().flat_map(|parent|
+                if under(parent) { self.reference_ancestors(parent).into_iter().filter(|ancestor| !under(ancestor)).collect() }
+                else { BTreeSet::from([parent.clone()]) }).collect::<BTreeSet<_>>()))
+            .collect::<Vec<_>>();
+        for (owner, parents) in outgoing { self.reborrow_parents.insert(owner, parents); }
+        self.reborrow_parents.retain(|owner, _| !under(owner));
+        self.reference_origins.retain(|owner, _| !under(owner));
+        self.logical.origins.retain(|owner, _| !under(owner));
     }
 
     /// Source-free local-use collection over Typed Core. Names are deliberately
@@ -3247,7 +3389,8 @@ impl Analyzer<'_> {
         match &self.body.expression(id).kind {
             CoreKind::Local(name) => Some(self.resolve_name(name)),
             CoreKind::Field { base, index, .. } => {
-                let mut key = self.reference_origin_key(*base)?;
+                let mut key = if self.pending_results.contains(base) { Self::result_owner(*base) }
+                    else { self.reference_origin_key(*base)? };
                 key.push('.');
                 key.push_str(&index.to_string());
                 Some(key)
@@ -3312,24 +3455,7 @@ impl Analyzer<'_> {
                     else { known }
                 }).collect();
             }
-            CoreKind::Call { arguments, .. }
-            | CoreKind::Perform { arguments, reference_origin: CallReferenceOrigin::Paths(_) | CallReferenceOrigin::Partial(_), .. } => {
-                let mut known = BTreeSet::new();
-                let callable = self.signatures.is_some_and(|signatures| regions::callable_paths(signatures, &self.body.expression(id).ty, false)
-                    .iter().any(|(path, _)| crate::core::reference_path_matches(path, fields)));
-                for path in self.resident_call_paths(id) {
-                    if !crate::core::reference_path_is_prefix(&path.result_fields, fields) { continue; }
-                    let Some(argument) = arguments.get(path.argument as usize) else { continue; };
-                    // Forwarding a callable aliases its resident; capturing an
-                    // owner's reference does not alias the owner's data region.
-                    if callable && self.signatures.is_some_and(|signatures| !regions::callable_paths(signatures, &self.body.expression(*argument).ty, true)
-                        .iter().any(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields))) { continue; }
-                    let mut source = path.argument_fields.clone();
-                    source.extend_from_slice(&fields[path.result_fields.len()..]);
-                    known.extend(self.logical_regions_from_value_path(*argument, &source));
-                }
-                if !known.is_empty() || !logical { return known; }
-            }
+            CoreKind::Call { .. } | CoreKind::Perform { .. } => {},
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Record { fields: values, .. }
             | CoreKind::Enum { fields: values, .. } => {
                 if let Some((field, tail)) = fields.split_first() {
@@ -3396,9 +3522,13 @@ impl Analyzer<'_> {
     }
 
     fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
+        self.record_resident_reference_origins(name, id, false);
+    }
+
+    fn record_resident_reference_origins(&mut self, name: &str, id: CoreId, retain_carrier: bool) {
         let origins = self.reference_origins_from_value(id);
         if origins.is_known_empty() {
-            self.install_reference_snapshot(name, origins, id);
+            self.install_resident_snapshot(name, origins, id, retain_carrier);
             return;
         }
         self.record_logical_value_origins(name, id);
@@ -3409,7 +3539,7 @@ impl Analyzer<'_> {
                 .map(|key| (format!("{name}{}", &key[source.len()..]), self.origin_snapshot(key)))
                 .collect::<Vec<_>>();
             for (destination, origins) in aliases {
-                self.install_reference_snapshot(&destination, origins, id);
+                self.install_resident_snapshot(&destination, origins, id, retain_carrier);
             }
             return;
         }
@@ -3420,12 +3550,12 @@ impl Analyzer<'_> {
                     self.signatures.unwrap_or(&empty), &self.body.expression(id).ty);
                 self.record_call_reference_origin(name, id, &[], origin);
             }
-            CoreKind::Move(value) => self.record_aggregate_reference_origins(name, value),
+            CoreKind::Move(value) => self.record_resident_reference_origins(name, value, retain_carrier),
             CoreKind::Block(values) => {
-                if let Some(tail) = values.last() { self.record_aggregate_reference_origins(name, *tail); }
+                if let Some(tail) = values.last() { self.record_resident_reference_origins(name, *tail, retain_carrier); }
             }
             CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } =>
-                self.record_aggregate_reference_origins(name, body),
+                self.record_resident_reference_origins(name, body, retain_carrier),
             CoreKind::Local(_) | CoreKind::Field { .. } | CoreKind::Deref(_) => {
                 if let Some(source) = self.reference_origin_key(id) {
                     let prefix = source.clone() + ".";
@@ -3434,7 +3564,7 @@ impl Analyzer<'_> {
                         .map(|(key, _)| (format!("{name}{}", &key[source.len()..]), self.origin_snapshot(key)))
                         .collect::<Vec<_>>();
                     for (destination, origins) in aliases {
-                        self.install_reference_snapshot(&destination, origins, id);
+                        self.install_resident_snapshot(&destination, origins, id, retain_carrier);
                     }
                 } else {
                     let empty = ElaboratedInterface::default();
@@ -3443,7 +3573,7 @@ impl Analyzer<'_> {
                         &self.body.expression(id).ty, &mut vec![], &mut leaves);
                     for (fields, _) in leaves {
                         let origins = self.reference_origins_through_deref(id, &fields);
-                        self.install_reference_snapshot(&projection_key(name, &fields), origins, id);
+                        self.install_resident_snapshot(&projection_key(name, &fields), origins, id, retain_carrier);
                     }
                 }
             }
@@ -3455,7 +3585,7 @@ impl Analyzer<'_> {
             // field identity now; scope exit can then release the unique
             // borrow instead of pinning the referent to the enclosing body.
             CoreKind::Borrow { .. } | CoreKind::Closure { .. } => {
-                self.install_reference_snapshot(name, self.reference_origins_from_value(id), id);
+                self.install_resident_snapshot(name, self.reference_origins_from_value(id), id, retain_carrier);
             }
             // Every aggregate constructor carries its children in frozen Core
             // order.  Keeping this deliberately independent of source field
@@ -3477,7 +3607,7 @@ impl Analyzer<'_> {
                     // aggregate itself as ordinary storage; a later
                     // `&*slot` creates the child reborrow that owns an NLL
                     // region.
-                    self.record_aggregate_reference_origins(&key, field);
+                    self.record_resident_reference_origins(&key, field, retain_carrier);
                 }
                 let empty = ElaboratedInterface::default();
                 let mut leaves = vec![];
@@ -3488,16 +3618,10 @@ impl Analyzer<'_> {
                     if origins.is_known_empty() { self.install_reference_snapshot(&projection_key(name, &path), origins, id); }
                 }
             }
-            CoreKind::Call {
-                arguments,
-                reference_origin,
-                ..
-            }
-            | CoreKind::Perform {
-                arguments,
-                reference_origin,
-                ..
-            } => self.record_call_reference_origin(name, id, &arguments, reference_origin),
+            // Executed invocations publish their result from evaluated
+            // inputs. Re-reading their Core operands here would observe
+            // source storage after later arguments have replaced it.
+            CoreKind::Call { .. } | CoreKind::Perform { .. } => {},
             _ => {}
         }
     }
@@ -3510,24 +3634,50 @@ impl Analyzer<'_> {
         &mut self,
         result: &str,
         call: CoreId,
-        arguments: &[CoreId],
+        arguments: &[invocations::EvaluatedOperand],
         origin: CallReferenceOrigin,
     ) {
+        // Declared logical and callable result paths consume the same
+        // positional residents as physical return and invocation-store rules.
+        let empty = ElaboratedInterface::default();
+        let signatures = self.signatures.unwrap_or(&empty);
+        let result_ty = &self.body.expression(call).ty;
+        let mut leaves = vec![];
+        let _ = crate::core::reference_leaf_paths(signatures, result_ty, &mut vec![], &mut leaves);
+        let callable_paths = regions::callable_paths(signatures, result_ty, false);
+        leaves.extend(callable_paths.iter().cloned());
+        for (fields, _) in leaves {
+            let callable = callable_paths.iter().any(|(path, _)| crate::core::reference_path_matches(path, &fields));
+            for path in self.resident_call_paths(call) {
+                if !crate::core::reference_path_is_prefix(&path.result_fields, &fields) { continue; }
+                let Some(argument) = arguments.get(path.argument as usize) else { continue; };
+                // Capturing an owner's reference does not alias its data
+                // region; forwarding an existing callable aliases its resident.
+                if callable && !regions::callable_paths(signatures, &argument.operand.ty, true).iter()
+                    .any(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) { continue; }
+                let mut source = path.argument_fields.clone();
+                source.extend_from_slice(&fields[path.result_fields.len()..]);
+                let projected = crate::resident_invocations::Inputs::project(self, &argument.operand.value, &source).expect("resident projection");
+                let (regions, _) = self.invocation_reference_origins(&projected);
+                if !regions.is_empty() { self.logical.origins.entry(projection_key(result, &fields)).or_default().extend(regions); }
+            }
+        }
         if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(call).kind) {
             for path in regions::callable_result_paths(signatures, self.body.expression(*callee)) {
                 if let Some(argument) = arguments.get(path.argument as usize) {
                     let owner = projection_key(result, &path.result_fields);
                     let mut inputs = vec![];
-                    let _ = crate::core::input_reference_leaf_paths(signatures, &self.body.expression(*argument).ty, &mut inputs);
+                    let _ = crate::core::input_reference_leaf_paths(signatures, &argument.operand.ty, &mut inputs);
                     if let Some((_, ty)) = inputs.iter().find(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
-                        self.record_factory_capture_origins(&owner, *argument, &path.argument_fields, ty);
+                        self.record_factory_capture_origins(&owner, &argument.operand.value, &path.argument_fields, ty);
                     }
-                    if regions::callable_paths(signatures, &self.body.expression(*argument).ty, true).iter()
+                    let projected = crate::resident_invocations::Inputs::project(self, &argument.operand.value, &path.argument_fields).expect("resident projection");
+                    if regions::callable_paths(signatures, &argument.operand.ty, true).iter()
                         .any(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
-                        let sources = self.callable_origin_owners(*argument, &path.argument_fields);
+                        let sources = self.invocation_owners(&projected);
                         self.forward_capture_origins(&owner, &sources);
                     }
-                    for parent in self.reference_loans_from_value_path(*argument, &path.argument_fields) {
+                    for parent in self.invocation_reference_origins(&projected).1.loans {
                         self.install_reference_alias(&projection_key(result, &path.result_fields), parent, call);
                     }
                 }
@@ -3545,7 +3695,7 @@ impl Analyzer<'_> {
             return;
         }
         for path in origin.paths() {
-            let Some(argument) = arguments.get(path.argument as usize).copied() else {
+            let Some(argument) = arguments.get(path.argument as usize) else {
                 self.error(
                     self.body.expression(self.body.root).span,
                     "G5023",
@@ -3553,7 +3703,8 @@ impl Analyzer<'_> {
                 );
                 continue;
             };
-            let origins = self.reference_origins_from_value_path(argument, &path.argument_fields);
+            let projected = crate::resident_invocations::Inputs::project(self, &argument.operand.value, &path.argument_fields).expect("resident projection");
+            let origins = self.invocation_reference_origins(&projected).1;
             let known_empty = origins.is_known_empty();
             let parents = origins.loans;
             if parents.is_empty() {
@@ -3562,16 +3713,8 @@ impl Analyzer<'_> {
                 // empty set creates no checked reference authority; unlike
                 // a missing physical reference it is not a malformed call.
                 if crate::core::reference_path_is_logical(&path.argument_fields) { continue; }
-                // A call classified as `External` has proved that all of its
-                // reference leaves are static/external.  Forwarding one of
-                // those leaves needs no caller loan to keep alive; in
-                // particular this lets ordinary std wrappers project the
-                // backing reference of a static `Str` into a `Slice`.
-                if self.external_reference_path(argument) {
-                    continue;
-                }
                 self.error(
-                    self.body.expression(argument).span,
+                    self.body.expression(argument.expression).span,
                     "G5023",
                     "reference-valued call forwards an argument without a live reference provenance"
                         .into(),
@@ -3581,7 +3724,7 @@ impl Analyzer<'_> {
             let result = projection_key(result, &path.result_fields);
             for parent in parents {
                 let parent = self.partition_call_result(call, &path.result_fields, parent);
-                self.install_reference_alias(&result, parent, argument);
+                self.install_reference_alias(&result, parent, argument.expression);
             }
         }
     }
@@ -3653,24 +3796,7 @@ impl Analyzer<'_> {
                 self.reference_origin_key(id).map(|key| self.origin_snapshot(&key))
                     .unwrap_or_else(|| self.reference_origins_through_deref(id, &[]))
             }
-            CoreKind::Call { reference_origin: CallReferenceOrigin::External | CallReferenceOrigin::Unsafe, .. }
-            | CoreKind::Perform { reference_origin: CallReferenceOrigin::External, .. } =>
-                ReferenceOrigins::known(self.external_reference_loans(id, &[])),
-            CoreKind::Call {
-                arguments,
-                ..
-            }
-            | CoreKind::Perform {
-                arguments,
-                reference_origin: CallReferenceOrigin::Paths(_) | CallReferenceOrigin::Partial(_),
-                ..
-            } => ReferenceOrigins::unknown(self.resident_call_paths(id)
-                .into_iter()
-                .filter(|path| path.result_fields.is_empty())
-                .flat_map(|path| arguments.get(path.argument as usize).map(|argument|
-                    self.reference_loans_from_value_path(*argument, &path.argument_fields).into_iter()
-                        .map(|loan| self.partition_call_result(id, &path.result_fields, loan)).collect::<BTreeSet<_>>()).unwrap_or_default())
-                .collect()),
+            CoreKind::Call { .. } | CoreKind::Perform { .. } => ReferenceOrigins::default(),
             CoreKind::Move(value) => self.reference_origins_from_value(*value),
             _ => ReferenceOrigins::default(),
         }
@@ -3723,12 +3849,9 @@ impl Analyzer<'_> {
         if fields.is_empty() {
             return self.reference_origins_from_value(id);
         }
-        // A call can return a nominal aggregate which carries a reference in
-        // one of its fields (for example `Vec::as_mut_slice` and then
-        // `SliceMut::iter`). The frozen caller-path relation already proves
-        // that field aliases an argument field; follow it before treating the
-        // call expression as an anonymous aggregate. This makes provenance
-        // compose through wrappers that have not been let-bound.
+        // Executed calls have a published resident above, including nominal
+        // fields. An unexecuted expression cannot reconstruct one by reading
+        // its source arguments from the current storage graph.
         match &self.body.expression(id).kind {
             CoreKind::Constant { .. } => {
                 let empty = ElaboratedInterface::default();
@@ -3736,31 +3859,7 @@ impl Analyzer<'_> {
                 return if matches!(origin, CallReferenceOrigin::External) { ReferenceOrigins::known(self.external_reference_loans(id, fields)) }
                     else { ReferenceOrigins::default() };
             }
-            CoreKind::Call { reference_origin: CallReferenceOrigin::External | CallReferenceOrigin::Unsafe, .. }
-            | CoreKind::Perform { reference_origin: CallReferenceOrigin::External, .. } =>
-                return ReferenceOrigins::known(self.external_reference_loans(id, fields)),
-            CoreKind::Call {
-                arguments,
-                ..
-            }
-            | CoreKind::Perform {
-                arguments,
-                reference_origin: CallReferenceOrigin::Paths(_) | CallReferenceOrigin::Partial(_),
-                ..
-            } => {
-                let mut loans = BTreeSet::new();
-                for path in self.resident_call_paths(id) {
-                    if !crate::core::reference_path_is_prefix(&path.result_fields, fields) {
-                        continue;
-                    }
-                    let Some(argument) = arguments.get(path.argument as usize).copied() else { continue; };
-                    let mut argument_fields = path.argument_fields.clone();
-                    argument_fields.extend_from_slice(&fields[path.result_fields.len()..]);
-                    loans.extend(self.reference_loans_from_value_path(argument, &argument_fields).into_iter()
-                        .map(|loan| self.partition_call_result(id, &fields[..path.result_fields.len()], loan)));
-                }
-                return ReferenceOrigins::unknown(loans);
-            }
+            CoreKind::Call { .. } | CoreKind::Perform { .. } => return ReferenceOrigins::default(),
             CoreKind::Move(value) => return self.reference_origins_from_value_path(*value, fields),
             _ => {}
         }
@@ -3889,21 +3988,6 @@ impl Analyzer<'_> {
             return BTreeSet::new();
         };
         BTreeSet::from([ProjectionLoan::external(call, fields, mutability)])
-    }
-
-    fn external_reference_path(&self, id: CoreId) -> bool {
-        match &self.body.expression(id).kind {
-            CoreKind::Call {
-                reference_origin: CallReferenceOrigin::External | CallReferenceOrigin::Unsafe,
-                ..
-            }
-            | CoreKind::Perform {
-                reference_origin: CallReferenceOrigin::External,
-                ..
-            } => true,
-            CoreKind::Field { base, .. } => self.external_reference_path(*base),
-            _ => false,
-        }
     }
 
     /// Handler payload binders are ordinary branch locals, but their backing
@@ -4123,6 +4207,10 @@ impl Analyzer<'_> {
     }
 
     fn install_reference_alias(&mut self, result: &str, parent: ProjectionLoan, source: CoreId) {
+        self.install_resident_alias(result, parent, source, true);
+    }
+
+    fn install_resident_alias(&mut self, result: &str, parent: ProjectionLoan, source: CoreId, retain_carrier: bool) {
         let alias = ProjectionLoan {
             place: parent.place.clone(),
             capture_path: parent.capture_path.clone(),
@@ -4138,12 +4226,12 @@ impl Analyzer<'_> {
             self.projection_loans.push(alias);
         }
         if let Some(owner) = parent.owner.filter(|owner| owner != result) {
-            if self.origin_has_been_moved(&owner) {
-                // Moving a reference-bearing owner transfers its backing
-                // loans; it must not suspend the now-vacant source slot.
-                // Retain any external ancestor that was already suspended.
+            if !retain_carrier || self.origin_has_been_moved(&owner) {
+                // Copy/Move transports backing loans and upstream reborrow
+                // debt without borrowing the source handle's slot. A view
+                // or actual reborrow additionally suspends that carrier.
                 let parents = self.reference_ancestors(&owner).into_iter()
-                    .filter(|parent| !self.origin_has_been_moved(parent)).collect::<BTreeSet<_>>();
+                    .filter(|parent| *parent != owner && !self.origin_has_been_moved(parent)).collect::<BTreeSet<_>>();
                 self.reborrow_parents.entry(result.to_owned()).or_default().extend(parents);
             } else {
                 self.reborrow_parents.entry(result.to_owned()).or_default().insert(owner);
@@ -4159,11 +4247,15 @@ impl Analyzer<'_> {
     /// lifetime debt already attached to this result. Logical-region refresh
     /// calls `install_reference_alias`, which cannot replace this target proof.
     fn install_reference_snapshot(&mut self, result: &str, origins: ReferenceOrigins, source: CoreId) {
+        self.install_resident_snapshot(result, origins, source, true);
+    }
+
+    fn install_resident_snapshot(&mut self, result: &str, origins: ReferenceOrigins, source: CoreId, retain_carrier: bool) {
         let reference_free = origins.reference_free;
         if !reference_free { self.invalidate_reference_empty_ancestors(result); }
         let targets = origins.targets.map(|targets| targets.into_iter().map(|loan|
             ProjectionLoan { owner: Some(result.to_owned()), ..loan }).collect());
-        for parent in origins.loans { self.install_reference_alias(result, parent, source); }
+        for parent in origins.loans { self.install_resident_alias(result, parent, source, retain_carrier); }
         let result = self.reference_origins.entry(result.to_owned()).or_default();
         result.targets = targets;
         result.reference_free = reference_free;
@@ -4191,7 +4283,8 @@ impl Analyzer<'_> {
         }
     }
 
-    fn record_assigned_reference_origin(&mut self, place: &CorePlace, value: CoreId) {
+    fn record_assigned_reference_origin(&mut self, place: &CorePlace, input: &invocations::EvaluatedOperand) {
+        let value = input.expression;
         let Some(destinations) = self.place_origin_keys(place) else {
             return;
         };
@@ -4204,12 +4297,9 @@ impl Analyzer<'_> {
             }
             return;
         }
-        // Evaluate provenance before ending the old resident: self-assignment
-        // and projected moves can read precisely the origin being replaced.
-        // This transient namespace snapshots the RHS's ordinary frozen facts;
-        // it is removed before publishing the new destination's aliases.
-        let temporary = format!("<assignment-value-{}>", value.0);
-        self.record_aggregate_reference_origins(&temporary, value);
+        // The RHS was acquired before evaluating the destination. Consume
+        // that occurrence's resident, not the source place's current value.
+        let temporary = &input.owner;
         let under = |candidate: &str, root: &str| candidate == root
             || candidate.strip_prefix(root).is_some_and(|suffix| suffix.starts_with('.'));
         let replacement = self.reference_origins.iter()
@@ -4440,14 +4530,19 @@ impl Analyzer<'_> {
         if origins.loans.is_empty() {
             return;
         }
+        self.check_reference_access(&name, key.is_some(), origins, fields, span, mutation);
+    }
+
+    fn check_reference_access(&mut self, name: &str, named: bool, origins: ReferenceOrigins,
+        fields: &[u32], span: Span, mutation: bool) {
         // A dereference may name a reference stored in an aggregate rather
         // than a standalone local (`*holder.0`).  Follow the reborrow chain
         // by identity and admit the exact frozen backing loan for each
         // ancestor.  This permits a child reborrow to use its own suspended
         // parent while still rejecting access through that parent while the
         // child is live.
-        let mut allowed_owners = self.reference_ancestors(&name);
-        if key.is_none() {
+        let mut allowed_owners = self.reference_ancestors(name);
+        if !named {
             for parent in &origins.loans {
                 if let Some(owner) = &parent.owner { allowed_owners.extend(self.reference_ancestors(owner)); }
             }

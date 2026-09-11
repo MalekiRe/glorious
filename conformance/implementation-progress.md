@@ -5,6 +5,36 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 155: retained strict reference residents
+
+PlaceFlow acquires a distinct loan-graph resident at each strict input position.
+Invocation stores, declared and observed returns, aggregate results and assignment
+RHS consumers use that product instead of late source-place reads. Copy/Move
+retains backing loans and upstream ancestry without suspending the copied handle
+slot; borrowed unique receiver views retain that slot's authority. Retired
+temporaries cannot retarget outgoing ancestry when a shared Core node executes
+again. The deferred-Core invocation adapter and late call-result reconstruction
+are removed.
+
+The reference-result run passes 27 tests, including new positive and negative
+replacement/capture/reborrow cases and fresh/decoded VM plus native O0/O2
+execution. The shared-Core occurrence test passes with receiving Core validation,
+and the borrowed-receiver handler-reentry matrix passes. Removing this source
+change reproduces the original unsafe argument-loan acceptance.
+
+A new handler-payload regression remains active and failing: the clause binding
+still rereads an operation input after another argument replaces its source
+handle. Its valid execution case passes; its invalid mutation is wrongly
+accepted. This is the next consumer migration, not completed payload conformance.
+
+The adjacent reborrow run passed 39/40 and borrowed-temporary run 5/7. Their
+failures, plus a selected minimum-use helper-label fixture, all reproduce with
+this source change removed: two G7041 label-call preparation failures, one source
+diagnostic expectation mismatch and one destroyed native environment failure.
+No failing test is ignored or counted as passing. Owned receiver lifetime and
+the other native-handler acceptance requirements remain open. Cache 155 changes;
+verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+
 ## Cache 154: exact storage writes in shared control execution
 
 The existing callable-control log now carries ordered exact assignments. Place

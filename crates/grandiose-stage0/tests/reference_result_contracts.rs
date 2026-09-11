@@ -34,6 +34,167 @@ const PREFIX: &str = r#"#![no_std]
 "#;
 
 #[test]
+fn strict_reference_inputs_keep_their_original_loans_after_handle_replacement() {
+    for expression in [
+        "keep(reference, { reference = &second; first = 7; })",
+        "(reference, { reference = &second; first = 7; }).0",
+        "keep({ reference }, { reference = &second; first = 7; })",
+        "{ let kept = keep(reference, { reference = &second; }); first = 7; kept }",
+        "{ let kept = (reference, { reference = &second; }).0; first = 7; kept }",
+    ] {
+        let source = format!("#![no_std]
+            fn keep<'a>(value:&'a i64, ignored:()) -> &'a i64 {{ value }}
+            pub fn main() -> i64 {{
+                let mut first = 42; let second = 0; let mut reference = &first;
+                let result = {expression}; *result
+            }}");
+        for optimization in ["0", "2"] {
+            let Err(failure) = StageZeroCompiler::new().compile(request(&source, optimization)) else {
+                panic!("O{optimization}: replacing the handle must not retire the evaluated input's loan: {source}");
+            };
+            assert!(failure.diagnostics().iter().any(|diagnostic|
+                matches!(diagnostic.code, "G5004" | "G5006" | "G5007")), "{source}\n{:?}", failure.diagnostics());
+        }
+    }
+}
+
+#[test]
+fn strict_reference_results_keep_the_selected_referent_after_handle_replacement() {
+    for expression in [
+        "keep(reference, { reference = &second; })",
+        "(reference, { reference = &second; }).0",
+        "keep({ reference }, { reference = &second; })",
+    ] {
+        accepts(&format!("#![no_std]
+            fn keep<'a>(value:&'a i64, ignored:()) -> &'a i64 {{ value }}
+            pub fn main() -> i64 {{
+                let first = 42; let second = 0; let mut reference = &first;
+                let result = {expression}; *result
+            }}"));
+    }
+}
+
+#[test]
+fn strict_reference_transport_preserves_upstream_reborrow_debt() {
+    for (input, parameter) in [("child", "&'a i64"), ("move child", "&'a mut i64")] {
+        let borrow = if input == "child" { "&(*parent)" } else { "&mut *parent" };
+        let source = format!("#![no_std]
+            fn keep<'a>(value:{parameter}, ignored:()) -> {parameter} {{ value }}
+            pub fn main() -> i64 {{
+                let mut first = 42; let mut second = 0;
+                let mut parent = &mut first; let child = {borrow};
+                let result = keep({input}, {{ parent = &mut second; }}); *result
+            }}");
+        for optimization in ["0", "2"] {
+            let failure = StageZeroCompiler::new().compile(request(&source, optimization))
+                .expect_err("transport cannot discard the upstream unique parent's suspension");
+            assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
+                "{source}\n{:?}", failure.diagnostics());
+        }
+    }
+    accepts("#![no_std] fn read(value:&i64, ignored:()) -> i64 { *value }
+        pub fn main() -> i64 {
+            let mut first = 42; let mut second = 0;
+            let mut parent = &mut first; let child = &(*parent);
+            let result = read(child, ()); parent = &mut second; *parent = result;
+            second
+        }");
+}
+
+#[test]
+fn assignment_inputs_are_retained_before_computed_destination_evaluation() {
+    let prefix = "#![no_std] pub fn main() -> i64 {
+        let mut first = 42; let second = 0; let mut reference = &first;
+        let mut destination = &second;";
+    accepts(&format!("{prefix}
+        *{{ reference = &second; &mut destination }} = reference;
+        *destination
+    }}"));
+    for mutation in [
+        "*{ reference = &second; first = 7; &mut destination } = reference;",
+        "*{ reference = &second; &mut destination } = reference; first = 7;",
+    ] {
+        let source = format!("{prefix} {mutation} *destination }}");
+        let failure = StageZeroCompiler::new().compile(request(&source, "0"))
+            .expect_err("the assignment consumes its retained RHS, not the replaced source handle");
+        assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
+            "{source}\n{:?}", failure.diagnostics());
+    }
+}
+
+#[test]
+fn strict_reference_snapshots_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "#![no_std]
+        fn keep<'a>(value:&'a i64, ignored:()) -> &'a i64 { value }
+        pub fn main() -> i64 {
+            let first = 42; let second = 22; let replacement = 0;
+            let mut a = &first; let mut b = &second;
+            let selected = (keep(a, { a = &replacement; }), b, { b = &replacement; });
+            *selected.0
+        }";
+    accepts(source);
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: execute only this locally compiled and checked source.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
+}
+
+#[test]
+fn strict_callable_inputs_retain_their_captured_reference_residents() {
+    let source = |mutation: &str| format!("#![no_std]
+        fn invoke<F>(task:F, ignored:()) -> i64 where F:Fn<(),Output=i64,Effects={{}}> {{ task() }}
+        pub fn main() -> i64 {{
+            let mut first = 42; let second = 0; let mut reference = &first;
+            let callback = move(reference) {{ *reference }};
+            invoke(callback, {{ reference = &second; {mutation} }})
+        }}");
+    accepts(&source(""));
+    let failure = StageZeroCompiler::new().compile(request(&source("first = 7;"), "0"))
+        .expect_err("evaluated callable inputs keep their captured backing loans");
+    assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
+        "{:?}", failure.diagnostics());
+}
+
+#[test]
+fn borrowed_unique_receivers_retain_view_authority_during_arguments() {
+    let source = |argument: &str| format!("#![no_std]
+        fn first(value:i64) -> i64 {{ 42 }} fn second(value:i64) -> i64 {{ 0 }}
+        pub fn main() -> i64 {{
+            let mut first:(i64)->i64 = first; let mut second:(i64)->i64 = second;
+            let mut callback = &mut first;
+            callback({argument})
+        }}");
+    accepts(&source("0"));
+    let failure = StageZeroCompiler::new().compile(request(&source("{ callback = &mut second; 0 }"), "0"))
+        .expect_err("a borrowed unique view suspends its source carrier until invocation");
+    assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
+        "{:?}", failure.diagnostics());
+}
+
+#[test]
+fn handler_payloads_keep_the_reference_selected_before_argument_replacement() {
+    let source = |mutation: &str| format!("#![no_std]
+        effect Select<'a> {{ [1,1] read(value:&'a i64, ignored:()) -> i64; }}
+        fn choose<'a>(first:&'a mut i64, second:&'a i64) -> i64 {{
+            let mut reference = &(*first);
+            handle Select<'a>::read(reference, {{ reference = second; }}) {{
+                Select<'a>::read(payload, _) with k => {{ {mutation} k(*payload) }}
+            }}
+        }}
+        pub fn main() -> i64 {{ let mut first = 42; let second = 0; choose(&mut first, &second) }}");
+    accepts(&source(""));
+    let Err(failure) = StageZeroCompiler::new().compile(request(&source("*first = 7;"), "0")) else {
+        panic!("the handler must retain the evaluated operation payload's original loan");
+    };
+    assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
+        "{:?}", failure.diagnostics());
+}
+
+#[test]
 fn an_absent_variant_payload_is_not_missing_reference_provenance() {
     accepts(r#"#![no_std]
         enum Maybe<T> { Some(T), None }

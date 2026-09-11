@@ -2152,3 +2152,38 @@ proof. General borrowed resumption invocation, helper-local symbolic delimiters,
 foreign-control admission, mandatory-tail fusion and full zero-marshalling/
 performance acceptance also remain open. Executable and runtime generations do
 not change.
+
+## Retained reference residents at strict boundaries
+
+PlaceFlow's existing strict sequence evaluator now publishes positional input
+residents in its loan graph before evaluating the next operand. Invocation
+stores, declared reference/callable results and observed normal/label returns
+consume those residents. Aggregate construction and assignment destination
+evaluation use the same acquisition rule. The invocation adapter no longer
+accepts a Core expression as a deferred storage lookup, and the old recursive
+call-result argument reconstruction is removed.
+
+Value transport preserves backing loans and upstream reborrow ancestry without
+borrowing the replaceable source handle slot. A borrowed unique receiver view
+retains its carrier authority instead. Results inherit those debts before input
+temporaries retire. Repeated evaluation of a shared Core node acquires distinct
+input residents; a completed expression result is not a memoized source value.
+Empty aggregate payload proofs survive this publication and retirement boundary.
+
+Cache 155 rejects mutation of an original referent after its reference was
+evaluated as an argument or field and its source handle was subsequently replaced.
+It also retains assignment RHS provenance across destination side effects.
+Positive replacement, upstream unique reborrows, captures, borrowed receiver
+views, shared-Core occurrences and fresh/decoded VM/native execution are covered.
+Twenty-seven reference-result tests pass; one newly preserved handler-payload
+regression still fails: clause binding reconstructs the operation's inputs after
+argument replacement. That consumer has not yet migrated, so this checkpoint
+does not establish complete operation-payload or guarded suspension provenance.
+
+Nearby tests also retain baseline failures: label-call preparation rejects two
+fixtures, one temporary-borrow fixture expects a different source diagnostic,
+and another fails with destroyed native environment authority. All four failures
+reproduce with this change removed. Owned receiver acquisition/lifetime, general
+borrowed resumption invocation, helper-local symbolic delimiters, foreign-control
+admission, mandatory-tail fusion and full zero-marshalling/performance acceptance
+remain open. Executable verifier, portable formats and runtime ABI do not change.

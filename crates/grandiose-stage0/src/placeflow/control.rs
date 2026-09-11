@@ -15,16 +15,17 @@ impl Analyzer<'_> {
     pub(super) fn apply_invocation_control(
         &mut self,
         call: CoreId,
-        owner: Option<&str>,
+        callable: &invocations::Value,
+        arguments: &[invocations::EvaluatedOperand],
         span: Span,
     ) {
-        let (callee, arguments, reference_shape) = match self.body.expression(call).kind.clone() {
-            CoreKind::Call { callee, arguments, reference_shape, .. } => (callee, arguments, reference_shape),
+        let reference_shape = match self.body.expression(call).kind.clone() {
+            CoreKind::Call { reference_shape, .. } => reference_shape,
             CoreKind::Constant { .. } => {
                 let empty = ElaboratedInterface::default();
                 let (_, shape) = crate::callable_declarations::value_reference_contract(
                     self.signatures.unwrap_or(&empty), &self.body.expression(call).ty);
-                (call, vec![], shape)
+                shape
             }
             _ => return,
         };
@@ -33,13 +34,12 @@ impl Analyzer<'_> {
             self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
             return;
         };
-        let callable = invocations::Value::callable(callee, owner);
         let arguments = arguments
             .iter()
-            .map(|id| invocations::Value::core(*id))
+            .map(|input| input.operand.value.clone())
             .collect::<Vec<_>>();
         let empty = ElaboratedInterface::default();
-        let returned = control.resolve_returns(&result_ty, self.signatures.unwrap_or(&empty), &callable, &arguments, self);
+        let returned = control.resolve_returns(&result_ty, self.signatures.unwrap_or(&empty), callable, &arguments, self);
         if !returned.references.is_complete() {
             self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
         }
@@ -69,7 +69,7 @@ impl Analyzer<'_> {
                 {
                     let payload = crate::callable_control::resolve_payload(
                         &transfer.payload,
-                        &callable,
+                        callable,
                         &arguments,
                         self,
                     );
@@ -101,9 +101,8 @@ impl Analyzer<'_> {
         empty_paths: &[Vec<u32>],
     ) {
         if returns.is_empty() { return; }
-        // Snapshot the declared result before installing an additional
-        // body-derived root: a partial input projection must not mask it.
-        self.preserve_expression_result(call, call);
+        // The input consumer has already published the declared result.
+        // Additional body-derived roots must not mask its lifetime debt.
         let result = Self::result_owner(call);
         let observed = format!("<invocation-return-{}>", call.0);
         for payload in returns {
