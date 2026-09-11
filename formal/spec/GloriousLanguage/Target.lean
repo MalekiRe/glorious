@@ -37,6 +37,9 @@ structure TargetProfile where
   effectConvention : Identity
   manifestIdentity : Identity
   supportsC : Bool
+  codeIdentityLayout : Layout
+  continuationLayout : Layout
+  cRecordLayout : List Layout → Layout
 
 def Width.bits (target : TargetProfile) : Width → Nat
   | .fixed bits => bits
@@ -58,11 +61,31 @@ def Layout.Valid (layout : Layout) : Prop :=
   PowerOfTwo layout.alignment ∧ layout.size % layout.alignment = 0 ∧
   ∀ offset ∈ layout.offsets, offset ≤ layout.size
 
+/-- A target supplies its C record layout; the language does not ask a host
+compiler for an ambient answer. These are the representation invariants the
+selected answer must satisfy, including zero-sized fields. -/
+def CRecordLayout (target : TargetProfile) (fields : List Layout) (layout : Layout) : Prop :=
+  target.supportsC = true ∧ layout = target.cRecordLayout fields ∧ layout.Valid ∧
+  layout.offsets.length = fields.length ∧ layout.tagBytes = 0 ∧ layout.variants = [] ∧
+  (∀ (index : Nat) field offset, fields[index]? = some field → layout.offsets[index]? = some offset →
+    offset % field.alignment = 0 ∧ offset+field.size ≤ layout.size ∧ field.alignment ≤ layout.alignment) ∧
+  (∀ (i j : Nat) left right a b, i < j → fields[i]? = some left → fields[j]? = some right →
+    layout.offsets[i]? = some a → layout.offsets[j]? = some b →
+    left.size = 0 ∨ right.size = 0 ∨ a+left.size ≤ b)
+
+def IdentityLayout (layout : Layout) : Prop :=
+  layout.Valid ∧ layout.offsets = [] ∧ layout.tagBytes = 0 ∧ layout.payloadOffset = 0 ∧ layout.variants = []
+
 def TargetProfile.Valid (target : TargetProfile) : Prop :=
   target.pointerBits ∈ [16,32,64,128] ∧ 0 < target.maximumObjectBytes ∧
-  (∀ scalar, scalar.Valid target → PowerOfTwo (target.scalarAlignment scalar)) ∧
+  (∀ scalar, scalar.Valid target → PowerOfTwo (target.scalarAlignment scalar) ∧
+    scalar.bytes target % target.scalarAlignment scalar = 0) ∧
   (∀ scalar ∈ target.cCompatibleScalars, scalar.Valid target ∧ PowerOfTwo (target.cScalarAlignment scalar)) ∧
-  (target.supportsC = true → 0 < target.cBoolBytes ∧ 0 < target.cFunctionPointerBytes)
+  (target.supportsC = true → 0 < target.cBoolBytes ∧ 0 < target.cFunctionPointerBytes ∧
+    ∀ fields, (∀ field ∈ fields, field.Valid) → CRecordLayout target fields (target.cRecordLayout fields)) ∧
+  IdentityLayout target.codeIdentityLayout ∧ IdentityLayout target.continuationLayout ∧
+  0 < target.continuationLayout.size ∧ target.codeIdentityLayout.size ≤ target.maximumObjectBytes ∧
+  target.continuationLayout.size ≤ target.maximumObjectBytes
 
 def alignUp (offset alignment : Nat) : Nat :=
   ((offset + alignment - 1) / alignment) * alignment
@@ -87,8 +110,8 @@ def ArrayLayout (element : Layout) (length : Nat) (layout : Layout) : Prop :=
 
 def EnumLayout (variants : List Layout) (layout : Layout) : Prop :=
   variants ≠ [] ∧ (∀ variant ∈ variants, variant.Valid) ∧
-  0 < layout.tagBytes ∧ variants.length ≤ 2^(8*layout.tagBytes) ∧
-  (∀ smaller, 0 < smaller → smaller < layout.tagBytes → 2^(8*smaller) < variants.length) ∧
+  layout.tagBytes ∈ [1,2,4,8,16] ∧ variants.length ≤ 2^(8*layout.tagBytes) ∧
+  (∀ smaller ∈ [1,2,4,8,16], smaller < layout.tagBytes → 2^(8*smaller) < variants.length) ∧
   layout.alignment = max layout.tagBytes (variants.foldl (fun a variant => max a variant.alignment) 1) ∧
   layout.payloadOffset = alignUp layout.tagBytes (variants.foldl (fun a variant => max a variant.alignment) 1) ∧
   layout.size = alignUp (layout.payloadOffset + variants.foldl (fun size variant => max size variant.size) 0)

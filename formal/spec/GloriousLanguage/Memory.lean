@@ -21,8 +21,6 @@ def ScalarValue.bytes (target : TargetProfile) : ScalarValue → List Nat
 structure RuntimeAddresses where
   callable : DeclId → List Term → Nat
   continuation : Identity → Nat
-  callableLayout : DeclId → List Term → Layout
-  continuationLayout : Term → Layout
   codeIdentity : Identity
 
 inductive FieldOffset (program : Language.Program) (world : World) :
@@ -30,6 +28,13 @@ inductive FieldOffset (program : Language.Program) (world : World) :
   | tuple {address fields index type layouts layout offset} : fields[index]? = some type →
       ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
       layout.offsets[index]? = some offset → FieldOffset program world address (.tuple fields) index type offset
+  | bindings {address brand region fields index type layouts layout offset} : fields[index]? = some type →
+      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
+      layout.offsets[index]? = some offset → FieldOffset program world address (.bindings brand region fields) index type offset
+  | callable {address id arguments fields index type layouts layout offset} : CallableFields program id arguments fields →
+      fields[index]? = some type → ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts →
+      AggregateLayout (program.input.target.codeIdentityLayout :: layouts) layout →
+      layout.offsets[index+1]? = some offset → FieldOffset program world address (.callable id arguments) index type offset
   | array {address element sign width count index layout} : 0 ≤ count → index < count.toNat →
       LayoutOf program ⟨[],[],0,default,false⟩ element layout →
       FieldOffset program world address (.array element (.constant (.integer sign width count))) index element
@@ -51,6 +56,7 @@ inductive AddressOffset (program : Language.Program) (world : World) : Address �
       AddressOffset program world (address.child index) type (offset+childOffset)
 
 def PhysicalAddress (program : Language.Program) (world : World) (address : Address) (type : Term) (physical : Nat) : Prop :=
+  Addressable program ⟨[],[],0,default,false⟩ type ∧
   ∃ root offset, world.root address = some root ∧ AddressOffset program world address type offset ∧ physical = root.base + offset
 
 def PointsTo (program : Language.Program) (world : World) (pointer : RawPointer) (address : Address) (type : Term) : Prop :=
@@ -85,6 +91,29 @@ mutual
           bytes.take layout.tagBytes = (integerBytes program.input.target.endian layout.tagBytes index).map some) →
         (∀ (index byte : Nat), bytes[index]? = some (some byte) → byte < 256) →
         Encodes program world runtime address value layout bytes
+    | callable {address owner id arguments fields layout bytes} :
+        LayoutOf program ⟨[],[],0,default,false⟩ (.callable id arguments) layout → bytes.length = layout.size →
+        runtime.callable id arguments < 256^program.input.target.codeIdentityLayout.size →
+        bytes.take program.input.target.codeIdentityLayout.size =
+          (integerBytes program.input.target.endian program.input.target.codeIdentityLayout.size (runtime.callable id arguments)).map some →
+        EncodesFields program world runtime address (.callable id arguments) 0 fields bytes →
+        Encodes program world runtime address (.resident owner (.callable id arguments) (.callable id arguments) true fields) layout bytes
+    | operation {address owner id arguments operation layout bytes} : program.operation id = some operation →
+        LayoutOf program ⟨[],[],0,default,false⟩ (.callable id arguments) layout → bytes.length = layout.size →
+        runtime.callable id arguments < 256^program.input.target.codeIdentityLayout.size →
+        bytes.take program.input.target.codeIdentityLayout.size =
+          (integerBytes program.input.target.endian program.input.target.codeIdentityLayout.size (runtime.callable id arguments)).map some →
+        Encodes program world runtime address (.resident owner (.callable id arguments) (.operation id arguments) true []) layout bytes
+    | continuation {address owner brand argument answer effects quantity id} :
+        runtime.continuation id < 256^program.input.target.continuationLayout.size →
+        Encodes program world runtime address
+          (.resident owner (.continuation brand argument answer effects quantity) (.continuation id) true [])
+          program.input.target.continuationLayout
+          ((integerBytes program.input.target.endian program.input.target.continuationLayout.size (runtime.continuation id)).map some)
+    | bindings {address owner brand region fields id types layout bytes} :
+        LayoutOf program ⟨[],[],0,default,false⟩ (.bindings brand region types) layout → bytes.length = layout.size →
+        EncodesFields program world runtime address (.bindings brand region types) 0 fields bytes →
+        Encodes program world runtime address (.resident owner (.bindings brand region types) (.bindings id) true fields) layout bytes
     | proof {address value} : value.fields = [] → value.shellLive = true →
         ((∃ brand region result, value.head = .label brand ∧ value.type = .label (.rigid brand .brand 0) region result) ∨
          (∃ id brand region, value.head = .available id ∧ value.type = .available brand region)) →
@@ -112,7 +141,8 @@ def OccupiesByte (program : Language.Program) (world : World) (root : Identity) 
     LayoutOf program ⟨[],[],0,default,false⟩ value.type layout ∧
     relative ≤ offset ∧ offset < relative+layout.size ∧
     (value.head = .unit ∨ (∃ scalar, value.head = .scalar scalar) ∨ (∃ pointer, value.head = .pointer pointer) ∨
-      (∃ loan, value.head = .reference loan) ∨ (∃ id args, value.head = .callable id args) ∨
+      (∃ loan, value.head = .reference loan) ∨
+      (∃ id args, (value.head = .callable id args ∨ value.head = .operation id args) ∧ offset-relative < program.input.target.codeIdentityLayout.size) ∨
       (∃ id, value.head = .continuation id) ∨
       ∃ variant, value.head = .constructor variant ∧ offset-relative < layout.tagBytes)
 

@@ -114,3 +114,26 @@ Synthetic operator regrouping still needs origin-preserving elaboration;
 contextual capture alternatives, generic/default/associated inference and
 handler continuation-pattern binding remain audit obligations. This checkpoint
 does not claim complete source adequacy or update the runtime/target debt above.
+
+## Shared representation boundary
+
+`lake build GloriousLanguage.RepresentationChecks` passes (22 jobs, through
+ABI). Callable and operation resident fields now share one instantiated relation
+for capability, lifetime, layout and field addressing. Explicit target identity
+layouts feed callable/continuation encoding; binding packs encode real fields.
+C records use the selected target's layout function with checked placement;
+fixed enums have real tag bytes and transparent wrappers have wrapper offsets.
+Default enum tags use supported power-of-two widths. Unit C results are void,
+without admitting unit as a C parameter. Sealed traits use the manifest's actual
+relation inventory rather than requiring a fictitious runtime function binding.
+
+Logical ownership places are distinct from machine addresses: label/environment
+witnesses have no direct addressability rule, and shared ABI homes are required
+for addressable residents. `TypeOutlives` now follows actual nominal fields and
+callable captures; an unresolved rigid/projection is not justified merely because
+it has no visible type children. Checks cover capture offsets, explicit control
+layouts, C layout identity and rejection of an unsupported three-byte enum tag.
+
+Runtime lexical-to-generative type instantiation, physical snapshot relocation,
+generic normalization and complete target/control-site coverage remain open.
+The new target layout obligations are specifications, not implemented runtimes.

@@ -108,7 +108,8 @@ def SharedABI (program : Kernel.Program) (runtime : RuntimeAddresses)
     ∃ injection,
       Represents program runtime source.world (vm.backing vmState) injection ∧
       Represents program runtime source.world (native.backing nativeState) injection ∧
-      ∀ address value, source.world.Resident address value → SharedHome vm native vmState nativeState address
+      ∀ address value, source.world.Resident address value →
+        Addressable program.declarations ⟨[],[],0,default,false⟩ value.type → SharedHome vm native vmState nativeState address
 
 /-- A crossing changes which engine executes, not the backing allocation or
 the concrete identity of an addressable argument. Ordinary source moves are

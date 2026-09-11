@@ -2,6 +2,7 @@ import GloriousLanguage.Specification
 import GloriousLanguage.BasicChecks
 import GloriousLanguage.ExecutionChecks
 import GloriousLanguage.SourceChecks
+import GloriousLanguage.RepresentationChecks
 
 /-! Foundational regression propositions. These are checked by the default
 build; they are not a claim that all language metatheory has been proved. -/

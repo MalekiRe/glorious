@@ -121,6 +121,7 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
   | acquire {place force type writable} : PlaceType program.declarations context place type writable →
       AtomType program context (.acquire place force) type
   | borrow {place mode region type writable} : PlaceType program.declarations context place type writable →
+      Addressable program.declarations context.static type →
       (mode = .unique → writable = true) →
       AtomType program context (.borrow place mode region) (.reference mode (.rigid region .region 0) type)
   | construct {type variant fields fieldTypes head} : PlacesType program.declarations context fields fieldTypes →

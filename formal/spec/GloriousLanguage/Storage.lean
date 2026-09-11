@@ -290,7 +290,7 @@ inductive Borrows (program : Program) :
   | borrow {before authority mode region referent destination value after parent} :
       before.Stores referent value →
       (mode = .shared → value.Initialized) → region ∈ before.liveRegions →
-      (∀ brand, value.head ≠ .label brand) →
+      Addressable program ⟨[],[],0,default,false⟩ value.type →
       Permitted before authority (if mode = .shared then .shared else .unique) referent →
       before.Vacant destination →
       parent = (match authority with | .owner => none | .loan id => some id) →

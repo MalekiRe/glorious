@@ -12,6 +12,15 @@ structure Context where
   unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
+/-- The concrete resident fields of either a source callable or an operation
+value. Capability, layout and byte addressing consume this same instance. -/
+inductive CallableFields (program : Program) : DeclId → List Term → List Term → Prop where
+  | function {id function arguments substitution captures} : program.function id = some function →
+      Instantiates function.signature.generics arguments substitution →
+      ListRel (Substitutes substitution) function.captures captures → CallableFields program id arguments captures
+  | operation {id operation arguments substitution} : program.operation id = some operation →
+      Instantiates operation.signature.generics arguments substitution → CallableFields program id arguments []
+
 inductive Kinding (program : Program) (context : Context) : Term → Kind → Prop where
   | quantity {quantity} : (∀ upper, quantity.upper = some upper → quantity.lower ≤ upper) →
       Kinding program context (.quantity quantity) .quantity
@@ -101,9 +110,7 @@ inductive CapabilityEquation (program : Program) (assignment : Term → Option P
        data.principalRestriction = some principal ∧ principal.Restricts structural) →
       (data.dropHook.isSome = true → principal.MayDiscard) →
       CapabilityEquation program assignment (.nominal id arguments) principal
-  | callable {id function arguments substitution captures principals} : program.function id = some function →
-      Instantiates function.signature.generics arguments substitution →
-      ListRel (Substitutes substitution) function.captures captures →
+  | callable {id arguments captures principals} : CallableFields program id arguments captures →
       ListRel (fun field capability => assignment field = some capability) captures principals →
       CapabilityEquation program assignment (.callable id arguments) (Principal.fields principals)
   | environment {definition brand region principals} : Definition.environment definition ∈ program.declarations →
@@ -202,12 +209,30 @@ mutual
     | pointer {mode type region} : TypeOutlives program context (.rawPointer mode type) region
     | reference {mode long type short} : RegionIncludes context.assumptions long short →
         TypeOutlives program context (.reference mode long type) short
-    | aggregate {type region} :
-        (∀ mode lifetime referent, type ≠ .reference mode lifetime referent) →
-        (∀ id kind, type ≠ .parameter id kind) →
-        (∀ child ∈ type.children, child.kind = .region → RegionIncludes context.assumptions child region) →
-        (∀ child ∈ type.children, child.kind = .type → TypeOutlives program context child region) →
-        TypeOutlives program context type region
+    | bottom {region} : TypeOutlives program context .bottom region
+    | tuple {fields region} : (∀ field ∈ fields, TypeOutlives program context field region) →
+        TypeOutlives program context (.tuple fields) region
+    | array {element count region} : TypeOutlives program context element region →
+        TypeOutlives program context (.array element count) region
+    | nominal {id arguments data substitution fields region} : program.data id = some data →
+        Instantiates data.generics arguments substitution →
+        ListRel (Substitutes substitution) ((data.variants.flatMap (·.fields)).map (·.type)) fields →
+        (∀ field ∈ fields, TypeOutlives program context field region) →
+        TypeOutlives program context (.nominal id arguments) region
+    | callable {id arguments fields region} : CallableFields program id arguments fields →
+        (∀ field ∈ fields, TypeOutlives program context field region) →
+        TypeOutlives program context (.callable id arguments) region
+    | label {brand long result short} : RegionIncludes context.assumptions long short →
+        TypeOutlives program context (.label brand long result) short
+    | environment {definition short} : Definition.environment definition ∈ program.declarations →
+        RegionIncludes context.assumptions definition.region short →
+        (∀ field ∈ definition.residents, TypeOutlives program context field short) →
+        TypeOutlives program context (.environment definition.brand definition.region) short
+    | available {brand long short} : TypeOutlives program context (.environment brand long) short →
+        TypeOutlives program context (.available brand long) short
+    | bindings {brand long fields short} : RegionIncludes context.assumptions long short →
+        (∀ field ∈ fields, TypeOutlives program context field short) →
+        TypeOutlives program context (.bindings brand long fields) short
     | equal {a b region} : Equal program context a b → TypeOutlives program context a region → TypeOutlives program context b region
 
   inductive Entails (program : Program) (context : Context) : Constraint → Prop where
@@ -349,6 +374,19 @@ mutual
         ⟨program.input.target.pointerBits / 8,program.input.target.pointerBits / 8,[],0,0,[]⟩
     | tuple {fields layouts layout} : ListRel (LayoutOf program context) fields layouts → AggregateLayout layouts layout →
         LayoutOf program context (.tuple fields) layout
+    | callable {id arguments fields layouts layout} : CallableFields program id arguments fields →
+        ListRel (LayoutOf program context) fields layouts →
+        AggregateLayout (program.input.target.codeIdentityLayout :: layouts) layout →
+        LayoutOf program context (.callable id arguments) layout
+    | continuation {brand argument answer effects quantity} :
+        LayoutOf program context (.continuation brand argument answer effects quantity) program.input.target.continuationLayout
+    | label {brand region result} : LayoutOf program context (.label brand region result) ⟨0,1,[],0,0,[]⟩
+    | available {brand region} : LayoutOf program context (.available brand region) ⟨0,1,[],0,0,[]⟩
+    | bindings {brand region fields layouts layout} : ListRel (LayoutOf program context) fields layouts →
+        AggregateLayout layouts layout → LayoutOf program context (.bindings brand region fields) layout
+    | environment {definition layouts layout} : Definition.environment definition ∈ program.declarations →
+        ListRel (LayoutOf program context) definition.residents layouts → AggregateLayout layouts layout →
+        LayoutOf program context (.environment definition.brand definition.region) layout
     | array {element sign width length elementLayout layout} : 0 ≤ length →
         IntegerRange program.input.target false .pointer length → LayoutOf program context element elementLayout →
         ArrayLayout elementLayout length.toNat layout →
@@ -360,46 +398,69 @@ mutual
         ListRel (FieldsHaveLayout program context) variantTypes variantLayouts →
         (data.isEnum = true ∧ EnumLayout variantLayouts layout ∨ data.isEnum = false ∧ variantLayouts = [layout]) →
         layout.size ≤ program.input.target.maximumObjectBytes → LayoutOf program context (.nominal id arguments) layout
-    | transparent {id data arguments substitution variant fields types layouts distinguished layout} :
+    | transparent {id data arguments substitution variant fields types layouts distinguished represented layout} :
         program.data id = some data → data.representation = .transparent → data.isEnum = false → data.variants = [variant] →
         fields = variant.fields → Instantiates data.generics arguments substitution →
         ListRel (Substitutes substitution) (fields.map (·.type)) types → ListRel (LayoutOf program context) types layouts →
-        layouts[distinguished]? = some layout →
-        (∀ (i : Nat) (other : Layout), layouts[i]? = some other → i ≠ distinguished → other.size = 0 ∧ other.alignment ≤ layout.alignment) →
+        layouts[distinguished]? = some represented → 0 < represented.size →
+        (∀ (i : Nat) (other : Layout), layouts[i]? = some other → i ≠ distinguished → other.size = 0 ∧ other.alignment ≤ represented.alignment) →
+        layout = { represented with offsets := List.replicate fields.length 0, tagBytes := 0, payloadOffset := 0, variants := [] } →
         LayoutOf program context (.nominal id arguments) layout
+    | cRepresentation {id data arguments layout} : program.data id = some data →
+        (data.representation = .c ∨ ∃ sign width, data.representation = .integer sign width) →
+        CCompatible program context (.nominal id arguments) layout → LayoutOf program context (.nominal id arguments) layout
     | alias {a b layout} : Equal program context a b → LayoutOf program context a layout → LayoutOf program context b layout
 
   inductive FieldsHaveLayout (program : Program) (context : Context) : List Term → Layout → Prop where
     | fields {types layouts layout} : ListRel (LayoutOf program context) types layouts → AggregateLayout layouts layout →
         FieldsHaveLayout program context types layout
+  inductive CCompatible (program : Program) (context : Context) : Term → Layout → Prop where
+    | scalar {scalar} : scalar ∈ program.input.target.cCompatibleScalars →
+        program.input.target.scalarAlignment scalar = program.input.target.cScalarAlignment scalar →
+        CCompatible program context (.scalar scalar) ⟨scalar.bytes program.input.target,
+          program.input.target.cScalarAlignment scalar,[],0,0,[]⟩
+    | pointer {mode referent} : CCompatible program context (.rawPointer mode referent)
+        ⟨program.input.target.pointerBits/8,program.input.target.pointerBits/8,[],0,0,[]⟩
+    | record {id data arguments substitution variant types layouts layout} : program.data id = some data →
+        data.representation = .c → data.isEnum = false → data.variants = [variant] →
+        Instantiates data.generics arguments substitution → ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
+        ListRel (CCompatible program context) types layouts → CRecordLayout program.input.target layouts layout →
+        CCompatible program context (.nominal id arguments) layout
+    | enumeration {id data arguments substitution sign width} : program.data id = some data →
+        Instantiates data.generics arguments substitution → data.representation = .integer sign width → data.isEnum = true →
+        data.variants ≠ [] → Scalar.Valid program.input.target (.integer sign width) →
+        (∀ variant ∈ data.variants, variant.fields = []) →
+        IntegerRange program.input.target sign width (Int.ofNat data.variants.length - 1) →
+        CCompatible program context (.nominal id arguments)
+          ⟨width.bits program.input.target/8,program.input.target.cScalarAlignment (.integer sign width),[],
+            width.bits program.input.target/8,0,List.replicate data.variants.length []⟩
+    | transparent {id data arguments variant substitution types layouts index represented representation layout} :
+        LayoutOf program context (.nominal id arguments) layout → program.data id = some data →
+        data.representation = .transparent → data.variants = [variant] → Instantiates data.generics arguments substitution →
+        ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
+        ListRel (LayoutOf program context) types layouts → types[index]? = some represented →
+        CCompatible program context represented representation → 0 < representation.size →
+        layout.size = representation.size → layout.alignment = representation.alignment →
+        (∀ (i : Nat) (other : Layout), layouts[i]? = some other → i ≠ index → other.size = 0) →
+        CCompatible program context (.nominal id arguments) layout
+    | alias {a b layout} : Equal program context a b → CCompatible program context a layout → CCompatible program context b layout
 end
 
-inductive CCompatible (program : Program) (context : Context) : Term → Layout → Prop where
-  | scalar {scalar} : scalar ∈ program.input.target.cCompatibleScalars →
-      CCompatible program context (.scalar scalar) ⟨scalar.bytes program.input.target,
-        program.input.target.cScalarAlignment scalar,[],0,0,[]⟩
-  | pointer {mode referent} : CCompatible program context (.rawPointer mode referent)
-      ⟨program.input.target.pointerBits/8,program.input.target.pointerBits/8,[],0,0,[]⟩
-  | record {id data arguments substitution variant types layouts layout} : program.data id = some data →
-      data.representation = .c → data.isEnum = false → data.variants = [variant] →
-      Instantiates data.generics arguments substitution → ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
-      ListRel (CCompatible program context) types layouts → AggregateLayout layouts layout →
-      CCompatible program context (.nominal id arguments) layout
-  | enumeration {id data arguments sign width} : program.data id = some data →
-      data.representation = .integer sign width → data.isEnum = true →
-      (∀ variant ∈ data.variants, variant.fields = []) →
-      IntegerRange program.input.target sign width (Int.ofNat data.variants.length - 1) →
-      CCompatible program context (.nominal id arguments)
-        ⟨width.bits program.input.target/8,program.input.target.cScalarAlignment (.integer sign width),[],0,0,[]⟩
-  | transparent {id data arguments variant substitution types layouts index represented layout} :
-      LayoutOf program context (.nominal id arguments) layout → program.data id = some data →
-      data.representation = .transparent → data.variants = [variant] → Instantiates data.generics arguments substitution →
-      ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
-      ListRel (LayoutOf program context) types layouts → types[index]? = some represented →
-      CCompatible program context represented layout →
-      (∀ (i : Nat) (other : Layout), layouts[i]? = some other → i ≠ index → other.size = 0) →
-      CCompatible program context (.nominal id arguments) layout
-  | alias {a b layout} : Equal program context a b → CCompatible program context a layout → CCompatible program context b layout
+/-- Logical ownership places are not necessarily machine-addressable.
+Labels and open-environment witnesses have no constructor here. -/
+inductive Addressable (program : Program) (context : Context) : Term → Prop where
+  | unit : Addressable program context .unit
+  | scalar {scalar} : Addressable program context (.scalar scalar)
+  | tuple {fields} : Addressable program context (.tuple fields)
+  | array {element count} : Addressable program context (.array element count)
+  | nominal {id arguments} : Addressable program context (.nominal id arguments)
+  | reference {mode region type} : Addressable program context (.reference mode region type)
+  | pointer {mode type} : Addressable program context (.rawPointer mode type)
+  | callable {id arguments} : Addressable program context (.callable id arguments)
+  | continuation {brand argument answer effects quantity} :
+      Addressable program context (.continuation brand argument answer effects quantity)
+  | bindings {brand region fields} : Addressable program context (.bindings brand region fields)
+  | equal {a b} : Equal program context a b → Addressable program context a → Addressable program context b
 
 def ImplLocal (program : Program) (implementation : ImplDefinition) : Prop :=
   implementation.trait.package = implementation.header.id.package ∨
@@ -439,13 +500,14 @@ def DeclarationWellFormed (program : Program) : Definition → Prop
   | .function function => SignatureWellFormed program function.header.module function.signature ∧
     function.parameters.length = function.signature.parameters.length ∧ function.parameters.Nodup ∧
     (function.cABI = true → function.signature.generics = [] ∧
-      ∀ parameter ∈ function.signature.parameters ++ [function.signature.result],
+      (∀ parameter ∈ function.signature.parameters,
         ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false⟩ parameter layout) ∧
+      (function.signature.result = .unit ∨ ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false⟩ function.signature.result layout)) ∧
     (function.origin = .foreign → function.cABI = true) ∧
     (∀ manifest, function.origin = .runtime manifest → manifest = program.input.manifest.identity ∧
       ∃ binding ∈ program.input.manifest.bindings, binding.declaration = function.header.id ∧ binding.signature = function.signature)
   | .trait trait => (trait.generics.map (·.id)).Nodup ∧ trait.members.Nodup ∧
-    (trait.relation ≠ .ordinary → ∃ binding ∈ program.input.manifest.bindings, binding.declaration = trait.header.id)
+    (trait.relation ≠ .ordinary → (trait.header.id,trait.relation) ∈ program.input.manifest.sealedRelations)
   | .associated associated => ∃ trait, program.trait associated.owner = some trait ∧ associated.header.id ∈ trait.members ∧
     (∀ value, associated.defaultValue = some value →
       WellKinded program ⟨trait.generics ++ associated.generics,trait.requirements ++ associated.requirements,
