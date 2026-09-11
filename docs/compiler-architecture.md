@@ -2789,3 +2789,28 @@ query. It does not relax the full transitive-address proof required for an
 actual tail-transfer argument, and it does not infer independence from an empty
 loan set, source safety annotation or unknown producer. Cache 178 changes
 compiler proof construction only; executable schema and native ABI are unchanged.
+
+## Coercion shape inference before directional region constraints
+
+Coercion sites infer ordinary type structure against a source shape with fresh
+free regions. The existing binder-aware region transformation preserves nested
+universal binders and placeholders; the ordinary unifier still owns type, const,
+effect-row and callable-refinement inference. This shape step is not a lifetime
+proof. The original resolved source and destination then pass through the shared
+variance relation and body outlives solver. Constructor fields use that same
+input boundary, so an unresolved generic field cannot pin an enclosing inferred
+join to the first value's static lifetime.
+
+Contextual call/operator results, completion and operation-handler results,
+label bodies and transfers consume this separation. Genuine equality contracts
+remain equalities. No Slice-specific join rule, alternate region inventory or
+new variance walker is introduced. Control construction uses its existing
+representation-preserving result forwarding for label payloads and handler
+results as well as ordinary completion arms; CFG edge equality remains exact.
+Cache 179 invalidates older inference and forwarding products without changing
+the executable wire format or native ABI.
+
+Array-element joins and the remaining contextual enum-constructor equality
+path are not migrated by this checkpoint. Their consumers still need the same
+directional contract, with constructor and callable-refinement composition
+verified rather than assumed from the branch tests above.

@@ -1261,6 +1261,23 @@ impl InferContext {
         Ok(())
     }
 
+    /// Infer a coercion's ordinary type shape without identifying its source
+    /// and destination regions. The caller must subsequently prove the
+    /// directional region relation on the resolved original types. Fresh
+    /// leaves also keep a newly bound type hole open to later alternatives.
+    pub(crate) fn infer_coercion_shape(&mut self, left: Type, right: Type) -> Result<(), TypeError> {
+        let value = self.resolve_type_structure(right);
+        let argument = regions::map_argument_regions(GenericArgument::Type(value), &mut |region, cutoff| {
+            Some(match region {
+                Lifetime::Bound { depth, .. } if depth < cutoff => region,
+                Lifetime::Placeholder(_) => region,
+                _ => self.fresh_lifetime(),
+            })
+        }).expect("coercion shape does not shift region binders");
+        let GenericArgument::Type(right) = argument else { unreachable!() };
+        self.unify(left, right).map(|_| ())
+    }
+
     pub fn unify(&mut self, left: Type, right: Type) -> Result<Type, TypeError> {
         let variables = [match left { Type::Infer(variable) => Some(variable), _ => None },
             match right { Type::Infer(variable) => Some(variable), _ => None }];

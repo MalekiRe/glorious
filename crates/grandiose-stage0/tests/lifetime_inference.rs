@@ -50,6 +50,60 @@ fn rejects_lifetime(source: &str) {
 }
 
 #[test]
+fn inferred_nominal_view_joins_accept_shorter_borrows_and_static_fallbacks() {
+    for selection in [
+        "handle flag { true => input, false => empty }",
+        "handle flag { false => empty, true => input }",
+        "handle flag { false => static_view(), true => input }",
+        "(handle flag { false => (empty,), true => (input,) }).0",
+        "(handle flag { false => Wrapped { view: empty }, true => Wrapped { view: input } }).view",
+        "@selected: Slice<'_,u8> { handle flag { false => @selected(empty), true => @selected(input) } }",
+        "handle { handle flag { true => input, false => { Pick::pick(); input } } } { Pick::pick() with _ => empty }",
+        "handle Slice::slice(input, Range { start: 0, end: 1 }) { Result::Ok(view) => view, Result::Err(_) => b\"\" }",
+    ] {
+        let source = format!("struct Wrapped<T> {{ view: T }} effect Pick {{ [0,1] pick() -> (); }} fn static_view() -> Slice<'static,u8> {{ b\"\" }} fn choose<'a>(input: Slice<'a,u8>, flag: Bool) -> usize {{ let empty: Slice<'static,u8> = b\"\"; let selected = {selection}; Slice::len(&selected) }} pub fn main() -> i64 {{ as<i64>(choose(b\"*\", true) + choose(b\"\", false)) + 41 }}");
+        let artifact = StageZeroCompiler::new().compile(request(&source))
+            .unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        // SAFETY: the only native view is a checked one-byte static input.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+        let ir = StageZeroCompiler::new().compile_llvm(request(&source), LlvmTarget::host().unwrap()).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            // SAFETY: the native variant executes the same checked static views.
+            assert_eq!(unsafe { native.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn inferred_nominal_view_joins_cannot_promote_a_borrow_to_static() {
+    for selection in [
+        "handle flag { true => input, false => empty }",
+        "handle flag { false => empty, true => input }",
+        "@selected: Slice<'_,u8> { handle flag { false => @selected(empty), true => @selected(input) } }",
+    ] {
+        rejects_lifetime(&format!("fn invalid<'a>(input: Slice<'a,u8>, flag: Bool) -> Slice<'static,u8> {{ let empty: Slice<'static,u8> = b\"\"; let selected = {selection}; selected }} pub fn main() -> i64 {{ 42 }}"));
+    }
+}
+
+#[test]
+fn inferred_byte_literal_view_joins_do_not_depend_on_branch_order() {
+    for selection in [
+        "handle flag { true => input, false => b\"\" }",
+        "handle flag { false => b\"\", true => input }",
+    ] {
+        let source = format!("fn choose<'a>(input: Slice<'a,u8>, flag: Bool) -> usize {{ let selected = {selection}; Slice::len(&selected) }} pub fn main() -> i64 {{ as<i64>(choose(b\"*\", true)) + 41 }}");
+        let artifact = StageZeroCompiler::new().compile(request(&source))
+            .unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+        // SAFETY: this program reads only compiler-emitted static octets.
+        assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
 fn destructor_owned_loans_remain_live_until_the_owner_is_destroyed() {
     const PREFIX: &str = r#"
         struct Probe<'a> { target: &'a mut i64 }

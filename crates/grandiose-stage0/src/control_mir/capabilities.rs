@@ -450,8 +450,11 @@ impl Builder<'_> {
             }
             EvalOp::Transfer(brand) => {
                 let label = *self.active_labels.get(brand).ok_or_else(|| ControlError::Invalid("leave outside label".into()))?;
+                let expected = self.result.ty(self.result.labels[label.0 as usize].result)?.clone();
+                let [value] = operands else { return Err(ControlError::Invalid("label transfer must have one payload".into())); };
+                let value = self.forward_result_type(*block, scope, *value, &expected)?;
                 self.transfer(*block, ControlTransfer::Leave { label, edge: ControlEdge {
-                    target: self.result.labels[label.0 as usize].target, arguments: operands.to_vec(),
+                    target: self.result.labels[label.0 as usize].target, arguments: vec![value],
                 }});
                 return Ok(true);
             }
@@ -571,9 +574,12 @@ impl Builder<'_> {
                 self.active_handler_clauses.extend((0..arms.len() as u32).rev().map(|clause| (handler, clause)));
                 let (exit, value) = self.region(*computation, computation_entry, names, Some(scope))?;
                 self.active_handler_clauses = outer_handlers.clone();
-                if let Some(exit) = exit { self.transfer(exit, ControlTransfer::CompleteHandler {
-                    handler, value, edge: ControlEdge { target, arguments: vec![value] },
-                }); }
+                if let Some(exit) = exit {
+                    let value = self.forward_result_type(exit, scope, value, &instruction.ty)?;
+                    self.transfer(exit, ControlTransfer::CompleteHandler {
+                        handler, value, edge: ControlEdge { target, arguments: vec![value] },
+                    });
+                }
                 for (index, arm) in arms.iter().enumerate() {
                     self.active_handler_clauses = outer_handlers.clone();
                     self.active_handler_clauses.extend((index as u32..arms.len() as u32).rev().map(|clause| (handler, clause)));
@@ -626,6 +632,8 @@ impl Builder<'_> {
                     self.active_resumptions = saved_resumptions;
                     if let Some(exit) = exit {
                         let value = self.finish_arm_scope(arm_scope, exit, value, instruction.source, arm.span)?;
+                        let value = if matches!(arm.resumption, CoreHandlerResumption::Tail { .. }) { value }
+                            else { self.forward_result_type(exit, scope, value, &instruction.ty)? };
                         self.transfer(exit, match arm.resumption {
                             CoreHandlerResumption::Tail { .. } => ControlTransfer::TailResume { handler, clause: index as u32, value },
                             _ => ControlTransfer::FinishClause { handler, clause: index as u32, value, edge: ControlEdge { target, arguments: vec![value] } },

@@ -4480,8 +4480,7 @@ impl Elaborator<'_> {
                 // transfer out of the label's result contract.
                 if !matches!(body_type, Type::Never)
                     && self
-                        .inference
-                        .unify(result.clone(), body_type.clone())
+                        .unify_rigid_lifetimes(result.clone(), body_type.clone(), expression.span)
                         .is_err()
                 {
                     self.error(
@@ -4544,8 +4543,7 @@ impl Elaborator<'_> {
                 let value_type = crate::CallableContract::invocation_input_view(&expected,
                     self.expressions[value.0 as usize].ty.clone());
                 if self
-                    .inference
-                    .unify(label.result.clone(), value_type)
+                    .unify_rigid_lifetimes(label.result.clone(), value_type, expression.span)
                     .is_err()
                 {
                     self.error(
@@ -5136,7 +5134,7 @@ impl Elaborator<'_> {
                 // that can soundly turn it into the caller-local region.
                 let expected = expected.expect("guarded above");
                 let result_context = self.freshen_call_context_lifetimes(*result);
-                let _ = self.inference.unify(result_context, expected.clone());
+                let _ = self.inference.infer_coercion_shape(expected.clone(), result_context);
                 let arguments = self.call_arguments_with_context(Some(callee), &parameters, arguments);
                 let call = self.call_with_expected(callee, arguments, expression.span,
                     if open_call_lifetimes { None } else { Some(&expected) });
@@ -8526,10 +8524,10 @@ impl Elaborator<'_> {
         defer: bool,
         mode: LifetimeMode,
     ) -> Result<Type, ()> {
-        // Equality inference may solve constructor-owned holes, but never a
-        // declared region. The directional lifetime proof below still owns
-        // all outlives/coercion checks when rigid lifetimes differ.
-        if matches!(mode, LifetimeMode::Rigid) { let _ = self.inference.unify(expected.clone(), actual.clone()); }
+        // Shape inference must not solve a destination region from the first
+        // value entering it. Variance and the body outlives solver own that
+        // relation, including joins with later alternatives.
+        let _ = self.inference.infer_coercion_shape(expected.clone(), actual.clone());
         let expected = self.inference.zonk(expected.clone()).unwrap_or(expected);
         let actual = self.inference.zonk(actual.clone()).unwrap_or(actual);
         let expected = self.inference.resolve_type_structure(expected);
@@ -12249,8 +12247,7 @@ impl Elaborator<'_> {
         let computation_ty = self.expressions[computation.0 as usize].ty.clone();
         if completion_clauses.is_empty() && !matches!(computation_ty, Type::Never)
             && self
-                .inference
-                .unify(result.clone(), computation_ty.clone())
+                .unify_rigid_lifetimes(result.clone(), computation_ty.clone(), span)
                 .is_err()
         {
             self.error(
@@ -14673,7 +14670,7 @@ impl Elaborator<'_> {
                 };
                 if let Some(expected) = expected {
                     let result_context = self.freshen_call_context_lifetimes(*result);
-                    let _ = self.inference.unify(result_context, expected);
+                    let _ = self.inference.infer_coercion_shape(expected, result_context);
                 }
                 let mut arguments = vec![];
                 for (operand, parameter) in operands.into_iter().zip(parameters) {

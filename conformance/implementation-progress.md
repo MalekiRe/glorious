@@ -5,6 +5,42 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Directional region inference through joins and constructor inputs
+
+Cache 179 separates coercion shape inference from lifetime equality. The
+existing type unifier learns the ordinary structure against fresh free source
+regions; the existing variance relation and body-region solver then check the
+original source and destination. This is shared by declared result/input
+checks, contextual call/operator results, completion/operation results and
+label transfers. Constructor input holes no longer pin a generic enclosing
+join to the first static field. Equality-only contracts are not weakened.
+
+Eight source variants pass fresh VM, decoded VM and LLVM O0/O2, exercising both
+runtime alternatives, helper returns, tuples, generic records, local labels,
+operation-handler cancellation and the reduced I/O fallback. Three static-escape
+variants are rejected. Label payloads and handler results now use the existing
+explicit result-forwarding operation before CFG edges; all eight Control MIR
+validation/mutation tests pass without relaxing edge type equality.
+The final focused run passes all 20 lifetime-inference checks other than the
+separately filtered literal-view regression, all 40 expected-reborrow checks and
+all eight effect-contract checks. Borrowed-callable checks finish at 27/31 and
+implementation-label checks at 3/4, with the pre-existing failures below.
+
+The focused cross-boundary run exposed four borrowed-callable failures and one
+label-capture failure. Reverting only the candidate inference changes reproduced
+all five against the previous compiler, including the same array tail-proof
+diagnostic and missing generic cancellation/residual-predicate rejections.
+These tests remain active and unresolved. A separate preserved branch-order
+failure comes from uncontextualized byte literals becoming legacy scalar Bytes
+instead of the manifest-bound library view; this checkpoint does not fix it.
+The complete I/O family exceeded the unchanged 590-second test budget after
+the reduced lifetime case passed. Its compile/execution stage has not yet been
+isolated, and it is not counted as a passing family. The earlier source-map
+follow-up completed successfully in 277 seconds.
+Array-element joins and the remaining contextual enum-constructor equality
+path still need migration and compositional checks; this is not a claim that
+all source inference boundaries or standard-library families are conformant.
+
 ## Per-input result provenance for borrowed-owner getters
 
 Cache 178 replaces the executable helper-result independence bit with the

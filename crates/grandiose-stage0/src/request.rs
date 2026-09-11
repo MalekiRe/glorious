@@ -381,7 +381,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 176 normalizes grouped types without inventing singleton tuple arity.
 // Cache 177 recognizes prepared invocation in executable label forwarding proofs.
 // Cache 178 proves helper-result independence under per-input reference hypotheses.
-pub const STAGE0_CACHE_GENERATION: u32 = 178;
+// Cache 179 separates coercion shape inference from directional region constraints.
+pub const STAGE0_CACHE_GENERATION: u32 = 179;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
