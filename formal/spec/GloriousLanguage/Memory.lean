@@ -13,7 +13,7 @@ def integerBytes (endian : Endianness) (width value : Nat) : List Nat :=
   match endian with | .little => little | .big => little.reverse
 
 def ScalarValue.bytes (target : TargetProfile) : ScalarValue → List Nat
-  | .integer signed width n => integerBytes target.endian (width.bits target / 8)
+  | .integer _ width n => integerBytes target.endian (width.bits target / 8)
       (n % (2^width.bits target : Int)).toNat
   | .floating width bits => integerBytes target.endian (if width = .single then 4 else 8) bits
   | .character scalar => integerBytes target.endian 4 scalar
@@ -40,7 +40,7 @@ inductive FieldOffset (program : Language.Program) (world : World) :
       types[index]? = some type → LayoutOf program ⟨[],[],0,data.header.module,false⟩ (.nominal id arguments) layout →
       world.Stores address value → value.head = .constructor variant.header.id →
       (data.isEnum = false ∧ layout.offsets[index]? = some offset ∨
-        ∃ tag offsets, data.variants[tag]? = some variant ∧ layout.variants[tag]? = some offsets ∧ offsets[index]? = some offset) →
+        ∃ (tag : Nat) (offsets : List Nat), data.variants[tag]? = some variant ∧ layout.variants[tag]? = some offsets ∧ offsets[index]? = some offset) →
       FieldOffset program world address (.nominal id arguments) index type offset
 
 inductive AddressOffset (program : Language.Program) (world : World) : Address → Term → Nat → Prop where
@@ -83,10 +83,11 @@ mutual
         (∀ id data variant arguments index, value.head = .constructor id → value.type = .nominal data.header.id arguments →
           program.Constructor id data variant → data.isEnum = true → data.variants[index]? = some variant →
           bytes.take layout.tagBytes = (integerBytes program.input.target.endian layout.tagBytes index).map some) →
-        (∀ index byte, bytes[index]? = some (some byte) → byte < 256) →
+        (∀ (index byte : Nat), bytes[index]? = some (some byte) → byte < 256) →
         Encodes program world runtime address value layout bytes
-    | proof {address value} :
-        (∃ brand, value.head = .label brand) ∨ (∃ id, value.head = .available id) ∨ (∃ id, value.head = .bindings id) →
+    | proof {address value} : value.fields = [] → value.shellLive = true →
+        ((∃ brand region result, value.head = .label brand ∧ value.type = .label (.rigid brand .brand 0) region result) ∨
+         (∃ id brand region, value.head = .available id ∧ value.type = .available brand region)) →
         Encodes program world runtime address value ⟨0,1,[],0,0,[]⟩ []
 
   inductive EncodesFields (program : Language.Program) (world : World) (runtime : RuntimeAddresses) :
@@ -94,13 +95,13 @@ mutual
     | nil {address type index bytes} : EncodesFields program world runtime address type index [] bytes
     | hole {address type index fields bytes child offset layout} :
         FieldOffset program world address type index child offset → LayoutOf program ⟨[],[],0,default,false⟩ child layout →
-        bytes.drop offset |>.take layout.size = List.replicate layout.size none →
+        (bytes.drop offset).take layout.size = List.replicate layout.size none →
         EncodesFields program world runtime address type (index+1) fields bytes →
         EncodesFields program world runtime address type index (none :: fields) bytes
     | resident {address type index value fields bytes offset layout childBytes} :
         FieldOffset program world address type index value.type offset →
         Encodes program world runtime (address.child index) value layout childBytes →
-        bytes.drop offset |>.take layout.size = childBytes →
+        (bytes.drop offset).take layout.size = childBytes →
         EncodesFields program world runtime address type (index+1) fields bytes →
         EncodesFields program world runtime address type index (some value :: fields) bytes
 end
@@ -130,16 +131,7 @@ inductive AllocatesBuffer (program : Language.Program) :
       base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
       DisjointStorage before base layout.size →
       AllocatesBuffer program before domain element count base ⟨base,some before.nextRoot,0,0,some domain⟩
-        { before with
-          roots := before.roots.set before.nextRoot ⟨.allocation domain,0,before.nextRegion,base,layout,
-            .array element (.constant (.integer false .pointer count)),
-            some (.resident before.nextOwner (.array element (.constant (.integer false .pointer count)))
-              .array false (List.replicate count none)),true,before.clock,true,List.replicate layout.size none⟩
-          liveRegions := before.nextRegion :: before.liveRegions
-          nextRegion := before.nextRegion+1
-          nextRoot := before.nextRoot+1
-          nextOwner := before.nextOwner+1
-          clock := before.clock+1 }
+        { before with roots := before.roots.set before.nextRoot ⟨.allocation domain,0,before.nextRegion,base,layout, .array element (.constant (.integer false .pointer count)), some (.resident before.nextOwner (.array element (.constant (.integer false .pointer count))) .array false (List.replicate count none)),true,before.clock,true,List.replicate layout.size none⟩, liveRegions := before.nextRegion :: before.liveRegions, nextRegion := before.nextRegion+1, nextRoot := before.nextRoot+1, nextOwner := before.nextOwner+1, clock := before.clock+1 }
 
 def PointerOffset (program : Language.Program) (world : World) (pointer : RawPointer) (bytes : Int) (result : RawPointer) : Prop :=
   ∃ id root offset,
@@ -232,7 +224,7 @@ def AllocationContract.Valid (program : Language.Program) (contract : Allocation
 theorem address_integer_has_no_provenance {program : Language.Program} {world : World}
     {integer address type} : ¬ PointsTo program world (AddressOnly integer) address type := by
   intro points
-  exact Option.noConfusion points.1
+  cases points.1
 
 theorem vacant_release_has_no_live_loan {program : Language.Program} {before after : World}
     {pointer domain id loan} (released : ReleasesBuffer program before pointer domain after)

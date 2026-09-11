@@ -133,8 +133,8 @@ def Relocation.frame (map : Relocation) : Frame → Frame
   | .scope outer scope region => .scope (map.context outer) (map.scope scope) (map.region region)
   | .label outer brand region result => .label (map.context outer) brand (map.region region) (map.term result)
   | .handler handler owns => .handler (map.installed handler) owns
-  | .serviced handler continuation => .serviced (map.installed handler) continuation
-  | .completion handler owns => .completion (map.installed handler) owns
+  | .serviced handler owns clause continuation => .serviced (map.installed handler) owns (map.context clause) continuation
+  | .completion handler owns clause => .completion (map.installed handler) owns (map.context clause)
   | .resumed caller => .resumed (map.context caller)
   | frame => frame
 
@@ -143,25 +143,30 @@ def Relocation.home (map : Relocation) : Home → Home
   | .temporary activation scope => .temporary (map.activation activation) (map.scope scope)
   | home => home
 
-def Relocation.value (map : Relocation) : Value → Value
-  | .resident owner type head live fields => .resident (map.ownerBase + owner) (map.term type)
-      (match head with
-       | .reference loan => .reference (map.loan loan)
-       | .callable id arguments => .callable id (arguments.map map.term)
-       | .operation id arguments => .operation id (arguments.map map.term)
-       | other => other)
-      live (fields.map (Option.map map.value))
+mutual
+  def Relocation.value (map : Relocation) : Value → Value
+    | .resident owner type head live fields => .resident (map.ownerBase + owner) (map.term type)
+        (match head with
+         | .reference loan => .reference (map.loan loan)
+         | .callable id arguments => .callable id (arguments.map map.term)
+         | .operation id arguments => .operation id (arguments.map map.term)
+         | other => other)
+        live (map.values fields)
+
+  def Relocation.values (map : Relocation) : List (Option Value) → List (Option Value)
+    | [] => []
+    | none :: rest => none :: map.values rest
+    | some value :: rest => some (map.value value) :: map.values rest
+end
 
 def Relocation.rootValue (map : Relocation) (root : Root) : Root :=
-  { root with home := map.home root.home, region := map.region root.region, type := map.term root.type,
-    value := root.value.map map.value }
+  { root with home := map.home root.home, region := map.region root.region, type := map.term root.type, value := root.value.map map.value }
 
 def Relocation.loanValue (map : Relocation) (loan : Loan) : Loan :=
-  { loan with identity := map.loan loan.identity, parent := loan.parent.map map.loan,
-    referent := map.address loan.referent, region := map.region loan.region }
+  { loan with identity := map.loan loan.identity, parent := loan.parent.map map.loan, referent := map.address loan.referent, region := map.region loan.region }
 
 def SnapshotFrame : Frame → Prop
-  | .label .. | .hook .. | .foreign .. | .serviced .. => False
+  | .label .. | .hook .. | .foreign .. | .hostCallback .. | .serviced .. => False
   | _ => True
 
 /-- The complete used-name set, rather than every label in lexical scope,
@@ -207,8 +212,12 @@ def CopiesSnapshot (program : Kernel.Program) (before : State) (suspension : Sus
 
 theorem relocation_preserves_holes (map : Relocation) (value : Value) :
     (map.value value).fields.map Option.isSome = value.fields.map Option.isSome := by
+  have fields (values : List (Option Value)) : (map.values values).map Option.isSome = values.map Option.isSome := by
+    induction values with
+    | nil => rfl
+    | cons first rest ih => cases first <;> simp [Relocation.values, ih]
   cases value
-  simp [Relocation.value, Value.fields, List.map_map]
+  exact fields _
 
 theorem relocation_preserves_alias (map : Relocation) {a b : Address} (same : a = b) :
     map.address a = map.address b := congrArg map.address same

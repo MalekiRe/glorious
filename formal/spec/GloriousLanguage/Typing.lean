@@ -191,6 +191,25 @@ def PatternCoverage (program : Kernel.Program) (type : Term) (arms : List Arm) :
   (∀ arm ∈ arms, ∃ world address value, WorldTyped program world ∧ world.Stores address value ∧ value.type = type ∧
     value.Initialized ∧ FirstArm program.declarations world address arms arm)
 
+/-- Removing an effect family from the outward row requires coverage of every
+admissible operation application and initialized payload, not merely one arm
+whose operation happens to belong to that family. Partial handlers forward. -/
+def CompletelyHandles (program : Kernel.Program) (context : Language.Context)
+    (handler : Handler) (instanceTerm : Term) : Prop :=
+  ∃ id arguments family substitution,
+    instanceTerm = .effect id arguments ∧ program.declarations.effect id = some family ∧
+    Instantiates family.generics arguments substitution ∧ ConstraintsHold program.declarations context substitution family.requirements ∧
+    ∀ operationId ∈ family.operations, ∀ itemArguments operation signature,
+      Execution.OperationInstance program operationId (arguments ++ itemArguments) operation signature →
+      ∀ world payload, WorldTyped program world →
+        ListRel (fun address type => ∃ value, world.Stores address value ∧ value.type = type ∧ value.Initialized)
+          payload signature.parameters →
+        ∃ arm ∈ handler.operations, Execution.ArmAccepts program world context operationId (arguments ++ itemArguments) payload arm
+
+def HandledInstances (program : Kernel.Program) (context : Language.Context)
+    (handler : Handler) (instances : List Term) : Prop :=
+  ∀ instanceTerm ∈ instances, CompletelyHandles program context handler instanceTerm
+
 mutual
   inductive CodeType (program : Kernel.Program) : Context → Code → Term → Prop where
     | result {context place actual result writable} : PlaceType program.declarations context place actual writable →
@@ -216,8 +235,9 @@ mutual
     | choose {context subject arms type writable result} : PlaceType program.declarations context subject type writable →
         PatternCoverage program type arms → ArmsType program context arms type result →
         CodeType program context (.choose subject arms) result
-    | handler {context id computation handler input result} : HandlerType program context handler input result →
-        CodeType program { context with effects := .row (HandledInstances handler) [context.effects] } computation input →
+    | handler {context id computation handler input result instances} : HandlerType program context handler input result →
+        HandledInstances program context.static handler instances →
+        CodeType program { context with effects := .row instances [context.effects] } computation input →
         CodeType program context (.handle id computation handler) result
     | test {context localSlot subject pattern id next type writable bindings result carrier arguments} :
         PlaceType program.declarations context subject type writable →
@@ -247,10 +267,15 @@ mutual
 
   inductive HandlerType (program : Kernel.Program) : Context → Handler → Term → Term → Prop where
     | attached {context result completion operations captures input types} : CapturesType program.declarations context captures types →
-        (completion = [] ∧ Equal program.declarations context.static input result ∨
-          completion ≠ [] ∧ PatternCoverage program input completion ∧ ArmsType program context completion input result) →
-        OperationArmsType program context operations result →
+        CompletionType program { context with locals := Execution.CaptureLocals captures } completion input result →
+        OperationArmsType program { context with locals := Execution.CaptureLocals captures } operations result →
         HandlerType program context (.attached result completion operations captures) input result
+
+  inductive CompletionType (program : Kernel.Program) : Context → List Arm → Term → Term → Prop where
+    | identity {context input result} : Equal program.declarations context.static input result →
+        CompletionType program context [] input result
+    | arms {context completion input result} : completion ≠ [] → PatternCoverage program input completion →
+        ArmsType program context completion input result → CompletionType program context completion input result
 
   inductive OperationArmsType (program : Kernel.Program) : Context → List OperationArm → Term → Prop where
     | nil {context result} : OperationArmsType program context [] result

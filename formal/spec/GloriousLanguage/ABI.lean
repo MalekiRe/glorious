@@ -93,6 +93,8 @@ structure Engine (Event Result : Type) where
   directTransfer : semantics.State → Identity → semantics.State → Prop
   sourceState : semantics.State → State → Prop
 
+variable {Event Result : Type}
+
 def SharedHome (vm : Engine Event Result) (native : Engine Event Result)
     (vmState : vm.semantics.State) (nativeState : native.semantics.State) (address : Address) : Prop :=
   (vm.backing vmState).identity = (native.backing nativeState).identity ∧

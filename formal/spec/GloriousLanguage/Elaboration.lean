@@ -31,8 +31,7 @@ structure Context where
   deriving Repr, Inhabited
 
 def Context.bind (context : Context) (name : String) (localSlot : Local) : Context :=
-  { context with typed := context.typed.bind localSlot,
-    names := ⟨name,⟨localSlot.id,[]⟩,localSlot.type,localSlot.mutable⟩ :: context.names.filter (fun old => old.name != name) }
+  { context with typed := context.typed.bind localSlot, names := ⟨name,⟨localSlot.id,[]⟩,localSlot.type,localSlot.mutable⟩ :: context.names.filter (fun old => old.name != name) }
 
 def Context.child (context : Context) (index : Nat) : Context :=
   { context with origin := { context.origin with node := context.origin.node ++ [index] }, itemIndex := 0 }
@@ -418,8 +417,7 @@ mutual
         Expression program context (.capture places source) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
     | label {context name annotation body type brand region code} :
         (annotation = none ∨ ∃ source, annotation = some source ∧ TypeExpression program context source .type type) →
-        Expression program { context with namedLabels := (name,brand) :: context.namedLabels,
-          typed := { context.typed with labels := (brand,.rigid region .region 0,type) :: context.typed.labels } } body type code →
+        Expression program { context with namedLabels := (name,brand) :: context.namedLabels, typed := { context.typed with labels := (brand,.rigid region .region 0,type) :: context.typed.labels } } body type code →
         Expression program context (.label name annotation body) type (.scope region (.label brand region type code))
     | test {context subject sourcePattern subjectLocal subjectCode type pattern names patternId result nextType} :
         Fresh context subjectLocal → subjectLocal.type = type → Expression program context subject type subjectCode →
@@ -430,8 +428,7 @@ mutual
     | handle {context source arms computation input handler result identity} : Handler program context arms input handler →
         Expression program context source input computation → handler.result = result →
         Expression program context (.handle source arms) result (.handle identity computation handler)
-    | unsafeAllowed {context source type body} : Expression program { context with typed :=
-          { context.typed with static := { context.typed.static with unsafeAllowed := true } } } source type body →
+    | unsafeAllowed {context source type body} : Expression program { context with typed := { context.typed with static := { context.typed.static with unsafeAllowed := true } } } source type body →
         Expression program context (.unsafeBlock source) type (.unsafeScope body)
     | operators {context first rest grouped type code} : Grouped program.declarations context.typed.static.module first rest grouped →
         Expression program context grouped type code → Expression program context (.operators first rest) type code
@@ -562,8 +559,7 @@ mutual
         (∀ old ∈ context.typed.static.binders, old.id ≠ binder.id ∧ old.name ≠ binder.name) →
         ((source.defaultValue = none ∧ binder.defaultValue = none) ∨ ∃ sourceDefault value,
           source.defaultValue = some sourceDefault ∧ binder.defaultValue = some value ∧ TypeExpression program context sourceDefault binder.kind value) →
-        middle = { context with typed := { context.typed with static :=
-          { context.typed.static with binders := context.typed.static.binders ++ [binder] } } } →
+        middle = { context with typed := { context.typed with static := { context.typed.static with binders := context.typed.static.binders ++ [binder] } } } →
         Generics program middle rest binders final → Generics program context (source :: rest) (binder :: binders) final
 
   inductive Predicate (program : Kernel.Program) : Context → Source.Predicate → List Constraint → Prop where
@@ -616,8 +612,7 @@ mutual
     | inherent {context generics self requirements members unsafeAllowed binders inner type constraints id arguments} :
         Generics program context generics binders inner → TypeExpression program inner self .type type →
         type = .nominal id arguments → Predicates program inner requirements constraints →
-        Declarations program { inner with selfType := some type, owner := some id,
-          typed := { inner.typed with static := { inner.typed.static with assumptions := constraints ++ inner.typed.static.assumptions } } } members →
+        Declarations program { inner with selfType := some type, owner := some id, typed := { inner.typed with static := { inner.typed.static with assumptions := constraints ++ inner.typed.static.assumptions } } } members →
         Declaration program context (.implementation generics none self requirements members unsafeAllowed false)
     | checked {context source definition} : DeclarationHeader program context source definition →
         (definition.header.id,context.origin) ∈ program.declarations.origins →
@@ -650,9 +645,7 @@ mutual
     | function {context head source definition function names inner code} :
         program.function definition.header.id = some function → definition.origin = .source context.origin →
         Parameters program context head.parameters function.parameters names →
-        inner = { (BindNames context names) with namedLabels := (head.name,function.namedExit.getD 0) :: context.namedLabels,
-          typed := { (BindNames context names).typed with effects := function.signature.effects,
-            labels := (function.namedExit.getD 0,.rigid (function.namedExit.getD 0) .region 0,function.signature.result) :: context.typed.labels } } →
+        inner = { (BindNames context names) with namedLabels := (head.name,function.namedExit.getD 0) :: context.namedLabels, typed := { (BindNames context names).typed with effects := function.signature.effects, labels := (function.namedExit.getD 0,.rigid (function.namedExit.getD 0) .region 0,function.signature.result) :: context.typed.labels } } →
         Expression program (inner.child 0) source function.signature.result code → function.body = code → function.signature = definition.signature →
         DeclarationBody program context (.function head (some source)) (.function definition)
     | bodyless {context head definition} :
@@ -729,8 +722,7 @@ mutual
         Predicates program inner requirements constraints → definition.generics = binders → definition.trait = header.id →
         definition.arguments = type :: arguments → definition.requirements = constraints → definition.unsafeAllowed = unsafeAllowed → definition.negative = negative →
         (negative = true → members = [] ∧ definition.associated = [] ∧ definition.functions = []) →
-        Declarations program { inner with owner := some header.id, selfType := some type,
-          typed := { inner.typed with static := { inner.typed.static with assumptions := constraints ++ inner.typed.static.assumptions } } } members →
+        Declarations program { inner with owner := some header.id, selfType := some type, typed := { inner.typed with static := { inner.typed.static with assumptions := constraints ++ inner.typed.static.assumptions } } } members →
         ItemBody program context (.implementation generics (some (.path traitPath traitArguments [])) self requirements members unsafeAllowed negative)
           (.implementation definition)
 

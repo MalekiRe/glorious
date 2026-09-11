@@ -30,8 +30,8 @@ def Guard.Holds (world : World) : Guard → Prop
   | .always => True
   | .constructor origin path variant => ∃ address value selected,
       world.Resident address value ∧ value.owner = origin ∧ value.atPath path = some selected ∧ selected.head = .constructor variant
-  | .pattern origin pattern positive => ∃ id pack,
-      world.bindings.get id = some pack ∧ pack.resultOrigin = origin ∧ pack.pattern = pattern ∧ pack.positive = positive
+  | .pattern origin patternId positive => ∃ id pack,
+      world.bindings.get id = some pack ∧ pack.resultOrigin = origin ∧ pack.pattern = patternId ∧ pack.positive = positive
   | .and left right => left.Holds world ∧ right.Holds world
   | .or left right => left.Holds world ∨ right.Holds world
 
@@ -42,7 +42,7 @@ structure Observation where
   after : World
   outcome : Outcome
 
-def ContextInputs (context : Context) (inputs : List InvocationInput) : Prop :=
+def ContextInputs (context : Execution.Context) (inputs : List InvocationInput) : Prop :=
   context.environment = inputs.map (fun input => ⟨input.formal.id,input.storage,input.authority⟩)
 
 def InputsTyped (program : Kernel.Program) (inputs : List InvocationInput) (world : World) : Prop :=

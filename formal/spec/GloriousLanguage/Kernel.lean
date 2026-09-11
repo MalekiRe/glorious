@@ -102,6 +102,11 @@ end
 
 def Arm.pattern : Arm → Pattern | .clause pattern _ => pattern
 def Arm.body : Arm → Code | .clause _ body => body
+def OperationArm.operation : OperationArm → DeclId | .clause id _ _ _ _ _ => id
+def OperationArm.arguments : OperationArm → List Term | .clause _ family item _ _ _ => family ++ item
+def OperationArm.patterns : OperationArm → List Pattern | .clause _ _ _ patterns _ _ => patterns
+def OperationArm.continuation : OperationArm → Option Local | .clause _ _ _ _ continuation _ => continuation
+def OperationArm.body : OperationArm → Code | .clause _ _ _ _ _ body => body
 def Handler.result : Handler → Term | .attached result _ _ _ => result
 def Handler.completion : Handler → List Arm | .attached _ completion _ _ => completion
 def Handler.operations : Handler → List OperationArm | .attached _ _ operations _ => operations
@@ -198,36 +203,49 @@ inductive PatternAction where
   | dispose (address : Address) (authority : Authority)
   deriving Repr, Inhabited
 
+structure PatternActions where
+  shells : List PatternAction := []
+  bindings : List PatternAction := []
+  cleanup : List PatternAction := []
+  deriving Repr, Inhabited
+
 mutual
   inductive PatternPlan (program : Language.Program) (world : World) :
-      Address → Authority → Access → Pattern → List PatternAction → Prop where
-    | wildcardOwned {address authority} : PatternPlan program world address authority .owned .wildcard [.dispose address authority]
-    | wildcardBorrowed {address authority access} : access ≠ .owned → PatternPlan program world address authority access .wildcard []
+      Address → Authority → Access → Pattern → PatternActions → Prop where
+    | wildcardOwned {address authority} : PatternPlan program world address authority .owned .wildcard
+        ⟨[],[],[.dispose address authority]⟩
+    | wildcardBorrowed {address authority access} : access ≠ .owned →
+        PatternPlan program world address authority access .wildcard ⟨[],[],[]⟩
     | bind {address authority access localSlot} : PatternPlan program world address authority access (.bind localSlot)
-        [.bind localSlot address authority access]
-    | scalarOwned {address authority scalar} : PatternPlan program world address authority .owned (.scalar scalar) [.dispose address authority]
-    | scalarBorrowed {address authority access scalar} : access ≠ .owned → PatternPlan program world address authority access (.scalar scalar) []
-    | unitOwned {address authority} : PatternPlan program world address authority .owned .unit [.dispose address authority]
-    | unitBorrowed {address authority access} : access ≠ .owned → PatternPlan program world address authority access .unit []
+        ⟨[],[.bind localSlot address authority access],[]⟩
+    | scalarOwned {address authority scalar} : PatternPlan program world address authority .owned (.scalar scalar)
+        ⟨[],[],[.dispose address authority]⟩
+    | scalarBorrowed {address authority access scalar} : access ≠ .owned →
+        PatternPlan program world address authority access (.scalar scalar) ⟨[],[],[]⟩
+    | unitOwned {address authority} : PatternPlan program world address authority .owned .unit
+        ⟨[],[],[.dispose address authority]⟩
+    | unitBorrowed {address authority access} : access ≠ .owned →
+        PatternPlan program world address authority access .unit ⟨[],[],[]⟩
     | aggregate {address authority access pattern fields actions} :
         (pattern = .tuple fields ∨ pattern = .array fields ∨ ∃ id, pattern = .constructor id fields) →
         PatternPlans program world address authority access 0 fields actions →
         PatternPlan program world address authority access pattern
-          ((if access = .owned then [.consumeShell address authority] else []) ++ actions ++
-            (if access = .owned then [.dispose address authority] else []))
+          ⟨(if access = .owned then [.consumeShell address authority] else []) ++ actions.shells,
+            actions.bindings, actions.cleanup ++ (if access = .owned then [.dispose address authority] else [])⟩
     | reference {address authority access pattern mode value id loan actions} : world.Stores address value →
         value.head = .reference id → world.loans.get id = some loan → loan.mode = mode → loan.live = true →
         PatternPlan program world loan.referent (.loan id) (if mode = .shared then .shared else .unique) pattern actions →
         PatternPlan program world address authority access (.reference mode pattern)
-          (actions ++ if access = .owned then [.dispose address authority] else [])
+          ⟨actions.shells,actions.bindings,actions.cleanup ++ (if access = .owned then [.dispose address authority] else [])⟩
 
   inductive PatternPlans (program : Language.Program) (world : World) :
-      Address → Authority → Access → Nat → List Pattern → List PatternAction → Prop where
-    | nil {address authority access index} : PatternPlans program world address authority access index [] []
+      Address → Authority → Access → Nat → List Pattern → PatternActions → Prop where
+    | nil {address authority access index} : PatternPlans program world address authority access index [] ⟨[],[],[]⟩
     | cons {address authority access index pattern rest first later} :
         PatternPlan program world (address.child index) authority access pattern first →
         PatternPlans program world address authority access (index+1) rest later →
-        PatternPlans program world address authority access index (pattern :: rest) (first ++ later)
+        PatternPlans program world address authority access index (pattern :: rest)
+          ⟨first.shells ++ later.shells,first.bindings ++ later.bindings,later.cleanup ++ first.cleanup⟩
 end
 
 inductive InvocationOrigin where

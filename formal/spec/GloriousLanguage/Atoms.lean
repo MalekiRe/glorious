@@ -73,7 +73,7 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       ResolvesPlace before.world context.environment place source authority →
       Acquires program.declarations before.world authority force source destination after →
       AtomStep program before (some (if force then .move source destination else
-        if after.read source |>.isSome then .copy source destination else .move source destination))
+        if (after.read source).isSome then .copy source destination else .move source destination))
         { before with world := after, task := .run context next }
   | borrow {before context destination place mode lexicalRegion next source authority after} :
       before.task = .atom context destination (.borrow place mode lexicalRegion) next →
@@ -93,8 +93,7 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       ListRel (fun formal address => ∃ value, captured.Stores address value ∧ value.type = formal.type) function.captures sources →
       DestinationType captured destination (.callable id arguments) →
       NewValue program.declarations captured destination (.callable id arguments) (.callable id arguments) sources after →
-      AtomStep program before none { before with world := after,
-        task := (sources.foldr (fun address nextTask => .retire address.root nextTask) (.run context next)) }
+      AtomStep program before none { before with world := after, task := sources.foldr (fun address nextTask => .retire address.root nextTask) (.run context next) }
   | function {before context destination id arguments next function after} :
       before.task = .atom context destination (.function id arguments) next → Instance program id arguments function →
       function.captures = [] → DestinationType before.world destination (.callable id arguments) →

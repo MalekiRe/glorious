@@ -51,6 +51,31 @@ static/runtime type correspondence. Those and the coverage audit remain real
 obligations. Identifier migrations in downstream modules are not claims that
 those modules check. No compiler or library acceptance suite was run.
 
+## Execution-rule repair checkpoint
+
+`lake build GloriousLanguage.BasicChecks GloriousLanguage.ExecutionChecks
+GloriousLanguage.Contracts GloriousLanguage.ABI` passes (24 jobs).
+The execution, memory, foreign, structural typing, contract and ABI definitions
+now check. Source elaboration still fails at pattern-field inference and a
+byte-literal conversion; downstream origins and the full aggregate are pending.
+
+Pattern plans now publish separate shell, binding and postorder-cleanup
+sequences. Handler operation and completion clauses use fresh local activations;
+serviced frames retain their environment ownership and clause context. Clause
+obligations are checked after cleanup, allowing optional cancellation while
+preserving borrowed handler environments. Regression proofs check nested cleanup
+order, active-token rejection, lent-environment return and foreign callback
+barriers. Exact positive resumption cancellation remains formally excluded.
+Handler effect subtraction requires complete operation/payload coverage.
+Pattern test carriers place their binding pack exactly once.
+
+This is still an incomplete specification: runtime generative type closure,
+callable/control layouts, snapshot physical extents, source-origin threading,
+and source/ABI adequacy require further repair. Binding packs are no longer
+incorrectly erased as zero-byte proof values; their real field encoding still
+needs integration. These checked definitions and local proofs are not a
+type-soundness, complete-language, compiler or library-conformance result.
+
 The earlier compiler draft is retained in `formal/lean` as reference. The
 new specification does not import it. Unrelated Stage0 working-tree changes
 were left untouched.

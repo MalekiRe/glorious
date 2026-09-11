@@ -72,13 +72,13 @@ structure Model where
   step : DeclId → World → List Address → List Nat →
     List Nat → World → HostAction → List Nat → Prop
 
-def Selected (program : Kernel.Program) (model : Model) (binding : RuntimeBinding) (import : Import) (contract : Contract) : Prop :=
+def Selected (program : Kernel.Program) (model : Model) (binding : RuntimeBinding) (imported : Import) (contract : Contract) : Prop :=
   binding ∈ program.declarations.input.manifest.bindings ∧ binding.primitive = none ∧
-  import ∈ model.imports ∧ import.declaration = binding.declaration ∧ binding.symbol = some import.symbol ∧
-  import.capability = binding.capability ∧ import.domain = binding.domain ∧
+  imported ∈ model.imports ∧ imported.declaration = binding.declaration ∧ binding.symbol = some imported.symbol ∧
+  imported.capability = binding.capability ∧ imported.domain = binding.domain ∧
   contract ∈ model.contracts ∧ contract.declaration = binding.declaration ∧
-  (binding.cABI = true → CSignature program.declarations binding.signature import.signature) ∧
-  (binding.signature.unsafeAllowed = false → binding.safeReviewed = true ∧ import.reviewedSafe = true)
+  (binding.cABI = true → CSignature program.declarations binding.signature imported.signature) ∧
+  (binding.signature.unsafeAllowed = false → binding.safeReviewed = true ∧ imported.reviewedSafe = true)
 
 def FramePreserved (contract : Contract) (before : World) (operands : List Address) (after : World) : Prop :=
   ∀ address value, before.Resident address value →
@@ -86,8 +86,8 @@ def FramePreserved (contract : Contract) (before : World) (operands : List Addre
 
 def Model.Lawful (program : Kernel.Program) (model : Model) : Prop :=
   (model.imports.map (·.declaration)).Nodup ∧ (model.contracts.map (·.declaration)).Nodup ∧
-  ∀ binding import contract before operands state observation after action next,
-    Selected program model binding import contract → before.WellFormed → contract.precondition before operands →
+  ∀ binding imported contract before operands state observation after action next,
+    Selected program model binding imported contract → before.WellFormed → contract.precondition before operands →
     model.step binding.declaration before operands state observation after action next →
     after.WellFormed ∧ contract.transition before operands after action ∧ FramePreserved contract before operands after ∧
     (∀ result, action = .result result → contract.normalPostcondition before operands after result) ∧
@@ -97,38 +97,35 @@ def Model.Lawful (program : Kernel.Program) (model : Model) : Prop :=
       contract.retainable before operands loan.referent ∨ loan.region ∈ before.liveRegions)
 
 inductive Step (program : Kernel.Program) (model : Model) : State → Option Event → State → Prop where
-  | enter {before context destination binding arguments operands next import contract state} :
+  | enter {before context destination binding arguments operands next imported contract state} :
       before.task = .primitive context destination binding arguments operands next →
-      Selected program model binding import contract → contract.precondition before.world operands →
+      Selected program model binding imported contract → contract.precondition before.world operands →
       model.start binding.declaration before.world operands state →
       Step program model before none { before with task := .foreign context destination binding operands state next }
-  | host {before context destination binding operands state next import contract observation after nextState} :
-      before.task = .foreign context destination binding operands state next → Selected program model binding import contract →
+  | host {before context destination binding operands state next imported contract observation after nextState} :
+      before.task = .foreign context destination binding operands state next → Selected program model binding imported contract →
       model.step binding.declaration before.world operands state observation after .continue nextState →
-      Step program model before (some (.host import.symbol state observation))
+      Step program model before (some (.host imported.symbol state observation))
         { before with world := after, task := .foreign context destination binding operands nextState next }
-  | result {before context destination binding operands state next import contract observation after result nextState transferred} :
-      before.task = .foreign context destination binding operands state next → Selected program model binding import contract →
+  | result {before context destination binding operands state next imported contract observation after result nextState transferred} :
+      before.task = .foreign context destination binding operands state next → Selected program model binding imported contract →
       model.step binding.declaration before.world operands state observation after (.result result) nextState →
       Transfers after .owner result destination transferred →
-      Step program model before (some (.host import.symbol state observation))
+      Step program model before (some (.host imported.symbol state observation))
         { before with world := transferred, task := .run context next }
-  | callback {before context destination binding operands state next import contract observation after id arguments inputs nextState function} :
-      before.task = .foreign context destination binding operands state next → Selected program model binding import contract →
+  | callback {before context destination binding operands state next imported contract observation after id arguments inputs nextState function} :
+      before.task = .foreign context destination binding operands state next → Selected program model binding imported contract →
       model.step binding.declaration before.world operands state observation after (.callback id arguments inputs) nextState →
       Instance program id arguments function → function.signature.effects = .row [] [] →
-      Step program model before (some (.host import.symbol state observation)) { before with world := after,
-        task := .enter context function inputs false,
-        frames := .hostCallback context destination binding operands nextState next :: before.frames }
+      Step program model before (some (.host imported.symbol state observation)) { before with world := after, task := .enter context function inputs false, frames := .hostCallback context destination binding operands nextState next :: before.frames }
   | callbackResult {before context result outer destination binding operands state next rest value} :
       before.task = .yield context result → before.frames = .hostCallback outer destination binding operands state next :: rest →
       before.world.Stores result value →
       (∀ address resident loanId loan, before.world.Resident address resident → resident.head = .reference loanId →
         before.world.loans.get loanId = some loan → loan.referent.root = result.root → loan.region = outer.region) →
-      Step program model before none { before with frames := rest,
-        task := .foreign outer destination binding (operands ++ [result]) state next }
-  | fault {before context destination binding operands state next import contract observation after nextState} :
-      before.task = .foreign context destination binding operands state next → Selected program model binding import contract →
+      Step program model before none { before with frames := rest, task := .foreign outer destination binding (operands ++ [result]) state next }
+  | fault {before context destination binding operands state next imported contract observation after nextState} :
+      before.task = .foreign context destination binding operands state next → Selected program model binding imported contract →
       model.step binding.declaration before.world operands state observation after .fault nextState →
       Step program model before (some (.fatal .hostContract)) { before with world := after, task := .fatal .hostContract }
 
@@ -139,6 +136,7 @@ def NoForeignCapture (frames : List Frame) : Prop :=
 theorem callback_barrier_not_empty {context destination binding operands state next rest} :
     ¬ NoForeignCapture (.hostCallback context destination binding operands state next :: rest) := by
   intro safe
-  exact (safe _ (by simp)).2 _ _ _ _ _ _ rfl
+  exact (safe (.hostCallback context destination binding operands state next) (by simp)).2
+    context destination binding operands state next rfl
 
 end Glorious.Language.Foreign

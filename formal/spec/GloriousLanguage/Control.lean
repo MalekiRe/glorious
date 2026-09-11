@@ -81,10 +81,22 @@ def PacksBindings (program : Kernel.Program) (context : Context) (before : World
     type = .bindings (.rigid before.nextProof .brand 0) (.rigid context.region .region 0) (bindings.map (fun entry => entry.1.type)) ∧
     Temporary program context type before pack allocated ∧
     NewValue program.declarations allocated pack type (.bindings before.nextProof) (bindings.map Prod.snd) created ∧
-    after = { created with nextProof := before.nextProof+1,
-      bindings := created.bindings.set before.nextProof
-        ⟨before.nextProof,pattern,before.nextProof,positive,context.region,
-          bindings.zipIdx.map (fun (entry,index) => (entry.1.id,pack.child index)),loans⟩ }
+    after = { created with nextProof := before.nextProof+1, bindings := created.bindings.set before.nextProof ⟨before.nextProof,pattern,before.nextProof,positive,context.region, bindings.zipIdx.map (fun (entry,index) => (entry.1.id,pack.child index)),loans⟩ }
+
+inductive UnitFields (program : Kernel.Program) (context : Context) :
+    World → List Term → Option Nat → Address → List Address → World → Prop where
+  | done {world pack} : UnitFields program context world [] none pack [] world
+  | selected {before type types pack rest after value} : before.Stores pack value → value.type = type →
+      UnitFields program context before types none pack rest after →
+      UnitFields program context before (type :: types) (some 0) pack (pack :: rest) after
+  | unitBefore {before types index pack address allocated created rest after} :
+      Temporary program context .unit before address allocated → StoresUnit program allocated address created →
+      UnitFields program context created types (some index) pack rest after →
+      UnitFields program context before (.unit :: types) (some (index+1)) pack (address :: rest) after
+  | unitAfter {before types pack address allocated created rest after} :
+      Temporary program context .unit before address allocated → StoresUnit program allocated address created →
+      UnitFields program context created types none pack rest after →
+      UnitFields program context before (.unit :: types) none pack (address :: rest) after
 
 def CarrierFields (program : Kernel.Program) (context : Context) (before : World) (variant : DeclId)
     (arguments : List Term) (pack : Address) (packIndex : Nat) (fields : List Address) (after : World) : Prop :=
@@ -94,18 +106,7 @@ def CarrierFields (program : Kernel.Program) (context : Context) (before : World
     fields[packIndex]? = some pack ∧
     (∀ index address type, fields[index]? = some address → types[index]? = some type →
       index = packIndex ∨ type = .unit ∧ ∃ value, after.Stores address value ∧ value.type = .unit ∧ value.head = .unit) ∧
-    UnitFields program context before types packIndex pack fields after
-
-inductive UnitFields (program : Kernel.Program) (context : Context) :
-    World → List Term → Nat → Address → List Address → World → Prop where
-  | done {world index pack} : UnitFields program context world [] index pack [] world
-  | selected {before type types pack rest after value} : before.Stores pack value → value.type = type →
-      UnitFields program context before types 0 pack rest after →
-      UnitFields program context before (type :: types) 0 pack (pack :: rest) after
-  | unit {before types index pack address allocated created rest after} :
-      Temporary program context .unit before address allocated → StoresUnit program allocated address created →
-      UnitFields program context created types (index-1) pack rest after →
-      UnitFields program context before (.unit :: types) index pack (address :: rest) after
+    UnitFields program context before types (some packIndex) pack fields after
 
 inductive TestResult (program : Kernel.Program) (context : Context) :
     World → Address → Term → Identity → Bool → List (Local × Address × Authority) → World → Prop where
@@ -129,8 +130,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       before.task = .leave context brand argument → LabelRoute before.frames brand inner outerContext region type outer →
       Protect program outerContext before.world argument .owner kept after →
       AbandonedRoots after inner [kept.root] roots → Cancelable program.declarations after roots →
-      ControlStep program before none { before with world := after, frames := outer,
-        task := .cleanup context roots (.yield outerContext kept) }
+      ControlStep program before none { before with world := after, frames := outer, task := .cleanup context roots (.yield outerContext kept) }
   | reserve {before context localSlot brand places next addresses allocated destination after layout} :
       before.task = .run context (.reserve localSlot brand places next) → Addresses before.world context.environment places addresses →
       addresses.Nodup → (∀ a ∈ addresses, ∀ b ∈ addresses, a ≠ b → ¬ a.Overlaps b) →
@@ -140,10 +140,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region localSlot.type layout
         localSlot.mutable destination allocated →
       NewValue program.declarations allocated destination localSlot.type (.available before.world.nextProof) [] after →
-      ControlStep program before none { before with world := { after with nextProof := before.world.nextProof+1,
-        availability := after.availability.set before.world.nextProof
-          ⟨before.world.nextProof,.rigid brand .brand 0,context.region,addresses,true⟩ },
-        task := .run (context.bind localSlot destination) next }
+      ControlStep program before none { before with world := { after with nextProof := before.world.nextProof+1, availability := after.availability.set before.world.nextProof ⟨before.world.nextProof,.rigid brand .brand 0,context.region,addresses,true⟩ }, task := .run (context.bind localSlot destination) next }
   | available {before context destination id next source authority after} :
       before.task = .atom context destination (.available id) next →
       (∃ binding ∈ context.environment, binding.address = source ∧ binding.authority = authority ∧
@@ -155,14 +152,12 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       before.world.Stores address value → value.head = .available id → before.world.availability.get id = some available →
       ReservationCanClose program before.world available → Permitted before.world authority .owned address →
       before.world.write address none = some cleared →
-      ControlStep program before none { before with world := { cleared with availability := cleared.availability.set id { available with active := false } },
-        task := Disposes context available.reserved.reverse (.run context next) }
+      ControlStep program before none { before with world := { cleared with availability := cleared.availability.set id { available with active := false } }, task := Disposes context available.reserved.reverse (.run context next) }
   | destroyAvailable {before context address authority next value id available cleared} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.head = .available id →
       before.world.availability.get id = some available → ReservationCanClose program before.world available →
       Permitted before.world authority .owned address → before.world.write address none = some cleared →
-      ControlStep program before none { before with world := { cleared with availability := cleared.availability.set id { available with active := false } },
-        task := Disposes context available.reserved.reverse next }
+      ControlStep program before none { before with world := { cleared with availability := cleared.availability.set id { available with active := false } }, task := Disposes context available.reserved.reverse next }
   | destroySpentAvailable {before context address authority next value id available cleared} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.head = .available id →
       before.world.availability.get id = some available → available.active = false →
@@ -176,8 +171,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       captures = (function.captures.zip available.reserved).zipIdx.map
         (fun (entry,index) => ⟨.capture index,entry.1,entry.2,.owner,call.receiver⟩) →
       function.captures.length = available.reserved.length → ArgumentInputs before.world context 0 function.parameters call.arguments inputs →
-      after = { before.world with availability := before.world.availability.set token
-        { available with active := if call.receiver = .owned then false else true } } →
+      after = { before.world with availability := before.world.availability.set token { available with active := if call.receiver = .owned then false else true } } →
       ControlStep program before (some (.call id (captures ++ inputs)))
         { before with world := after, task := .enter context function (captures ++ inputs) tail }
   | positiveTest {before context localSlot subject pattern patternId next source authority bindings destination allocated after layout} :
