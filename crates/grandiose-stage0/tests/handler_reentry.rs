@@ -373,6 +373,20 @@ fn prepared_receiver_keeps_captures_before_argument_replacement() {
 }
 
 #[test]
+fn borrowed_receiver_before_helper_replacement_retains_its_acquired_contract() {
+    candidate("type Callback=(i64)->i64;
+        fn replace(slot:&mut Callback,replacement:Callback) {*slot=replacement;}
+        pub fn main() -> i64 {
+            let first=20; let second=22;
+            let mut callback:Callback=(value:i64)->i64 {first};
+            let before=(&callback)(0);
+            let replacement:Callback=(value:i64)->i64 {second};
+            replace(&mut callback,replacement);
+            before + callback(0)
+        }");
+}
+
+#[test]
 fn stored_factory_callable_can_be_replaced_by_a_checked_helper() {
     candidate("type Callback=(i64)->i64;
         fn make(answer:i64) -> Callback {(value:i64)->i64 {answer}}

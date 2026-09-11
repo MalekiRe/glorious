@@ -2340,3 +2340,22 @@ decoded VM and native/mixed O0/O2. A VM/native probe test covers move-out, disjo
 zero-sized fields and restoration. Native ABI becomes 19. The original helper
 mutation still fails writable-callable referent ABI validation; mutable reference
 invariance remains enforced. This is not complete native-handler acceptance.
+
+## Writable callable resident alternatives
+
+A concrete writable referent supplies a possible future resident, not merely
+an optional structural annotation. Fresh unique borrowing of an owned place
+feeds that alternative into the existing callable value join. The shared
+contract rule intersects environment and receiver authority while retaining
+capture-region and invocation debt. Callable ABI components remain fixed;
+the storage-view transformation does not traverse existing references or
+callable parameters/results. Owned tuple and array products compose the rule.
+
+Cache 162 repairs the preserved helper-mutation receiver gate through fresh/
+decoded VM and native/mixed O0/O2, with nine selected receiver gates passing.
+Post-exposure borrowed access rejects and capture debt remains attached.
+This is a whole-body type join, not point-sensitive receiver permission:
+the new earlier-borrowed-invocation regression still fails G4304 after a later
+helper replacement erases its refinement. That integration obligation, nominal
+storage refinements, computed-factory lifetime and full native-handler acceptance
+remain open. No executable or runtime ABI generation changes.

@@ -17,6 +17,35 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn writable_callable_storage_cannot_keep_the_initial_borrowed_receiver_permission() {
+    for receiver in ["&callback", "&mut callback"] {
+        let core = core_for("writable-callable-receiver@0.1.0", &format!(
+            "type Callback=(i64)->i64; fn expose(slot:&mut Callback) {{}}
+             pub fn main() -> i64 {{let answer=42; let mut callback:Callback=(value:i64)->i64 {{answer}};
+                 expose(&mut callback); ({receiver})(0)}}"));
+        assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4180"), "{receiver}: {:?}", core.diagnostics);
+    }
+}
+
+#[test]
+fn writable_callable_storage_retains_the_initial_captured_reference_debt() {
+    let core = core_for("writable-callable-debt@0.1.0",
+        "type Callback=(i64)->i64; fn expose(slot:&mut Callback) {}
+         pub fn main() -> i64 {let answer=42; let reference = &answer;
+             let mut callback:Callback=(value:i64)->i64 {*reference};
+             expose(&mut callback); callback(0)}");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let contract = core.expressions.iter().find_map(|expression| match (&expression.kind, &expression.ty) {
+        (CoreKind::Local(name), Type::Callable { contract, .. }) if name == "callback" => Some(contract),
+        _ => None,
+    }).unwrap();
+    assert!(contract.environment.is_none());
+    assert!(!contract.shared_receiver && !contract.unique_receiver);
+    assert!(contract.captures.iter().any(|capture| matches!(capture, Type::Reference { .. })), "{contract:?}");
+}
+
+#[test]
 fn callable_stores_transfer_only_through_checked_outside_frame_destinations() {
     for body in [
         "pub fn main(slot:&mut Callback,replacement:Callback) {*slot=replacement;}",

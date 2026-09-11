@@ -5,6 +5,28 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 162: writable callable resident alternatives
+
+Fresh unique borrowing of an owned callable place uses the writer's referent
+contract as a real resident alternative in the existing callable value join.
+An empty writer contract is not an absent annotation. The shared join rule
+intersects receiver/environment authority and retains capture regions and
+invocation prerequisites. Callable ABI structure and existing reference types
+are not reinterpreted; owned tuple/array products propagate the storage view.
+Generic writable exposure without a concrete weaker referent remains unchanged.
+
+The original helper-mutation receiver regression now passes fresh/decoded VM
+and native/mixed O0/O2. All nine selected receiver gates pass. Two type-rule
+checks preserve ABI/reference boundaries and capture obligations; two source
+checks reject post-exposure borrowed invocation and retain captured references.
+
+This still uses the existing whole-body callable join, unlike point-sensitive
+ownership quantity acquisition. A new active regression with a borrowed call
+before helper replacement fails G4304 because its earlier receiver refinement
+is erased by the storage join. Point-sensitive callable receiver contracts and
+nominal storage refinements remain open, alongside computed-factory lifetime
+and the remaining native-handler gates. Runtime generations do not change.
+
 ## Cache 161: checked outgoing stores and native referent probes
 
 PlaceFlow publishes a checked assignment boundary from the actual reference

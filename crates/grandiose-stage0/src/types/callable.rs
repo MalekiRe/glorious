@@ -45,6 +45,46 @@ mod abi_refinement_tests {
     }
 
     #[test]
+    fn writable_residents_intersect_authority_and_retain_capture_obligations() {
+        let mut resident = CallableContract::default();
+        resident.environment = Some(Box::new(Type::Unit));
+        resident.after_environment = Some(Box::new(Type::Unit));
+        resident.shared_receiver = true;
+        resident.unique_receiver = true;
+        resident.captures.push(reference(Lifetime::Generic(0), Type::Unit));
+        resident.residual.where_outlives.push(crate::OutlivesPredicate::Type {
+            subject: Type::Unit, lifetime: Lifetime::Static,
+        });
+        let writer = CallableContract::default();
+        assert_eq!(resident.join(&writer), resident, "annotation remains contextual");
+        let joined = resident.join_residents(&writer);
+        assert!(!joined.shared_receiver && !joined.unique_receiver);
+        assert!(joined.environment.is_none() && joined.after_environment.is_none());
+        assert_eq!(joined.captures, resident.captures);
+        assert_eq!(joined.residual, resident.residual);
+        assert_eq!(writer.join_residents(&resident), joined, "writer cannot grant initial permissions");
+    }
+
+    #[test]
+    fn writable_storage_views_preserve_abi_and_do_not_reinterpret_references() {
+        let mut resident = CallableContract::default();
+        resident.shared_receiver = true;
+        resident.unique_receiver = true;
+        let function = |contract, invocation| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![reference(Lifetime::Static, Type::Unit)],
+            result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation };
+        let previous = function(resident, Quantity::UNRESTRICTED);
+        let writer = function(CallableContract::default(), Quantity::ONCE);
+        let expected = function(CallableContract::default(), Quantity::UNRESTRICTED);
+        assert_eq!(CallableContract::writable_storage_view(previous.clone(), &writer), expected.clone());
+        assert_eq!(CallableContract::writable_storage_view(Type::Tuple(vec![previous.clone()]),
+            &Type::Tuple(vec![writer.clone()])), Type::Tuple(vec![expected]));
+        let existing = reference(Lifetime::Generic(0), previous);
+        assert_eq!(CallableContract::writable_storage_view(existing.clone(),
+            &reference(Lifetime::Static, writer)), existing);
+    }
+
+    #[test]
     fn assignment_refinement_preserves_reference_regions_and_the_declared_callable_abi() {
         let function = |lifetime, contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
             lifetime_binders: 0, parameters: vec![reference(lifetime, Type::Unit)], result: Box::new(Type::Unit),
@@ -61,6 +101,27 @@ mod abi_refinement_tests {
 }
 
 impl CallableContract {
+    /// A writable owned place must admit every resident promised by the
+    /// writer's referent type. Unlike an annotation, an empty contract here
+    /// is an actual alternative. Never reinterpret an existing reference or
+    /// change callable inputs/results while inferring this storage view.
+    pub(crate) fn writable_storage_view(previous: Type, writer: &Type) -> Type {
+        match (previous, writer) {
+            (Type::Callable { contract, safety, lifetime_binders, parameters, result, effects, invocation },
+             Type::Callable { contract: writer, .. }) => Type::Callable {
+                contract: Box::new(contract.join_residents(writer)), safety, lifetime_binders,
+                parameters, result, effects, invocation,
+            },
+            (Type::Tuple(fields), Type::Tuple(writers)) if fields.len() == writers.len() =>
+                Type::Tuple(fields.into_iter().zip(writers).map(|(field, writer)| Self::writable_storage_view(field, writer)).collect()),
+            (Type::Array(element), Type::Array(writer)) =>
+                Type::Array(Box::new(Self::writable_storage_view(*element, writer))),
+            (Type::FixedArray { element, length }, Type::FixedArray { element: writer, .. }) =>
+                Type::FixedArray { element: Box::new(Self::writable_storage_view(*element, writer)), length },
+            (previous, _) => previous,
+        }
+    }
+
     /// Apply the same one-way callable view through owned value products and
     /// nominal type arguments. References are deliberately not traversed:
     /// replacing a value is not permission to weaken writable referent storage.
@@ -263,6 +324,10 @@ impl CallableContract {
     pub(crate) fn join(&self, other: &Self) -> Self {
         if self.is_empty() { return other.clone(); }
         if other.is_empty() || self == other { return self.clone(); }
+        self.join_residents(other)
+    }
+
+    fn join_residents(&self, other: &Self) -> Self {
         fn union<T: Clone + PartialEq>(left: &[T], right: &[T]) -> Vec<T> {
             let mut result = left.to_vec();
             for item in right { if !result.contains(item) { result.push(item.clone()); } }

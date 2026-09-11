@@ -5320,7 +5320,7 @@ impl Elaborator<'_> {
             Some(Type::Reference { referent, .. }) => Some(*referent),
             _ => None,
         };
-        let value = self.expression_expected(value, referent);
+        let value = self.expression_expected(value, referent.clone());
         if unique && self.place_uses_shared_reference(value) {
             return self.fail(span, "G4141", "a unique borrow cannot be derived through a shared reference");
         }
@@ -5328,7 +5328,16 @@ impl Elaborator<'_> {
             && !self.check_local_mutability(&name, span) {
             return self.alloc(CoreKind::Error, Type::Error, span);
         }
-        let ty = self.expressions[value.0 as usize].ty.clone();
+        let mut ty = self.expressions[value.0 as usize].ty.clone();
+        if unique && self.owned_place_root(value).is_some() && let Some(writer) = referent {
+            let previous = self.inference.resolve_type_structure(ty.clone());
+            let writer = self.inference.resolve_type_structure(writer);
+            let joined = crate::CallableContract::writable_storage_view(previous.clone(), &writer);
+            if joined != previous {
+                self.callable_value_joins.push((previous, joined.clone()));
+                ty = joined;
+            }
+        }
         if crate::types::label::payload(&ty).is_some() {
             return self.fail(span, "G4179", "generative labels are proof-only and cannot be addressed");
         }
