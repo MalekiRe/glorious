@@ -2756,3 +2756,19 @@ Cache 176 invalidates earlier parsing. No executable wire format or ABI changes.
 Parser and VM/decoded/LLVM grouping checks pass, including rejection of scalar
 Fn argument packs and lack of implicit tuple conversions. Grouping does not add
 an effect-row equality or borrowed-call authority to an opaque callable.
+
+## Prepared receiver transport through label forwarding
+
+Executable forwarding-shim analysis consumes both owned indirect invocation
+and the prepared invocation protocol emitted for ordinary source helpers.
+Its existing input-origin product distinguishes a prepared receiver from an
+owned input: preparation acquires the exact input identity without consuming
+it, and only an ordinary carrier can supply the transferred payload. Cleanup
+still must be harmless label disposal; unknown instructions remain unproved.
+
+The resulting Shim is consumed by the existing local-label transfer worklist,
+which validates the destination rather than declaring a nonreturning call or
+its suffix harmless. Exposed storage and mixed label/callable identities do
+not supply an exact local destination. Cache 177 restores pure helper tail
+proofs across this protocol migration; no alternate source-name proof or
+blanket call-preservation exception is introduced.

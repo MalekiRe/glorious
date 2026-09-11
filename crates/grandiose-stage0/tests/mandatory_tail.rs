@@ -47,6 +47,20 @@ fn run_native(source: &str, optimization: u8) -> i64 {
 }
 
 #[test]
+fn mandatory_tail_retains_incoming_references_after_pure_branching_helpers() {
+    for helper in [
+        "fn inspect(value: &i64) -> Result<i64, ()> { handle *value < 1 { true => return(Result::Err(()), @inspect), false => () }; Result::Ok(1) }",
+        "fn inspect(value: &i64) -> Result<i64, ()> { handle *value < 1 { true => Result::Err(()), false => Result::Ok(1) } }",
+    ] {
+        let source = format!("{helper} fn walk(value: &i64, remaining: i64) -> i64 {{ handle remaining {{ 0 => *value, _ => handle inspect(value) {{ Result::Err(_) => 0, Result::Ok(width) => tail walk(value, remaining - width) }} }} }} pub fn main() -> i64 {{ let value = 42; walk(&value, 3) }}");
+        let artifact = compile(&source).unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        for optimization in [0, 2] { assert_eq!(run_native(&source, optimization), 42); }
+    }
+}
+
+#[test]
 fn mandatory_tail_transfers_generic_callback_results_from_incoming_storage() {
     let source = r#"
         fn fold<'a,T,A,F>(item: &'a T, state: A, step: &mut F, remaining: i64) -> A

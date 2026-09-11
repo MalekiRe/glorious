@@ -5,6 +5,25 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Prepared receivers in executable label-transfer evidence
+
+Cache 177 repairs the executable label-forwarding boundary exposed by the
+library checkpoint below. Source `return` helpers now acquire their receiver
+with PrepareInvocation and invoke it with CallPrepared; the existing forwarding
+proof still recognized only CallIndirectOwned. This made pure early-return
+helpers unknown mutation boundaries and incorrectly revoked incoming tail-carrier
+provenance. The same proof now transports a typed input identity distinguishing
+an owned payload from a prepared receiver. Cleanup, private label identity,
+and verification of the actual rejoin destination remain required.
+
+The two-source helper matrix passes fresh VM, decoded VM and LLVM O0/O2.
+The existing early-return helper regression and all ten tail-provenance verifier
+tests pass, including prepared-call variants of outgoing-frame rejection,
+exposed storage and mixed label/callable identities. The previously failing
+UTF-8 source-family gate passes. Other library failures listed below have not
+been declared resolved by this focused checkpoint. No mutation-preservation
+assumption, runtime limit, bytecode schema or native ABI was weakened.
+
 ## Parenthesized type grouping and current library baseline
 
 Cache 176 corrects both declaration-header and body-annotation parsing: `(T)`

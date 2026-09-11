@@ -58,7 +58,10 @@ fn mandatory_tail_vm_audits_the_destination_of_a_forwarded_local_label() {
     let shim = DefKey(Digest::of_bytes(b"anonymous-label-forwarding-shim"));
     let label_type = VmType::Callable { shared_receiver: false, unique_receiver: false, safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() };
-    for (local_tail, opaque) in [(false, false), (true, false), (true, true)] {
+    for (local_tail, opaque, prepared) in [
+        (false, false, false), (true, false, false), (true, true, false),
+        (false, false, true), (true, false, true), (true, true, true),
+    ] {
         let mut program = tail_reference_program(vec![
             VmInstruction::ConstI64 { dst: 10, value: 99 },
             VmInstruction::MakeLabel { dst: 7, brand_owner: relay, brand_label: 0, target: 6, destination: 1 },
@@ -75,16 +78,21 @@ fn mandatory_tail_vm_audits_the_destination_of_a_forwarded_local_label() {
         program.functions.insert(shim, VmFunction {
             definition: shim, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
             nominal_copy_descriptors: vec![], captures: 0, parameters: 2,
-            registers: vec![VmType::I64, label_type.clone(), VmType::Unit, VmType::Unit],
+            registers: vec![VmType::I64, label_type.clone(), VmType::Unit, VmType::Unit, label_type.clone()],
             instructions: {
                 let mut body = vec![VmInstruction::DeclareResult { result: VmType::Unit, returns: false }];
                 // Still valid executable bytecode, but outside the exact
                 // forwarding-shim proof: the label edge cannot be ignored.
                 if opaque { body.push(VmInstruction::ConstUnit { dst: 3 }); }
-                body.extend([
-                    VmInstruction::CallIndirectOwned { dst: 2, callee: 1, arguments: vec![0] },
-                    VmInstruction::Trap,
-                ]);
+                if prepared {
+                    body.extend([
+                        VmInstruction::PrepareInvocation { dst: 4, src: 1, fields: vec![], reborrow: false },
+                        VmInstruction::CallPrepared { dst: 2, callee: 4, arguments: vec![0] },
+                    ]);
+                } else {
+                    body.push(VmInstruction::CallIndirectOwned { dst: 2, callee: 1, arguments: vec![0] });
+                }
+                body.push(VmInstruction::Trap);
                 body
             },
         });
@@ -106,7 +114,7 @@ fn mandatory_tail_vm_requires_exact_unexposed_label_identity_at_a_shim_call() {
     let ordinary = DefKey(Digest::of_bytes(b"label-identity-ordinary"));
     let label_type = VmType::Callable { shared_receiver: false, unique_receiver: false, safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64], result: Box::new(VmType::Unit), effects: Default::default() };
-    for exposed in [false, true] {
+    for (exposed, prepared) in [(false, false), (true, false), (false, true), (true, true)] {
         let mut program = tail_reference_program(vec![]);
         let function = program.functions.get_mut(&relay).unwrap();
         function.registers.extend([label_type.clone(), label_type.clone(), VmType::Unit, VmType::I64,
@@ -138,11 +146,19 @@ fn mandatory_tail_vm_requires_exact_unexposed_label_identity_at_a_shim_call() {
             callee: DefKey(Digest::of_bytes(b"tail-reference-read")), arguments: vec![3],
         });
         for (definition, parameters, registers, instructions) in [
-            (shim, 2, vec![VmType::I64, label_type.clone(), VmType::Unit], vec![
-                VmInstruction::DeclareResult { result: VmType::Unit, returns: false },
-                VmInstruction::CallIndirectOwned { dst: 2, callee: 1, arguments: vec![0] },
-                VmInstruction::Trap,
-            ]),
+            (shim, 2, vec![VmType::I64, label_type.clone(), VmType::Unit, label_type.clone()], {
+                let mut body = vec![VmInstruction::DeclareResult { result: VmType::Unit, returns: false }];
+                if prepared {
+                    body.extend([
+                        VmInstruction::PrepareInvocation { dst: 3, src: 1, fields: vec![], reborrow: false },
+                        VmInstruction::CallPrepared { dst: 2, callee: 3, arguments: vec![0] },
+                    ]);
+                } else {
+                    body.push(VmInstruction::CallIndirectOwned { dst: 2, callee: 1, arguments: vec![0] });
+                }
+                body.push(VmInstruction::Trap);
+                body
+            }),
             (ordinary, 1, vec![VmType::I64, VmType::Unit], vec![
                 VmInstruction::DeclareResult { result: VmType::Unit, returns: true },
                 VmInstruction::ConstUnit { dst: 1 }, VmInstruction::Return { value: 1 },

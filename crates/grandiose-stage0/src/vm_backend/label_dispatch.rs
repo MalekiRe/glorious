@@ -38,6 +38,12 @@ pub(super) fn shims(functions: &BTreeMap<DefKey, VmFunction>) -> BTreeMap<DefKey
     }).collect()
 }
 
+#[derive(Clone, Copy)]
+struct InputCarrier {
+    input: u32,
+    prepared: bool,
+}
+
 fn recognize(function: &VmFunction, functions: &BTreeMap<DefKey, VmFunction>) -> Option<Shim> {
     if function.parameters != 2 || function.captures != 0
         || !matches!(function.instructions.first(), Some(VmInstruction::DeclareResult { result: VmType::Unit, returns: false })) {
@@ -45,7 +51,10 @@ fn recognize(function: &VmFunction, functions: &BTreeMap<DefKey, VmFunction>) ->
     }
     let mut origins = vec![None; function.registers.len()];
     let mut live = vec![false; function.registers.len()];
-    for index in 0..2 { *origins.get_mut(index)? = Some(index as u32); *live.get_mut(index)? = true; }
+    for index in 0..2 {
+        *origins.get_mut(index)? = Some(InputCarrier { input: index as u32, prepared: false });
+        *live.get_mut(index)? = true;
+    }
     for (pc, instruction) in function.instructions.iter().enumerate() {
         match instruction {
             VmInstruction::DeclareResult { .. } | VmInstruction::DeclareFrameCleanup { .. } => {}
@@ -63,19 +72,33 @@ fn recognize(function: &VmFunction, functions: &BTreeMap<DefKey, VmFunction>) ->
                 *origins.get_mut(*dst as usize)? = origin;
                 *live.get_mut(*dst as usize)? = true;
             }
-            VmInstruction::CallIndirectOwned { callee, arguments, .. } => {
+            VmInstruction::PrepareInvocation { dst, src, fields, reborrow: false } if fields.is_empty() => {
+                if !*live.get(*src as usize)? { return None; }
+                let origin = (*origins.get(*src as usize)?)?;
+                if origin.prepared { return None; }
+                // Acquisition retains this exact input without transferring
+                // its owner. The invocation-only carrier cannot masquerade
+                // as an ordinary owned payload or callable occurrence.
+                *origins.get_mut(*dst as usize)? = Some(InputCarrier { prepared: true, ..origin });
+                *live.get_mut(*dst as usize)? = true;
+            }
+            VmInstruction::CallIndirectOwned { callee, arguments, .. }
+            | VmInstruction::CallPrepared { callee, arguments, .. } => {
                 if !matches!(&function.instructions[pc + 1..], [VmInstruction::Trap]) { return None; }
                 let [argument] = arguments.as_slice() else { return None; };
                 if !*live.get(*callee as usize)? || !*live.get(*argument as usize)? { return None; }
-                let label = (*origins.get(*callee as usize)?)?;
-                let payload = (*origins.get(*argument as usize)?)?;
-                if label == payload { return None; }
+                let receiver = (*origins.get(*callee as usize)?)?;
+                let transferred = (*origins.get(*argument as usize)?)?;
+                if receiver.prepared != matches!(instruction, VmInstruction::CallPrepared { .. })
+                    || transferred.prepared || receiver.input == transferred.input { return None; }
+                let label = receiver.input;
+                let payload = transferred.input;
                 live[*argument as usize] = false;
                 // The runtime retires the transferred payload, then destroys
                 // every other live declared owner in the shim's frame.
                 for action in declared_frame_cleanup(function).ok()? {
                     if !*live.get(action.owner as usize)? { continue; }
-                    if *origins.get(action.owner as usize)? != Some(label)
+                    if !origins.get(action.owner as usize)?.is_some_and(|origin| origin.input == label && !origin.prepared)
                         || !functions.get(&action.destructor).is_some_and(label_disposer) { return None; }
                 }
                 return Some(Shim { label, payload });
