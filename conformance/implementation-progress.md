@@ -5,6 +5,41 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Shared native initialization-loan backing
+
+The preserved native decimal-conversion regression identifies its first failure
+as the boundary-rounding fixture at O0. Allocation tracing measured 8,453,385
+elements in cloned logical path lists and 6,587,260 in per-entry loan objects
+before the 16,777,216-element ceiling, at 1,385,346 native work ticks. Those two
+native-only sites account for about 90% of the ceiling; the initial trace also
+contained earlier VM charges at other sites and is not an all-native total.
+
+Cache 184 makes the native frame's published logical path lists shared immutable
+storage, consumed directly by generated emission and segment entry. Resident
+initialization now has one inline, uniquely owned active view and reusable
+backing for nested views, replacing the per-loan boxed state and shared live-flag
+allocation. The exact-sidecar input registry retains empty hash-table backing,
+not returned authorities. Actual registry and nested-stack growth remain charged.
+No allocation ceiling, source assertion, home lifetime or mask-validity check
+was relaxed. References still resolve the actual home and active logical mask.
+
+All 18 focused native-storage tests pass, including 1,024 three-level loan cycles
+under the exact already-allocated ceiling, backing-pointer reuse, rejection of
+new registry/stack growth without disturbing active authority, invalid masks,
+out-of-order returns and distinct zero-byte owners. Eleven generated-code storage
+checks pass in 19.67 seconds, and six handler-payload checks pass in 7.84 seconds,
+covering shared/mutable payloads and rejection of escaping local reborrows.
+
+The original native decimal-conversion gate still **fails** at boundary O0. With
+the repair, its trace reaches 13,285,255 work ticks before the same allocation
+ceiling, after 138.22 seconds. Of those charges, 15,653,438 now come from native
+home construction; registry growth contributes only 3,580. This is evidence of
+the next actual allocation cost, not proof of which home category dominates.
+The exact-subnormal and native O2 portions have not been reached. Temporary
+instrumentation has been removed. The runtime metadata repair and the 35 focused
+passing checks do not establish native float, full library, language or self-hosted
+acceptance. Executable verifier, portable encoding and native ABI are unchanged.
+
 ## Exact rounding intervals and bounded decimal powers
 
 Shortest formatting now validates each decimal-grid candidate directly against

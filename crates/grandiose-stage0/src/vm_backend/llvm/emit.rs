@@ -23,7 +23,7 @@ const MAX_INIT_PATHS: usize = 16 * 1024;
 #[derive(Clone, Debug)]
 pub(in crate::vm_backend) struct FunctionPlan {
     pub(in crate::vm_backend) layouts: Vec<Arc<NativeLayout>>,
-    pub(in crate::vm_backend) paths: Vec<Vec<Vec<u32>>>,
+    pub(in crate::vm_backend) paths: Vec<Arc<[Vec<u32>]>>,
     pub(in crate::vm_backend) scratch_bytes: usize,
     pub(in crate::vm_backend) pattern_references: Vec<PatternReferencePlan>,
     pattern_reference_width: usize,
@@ -80,7 +80,7 @@ impl<'a> Plan<'a> {
             };
             let descriptors = function.nominal_copy_descriptors.clone().into();
             let mut layouts = vec![];
-            let mut paths: Vec<Vec<Vec<u32>>> = vec![];
+            let mut paths: Vec<Arc<[Vec<u32>]>> = vec![];
             let mut frame_bytes = 0u64;
             let mut path_count = 0usize;
             for (register, ty) in function.registers.iter().enumerate() {
@@ -856,7 +856,7 @@ impl<'a, 'p> Body<'a, 'p> {
                     self.pointer(*subject),
                     self.data.layouts[*subject as usize].clone(),
                     pattern,
-                    Some(PatternStorage { flags: format!("%init{subject}"), paths: self.data.paths[*subject as usize].clone(), path: vec![] }),
+                    Some(PatternStorage { flags: format!("%init{subject}"), paths: self.data.paths[*subject as usize].to_vec(), path: vec![] }),
                     pattern.read_requirement(),
                 )?;
                 let value = self.value(format!("zext i1 {matched} to i8"));

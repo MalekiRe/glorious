@@ -78,7 +78,7 @@ impl LlvmNativeModule {
         for (slot, home) in homes.iter().enumerate() {
             // The generated code writes the actual active initialization view,
             // not a shadow mask interpreted after the computation has run.
-            loans.push(unsafe { home.lend_native(flags[slot].as_mut_ptr(), frame.paths[slot].clone().into(), budget)? });
+            loans.push(unsafe { home.lend_native(flags[slot].as_mut_ptr(), frame.paths[slot].clone(), budget)? });
         }
         let mut context = NativeContext::new(budget.limits);
         context.instructions = budget.instructions;

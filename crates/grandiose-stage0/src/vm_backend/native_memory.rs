@@ -421,21 +421,23 @@ struct ReferenceInitialization(Rc<RefCell<BTreeSet<Vec<u32>>>>);
 
 /// The exact writable logical mask lent to a generated segment. A resident
 /// home selects this view only while its synchronous native loan is active.
-#[derive(Clone, Debug)]
+/// The view has one owner; checked references follow the home, never a clone
+/// of this temporary flag-pointer authority.
+#[derive(Debug)]
 pub(super) struct GeneratedInitialization {
     flags: *mut u8,
     paths: Arc<[Vec<u32>]>,
-    live: Rc<Cell<bool>>,
+    live: Cell<bool>,
 }
 
 impl GeneratedInitialization {
-    pub(super) unsafe fn new(flags: *mut u8, paths: Arc<[Vec<u32>]>, live: Rc<Cell<bool>>)
+    pub(super) unsafe fn new(flags: *mut u8, paths: Arc<[Vec<u32>]>)
         -> Result<Self, VmArtifactError>
     {
         if flags.is_null() || paths.first().is_none_or(|path| !path.is_empty()) {
             return Err(error("generated reference lacks its backing initialization contract"));
         }
-        let view = Self { flags, paths, live };
+        let view = Self { flags, paths, live: Cell::new(true) };
         view.any_hole(|_| false)?;
         Ok(view)
     }

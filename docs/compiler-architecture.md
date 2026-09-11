@@ -2896,3 +2896,25 @@ their allocation charges. Only genuinely reused backing avoids another charge;
 there is no limit increase, counter reset or exemption for library code.
 Cache 183 records the runtime correction. Executable proofs, encoding and native
 ABI remain unchanged.
+
+## Native initialization-loan backing and immutable layout paths
+
+The native frame producer publishes each register's logical initialization paths
+as shared immutable storage. Generated emission and machine entry consume that
+same plan; entry no longer allocates a fresh copy of its paths on every segment.
+The resident home retains one inline active initialization view and reusable
+backing for nested views. Only the active view supplies readable/writable flags;
+return restores the immediately enclosing view or the home's owned state.
+
+A generated view has one owner, not a separately allocated shared lifetime flag.
+References continue to follow their actual home. Normal, failed and out-of-order
+returns remove the expiring sidecar before its caller's storage can disappear.
+The exact-sidecar input registry reuses empty hash-table backing while removing
+every returned authority; zero-byte residents keep distinct logical identities.
+Neither home allocations nor source activation/storage brands are pooled here.
+
+Real registry and nested-view backing growth retain allocation charges, with
+admission before publishing a new loan. Immutable code metadata and inline views
+do not pretend to allocate per entry. Cache 184 records this runtime correction;
+executable proofs, portable encoding and native ABI are unchanged. This repairs
+metadata churn, not full compiler, library or self-hosted acceptance.
