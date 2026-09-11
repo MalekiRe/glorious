@@ -796,7 +796,18 @@ impl OwnershipMir {
                     }
                     ControlOperation::Capability(ControlCapabilityOperation::ReadReference(
                         value,
-                    )) => OwnershipOperation::ReadReference(value),
+                    )) => {
+                        if views.contains(&instruction.destination) {
+                            OwnershipOperation::ReadReference(value)
+                        } else {
+                            // An explicit referent value owns its acquisition;
+                            // only an intermediate place observation is a view.
+                            OwnershipOperation::ReadPlace {
+                                place: value_places[&instruction.destination].clone(),
+                                mode: place_transfer(instruction.destination),
+                            }
+                        }
+                    }
                     ControlOperation::Capability(ControlCapabilityOperation::Project {
                         base,
                         index,

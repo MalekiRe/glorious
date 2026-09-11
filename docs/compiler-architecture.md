@@ -2686,3 +2686,25 @@ Cache 172, verifier 53, bytecode 77/schema 121 and native ABI 22/control v4 name
 these contracts. Source and executable checks cover stale input loans, moved
 inputs, fresh clause initialization, selective label cleanup and deep clause
 re-entry. Complete guarded source-resource analysis remains a separate obligation.
+
+## Source Copy acquisition from runtime storage views
+
+Ownership lowering publishes an explicit place acquisition for a referent value;
+only intermediate reference observations retain the non-owning view operation.
+Its validator rejects a reference observation with an owning destination.
+Cleanup MIR's `ValueTransfer::Copy` remains the authority for acquiring an owned
+resident from a place. Runtime lowering now preserves that acquisition after a
+reference or aggregate projection: the physical read produces a non-owning view,
+then the existing `Copy` operation produces the owning destination. Whole-value
+copies already use that operation. Moves, reborrows, retained resumptions and
+non-owning reference reads keep their distinct paths.
+
+Both execution engines consume their existing structural owned-copy machinery,
+which duplicates callable environments and their owned captures while preserving
+borrowed referents. No read opcode gains implicit ownership, no runtime lifetime
+check is weakened, and no second ownership inventory is introduced. Cache 173
+invalidates earlier lowering; executable schema and native ABI are unchanged.
+
+This repairs already-proven Copy transfers. Propagating concrete resident quantity
+through stateful callable projections remains an active failing source regression:
+ownership lowering currently emits two moves for accepted repeated tuple reads.

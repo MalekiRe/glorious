@@ -293,8 +293,14 @@ impl OwnershipMir {
                             }
                         }
                     }
-                    OwnershipOperation::Read(value) | OwnershipOperation::ReadReference(value) => {
+                    OwnershipOperation::Read(value) => {
                         self.checked_owner(*value)?;
+                    }
+                    OwnershipOperation::ReadReference(value) => {
+                        self.checked_owner(*value)?;
+                        if self.checked_owner(instruction.destination)?.kind != OwnerKind::View {
+                            return Err(invalid("reference observation cannot acquire an owned resident"));
+                        }
                     }
                     OwnershipOperation::ReadPlace { place, mode }
                     | OwnershipOperation::Project { place, mode, .. } => {
@@ -514,10 +520,13 @@ mod tests {
 
     #[test]
     fn an_explicit_copy_of_a_referent_still_has_an_owner() {
-        let mir = fixture("struct CopyProbe { field: i64 } impl Use<[0, *]> for CopyProbe {} pub fn main(value: &CopyProbe) -> CopyProbe { let copy = *value; copy }");
-        let read = mir.blocks.iter().flat_map(|block| &block.instructions)
-            .find(|instruction| matches!(instruction.operation, OwnershipOperation::ReadReference(_))).unwrap();
+        let mut mir = fixture("struct CopyProbe { field: i64 } impl Use<[0, *]> for CopyProbe {} pub fn main(value: &CopyProbe) -> CopyProbe { let copy = *value; copy }");
+        let read = mir.blocks.iter_mut().flat_map(|block| &mut block.instructions)
+            .find(|instruction| matches!(instruction.operation, OwnershipOperation::ReadPlace { mode: ValueTransfer::Copy, .. })).unwrap();
         assert_ne!(mir.owners[read.destination.0 as usize].kind, OwnerKind::View);
+        let OwnershipOperation::ReadPlace { place: ControlPlace::Deref { reference, .. }, .. } = &read.operation else { panic!("expected referent acquisition") };
+        read.operation = OwnershipOperation::ReadReference(*reference);
+        assert!(mir.validate().unwrap_err().0.contains("reference observation cannot acquire an owned resident"));
     }
 
     #[test]

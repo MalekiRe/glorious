@@ -24,6 +24,28 @@ const CALL: &str = "pub fn main(action: () -> i64) -> i64 { action() }";
 const PERFORM: &str = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(42) { Ask::ask(value) with _ => value } }";
 
 #[test]
+fn source_copy_acquires_an_owner_after_a_projection_or_reference_view() {
+    for source in [
+        "pub fn main(value: (i64,)) -> i64 { value.0 }",
+        "pub fn main(value: &i64) -> i64 { *value }",
+    ] {
+        let body = fixture(source);
+        assert!(body.blocks.iter().any(|block| block.instructions.windows(2).any(|pair| {
+            let view = match &pair[0] {
+                RuntimeOperation::ProjectTuple { dst, .. } | RuntimeOperation::DerefCopy { dst, .. } => *dst,
+                _ => return false,
+            };
+            matches!(pair[1], RuntimeOperation::Copy { dst, src } if src == view && dst != view)
+        })), "{source}: missing owned Copy after the storage view");
+    }
+    // An erased linear callable parameter supplies no Copy permission.
+    let affine = fixture("pub fn main(value: (() -> i64,)) -> i64 { let callback=value.0; callback() }");
+    assert!(affine.blocks.iter().flat_map(|block| &block.instructions).any(|operation|
+        matches!(operation, RuntimeOperation::TakeProjection { base, fields, .. }
+            if *base == affine.parameters[0] && fields == &[0])));
+}
+
+#[test]
 fn handler_storage_rejects_noncanonical_and_absent_clause_roots() {
     let body = fixture(PERFORM);
     for roots in [vec![MirLocal(0), MirLocal(0)], vec![MirLocal(1), MirLocal(0)], vec![MirLocal(u32::MAX)]] {

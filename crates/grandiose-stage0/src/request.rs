@@ -375,7 +375,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 169 composes helper-local resumption delimiters and owned runtime branches.
 // Cache 170 enforces retained control limits across pending and returning branches.
 // Cache 172 retains executed clause inputs and explicit clause-storage ownership.
-pub const STAGE0_CACHE_GENERATION: u32 = 172;
+// Cache 173 preserves source Copy acquisition after reference/projection views.
+pub const STAGE0_CACHE_GENERATION: u32 = 173;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

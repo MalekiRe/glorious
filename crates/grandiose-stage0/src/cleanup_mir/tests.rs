@@ -55,6 +55,22 @@ pub(crate) fn fixture(source: &str) -> CleanupMir {
 const OWNED: &str = "pub fn main(value: () -> i64) -> { let owned = move value; () }";
 
 #[test]
+fn referent_acquisitions_require_ownership_and_copy_authority() {
+    let body = fixture("pub fn main(value: &i64) -> i64 { *value }");
+    let mut view = body.clone();
+    let read = view.blocks.iter_mut().flat_map(|block| &mut block.instructions)
+        .find(|instruction| matches!(instruction.operation, CleanupOperation::ReadPlace { mode: ValueTransfer::Copy, .. })).unwrap();
+    let destination = read.destination;
+    let CleanupOperation::ReadPlace { place: ControlPlace::Deref { reference, .. }, .. } = &read.operation else { panic!("expected referent acquisition") };
+    read.operation = CleanupOperation::ReadReference(*reference);
+    assert!(view.validate().unwrap_err().0.contains("reference observation cannot acquire an owned resident"));
+
+    let mut affine = body;
+    affine.owners[destination.0 as usize].quantity = Some(Quantity::AFFINE);
+    assert!(affine.validate().unwrap_err().0.contains("cleanup invented copy authority"));
+}
+
+#[test]
 fn replay_outer_consumption_is_classified_from_the_resumed_suffix() {
     for (computation, captured) in [
         ("let consumed = move value; Tick::tick(); 42", false),

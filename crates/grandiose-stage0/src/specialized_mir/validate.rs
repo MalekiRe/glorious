@@ -381,6 +381,12 @@ impl SpecializedMir {
                     return Err(invalid("unknown specialized instruction scope"));
                 }
                 match &instruction.operation {
+                    SpecializedOperation::ReadReference(_) => {
+                        if self.owners.get(instruction.destination.0 as usize)
+                            .is_none_or(|owner| owner.kind != crate::ownership_mir::OwnerKind::View) {
+                            return Err(invalid("reference observation cannot acquire an owned resident"));
+                        }
+                    }
                     SpecializedOperation::Compute(SpecializedComputation::Function {
                         definition,
                         arguments,

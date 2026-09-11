@@ -201,7 +201,7 @@ impl CleanupMir {
             for instruction in &block.instructions {
                 let dst = local(instruction.destination);
                 let ty = &self.values[instruction.destination.0 as usize].ty;
-                let operation = match &instruction.operation {
+                let mut operation = match &instruction.operation {
                     CleanupOperation::Construct { aggregate, fields } => {
                         let field_types = fields
                             .iter()
@@ -774,6 +774,28 @@ impl CleanupMir {
                         },
                     },
                 };
+                // A typed reference/projection read produces a non-owning
+                // view. Preserve Cleanup's source Copy as a separate owned
+                // acquisition: relocation of resident bytes cannot duplicate
+                // a callable's owned environment or its nested captures.
+                if matches!(instruction.operation,
+                    CleanupOperation::ReadPlace { mode: ValueTransfer::Copy, .. }
+                        | CleanupOperation::Project { mode: ValueTransfer::Copy, .. }) {
+                    let read_destination = match &mut operation {
+                        RuntimeOperation::DerefCopy { dst, .. }
+                        | RuntimeOperation::ProjectRecord { dst, .. }
+                        | RuntimeOperation::ProjectTuple { dst, .. }
+                        | RuntimeOperation::ProjectArray { dst, .. } => Some(dst),
+                        _ => None,
+                    };
+                    if let Some(read_destination) = read_destination {
+                        let view = MirLocal(u32::try_from(locals.len()).ok()?);
+                        locals.push(MirLocalDecl { source: CoreId(u32::MAX), ty: ty.clone() });
+                        *read_destination = view;
+                        instructions.push(operation);
+                        operation = RuntimeOperation::Copy { dst, src: view };
+                    }
+                }
                 instructions.push(operation);
             }
             let mut routes = vec![];

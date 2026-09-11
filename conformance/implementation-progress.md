@@ -5,6 +5,29 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Owned Copy acquisition at reference and projection boundaries
+
+Cache 173 repairs the callback-environment destruction failure in
+`inferred_completion_references_remain_readable_and_assignable`. Ownership MIR
+now distinguishes an explicit owned referent acquisition from a non-owning
+reference observation. Runtime lowering preserves proven place/project Copy
+as the existing owned-copy operation after the physical view read. The VM and
+LLVM therefore use their shared structural callable-environment copy contract;
+raw reference reads, moves and reborrows retain their distinct meanings.
+
+The new five-source enum, tuple, reference, record and nested-record/enum gate
+passes fresh VM, decoded VM and LLVM O0/O2 execution. Focused reference-observation
+and cleanup tests reject an owning view and forged Copy authority. Executable
+schema and native ABI remain unchanged.
+The original nine-source completion gate passes at both VM optimization settings,
+including decoded execution; its three mutability/escape rejection cases pass.
+
+The independently discovered stateful tuple-projection regression remains active,
+not ignored: accepted repeated reads still lower to two moves and the second
+fails with `UseAfterMove`. The quantity contract is lost before runtime lowering;
+this checkpoint does not weaken the runtime check or claim that regression, the
+full language/library suite, or self-hosting is complete.
+
 ## Native-handler execution acceptance audit
 
 The integrated native-handler milestone is complete for the checked Stage0

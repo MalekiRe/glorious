@@ -333,6 +333,11 @@ impl CleanupMir {
                     return Err(invalid("instruction flag transitions are incomplete"));
                 }
                 match &instruction.operation {
+                    CleanupOperation::ReadReference(_) => {
+                        if self.owners[instruction.destination.0 as usize].kind != OwnerKind::View {
+                            return Err(invalid("reference observation cannot acquire an owned resident"));
+                        }
+                    }
                     CleanupOperation::Destroy(plan) | CleanupOperation::RunCleanup { plan, .. } => {
                         check_plan(*plan)?
                     }
@@ -385,7 +390,7 @@ impl CleanupMir {
                 }
                 match &instruction.operation {
                     CleanupOperation::ReadPlace { mode, .. }
-                    | CleanupOperation::Project { mode, .. } if *mode == ValueTransfer::RetainResumption => {
+                    | CleanupOperation::Project { mode, .. } => {
                         check_operand(&OwnershipOperand { value: instruction.destination, mode: *mode })?;
                     }
                     CleanupOperation::Construct { fields, .. } => {

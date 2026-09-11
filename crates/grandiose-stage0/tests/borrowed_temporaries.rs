@@ -53,10 +53,52 @@ fn inferred_completion_references_remain_readable_and_assignable() {
         for optimization in ["0", "2"] {
             let artifact = StageZeroCompiler::new().compile(request(source, optimization))
                 .unwrap_or_else(|error| panic!("{source}: {:#?}", error.diagnostics())).artifact.unwrap();
-            assert_eq!(artifact.run_i64().unwrap(), 42);
+            assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
             assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
         }
     }
+}
+
+#[test]
+fn completion_transfers_preserve_callable_resident_ownership() {
+    for source in [
+        "enum Wrapped<T> { Value(T) } fn answer() -> i64 { 42 }
+        pub fn main() -> i64 {
+            let callback = handle Wrapped::Value(answer) { Wrapped::Value(found) => found }; callback()
+        }",
+        "fn answer() -> i64 { 21 } pub fn main() -> i64 {
+            let wrapped=(answer,); let first=wrapped.0; let second=wrapped.0; first()+second() }",
+        "fn answer() -> i64 { 21 } pub fn main() -> i64 {
+            let original=answer; let reference = &original; let copied = *reference; copied()+original() }",
+        "struct Pair<T> { first:T, second:i64 } fn answer() -> i64 { 21 }
+        pub fn main() -> i64 { let wrapped=Pair { first:answer, second:0 };
+            let first=wrapped.first; let second=wrapped.first; first()+second() }",
+        "enum Wrapped<T> { Value(T) } struct Pair<T> { first:T, second:i64 }
+        pub fn main() -> i64 { let value=40; let task=move (value) { value+2 };
+            let outer=Wrapped::Value(Pair { first:task, second:0 });
+            let callback=handle outer { Wrapped::Value(Pair { first:found, second:_ }) => found }; callback() }",
+    ] {
+        let input = request(source, "0");
+        let artifact = StageZeroCompiler::new().compile(input.clone())
+            .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42, "O{optimization}: {source}");
+        }
+    }
+}
+
+#[test]
+fn projected_stateful_callable_copies_have_independent_environments() {
+    let source = "pub fn main() -> i64 { let mut count=0; let task=move (count) { count=count+1; count };
+        let wrapped=(task,); let first=wrapped.0; let second=wrapped.0; first()+second()+40 }";
+    let artifact = StageZeroCompiler::new().compile(request(source, "0"))
+        .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
 }
 
 #[test]
