@@ -141,6 +141,7 @@ theorem routed_handlers_were_skipped [DecidableEq κ] {key : OperationKey κ}
 inductive ResumptionPolicy where
   | optional
   | exact (count : Nat) (positive : 0 < count) (bounded : count ≤ 4294967295)
+  deriving Repr
 
 namespace ResumptionPolicy
 

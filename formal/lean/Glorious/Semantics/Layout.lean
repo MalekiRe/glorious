@@ -80,7 +80,8 @@ mutual
         require (count ≥ 0 && count.toNat < 2 ^ target.pointerBits) .invalidLayout "array length does not fit target usize"
         let element ← layoutOf program inference fuel (type :: active) element
         let stride := alignUp element.size element.alignment
-        boundLayout target { type, size := stride * count.toNat, alignment := element.alignment,
+        boundLayout target {
+          type, size := stride * count.toNat, alignment := element.alignment,
           stride := some stride, cCompatible := false }
       | .nominal declaration arguments =>
         let data ← getRequired (program.dataType declaration) .unknownName "layout names an unknown nominal type"
@@ -97,7 +98,8 @@ mutual
           let nonzero := variant.fields.filter (fun field => field.size != 0)
           require (nonzero.length == 1) .invalidLayout "transparent representation requires exactly one nonzero field"
           let field ← getRequired nonzero.head? .invalidLayout "missing transparent representation field"
-          return { type, size := field.size, alignment := field.alignment, fields := variant.fields,
+          return {
+            type, size := field.size, alignment := field.alignment, fields := variant.fields,
             variants, cCompatible := target.cEnabled }
         | .integer signed width =>
           require (data.isEnum && variants.all (fun variant => variant.fields.isEmpty)) .invalidLayout "integer repr requires a fieldless enum"
@@ -111,7 +113,8 @@ mutual
           if !data.isEnum then
             let variant ← getRequired variants.head? .invalidLayout "record has no variant"
             require (variants.length == 1) .invalidLayout "record has several variants"
-            return { type, size := variant.size, alignment := variant.alignment, fields := variant.fields,
+            return {
+              type, size := variant.size, alignment := variant.alignment, fields := variant.fields,
               variants, cCompatible := data.representation == .c && target.cEnabled }
           require (data.representation != .c) .invalidLayout "C enum representation requires an explicitly fixed integer tag"
           let tagBits := if variants.length ≤ 256 then 8 else if variants.length ≤ 65536 then 16
@@ -121,7 +124,8 @@ mutual
           let alignment := max tagBytes payloadAlignment
           let payloadOffset := alignUp tagBytes payloadAlignment
           let payloadSize := variants.foldl (fun size variant => max size variant.size) 0
-          boundLayout target { type, size := alignUp (payloadOffset + payloadSize) alignment,
+          boundLayout target {
+            type, size := alignUp (payloadOffset + payloadSize) alignment,
             alignment, variants, tagBits, payloadOffset }
       | .callable declaration arguments =>
         let function ← getRequired (program.function declaration) .missingEvidence "callable layout lacks its declaration"
@@ -141,7 +145,8 @@ mutual
       require (cursor + layout.size ≤ program.target.maxObjectSize) .invalidLayout "record offset arithmetic exceeds target size"
       return (cursor + layout.size, max alignment layout.alignment,
         layouts ++ [(⟨field, cursor, layout.size, layout.alignment⟩ : FieldLayout)])
-    boundLayout program.target { type, size := alignUp offset alignment, alignment,
+    boundLayout program.target {
+      type, size := alignUp offset alignment, alignment,
       fields := layouts, cCompatible := c && program.target.cEnabled }
 end
 

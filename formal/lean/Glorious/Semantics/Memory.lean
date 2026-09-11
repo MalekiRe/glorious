@@ -58,8 +58,9 @@ def memoryRange (program : Program) (pointer : Pointer) (size alignment : Nat)
   return allocation
 
 def updateAllocation (allocation : Allocation) : WorldM Unit :=
-  modify fun world => { world with allocations := world.allocations.map
-    (fun current => if current.identity == allocation.identity then allocation else current) }
+  modify fun world => { world with
+    allocations := world.allocations.map (fun current =>
+      if current.identity == allocation.identity then allocation else current) }
 
 def byteInitialized (allocation : Allocation) (offset : Nat) : Bool :=
   allocation.initialized.any (fun (start, stop) => start ≤ offset && offset < stop)
@@ -75,7 +76,7 @@ def rawResident (program : Program) (inference : Inference) (pointer : Pointer)
     require (value.type == type) .invalidPointer "raw source read uses a different resident type"
     let located : Located := ⟨address, type, none⟩
     checkAccess program world located (if copy then .read else .move)
-    if copy then copyValue program value else
+    if copy then cloneValue program.limits.normalization value else
       updateAddress program address none
       return value
   else
@@ -83,7 +84,7 @@ def rawResident (program : Program) (inference : Inference) (pointer : Pointer)
     let value ← getRequired (lookup pointer.offset.toNat allocation.residents)
       .uninitialized "raw read has no initialized typed resident"
     require (value.type == type) .invalidPointer "raw read type differs from its initialized resident"
-    if copy then copyValue program value else
+    if copy then cloneValue program.limits.normalization value else
       updateAllocation { allocation with residents := allocation.residents.filter (fun cell => cell.1 != pointer.offset.toNat) }
       return value
 
@@ -109,7 +110,8 @@ def rawStore (program : Program) (inference : Inference) (pointer : Pointer)
       let residentLayout ← layoutOf program inference program.limits.layout [] resident.type
       require (offset == pointer.offset.toNat || offset + residentLayout.size ≤ pointer.offset.toNat ||
         pointer.offset.toNat + layout.size ≤ offset) .invalidPointer "raw store overlaps another initialized resident"
-    updateAllocation { allocation with residents := put pointer.offset.toNat value allocation.residents,
+    updateAllocation { allocation with
+      residents := put pointer.offset.toNat value allocation.residents,
       initialized := (pointer.offset.toNat, pointer.offset.toNat + layout.size) :: allocation.initialized }
     return prior
 
@@ -123,8 +125,8 @@ def executeMemory (program : Program) (inference : Inference) (binding : Runtime
   match operation with
   | .abort => return none
   | .allocate =>
-    let size ← arg 0 >>= naturalValue
-    let alignment ← arg 1 >>= naturalValue
+    let size ← naturalValue (← arg 0)
+    let alignment ← naturalValue (← arg 1)
     require (alignment > 0 && Nat.land alignment (alignment - 1) == 0 && size ≤ program.target.maxObjectSize)
       .invalidLayout "allocation has invalid extent or alignment"
     let domain ← getRequired binding.allocationDomain .missingImport "allocator lacks a bound allocation domain"
@@ -133,7 +135,7 @@ def executeMemory (program : Program) (inference : Inference) (binding : Runtime
     set { world with nextAllocation := world.nextAllocation + 1, allocations := world.allocations ++ [allocation] }
     return some (← pointerResult ⟨some allocation.identity, 0, some allocation.provenance, true, none⟩)
   | .resize | .release =>
-    let pointer ← arg 0 >>= pointerValue
+    let pointer ← pointerValue (← arg 0)
     let allocation ← allocationFor (← get) pointer
     require (pointer.offset == 0 && binding.allocationDomain == some allocation.domain)
       .invalidPointer "allocation release/resize uses a different base or allocator domain"
@@ -142,49 +144,51 @@ def executeMemory (program : Program) (inference : Inference) (binding : Runtime
       updateAllocation { allocation with alive := false, initialized := [], byteValues := [] }
       return some (← unit)
     else
-      let size ← arg 1 >>= naturalValue
+      let size ← naturalValue (← arg 1)
       require (size ≤ program.target.maxObjectSize) .invalidLayout "resized allocation exceeds target limits"
       for (offset, value) in allocation.residents do
         let layout ← layoutOf program inference program.limits.layout [] value.type
         require (offset + layout.size ≤ size) .illegalDiscard "allocation shrink truncates a live resident"
-      updateAllocation { allocation with size, byteValues := allocation.byteValues.filter (fun byte => byte.1 < size),
+      updateAllocation { allocation with
+        size, byteValues := allocation.byteValues.filter (fun byte => byte.1 < size),
         initialized := allocation.initialized.map (fun (a, b) => (min a size, min b size)) }
       return some (← pointerResult pointer)
   | .offset =>
-    let pointer ← arg 0 >>= pointerValue
-    let offset ← arg 1 >>= integerValue
+    let pointer ← pointerValue (← arg 0)
+    let offset ← integerValue (← arg 1)
     let pointer := { pointer with offset := pointer.offset + offset }
     if pointer.allocation.isSome then
       let allocation ← allocationFor (← get) pointer
       require (pointer.offset ≥ 0 && pointer.offset.toNat ≤ allocation.size) .invalidPointer "offset leaves allocation including its one-past end"
     return some (← pointerResult pointer)
   | .distance =>
-    let a ← arg 0 >>= pointerValue
-    let b ← arg 1 >>= pointerValue
+    let a ← pointerValue (← arg 0)
+    let b ← pointerValue (← arg 1)
     require (a.allocation.isSome && a.allocation == b.allocation && a.provenance == b.provenance)
       .invalidPointer "pointer distance requires the same live allocation"
     let _ ← allocationFor (← get) a
     return some (← scalar (a.offset - b.offset))
-  | .cast => return some (← pointerResult (← arg 0 >>= pointerValue))
+  | .cast => return some (← pointerResult (← pointerValue (← arg 0)))
   | .fromAddress =>
-    let bits ← arg 0 >>= integerValue
+    let bits ← integerValue (← arg 0)
     return some (← pointerResult ⟨none, bits, none, true, none⟩)
   | .expose =>
-    let pointer ← arg 0 >>= pointerValue
+    let pointer ← pointerValue (← arg 0)
     require (pointer.allocation.isNone && pointer.source.isNone) .missingEvidence "allocation address exposure requires a concrete runtime address assignment"
     return some (← scalar pointer.offset)
   | .addressOf =>
     let value ← arg 0
     let loan ← match value.head with
-      | .reference identity => getRequired ((← get).loans.find? (fun l => l.identity == identity && l.live))
+      | .reference identity => do
+        getRequired ((← get).loans.find? (fun l => l.identity == identity && l.live))
           .invalidPointer "raw address construction sees an ended reference"
       | _ => reject .typeMismatch "raw address construction requires a reference"
     return some (← pointerResult ⟨none, 0, none, loan.mode == .unique, some loan.origin⟩)
   | .read | .copyRead =>
-    let pointer ← arg 0 >>= pointerValue
+    let pointer ← pointerValue (← arg 0)
     return some (← rawResident program inference pointer binding.signature.output (operation == .copyRead))
   | .write | .replace =>
-    let pointer ← arg 0 >>= pointerValue
+    let pointer ← pointerValue (← arg 0)
     let value ← arg 1
     let old ← rawStore program inference pointer value (operation == .replace)
     if operation == .replace then return old else return some (← unit)
@@ -193,16 +197,16 @@ def executeMemory (program : Program) (inference : Inference) (binding : Runtime
     let layout ← layoutOf program inference program.limits.layout [] type
     return some (← scalar (if operation == .sizeOf then layout.size else layout.alignment))
   | .copyBytes | .moveBytes | .fillBytes =>
-    let destination ← arg 0 >>= pointerValue
-    let size ← arg 2 >>= naturalValue
+    let destination ← pointerValue (← arg 0)
+    let size ← naturalValue (← arg 2)
     let target ← memoryRange program destination size 1 true
     require target.residents.isEmpty .missingEvidence "byte mutation of typed residents requires the checked representation transition"
     let bytes ← if operation == .fillBytes then do
-        let byte ← arg 1 >>= naturalValue
+        let byte ← naturalValue (← arg 1)
         require (byte < 256) .invalidScalar "byte fill value does not fit u8"
         pure (List.replicate size (UInt8.ofNat byte))
       else do
-        let source ← arg 1 >>= pointerValue
+        let source ← pointerValue (← arg 1)
         let allocation ← memoryRange program source size 1 false
         require allocation.residents.isEmpty .missingEvidence "byte copying typed owners requires a typed relocation contract"
         if operation == .copyBytes then
@@ -213,13 +217,14 @@ def executeMemory (program : Program) (inference : Inference) (binding : Runtime
           require (byteInitialized allocation (source.offset.toNat + index)) .uninitialized "bulk read reaches uninitialized bytes"
           getRequired (lookup (source.offset.toNat + index) allocation.byteValues) .missingEvidence "bulk read byte contents are unknown"
     let stored := bytes.zipIdx |>.map fun (byte, index) => (destination.offset.toNat + index, byte)
-    updateAllocation { target with byteValues := stored.foldl (fun table (offset, byte) => put offset byte table) target.byteValues,
+    updateAllocation { target with
+      byteValues := stored.foldl (fun table (offset, byte) => put offset byte table) target.byteValues,
       initialized := (destination.offset.toNat, destination.offset.toNat + size) :: target.initialized }
     return some (← unit)
 
 def scalarOperationName (name : String) : Option (ScalarType × String) := do
-  let prefix ← ["Usize", "Isize", "U128", "I128", "U64", "I64", "U32", "I32", "U16", "I16", "U8", "I8", "F32", "F64", "Char"].find? name.startsWith
-  let scalar ← lookup prefix [
+  let prefixOp ← ["Usize", "Isize", "U128", "I128", "U64", "I64", "U32", "I32", "U16", "I16", "U8", "I8", "F32", "F64", "Char"].find? (fun (prefixOp : String) => name.startsWith prefixOp)
+  let scalar ← lookup prefixOp [
     ("Usize", .integer false .pointer), ("Isize", .integer true .pointer),
     ("U128", .integer false .w128), ("I128", .integer true .w128),
     ("U64", .integer false .w64), ("I64", .integer true .w64),
@@ -227,13 +232,17 @@ def scalarOperationName (name : String) : Option (ScalarType × String) := do
     ("U16", .integer false .w16), ("I16", .integer true .w16),
     ("U8", .integer false .w8), ("I8", .integer true .w8),
     ("F32", .floating .w32), ("F64", .floating .w64), ("Char", .character)]
-  return (scalar, String.ofList (name.toList.drop prefix.length))
+  return (scalar, String.ofList (name.toList.drop prefixOp.length))
 
 def executeScalar (program : Program) (inference : Inference) (binding : RuntimeImport)
     (name : String) (values : List Value) : WorldM Value := do
   let (scalar, operation) ← getRequired (scalarOperationName name) .missingImport "unknown scalar primitive identity"
   let left ← memoryArgument values 0
   let right := values[1]?.getD left
+  match left.head, right.head with
+  | .symbolic _, _ | _, .symbolic _ =>
+    return ← createValue program inference binding.signature.output (.symbolic (← get).nextOwner)
+  | _, _ => pure ()
   let result ← match scalar, left.head, right.head with
     | .integer signed width, .scalar (.integer _ _ a), .scalar (.integer _ _ b) =>
       let spelling := operation.replace "Wrapping" ""
@@ -248,8 +257,6 @@ def executeScalar (program : Program) (inference : Inference) (binding : Runtime
         ("Div", .div), ("Rem", .rem), ("Neg", .neg), ("Eq", .eq), ("Ne", .ne), ("Lt", .lt), ("Le", .le), ("Gt", .gt), ("Ge", .ge)])
         .missingImport "unrecognized floating operation"
       floatOperation program.limits.execution width op a b
-    | _, .symbolic _, _ | _, _, .symbolic _ =>
-      return ← createValue program inference binding.signature.output (.symbolic (← get).nextOwner)
     | _, _, _ => reject .incompatibleABI "scalar primitive operands differ from its bound format"
   require (scalarValueType result == binding.signature.output) .incompatibleABI "scalar result differs from its bound signature"
   createValue program inference binding.signature.output (.scalar result)

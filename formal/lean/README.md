@@ -1,7 +1,8 @@
 # Executable Lean semantics — in progress
 
-**Current working draft:** the whole-compiler first implementation pass is in
-place, including an executable driver and VM receiving-IR bridge. See
+**Current working draft:** a mandatory, request-indexed whole-compiler proof
+attempt is wired into the implementation and driver. Its theorem bodies and
+proposed specifications have not verified. See
 [`DRAFT.md`](DRAFT.md). The implemented/proved boundary below describes the
 earlier verified checkpoint, not the unverified whole-compiler draft. Draft code
 does not establish any additional conformance or end-to-end acceptance yet.

@@ -55,6 +55,10 @@ def bindExpressions (values : List Elaborated) (continuation : List TypedSlot �
   let slots ← values.mapM (fun value => newSlot value.type)
   return (values.zip slots).foldr (fun (value, slot) next => .bind slot value.code next) (continuation slots)
 
+def bindExpression (value : Elaborated) (continuation : TypedSlot → Core) : ElabM Core := do
+  let slot ← newSlot value.type
+  return .bind slot value.code (continuation slot)
+
 def ensureExpected (actual : Term) (expected : Option Term) : ElabM Unit := do
   match expected with
   | none => pure ()
@@ -65,8 +69,8 @@ def resolveTerm (program : Program) (bindings : List Binding) (module : ModuleId
   | fuel + 1, term => do
     match term with
     | .named path arguments kind =>
-      let namespace := match kind with | .effect => .effect | .constant => .value | _ => .type
-      let binding ← resolve program bindings module namespace ⟨path⟩
+      let nameSpace := match kind with | .effect => .effect | .constant => .value | _ => .type
+      let binding ← resolve program bindings module nameSpace ⟨path⟩
       let arguments ← arguments.mapM (resolveTerm program bindings module fuel)
       if kind == .effect then return .effect binding.declaration arguments
       if kind == .constant then
@@ -99,7 +103,8 @@ def resolveConstraint (program : Program) (bindings : List Binding) (module : Mo
 def resolveSignature (program : Program) (bindings : List Binding) (module : ModuleId)
     (signature : Signature) : Check Signature := do
   let fuel := program.limits.normalization
-  return { signature with
+  return {
+    signature with
     arguments := ← signature.arguments.mapM (resolveTerm program bindings module fuel)
     output := ← resolveTerm program bindings module fuel signature.output
     effects := ← resolveTerm program bindings module fuel signature.effects
@@ -112,28 +117,35 @@ def resolveProgramTerms (program : Program) (bindings : List Binding) : Check Pr
   let dataTypes ← program.dataTypes.mapM fun data => do
     let variants ← data.variants.mapM fun variant => do
       return { variant with fields := ← variant.fields.mapM resolveField }
-    return { data with variants,
+    return { data with
+      variants,
       quantityMarker := ← data.quantityMarker.mapM (resolveTerm program bindings data.header.module fuel) }
   let aliases ← program.aliases.mapM fun aliasDecl => do
     return { aliasDecl with value := ← resolveTerm program bindings aliasDecl.header.module fuel aliasDecl.value }
   let functions ← program.functions.mapM fun function => do
-    return { function with signature := ← resolveSignature program bindings function.header.module function.signature,
+    return { function with
+      signature := ← resolveSignature program bindings function.header.module function.signature,
       parameters := ← function.parameters.mapM (fun parameter => do
         return { parameter with type := ← parameter.type.mapM (resolveTerm program bindings function.header.module fuel) }) }
   let constants ← program.constants.mapM fun constant => do
-    return { constant with type := ← resolveTerm program bindings constant.header.module fuel constant.type,
+    return { constant with
+      type := ← resolveTerm program bindings constant.header.module fuel constant.type,
       value := ← resolveTerm program bindings constant.header.module fuel constant.value }
   let effects ← program.effects.mapM fun effect => do
-    return { effect with requirements := ← effect.requirements.mapM (resolveConstraint program bindings effect.header.module fuel),
+    return { effect with
+      requirements := ← effect.requirements.mapM (resolveConstraint program bindings effect.header.module fuel),
       operations := ← effect.operations.mapM (fun operation => do
         return { operation with signature := ← resolveSignature program bindings operation.header.module operation.signature }) }
   let traits ← program.traits.mapM fun trait => do
-    return { trait with supertraits := ← trait.supertraits.mapM (resolveConstraint program bindings trait.header.module fuel),
+    return { trait with
+      supertraits := ← trait.supertraits.mapM (resolveConstraint program bindings trait.header.module fuel),
       members := ← trait.members.mapM (fun member => do
-        return { member with defaultValue := ← member.defaultValue.mapM (resolveTerm program bindings trait.header.module fuel),
+        return { member with
+          defaultValue := ← member.defaultValue.mapM (resolveTerm program bindings trait.header.module fuel),
           signature := ← member.signature.mapM (resolveSignature program bindings trait.header.module) }) }
   let implementations ← program.implementations.mapM fun implementation => do
-    return { implementation with
+    return {
+      implementation with
       arguments := ← implementation.arguments.mapM (resolveTerm program bindings implementation.header.module fuel),
       requirements := ← implementation.requirements.mapM (resolveConstraint program bindings implementation.header.module fuel),
       associated := ← implementation.associated.mapM (fun (member, value) => do
@@ -144,36 +156,39 @@ def captureRank : CaptureMode → Nat | .shared => 0 | .unique => 1 | .owned => 
 
 def requestCapture (place : Place) (type : Term) (mode : CaptureMode) : ElabM Unit := do
   let state ← get
-  let local := state.locals.find? (fun local => local.id == place.root)
-  match local with
+  let localValue := state.locals.find? (fun localValue => localValue.id == place.root)
+  match localValue with
   | none => pure ()
-  | some local =>
-    if local.closureDepth ≥ state.closureDepth then return
+  | some localValue =>
+    if localValue.closureDepth ≥ state.closureDepth then return
     let enclosing := state.captures.find? (fun capture => capture.source.root == place.root &&
       capture.source.projections.isPrefixOf place.projections)
     match enclosing with
     | some capture =>
-      modify fun state => { state with captures := state.captures.map fun current =>
+      modify fun state => { state with
+        captures := state.captures.map fun current =>
         if current.parameter == capture.parameter && captureRank current.mode < captureRank mode
         then { current with mode } else current }
     | none =>
       let parameter ← newId
       let nested := state.captures.filter (fun c => c.source.root == place.root && place.projections.isPrefixOf c.source.projections)
       let mode := nested.foldl (fun mode c => if captureRank c.mode > captureRank mode then c.mode else mode) mode
-      modify fun state => { state with captures := state.captures.filter
+      modify fun state => { state with
+        captures := state.captures.filter
           (fun c => !(c.source.root == place.root && place.projections.isPrefixOf c.source.projections)) ++
         [⟨place, mode, parameter, type⟩] }
 
 def mapCoreOpPlaces (f : Place → Place) : CoreOp → CoreOp
   | .read dst src force => .read dst (f src) force
-  | .initialize dst src => .initialize (f dst) (f src)
+  | .initializeOwner dst src => .initializeOwner (f dst) (f src)
   | .assign dst src => .assign (f dst) (f src)
   | .construct dst constructor fields => .construct dst constructor (fields.map f)
   | .closure dst function arguments captures materialized => .closure dst function arguments
       (captures.map fun c => { c with source := f c.source }) materialized
   | .borrow dst mode region src => .borrow dst mode region (f src)
   | .discard src => .discard (f src)
-  | .invoke dst call => .invoke dst { call with callee := f call.callee,
+  | .invoke dst call => .invoke dst { call with
+    callee := f call.callee,
       inputs := call.inputs.map (fun input => { input with value := f input.value }) }
   | .perform dst op args payload sig => .perform dst op args (payload.map f) sig
   | .deconstruct src pattern bindings => .deconstruct (f src) pattern bindings
@@ -190,7 +205,7 @@ def mapCorePlaces (fuel : Nat) (f : Place → Place) (core : Core) : Check Core 
     | .result value => return .result (f value)
     | .step operation next => return .step (mapCoreOpPlaces f operation) (← mapCorePlaces fuel f next)
     | .bind destination computation next => return .bind destination (← mapCorePlaces fuel f computation) (← mapCorePlaces fuel f next)
-    | .scoped scope body => return .scoped scope (← mapCorePlaces fuel f body)
+    | .scopeBlock scope body => return .scopeBlock scope (← mapCorePlaces fuel f body)
     | .cases subject clauses => return .cases (f subject) (← clauses.mapM fun (.clause pattern bindings body) => do
         return .clause pattern bindings (← mapCorePlaces fuel f body))
     | .label id brand region type body => return .label id brand region type (← mapCorePlaces fuel f body)
@@ -199,7 +214,8 @@ def mapCorePlaces (fuel : Nat) (f : Place → Place) (core : Core) : Check Core 
         | .completion pattern bindings body => return .completion pattern bindings (← mapCorePlaces fuel f body)
         | .operation op effectInstance patterns bindings k policy body =>
           return .operation op effectInstance patterns bindings k policy (← mapCorePlaces fuel f body))
-    | .tail call => return .tail { call with callee := f call.callee,
+    | .tail call => return .tail { call with
+      callee := f call.callee,
         inputs := call.inputs.map (fun input => { input with value := f input.value }) }
     | .leave brand payload => return .leave brand (f payload)
     | .fatal reason => return .fatal reason
@@ -238,17 +254,17 @@ def expectedCallable (expected : Option Term) : ElabM (Option Signature) := do
 
 def localByName (path : Path) : ElabM (Option Local) := do
   match path.components with
-  | [name] => return (← get).locals.find? (fun local => local.name == name)
+  | [name] => return (← get).locals.find? (fun localValue => localValue.name == name)
   | _ => return none
 
 def expressionPlace : Nat → Expr → ElabM (Place × Term)
   | 0, _ => reject .resourceLimit "place elaboration exhausted"
-  | _, .local _ identity => do
-    let local ← getRequired ((← get).locals.find? (fun l => l.id == identity)) .unknownName "unknown local identity"
-    return (⟨identity, []⟩, local.type)
-  | fuel + 1, .name span path [] => do
-    let local ← getRequired (← localByName path) .typeMismatch "expression does not denote a local place" span
-    return (⟨local.id, []⟩, local.type)
+  | _, .localValue _ identity => do
+    let localValue ← getRequired ((← get).locals.find? (fun l => l.id == identity)) .unknownName "unknown local identity"
+    return (⟨identity, []⟩, localValue.type)
+  | _fuel + 1, .name span path [] => do
+    let localValue ← getRequired (← localByName path) .typeMismatch "expression does not denote a local place" span
+    return (⟨localValue.id, []⟩, localValue.type)
   | fuel + 1, .project span value projection => do
     let (place, type) ← expressionPlace fuel value
     let type ← infer (zonk (← get).program type)
@@ -275,7 +291,7 @@ def expressionPlace : Nat → Expr → ElabM (Place × Term)
 def resolveFixity (spelling : String) (isPrefix : Bool) : ElabM Fixity := do
   let state ← get
   let candidates := state.program.fixities.filter fun f => f.module == state.module && f.spelling == spelling &&
-    (f.associativity == .prefix) == isPrefix
+    (f.associativity == .prefixOp) == isPrefix
   match candidates with
   | [fixity] => return fixity
   | [] => reject .unknownName s!"operator has no selected positional fixity: {spelling}"
@@ -338,7 +354,7 @@ mutual
         let selected ← expected.mapM (fun type => infer (zonk program type))
         match literal with
         | .integer magnitude suffix negative =>
-          let scalar ← match suffix, selected with
+          let scalar : ScalarType ← match suffix, selected with
             | some (.integer signed width), _ => pure (.integer signed width)
             | none, some (.scalar (.integer signed width)) => pure (.integer signed width)
             | none, _ => pure (.integer true .w64)
@@ -363,15 +379,15 @@ mutual
           let binding ← selectLiteralBinding expression selected
           ensureExpected binding.signature.output expected
           produce binding.signature.output span (fun dst => .literalView dst binding.identity bytes)
-      | .local .. | .project .. =>
+      | .localValue .. | .project .. =>
         let (place, type) ← expressionPlace fuel expression
         let capability ← deriveUse program (← get).inference type
         requestCapture place type (if capability == .duplicable then .shared else .owned)
         ensureExpected type expected
         produce type span (fun dst => .read dst place false)
       | .name _ path explicit =>
-        if let some local ← localByName path then
-          return ← elaborate fuel (.local span local.id) expected
+        if let some localValue ← localByName path then
+          return ← elaborate fuel (.localValue span localValue.id) expected
         if let [name] := path.components then
           if name.startsWith "@" then
             let type ← getRequired (lookup (name.drop 1 |>.toString) (← get).labelNames) .unknownName "unknown lexical label" span
@@ -443,7 +459,7 @@ mutual
         let scope ← newId
         let value ← elaborateBlock fuel statements result expected
         modify fun s => { s with locals := before }
-        return { value with code := .scoped scope value.code }
+        return { value with code := .scopeBlock scope value.code }
       | .lambda _ identity parameters output effects body moves =>
         elaborateLambda fuel span identity parameters output effects body moves expected true
       | .patternCallable _ identity clauses =>
@@ -474,8 +490,8 @@ mutual
         let type := Term.bindings positive region (bindings.map (fun b => b.slot.type))
         ensureExpected type expected
         let output ← newSlot type span
-        let code ← bindExpressions [subject] fun slots => .step (.declare output)
-          (.step (.test output.id ⟨slots[0]!.id, []⟩ checked positive negative) (.result ⟨output.id, []⟩))
+        let code ← bindExpression subject fun slot => .step (.declare output)
+          (.step (.test output.id ⟨slot.id, []⟩ checked positive negative) (.result ⟨output.id, []⟩))
         return ⟨type, code⟩
       | .handle _ body clauses => elaborateHandler fuel span body clauses expected
 
@@ -495,7 +511,8 @@ mutual
       let effectInstance := Term.effect effect.header.id (effect.generics.map (fun b => .param b.id b.kind))
       return ({ operation.signature with generics := binders, effects := .row [effectInstance] [] }, binders)
     if let some (data, variant) := program.constructor declaration then
-      return ({ generics := data.generics, arguments := variant.fields.map (·.type),
+      return ({
+        generics := data.generics, arguments := variant.fields.map (·.type),
         output := .nominal data.header.id (data.generics.map (fun b => .param b.id b.kind)) }, data.generics)
     reject .missingEvidence "declaration has no callable contract"
 
@@ -536,10 +553,10 @@ mutual
       | [] => pure ()
       | (expression, type) :: rest => do
         match expression with
-        | .local _ id =>
-          if let some local := (← get).locals.find? (fun l => l.id == id) then infer (unifyTypes state.program local.type type)
+        | .localValue _ id =>
+          if let some localValue := (← get).locals.find? (fun l => l.id == id) then infer (unifyTypes state.program localValue.type type)
         | .name _ path [] =>
-          if let some local ← localByName path then infer (unifyTypes state.program local.type type)
+          if let some localValue ← localByName path then infer (unifyTypes state.program localValue.type type)
         | _ => pure ()
         seed rest
     seed (arguments.zip signature.arguments)
@@ -565,7 +582,7 @@ mutual
     | fuel + 1, statement :: rest =>
       let state ← get
       match statement with
-      | .binding span pattern mutable annotation initializer =>
+      | .binding _span pattern mutable annotation initializer =>
         let initializer ← elaborate fuel initializer annotation
         let checked ← infer (checkPattern state.program state.bindings state.module none fuel initializer.type pattern)
         let checkedBindings ← patternBindings fuel checked
@@ -574,22 +591,22 @@ mutual
         modify fun state => { state with locals := locals.reverse ++ state.locals }
         let continuation ← elaborateBlock fuel rest result expected
         let bindings := checkedBindings.map (fun b => { b with slot.mutable := mutable })
-        let code ← bindExpressions [initializer] fun slots =>
+        let code ← bindExpression initializer fun slot =>
           coreStepList (bindings.map (fun b => .declare b.slot))
-            (.step (.deconstruct ⟨slots[0]!.id, []⟩ checked bindings)
+            (.step (.deconstruct ⟨slot.id, []⟩ checked bindings)
               (.step (.seal (bindings.map (fun b => ⟨b.slot.id, []⟩))) continuation.code))
         return { continuation with code }
-      | .assign span destination expression =>
+      | .assign _span destination expression =>
         let (place, type) ← expressionPlace fuel destination
         requestCapture place type .unique
         let value ← elaborate fuel expression (some type)
         let continuation ← elaborateBlock fuel rest result expected
-        let code ← bindExpressions [value] fun slots => .step (.assign place ⟨slots[0]!.id, []⟩) continuation.code
+        let code ← bindExpression value fun slot => .step (.assign place ⟨slot.id, []⟩) continuation.code
         return { continuation with code }
-      | .discard span expression =>
+      | .discard _span expression =>
         let value ← elaborate fuel expression none
         let continuation ← elaborateBlock fuel rest result expected
-        let code ← bindExpressions [value] fun slots => .step (.discard ⟨slots[0]!.id, []⟩) continuation.code
+        let code ← bindExpression value fun slot => .step (.discard ⟨slot.id, []⟩) continuation.code
         return { continuation with code }
 
   def elaborateLambda (fuel : Nat) (span : Span) (identity : DeclId) (parameters : List Parameter)
@@ -611,15 +628,16 @@ mutual
     let explicit := match row with | .row instances _ => instances | _ => []
     let localParameters := (parameters.zip argumentTypes).map fun (parameter, type) =>
       (⟨parameter.id, parameter.name, type, parameter.mutable, outer.closureDepth + 1⟩ : Local)
-    modify fun state => { state with locals := localParameters.reverse ++ outer.locals,
+    modify fun state => { state with
+      locals := localParameters.reverse ++ outer.locals,
       captures := [], closureDepth := outer.closureDepth + 1, unsafePermission := false,
       permittedEffects := row, effectContexts := explicit :: outer.effectContexts }
     let body ← match body with
       | .block _ statements result => elaborateBlock fuel statements result (some resultType)
       | _ => elaborate fuel body (some resultType)
     for place in assertedMoves do
-      let local ← getRequired (outer.locals.find? (fun local => local.id == place.root)) .unknownName "owned-capture assertion names no outer place"
-      requestCapture place local.type .owned
+      let localValue ← getRequired (outer.locals.find? (fun localValue => localValue.id == place.root)) .unknownName "owned-capture assertion names no outer place"
+      requestCapture place localValue.type .owned
     let inner ← get
     let captures := inner.captures
     let receiver := if captures.any (fun c => c.mode == .owned &&
@@ -630,9 +648,12 @@ mutual
       (⟨parameter.id, type, parameter.mutable, span⟩ : TypedSlot)
     let coreFunction : CoreFunction := ⟨identity, { signature with receiver := some receiver }, slots, captures,
       receiver, body, none, span⟩
-    let synthetic : FunctionDecl := ⟨⟨identity, outer.module, s!"lambda#{identity.localId}", .private, span⟩,
-      { signature with receiver := some receiver }, parameters, none, none, none⟩
-    set { inner with locals := outer.locals, captures := outer.captures, closureDepth := outer.closureDepth,
+    let synthetic : FunctionDecl := {
+      header := ⟨identity, outer.module, s!"lambda#{identity.localId}", .private, span⟩
+      signature := { signature with receiver := some receiver }
+      parameters, body := none }
+    set { inner with
+      locals := outer.locals, captures := outer.captures, closureDepth := outer.closureDepth,
       unsafePermission := outer.unsafePermission, permittedEffects := outer.permittedEffects,
       effectContexts := outer.effectContexts, functions := inner.functions ++ [coreFunction],
       program.functions := inner.program.functions ++ [synthetic] }
@@ -646,20 +667,23 @@ mutual
     let context ← expectedCallable expected
     let signature ← match context with
       | some signature => pure signature
-      | none => do pure ({ arguments := [← infer (freshMeta .type)], output := ← infer (freshMeta .type),
+      | none => do pure ({
+        arguments := [← infer (freshMeta .type)], output := ← infer (freshMeta .type),
           effects := .row [] [] } : Signature)
     let subjectType := if signature.arguments.length == 1 then signature.arguments.headD .unit else .tuple signature.arguments
     let subject ← newSlot subjectType span
     let explicit := match signature.effects with | .row instances _ => instances | _ => []
-    modify fun s => { s with captures := [], closureDepth := s.closureDepth + 1,
+    modify fun s => { s with
+      captures := [], closureDepth := s.closureDepth + 1,
       unsafePermission := false, permittedEffects := signature.effects,
       effectContexts := explicit :: s.effectContexts }
-    let checkedClauses ← clauses.mapM fun (.clause clauseSpan pattern body) => do
+    let checkedClauses ← clauses.mapM fun (.clause _clauseSpan pattern body) => do
       let before := (← get).locals
       let checked ← infer (checkPattern (← get).program state.bindings state.module none fuel subjectType pattern)
       let bindings ← patternBindings fuel checked
       let names ← checked.binders fuel
-      modify fun s => { s with locals := names.map (fun (id, name, type) =>
+      modify fun s => { s with
+        locals := names.map (fun (id, name, type) =>
         ⟨id, name, type, false, state.closureDepth + 1⟩) ++ before }
       let body ← elaborate fuel body (some signature.output)
       modify fun s => { s with locals := before }
@@ -671,9 +695,12 @@ mutual
     let receiver := if captures.any (fun c => c.mode == .owned) then .owned else if captures.any (fun c => c.mode == .unique) then .unique else .shared
     let body ← mapCorePlaces fuel (capturePlace captures) (.cases ⟨subject.id, []⟩ checkedClauses)
     let function : CoreFunction := ⟨identity, { signature with receiver := some receiver }, [subject], captures, receiver, body, none, span⟩
-    let declaration : FunctionDecl := ⟨⟨identity, state.module, s!"pattern#{identity.localId}", .private, span⟩,
-      { signature with receiver := some receiver }, [⟨subject.id, "_subject", some subjectType, false⟩], none, none, none⟩
-    set { inner with locals := state.locals, captures := state.captures, closureDepth := state.closureDepth,
+    let declaration : FunctionDecl := {
+      header := ⟨identity, state.module, s!"pattern#{identity.localId}", .private, span⟩
+      signature := { signature with receiver := some receiver }
+      parameters := [⟨subject.id, "_subject", some subjectType, false⟩], body := none }
+    set { inner with
+      locals := state.locals, captures := state.captures, closureDepth := state.closureDepth,
       unsafePermission := state.unsafePermission, permittedEffects := state.permittedEffects,
       effectContexts := state.effectContexts, functions := inner.functions ++ [function],
       program.functions := inner.program.functions ++ [declaration] }
@@ -711,13 +738,14 @@ mutual
             let (lower, upper) := declaration.quantity.getD (1, some 1)
             pure (some (← getRequired (ResumptionPolicy.parse lower upper) .invalidResumption "invalid resumption quantity" clauseSpan))
           if !terminal && continuation.isNone then
-            require (policy.get!.tailResumeAllowed) .invalidResumption "once-only handler abbreviation cannot satisfy this resumption count" clauseSpan
+            let resumable ← getRequired policy .invalidResumption "resumable operation has no quantity contract" clauseSpan
+            require resumable.tailResumeAllowed .invalidResumption "once-only handler abbreviation cannot satisfy this resumption count" clauseSpan
           let continuation ← continuation.mapM fun parameter => do
             let type := Term.continuation parameter.id signature.output output outer.permittedEffects
             pure (⟨parameter.id, type, false, clauseSpan⟩ : TypedSlot)
           pure (patterns, signature.arguments, continuation, policy, some (operation, effectInstance), body)
       require (patterns.length == argumentTypes.length) .typeMismatch "handler payload pattern arity differs" span
-      let patterns ← (patterns.zip argumentTypes).mapM fun (pattern, type) =>
+      let patterns ← (patterns.zip argumentTypes).mapM fun (pattern, type) => do
         infer (checkPattern (← get).program outer.bindings outer.module none fuel type pattern)
       let bindings := (← patterns.mapM (fun pattern => patternBindings fuel pattern)).flatten
       let names := (← patterns.mapM (fun pattern => pattern.binders fuel)).flatten
@@ -746,7 +774,8 @@ def elaborateFunction (function : FunctionDecl) : ElabM Unit := do
   let region := Term.rigid identity .region 1
   let labelType := Term.label brand region function.signature.output
   let explicit := match function.signature.effects with | .row instances _ => instances | _ => []
-  modify fun s => { s with module := function.header.module, locals := locals.reverse, captures := [], closureDepth := 0,
+  modify fun s => { s with
+    module := function.header.module, locals := locals.reverse, captures := [], closureDepth := 0,
     unsafePermission := false, labelNames := [(function.header.name, labelType)],
     permittedEffects := function.signature.effects, effectContexts := [explicit],
     inference.assumptions := function.signature.constraints }
@@ -754,14 +783,15 @@ def elaborateFunction (function : FunctionDecl) : ElabM Unit := do
     | .block _ statements result => elaborateBlock state.program.limits.elaboration statements result (some function.signature.output)
     | _ => elaborate state.program.limits.elaboration body (some function.signature.output)
   infer (solvePending (← get).program)
-  let parameters := locals.map (fun local => (⟨local.id, local.type, local.mutable, function.header.span⟩ : TypedSlot))
+  let parameters := locals.map (fun localValue => (⟨localValue.id, localValue.type, localValue.mutable, function.header.span⟩ : TypedSlot))
   let core : CoreFunction := ⟨function.header.id, function.signature, parameters, [], .shared,
     .label identity brand region function.signature.output body.code, some brand, function.header.span⟩
   modify fun s => { s with functions := s.functions ++ [core], locals := [], captures := [], labelNames := [] }
 
 def elaborateProgram (program : Program) (bindings : List Binding) : Check CoreProgram := do
   let first ← getRequired program.packages.head? .invalidSource "source closure has no package"
-  let initial : Elaboration := { program, bindings, module := first.root,
+  let initial : Elaboration := {
+    program, bindings, module := first.root,
     nextId := 1 + (program.functions.flatMap (fun f => f.parameters.map (·.id))).foldl max 0 }
   let action : ElabM Unit := do
     for function in program.functions do

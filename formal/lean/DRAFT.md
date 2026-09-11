@@ -1,4 +1,29 @@
-# Whole-compiler first implementation pass
+# Whole-compiler mandatory-proof attempt
+
+The user's clarified request is a compiler proved to preserve the language's
+semantics, not merely a compiler implemented in Lean. The first end-to-end
+proof-bearing draft was wired into the real entry points before its first
+build. It is an attempted proof and is **not yet a verified compiler**.
+
+`Proof/Behavior`, `Static`, `Resources`, `Operational`, `Elaboration`, `Source`,
+`Target`, and `Passes` define the proposed judgments and mandatory certificates.
+`compileParsed` now returns a request-indexed `CompileOutput` requiring the
+preparation, elaboration, transformation, analysis, and lowering proofs. The
+driver's incremental parser and `compileSources` require parsing certificates.
+Both use `parseOneFile`; the driver's duplicate parser invocation is removed.
+No unchecked alternate compiler path or admitted theorem is supplied.
+
+The first repair pass made the seven specification modules build, including
+the trace-composition, invariant, and basic move/copy/loan lemmas. The general
+phase theorems in `Proof/Passes` still fail, so the public compiler does not
+build. Several proposed specifications also
+remain incomplete: the source grammar does not yet cover all declarations or
+expressions; target instruction rules do not yet cover all emitted operations;
+cleanup records plans but does not yet schedule the source Drop bodies; and
+the observer relation still needs a coherent memory-injection treatment.
+Those are semantic defects in this proof attempt, not exclusions from the
+requested guarantee. The draft must not be presented as complete or as proven
+merely because the executable now has proof fields.
 
 The initial end-to-end draft has been written before running a build or a test,
 as requested. This is an implementation draft, not a verified checkpoint or a
@@ -30,9 +55,12 @@ there is no separate source checker supplying unchecked success to lowering.
 
 ## Repair phase
 
-The first builds have exposed syntax and elaboration errors. The shared model
-and lexer now build; the complete compiler does not yet build. After build errors
-are repaired, focused source and receiving-boundary checks must expose
+The earlier, unchecked implementation was repaired until all 57 Lake build
+targets passed. Its first generated unit program failed receiving verification
+by overwriting a live register; that regression remains an acceptance failure.
+The new mandatory-proof build reaches the phase theorems and fails on actual
+unsolved goals; increasing tactic limits or accepting missing proofs is not a
+repair. After proof and specification errors are repaired, focused source and receiving-boundary checks must expose
 and repair semantic integration gaps. Known draft debts include unresolved and
 associated declaration forms, generic runtime authority, capture/receiver binding,
 guarded recursion, NLL evidence transport, completion handlers, continuation
@@ -55,3 +83,12 @@ whole-artifact summary construction; the authoritative verifier now runs its
 existing descriptor and instruction-shape checks before those summaries.
 A focused VM regression also checks invalid receiver, register type and target
 metadata. These checks are not a Lean-generated source-program acceptance gate.
+
+The first lowering repair gives initialization flags dedicated, always-live
+prologue storage, consumes their old contents on replacement, reserves ABI
+parameter registers contiguously, and relocates all local branch/label targets
+when inserting the prologue. `tests/RegisterLowering.lean` exercises the real
+lowerer with typed Core. Its artifact passed fresh/decoded VM verification and
+executed successfully. Deliberately malformed live-flag and parameter-layout
+variants were rejected. This is a receiving-boundary check, not a successful
+run of the still-unbuilt certified source compiler.

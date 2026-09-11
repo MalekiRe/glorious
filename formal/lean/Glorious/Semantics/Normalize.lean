@@ -123,7 +123,8 @@ def assignMeta (program : Program) (id : Id) (kind : Kind) (level : Nat)
   let cell ← getRequired (state.cells.find? (fun c => c.id == id)) .missingEvidence "unregistered inference variable"
   require (cell.solution.isNone && cell.kind == kind && cell.level == level)
     .malformedCore "attempt to overwrite solved or stale inference evidence"
-  set { state with cells := state.cells.map (fun (c : MetaCell) =>
+  set { state with
+    cells := state.cells.map (fun (c : MetaCell) =>
     if c.id == id then { c with solution := some value } else c) }
 
 def sameTermHead (a b : Term) : Bool :=
@@ -197,7 +198,8 @@ def substituteConstraint (fuel : Nat) (substitutions : Substitution) : Constrain
     return .higherRanked binders obligations
 
 def substituteSignature (fuel : Nat) (substitutions : Substitution) (signature : Signature) : Check Signature := do
-  return { signature with
+  return {
+    signature with
     generics := signature.generics.filter (fun b => !(substitutions.any (fun p => p.1 == b.id)))
     arguments := ← signature.arguments.mapM (substitute fuel substitutions)
     output := ← substitute fuel substitutions signature.output

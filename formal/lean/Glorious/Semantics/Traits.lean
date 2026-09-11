@@ -78,6 +78,7 @@ mutual
       require (!(active.any (equalConstraint obligation))) .missingEvidence "recursive user trait obligations do not prove themselves"
       let active := obligation :: active
       match obligation with
+      | .named .. => reject .malformedCore "constraint proof requires resolved declaration identities"
       | .equal a b =>
         let a ← zonk program a
         let b ← zonk program b
@@ -113,7 +114,8 @@ mutual
         let values ← selected.declaration.associated.mapM fun (member, value) => do
           pure (⟨traitDecl, member, arguments,
             ← substitute program.limits.normalization selected.substitution value⟩ : ProjectionEvidence)
-        modify fun s => { s with projections := s.projections ++ values,
+        modify fun s => { s with
+          projections := s.projections ++ values,
           assumptions := .implements traitDecl arguments negative :: s.assumptions }
         let trait ← getRequired (program.traitDecl traitDecl) .unknownName "unknown trait declaration"
         let traitSubs ← bindArguments trait.generics arguments
@@ -170,7 +172,7 @@ mutual
       let attempts := candidates.map fun implementation => do
         let action : InferM Substitution := do
           let substitutions ← instantiate program implementation.generics []
-          let head ← implementation.arguments.mapM (substitute program.limits.normalization substitutions)
+          let head ← (implementation.arguments.mapM (substitute program.limits.normalization substitutions) : Check (List Term))
           require (head.length == arguments.length) .kindMismatch "implementation head arity differs"
           for (left, right) in head.zip arguments do unify program remaining left right
           for requirement in implementation.requirements do
@@ -215,8 +217,8 @@ def implHeadsOverlap (program : Program) (a b : ImplDecl) : Check Bool := do
   let action : InferM Unit := do
     let sa ← instantiate program a.generics []
     let sb ← instantiate program b.generics []
-    let aa ← a.arguments.mapM (substitute program.limits.normalization sa)
-    let bb ← b.arguments.mapM (substitute program.limits.normalization sb)
+    let aa ← (a.arguments.mapM (substitute program.limits.normalization sa) : Check (List Term))
+    let bb ← (b.arguments.mapM (substitute program.limits.normalization sb) : Check (List Term))
     require (aa.length == bb.length) .kindMismatch "implementation arity differs"
     for (left, right) in aa.zip bb do unifyTypes program left right
   match action.run {} with

@@ -30,7 +30,7 @@ def CheckedPattern.binders : Nat → CheckedPattern → Check (List (Id × Strin
   | _, .binder id name type => return [(id, name, type)]
   | fuel + 1, .constructor _ _ fields => return (← fields.mapM (CheckedPattern.binders fuel)).flatten
 
-def constructorUniverse (program : Program) (inference : Inference) (from : ModuleId)
+def constructorUniverse (program : Program) (inference : Inference) (sourceContext : ModuleId)
     (type : Term) : Check (Option (List PatternConstructor)) := do
   let type ← normalize program inference program.limits.normalization [] type
   match type with
@@ -43,7 +43,7 @@ def constructorUniverse (program : Program) (inference : Inference) (from : Modu
   | .reference mode _ referent => return some [⟨.reference mode, [referent]⟩]
   | .nominal declaration arguments =>
     let data ← getRequired (program.dataType declaration) .unknownName "unknown pattern subject type"
-    if data.nonExhaustive && from.packageId != declaration.packageId then return none
+    if data.nonExhaustive && sourceContext.packageId != declaration.packageId then return none
     let subs ← bindArguments data.generics arguments
     return some (← data.variants.mapM fun variant => do
       return ⟨.constructor variant.header.id,
@@ -77,33 +77,33 @@ def constantPattern : Nat → Term → Term → Check Pattern
       return .constructor declaration (fields.zipIdx |>.map (fun (field, index) => (index, .constant field))) false
     | _ => reject .invalidSource "pattern is not a closed structural constant"
 
-def checkPattern (program : Program) (bindings : List Binding) (from : ModuleId)
+def checkPattern (program : Program) (bindings : List Binding) (sourceContext : ModuleId)
     (borrowMode : Option (Mutability × Term)) : Nat → Term → Pattern → InferM CheckedPattern
   | 0, _, _ => reject .resourceLimit "pattern checking exhausted"
   | fuel + 1, expected, pattern => do
     let expected ← zonk program expected
     -- Borrow ergonomics produces references to fields, never copied owners.
     match expected, pattern with
-    | .reference mode region referent, .reference .. => pure ()
-    | .reference mode region referent, .binder .. => pure ()
-    | .reference mode region referent, .wildcard => pure ()
+    | .reference .., .reference .. => pure ()
+    | .reference .., .binder .. => pure ()
+    | .reference .., .wildcard => pure ()
     | .reference mode region referent, _ =>
-      let nested ← checkPattern program bindings from (some (mode, region)) fuel referent pattern
+      let nested ← checkPattern program bindings sourceContext (some (mode, region)) fuel referent pattern
       return .constructor expected (.reference mode) [nested]
     | _, _ => pure ()
     match pattern with
     | .wildcard => return .wildcard expected
     | .binder identity name forced =>
       if !forced then
-        match resolve program bindings from .value ⟨[name]⟩ with
+        match resolve program bindings sourceContext .value ⟨[name]⟩ with
         | .ok binding =>
           if (program.constants.any (fun c => c.header.id == binding.declaration)) then
-            return ← checkPattern program bindings from borrowMode fuel expected (.named ⟨[name]⟩ [])
+            return ← checkPattern program bindings sourceContext borrowMode fuel expected (.named ⟨[name]⟩ [])
         | .error d => if d.problem == .ambiguous then throw d
       let type := match borrowMode with | none => expected | some (mode, region) => .reference mode region expected
       return .binder identity name type
     | .named path fields =>
-      let binding ← resolve program bindings from .value path
+      let binding ← resolve program bindings sourceContext .value path
       match program.constants.find? (fun c => c.header.id == binding.declaration) with
       | some constant =>
         require fields.isEmpty .invalidSource "constant pattern cannot have arguments"
@@ -111,17 +111,17 @@ def checkPattern (program : Program) (bindings : List Binding) (from : ModuleId)
         let type ← substitute fuel subs constant.type
         unify program fuel expected type
         let value ← substitute fuel subs constant.value >>= zonk program
-        checkPattern program bindings from borrowMode fuel expected (← constantPattern fuel expected value)
+        checkPattern program bindings sourceContext borrowMode fuel expected (← constantPattern fuel expected value)
       | none =>
-        checkPattern program bindings from borrowMode fuel expected
+        checkPattern program bindings sourceContext borrowMode fuel expected
           (.constructor binding.declaration (fields.zipIdx |>.map (fun (field, index) => (index, field))) false)
     | .record path fields rest =>
-      let binding ← resolve program bindings from .value path
+      let binding ← resolve program bindings sourceContext .value path
       let (_, constructor) ← getRequired (program.constructor binding.declaration) .typeMismatch "record pattern names no constructor"
       let numbered ← fields.mapM fun (name, pattern) => do
         let index ← getRequired (constructor.fields.findIdx? (fun f => f.header.name == name)) .unknownName "unknown record field"
         return (index, pattern)
-      checkPattern program bindings from borrowMode fuel expected (.constructor binding.declaration numbered rest)
+      checkPattern program bindings sourceContext borrowMode fuel expected (.constructor binding.declaration numbered rest)
     | .constant value =>
       let value ← zonk program value
       match value with
@@ -129,7 +129,7 @@ def checkPattern (program : Program) (bindings : List Binding) (from : ModuleId)
       | .constant scalar =>
         unify program fuel expected (scalarValueType scalar)
         return .constructor expected (.scalar scalar) []
-      | _ => checkPattern program bindings from borrowMode fuel expected (← constantPattern fuel expected value)
+      | _ => checkPattern program bindings sourceContext borrowMode fuel expected (← constantPattern fuel expected value)
     | .tuple fields =>
       let types ← match expected with
         | .unit => pure []
@@ -140,7 +140,7 @@ def checkPattern (program : Program) (bindings : List Binding) (from : ModuleId)
           pure types
         | _ => reject .typeMismatch "tuple pattern requires the exact tuple argument shape"
       require (types.length == fields.length) .typeMismatch "tuple pattern arity differs"
-      let checked ← (types.zip fields).mapM (fun (type, field) => checkPattern program bindings from borrowMode fuel type field)
+      let checked ← (types.zip fields).mapM (fun (type, field) => checkPattern program bindings sourceContext borrowMode fuel type field)
       return .constructor expected (.product fields.length) checked
     | .array before after rest =>
       match expected with
@@ -151,7 +151,7 @@ def checkPattern (program : Program) (bindings : List Binding) (from : ModuleId)
         require (rest.isSome || before.length + after.length == count) .typeMismatch "array pattern is not the declared fixed length"
         let middle := count - before.length - after.length
         let patterns := before ++ List.replicate middle Pattern.wildcard ++ after
-        let checked ← patterns.mapM (checkPattern program bindings from borrowMode fuel element)
+        let checked ← patterns.mapM (checkPattern program bindings sourceContext borrowMode fuel element)
         -- A bound remainder is lowered as the exact resident subarray/view by
         -- the pattern projection phase, with all omitted indices retained.
         let checked := match rest with
@@ -169,19 +169,19 @@ def checkPattern (program : Program) (bindings : List Binding) (from : ModuleId)
       require (rest || fields.length == variant.fields.length) .typeMismatch "pattern omits fields without a remainder"
       if borrowMode.isNone then
         require data.dropHook.isNone .illegalDiscard "safe ownership deconstruction of a custom-Drop owner is forbidden"
-        require (!data.nonExhaustive || data.header.id.packageId == from.packageId)
+        require (!data.nonExhaustive || data.header.id.packageId == sourceContext.packageId)
           .privacy "external ownership deconstruction of a non-exhaustive enum is forbidden"
       let checked ← variant.fields.zipIdx |>.mapM fun (field, index) => do
-        require (visible from field.header) .privacy "pattern deconstructs a private field"
+        require (visible sourceContext field.header) .privacy "pattern deconstructs a private field"
         let type ← substitute fuel subs field.type
         let pattern := (lookup index fields).getD .wildcard
-        checkPattern program bindings from borrowMode fuel type pattern
+        checkPattern program bindings sourceContext borrowMode fuel type pattern
       return .constructor expected (.constructor declaration) checked
     | .reference mode pattern =>
       match expected with
       | .reference actual region referent =>
         require (actual == mode || (actual == .unique && mode == .shared)) .typeMismatch "reference pattern access is incompatible"
-        let checked ← checkPattern program bindings from (some (mode, region)) fuel referent pattern
+        let checked ← checkPattern program bindings sourceContext (some (mode, region)) fuel referent pattern
         return .constructor expected (.reference mode) [checked]
       | _ => reject .typeMismatch "reference pattern requires a reference"
 
@@ -197,12 +197,12 @@ def specializeMatrix (constructor : PatternConstructor) (matrix : List (List Che
 
 def defaultMatrix (matrix : List (List CheckedPattern)) : List (List CheckedPattern) :=
   matrix.filterMap fun row => match row with
-    | (.wildcard _ | .binder ..) :: rest => some rest
+  | .wildcard _ :: rest | .binder .. :: rest => some rest
     | _ => none
 
 /-- Standard constructor-matrix usefulness. Infinite scalar domains require a
     default row; no finite set of scalar constants is assumed exhaustive. -/
-def useful (program : Program) (inference : Inference) (from : ModuleId) :
+def useful (program : Program) (inference : Inference) (sourceContext : ModuleId) :
     Nat → List Term → List (List CheckedPattern) → List CheckedPattern → Check Bool
   | 0, _, _, _ => reject .resourceLimit "pattern exhaustiveness search exhausted"
   | _ + 1, [], matrix, [] => return matrix.isEmpty
@@ -210,29 +210,29 @@ def useful (program : Program) (inference : Inference) (from : ModuleId) :
     match pattern with
     | .constructor _ key fields => do
       let constructor : PatternConstructor := ⟨key, fields.map CheckedPattern.type⟩
-      useful program inference from fuel (constructor.fields ++ types)
+      useful program inference sourceContext fuel (constructor.fields ++ types)
         (specializeMatrix constructor matrix) (fields ++ patterns)
     | _ => do
-      match ← constructorUniverse program inference from type with
-      | none => useful program inference from fuel types (defaultMatrix matrix) patterns
+      match ← constructorUniverse program inference sourceContext type with
+      | none => useful program inference sourceContext fuel types (defaultMatrix matrix) patterns
       | some constructors =>
         let alternatives ← constructors.mapM fun constructor =>
-          useful program inference from fuel (constructor.fields ++ types)
+          useful program inference sourceContext fuel (constructor.fields ++ types)
             (specializeMatrix constructor matrix)
             (constructor.fields.map CheckedPattern.wildcard ++ patterns)
         return alternatives.any id
   | _, _, _, _ => reject .malformedCore "pattern matrix arity differs from its argument tuple"
 
-def checkExhaustive (program : Program) (inference : Inference) (from : ModuleId)
+def checkExhaustive (program : Program) (inference : Inference) (sourceContext : ModuleId)
     (type : Term) (patterns : List CheckedPattern) : Check Unit := do
   let _ ← patterns.foldlM (init := ([] : List (List CheckedPattern))) fun previous pattern => do
     let binders ← pattern.binders program.limits.normalization
     require (unique (binders.map (fun (id, _, _) => id)) && unique (binders.map (fun (_, name, _) => name)))
       .duplicate "a pattern binds a name more than once"
-    require (← useful program inference from program.limits.solving [type] previous [pattern])
+    require (← useful program inference sourceContext program.limits.solving [type] previous [pattern])
       .invalidSource "unreachable pattern clause"
     return previous ++ [[pattern]]
-  require (!(← useful program inference from program.limits.solving [type]
+  require (!(← useful program inference sourceContext program.limits.solving [type]
     (patterns.map (fun pattern => [pattern])) [.wildcard type])) .invalidSource "non-exhaustive pattern callable"
 
 end Glorious.Semantics

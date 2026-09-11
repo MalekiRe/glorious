@@ -26,16 +26,17 @@ def usage : String :=
 
 def parseOptions : List String → Options → Check Options
   | [], options => return options
-  | ("--help" | "-h") :: rest, options => parseOptions rest { options with help := true }
+  | "--help" :: rest, options | "-h" :: rest, options => parseOptions rest { options with help := true }
   | "--emit-json" :: rest, options => parseOptions rest { options with emitJson := true }
-  | ("-o" | "--output") :: value :: rest, options => parseOptions rest { options with output := some value }
+  | "-o" :: value :: rest, options | "--output" :: value :: rest, options => parseOptions rest { options with output := some value }
   | "--manifest" :: value :: rest, options => parseOptions rest { options with manifest := some value }
   | "--package" :: value :: rest, options => parseOptions rest { options with package := value.replace "-" "_" }
   | "--entry" :: value :: rest, options => parseOptions rest { options with entry := ⟨value.splitOn "::"⟩ }
   | "--assembler" :: value :: rest, options => parseOptions rest { options with assembler := value }
   | "--dependency" :: value :: rest, options => do
     match value.splitOn "=" with
-    | [name, path] => parseOptions rest { options with dependencies := options.dependencies ++
+    | [name, path] => parseOptions rest { options with
+      dependencies := options.dependencies ++
         [⟨name.replace "-" "_", path, []⟩] }
     | _ => reject .invalidSource "--dependency expects NAME=ROOT.glorious"
   | value :: rest, options => do
@@ -48,20 +49,18 @@ def checkedIO (result : Check α) : IO α :=
   | .error diagnostic => throw (IO.userError s!"{repr diagnostic.problem} at source {diagnostic.span.file}:{diagnostic.span.start}: {diagnostic.message}")
 
 structure SourceClosure where
+  initial : Program
   program : Program
   files : List SourceFile := []
+  parsed : Spec.Source.ParsedFiles initial files program
   nextId : Id := 1
-  deriving Repr
 
 def parseSource (closure : SourceClosure) (module : ModuleId) (path : FilePath) : IO SourceClosure := do
   let bytes ← IO.FS.readBinFile path
   let file : SourceFile := ⟨closure.files.length, module, path.toString, bytes⟩
-  let tokens ← checkedIO (lex file)
-  let program := if closure.program.modules.any (fun m => m.identity == module) then closure.program else
-    { closure.program with modules := closure.program.modules ++ [⟨module, [], [], false⟩] }
-  let state : ParserState := { tokens, nextId := closure.nextId, module, program }
-  let (_, state) ← checkedIO ((parseItems (tokens.size * 8 + 1)).run state)
-  return { program := state.program, files := closure.files ++ [file], nextId := state.nextId }
+  let result ← checkedIO (Spec.parseOneCertified closure.program closure.nextId file)
+  return { initial := closure.initial, program := result.val.2, files := closure.files ++ [file],
+    parsed := closure.parsed.append (.cons result.property .nil), nextId := result.val.1 }
 
 def childSourcePath (packages : List PackageInput) (module : ModuleId) : IO FilePath := do
   let package ← checkedIO (getRequired packages[module.packageId]? .unknownName "module package root is unavailable")
@@ -84,7 +83,7 @@ modules and supplied package roots. Parsing is the producer of that relation;
 the driver does not scan source text for module-looking names. -/
 def loadSourceClosure (manifest : CompilerManifest) (packages : List PackageInput) : IO SourceClosure := do
   let program ← checkedIO (initialProgram manifest packages)
-  let roots ← packages.zipIdx.foldlM (init := ({ program } : SourceClosure)) fun closure (package, id) =>
+  let roots ← packages.zipIdx.foldlM (init := ({ initial := program, program, parsed := .nil } : SourceClosure)) fun closure (package, id) =>
     parseSource closure ⟨id, []⟩ package.rootFile
   let rec expand : Nat → SourceClosure → IO SourceClosure
     | 0, _ => throw (IO.userError "source module closure exceeded the declared limit")
@@ -98,7 +97,13 @@ def loadSourceClosure (manifest : CompilerManifest) (packages : List PackageInpu
         expand fuel (← parseSource closure module path)
   expand manifest.limits.elaboration roots
 
-def prepareRequest (options : Options) : IO (CompileRequest × List SourceFile) := do
+structure ParsedRequest where
+  request : CompileRequest
+  initial : Program
+  files : List SourceFile
+  parsed : Spec.Source.ParsedFiles initial files request.program
+
+def prepareRequest (options : Options) : IO ParsedRequest := do
   let manifest ← match options.manifest with
     | none => pure emptyManifest
     | some path => checkedIO (decodeManifest (← IO.FS.readFile path))
@@ -110,34 +115,35 @@ def prepareRequest (options : Options) : IO (CompileRequest × List SourceFile) 
       if manifest.packages.isEmpty then throw (IO.userError "missing source root; use --help")
       pure manifest.packages
   let closure ← loadSourceClosure manifest packages
-  return (⟨manifest, closure.program, options.package, options.entry⟩, closure.files)
+  return ⟨⟨manifest, closure.program, options.package, options.entry⟩, closure.initial, closure.files, closure.parsed⟩
 
-def publish (options : Options) (output : CompileOutput) : IO Unit := do
+def publish (options : Options) (input : ParsedRequest) (output : CompileOutput input.request) : IO Unit := do
   let json := (output.artifact.json output.target).compress
   let destination := options.output.getD (if options.emitJson then "out.grbc.json" else "out.grbc")
   if options.emitJson then
     IO.FS.writeFile destination (json ++ "\n")
   else
-    let child ← IO.Process.spawn {
-      cmd := options.assembler, args := #["--output", destination],
-      stdin := .piped, stdout := .inherit, stderr := .inherit }
-    child.stdin.putStr json
-    child.stdin.flush
-    let child ← child.takeStdin
-    let code ← child.2.wait
+    let child ← do
+      let (stdin, child) ← (← IO.Process.spawn {
+        cmd := options.assembler, args := #["--output", destination],
+        stdin := .piped, stdout := .inherit, stderr := .inherit }).takeStdin
+      stdin.putStr json
+      stdin.flush
+      pure child
+    let code ← child.wait
     unless code == 0 do throw (IO.userError s!"receiving VM verification/encoding failed (exit {code}); no successful compiler artifact was published")
 
 def run (arguments : List String) : IO UInt32 := do
   try
     let options ← checkedIO (parseOptions arguments {})
     if options.help then IO.print usage; return 0
-    let (request, files) ← prepareRequest options
-    let output ← match compileParsed request with
+    let input ← prepareRequest options
+    let output ← match compileParsed input.request with
       | .ok output => pure output
       | .error diagnostic =>
-        let path := files[diagnostic.span.file]?.map (·.path) |>.getD "<semantic input>"
+        let path := input.files[diagnostic.span.file]?.map (·.path) |>.getD "<semantic input>"
         throw (IO.userError s!"{path}:{diagnostic.span.start}-{diagnostic.span.stop}: {repr diagnostic.problem}: {diagnostic.message}")
-    publish options output
+    publish options input output
     return 0
   catch error =>
     IO.eprintln s!"glorious-lean: {error}"

@@ -125,7 +125,8 @@ mutual
               let id ← parserId
               let binder : Binder := ⟨id, s!"_elided{id}", .region, none⟩
               let region := Term.param id .region
-              modify fun state => { state with
+              modify fun state => {
+                state with
                 implicitRegions := state.implicitRegions ++ [binder],
                 inputRegions := if state.parsingResult then state.inputRegions else state.inputRegions ++ [region] }
               pure region
@@ -512,7 +513,8 @@ def parseAttributes (fuel : Nat) : ParseM (List (String × List String)) := do
       let arguments ← if ← accept "=" then pure (arguments ++ [(← takeToken).spelling]) else pure arguments
       let _ ← expect "]"
       if inner && name == "no_implicit_prelude" then
-        modify fun state => { state with program.modules := state.program.modules.map (fun m =>
+        modify fun state => { state with
+          program.modules := state.program.modules.map (fun m =>
           if m.identity == state.module then { m with noImplicitPrelude := true } else m) }
       loop fuel (attributes ++ [(name, arguments)])
   loop fuel []
@@ -558,7 +560,8 @@ mutual
         let _ ← expect "="
         let value ← parseTerm fuel .constant
         let _ ← expect ";"
-        modify fun state => { state with
+        modify fun state => {
+          state with
           binders := before,
           program.constants := state.program.constants ++ [⟨header, generics, type, value, token.spelling == "let"⟩] }
       | "effect" => parseEffect fuel visibility
@@ -568,11 +571,13 @@ mutual
         let (name, _) ← identifier
         let parent := (← get).module
         let child := { parent with path := parent.path ++ [name] }
-        modify fun state => { state with program.modules := state.program.modules.map (fun moduleDecl =>
+        modify fun state => { state with
+          program.modules := state.program.modules.map (fun moduleDecl =>
           if moduleDecl.identity == parent then { moduleDecl with children := moduleDecl.children ++ [child] } else moduleDecl) }
         if ← accept ";" then pure () else
           let _ ← expect "{"
-          modify fun state => { state with
+          modify fun state => {
+            state with
             module := child,
             program.modules := state.program.modules ++ [⟨child, [], [], false⟩] }
           parseItems fuel "}"
@@ -585,7 +590,7 @@ mutual
         let target ← if ← accept "=" then parsePath fuel else pure ⟨[spelling.spelling]⟩
         let _ ← expect ";"
         let associativity : Associativity := match token.spelling with
-          | "infixl" => .left | "infixr" => .right | "prefix" => .«prefix» | _ => .none
+          | "infixl" => .left | "infixr" => .right | "prefix" => .«prefixOp» | _ => .none
         let fixity : Fixity := ⟨(← get).module, spelling.spelling, associativity, precedence,
           ⟨(← get).module.packageId, 0⟩, token.span, some target⟩
         modify fun state => { state with program.fixities := state.program.fixities ++ [fixity] }
@@ -613,7 +618,8 @@ mutual
     let body ← if ← accept ";" then pure none else pure (some (← parseBlock fuel))
     let exportName := (lookup "export_name" attributes).bind List.head?
     let function : FunctionDecl := { header, signature, parameters, body, exportName, owner := before.currentOwner }
-    modify fun state => { state with
+    modify fun state => {
+      state with
       binders := before.binders, implicitRegions := before.implicitRegions,
       inputRegions := before.inputRegions, parsingResult := before.parsingResult,
       program.functions := state.program.functions ++ [function] }
@@ -721,7 +727,8 @@ mutual
           let count := (← get).program.functions.length
           parseFunction fuel .public false .glorious []
           let function ← getRequired (← get).program.functions[count]? .malformedCore "trait method parser lost its declaration"
-          modify fun state => { state with program.functions := state.program.functions.map (fun f =>
+          modify fun state => { state with
+            program.functions := state.program.functions.map (fun f =>
             if f.header.id == function.header.id then { f with traitMember := some header.id } else f) }
           members fuel (result ++ [⟨function.header, function.signature.generics, .type, none, some function.signature⟩])
         else reject .invalidSource "expected a trait method or associated type" token.span
@@ -769,7 +776,8 @@ mutual
     let declaration : ImplDecl := {
       header, generics, traitDecl := ⟨before.module.packageId, 0⟩,
       arguments, requirements, associated, methods, negative, unsafeImpl := unsafe_, traitPath }
-    modify fun state => { state with
+    modify fun state => {
+      state with
       binders := before.binders, selfType := before.selfType, currentOwner := before.currentOwner,
       program.implementations := if traitPath.isSome then state.program.implementations ++ [declaration] else state.program.implementations }
 
@@ -789,7 +797,8 @@ mutual
           return [⟨module, ⟨names⟩, .value, aliasName, false, false, visibility == .public, true, span⟩]
     let imports ← tree fuel []
     let _ ← expect ";"
-    modify fun state => { state with program.modules := state.program.modules.map (fun m =>
+    modify fun state => { state with
+      program.modules := state.program.modules.map (fun m =>
       if m.identity == module then { m with imports := m.imports ++ imports } else m) }
 
   def parseForeignItems (fuel : Nat) (visibility : Visibility) (unsafe_ : Bool) : ParseM Unit := do
@@ -802,14 +811,17 @@ mutual
       parseForeignItems fuel visibility unsafe_
 end
 
+def parseOneFile (program : Program) (nextId : Id) (file : SourceFile) : Check (Id × Program) := do
+  let tokens ← lex file
+  let program := if program.modules.any (fun moduleDecl => moduleDecl.identity == file.module) then program else
+    { program with modules := program.modules ++ [⟨file.module, [], [], false⟩] }
+  let state : ParserState := { tokens, nextId, module := file.module, program }
+  let (_, state) ← (parseItems (tokens.size * 8 + 1)).run state
+  return (state.nextId, state.program)
+
 def parseFiles (initial : Program) (files : List SourceFile) : Check Program := do
-  let (_, program) ← files.foldlM (init := (1, initial)) fun (nextId, program) file => do
-    let tokens ← lex file
-    let program := if program.modules.any (fun moduleDecl => moduleDecl.identity == file.module) then program else
-      { program with modules := program.modules ++ [⟨file.module, [], [], false⟩] }
-    let state : ParserState := { tokens, nextId, module := file.module, program }
-    let (_, state) ← (parseItems (tokens.size * 8 + 1)).run state
-    return (state.nextId, state.program)
+  let (_, program) ← files.foldlM (init := (1, initial)) fun (nextId, program) file =>
+    parseOneFile program nextId file
   return program
 
 end Glorious.Semantics

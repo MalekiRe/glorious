@@ -81,7 +81,8 @@ def jsonDefault (value : Json) (field : String) (parse : Json → Check α) (fal
 def jsonStrings (value : Json) : Check (List String) := jsonList value >>= List.mapM jsonString
 
 def decodePackageInput (json : Json) : Check PackageInput := do
-  return { name := (← jsonField json "name" >>= jsonString).replace "-" "_",
+  return {
+    name := (← jsonField json "name" >>= jsonString).replace "-" "_",
     rootFile := ← jsonField json "root" >>= jsonString,
     dependencies := ← jsonDefault json "dependencies" jsonStrings [] }
 
@@ -118,7 +119,8 @@ def decodeTarget (json : Json) (manifest : String) : Check Target := do
         let name ← jsonField entry "type" >>= jsonString
         let scalar ← getRequired (parseScalarType name) .invalidLayout "unknown scalar alignment key"
         return (scalar, ← jsonField entry "alignment" >>= jsonNat)
-  let target := { target with pointerBits, scalarAlignments := alignments,
+  let target := { target with
+    pointerBits, scalarAlignments := alignments,
     triple := ← jsonField json "triple" >>= jsonString,
     littleEndian := ← jsonField json "little_endian" >>= jsonBool,
     maxObjectSize := ← jsonField json "max_object_size" >>= jsonNat,
@@ -141,18 +143,18 @@ def decodeManifest (text : String) : Check CompilerManifest := do
   let prelude ← (jsonOptional json "prelude").mapM fun value => do
     return (← jsonField value "package" >>= jsonString,
       ⟨(← jsonField value "path" >>= jsonString).splitOn "::"⟩)
-  let limits ← match jsonOptional json "limits" with
+  let limits : Limits ← match jsonOptional json "limits" with
     | none => pure ({} : Limits)
     | some value => do
       let default : Limits := {}
-      return {
+      pure ({
         normalization := ← jsonDefault value "normalization" jsonNat default.normalization,
         solving := ← jsonDefault value "solving" jsonNat default.solving,
         elaboration := ← jsonDefault value "elaboration" jsonNat default.elaboration,
         analysis := ← jsonDefault value "analysis" jsonNat default.analysis,
         alternatives := ← jsonDefault value "alternatives" jsonNat default.alternatives,
         layout := ← jsonDefault value "layout" jsonNat default.layout,
-        execution := ← jsonDefault value "execution" jsonNat default.execution }
+        execution := ← jsonDefault value "execution" jsonNat default.execution } : Limits)
   return { identity, target, packages, imports, capabilities, prelude, limits }
 
 def initialProgram (manifest : CompilerManifest) (packages : List PackageInput) : Check Program := do
@@ -162,7 +164,8 @@ def initialProgram (manifest : CompilerManifest) (packages : List PackageInput) 
     let dependencies ← package.dependencies.mapM fun dependency =>
       getRequired (names.findIdx? (· == dependency.replace "-" "_")) .unknownName "declared package dependency is not in the supplied closure"
     return (⟨id, package.name, dependencies, ⟨id, []⟩⟩ : Package)
-  return { packages, modules := [], dataTypes := [], aliases := [], traits := [], implementations := [],
+  return {
+    packages, modules := [], dataTypes := [], aliases := [], traits := [], implementations := [],
     effects := [], functions := [], constants := [], fixities := [], target := manifest.target,
     imports := [], grantedCapabilities := manifest.capabilities, limits := manifest.limits }
 
@@ -174,7 +177,8 @@ def addManifestPrelude (manifest : CompilerManifest) (program : Program) : Check
     let path := Path.mk (package.name :: path.components)
     let modules := program.modules.map fun moduleDecl =>
       if moduleDecl.noImplicitPrelude then moduleDecl else
-        { moduleDecl with imports := moduleDecl.imports ++
+        { moduleDecl with
+          imports := moduleDecl.imports ++
           [⟨moduleDecl.identity, path, .value, none, true, true, false, true, {}⟩] }
     return { program with modules }
 
@@ -200,7 +204,8 @@ def bindRuntimeManifest (manifest : CompilerManifest) (program : Program) (bindi
       output := ← parseManifestTerm program bindings function.header.module selector.output .type,
       effects := ← parseManifestTerm program bindings function.header.module selector.effects .row,
       unsafeCall := selector.unsafeCall, abi := selector.abi }
-    return ({ identity := function.header.id, signature, kind := selector.kind,
+    return ({
+      identity := function.header.id, signature, kind := selector.kind,
       capability := selector.capability, allocationDomain := selector.allocationDomain,
       retainedCallback := selector.retainedCallback, replayable := selector.replayable,
       symbol := selector.symbol, primitive := selector.primitive } : RuntimeImport)

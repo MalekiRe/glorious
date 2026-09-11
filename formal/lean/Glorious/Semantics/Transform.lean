@@ -15,7 +15,7 @@ def coreSlots : Nat → Core → Check (List TypedSlot)
         | _ => []
       return own ++ (← coreSlots fuel next)
     | .bind slot a b => return slot :: ((← coreSlots fuel a) ++ (← coreSlots fuel b))
-    | .scoped _ body | .label _ _ _ _ body => coreSlots fuel body
+    | .scopeBlock _ body | .label _ _ _ _ body => coreSlots fuel body
     | .cases _ clauses => return (← clauses.mapM fun (.clause _ bindings body) => do
         return bindings.map (·.slot) ++ (← coreSlots fuel body)).flatten
     | .handle _ body clauses => return (← coreSlots fuel body) ++ (← clauses.mapM fun clause => do
@@ -30,32 +30,34 @@ def coreBrands : Nat → Core → Check (List Id)
     match core with
     | .step _ next => coreBrands fuel next
     | .bind _ a b => return (← coreBrands fuel a) ++ (← coreBrands fuel b)
-    | .scoped identity body | .label identity _ _ _ body => return identity :: (← coreBrands fuel body)
+    | .scopeBlock identity body | .label identity _ _ _ body => return identity :: (← coreBrands fuel body)
     | .cases _ clauses => return (← clauses.mapM (fun (.clause _ _ body) => coreBrands fuel body)).flatten
     | .handle identity body clauses => return identity :: ((← coreBrands fuel body) ++ (← clauses.mapM fun clause =>
         match clause with | .completion _ _ body | .operation _ _ _ _ _ _ body => coreBrands fuel body).flatten)
     | _ => return []
 
-def renamePlace (renaming : List (Id × Id)) (place : Place) : Place :=
-  { root := (lookup place.root renaming).getD place.root,
+def renamePlace (renames : List (Id × Id)) (place : Place) : Place :=
+  {
+    root := (lookup place.root renames).getD place.root,
     projections := place.projections.map fun projection => match projection with
-      | .dynamicIndex identity => .dynamicIndex ((lookup identity renaming).getD identity)
+      | .dynamicIndex identity => .dynamicIndex ((lookup identity renames).getD identity)
       | _ => projection }
 
-def renameLocalTerm (fuel : Nat) (renaming : List (Id × Id)) (term : Term) : Check Term := do
+def renameLocalTerm (fuel : Nat) (renames : List (Id × Id)) (term : Term) : Check Term := do
   match fuel with
   | 0 => reject .resourceLimit "Core brand alpha-renaming exhausted"
   | fuel + 1 =>
     match term with
-    | .rigid identity kind level => return .rigid ((lookup identity renaming).getD identity) kind level
-    | .continuation identity a b effects => return .continuation ((lookup identity renaming).getD identity)
-        (← renameLocalTerm fuel renaming a) (← renameLocalTerm fuel renaming b) (← renameLocalTerm fuel renaming effects)
-    | _ => term.mapChildrenM (renameLocalTerm fuel renaming)
+    | .rigid identity kind level => return .rigid ((lookup identity renames).getD identity) kind level
+    | .continuation identity a b effects =>
+      return .continuation ((lookup identity renames).getD identity)
+        (← renameLocalTerm fuel renames a) (← renameLocalTerm fuel renames b) (← renameLocalTerm fuel renames effects)
+    | _ => term.mapChildrenM (renameLocalTerm fuel renames)
 
-def renameCore (fuel : Nat) (renaming : List (Id × Id)) (core : Core) : Check Core := do
-  let core ← mapCoreTerms fuel (renameLocalTerm fuel renaming) core
-  let core ← mapCorePlaces fuel (renamePlace renaming) core
-  let id := fun identity => (lookup identity renaming).getD identity
+def renameCore (fuel : Nat) (renames : List (Id × Id)) (core : Core) : Check Core := do
+  let core ← mapCoreTerms fuel (renameLocalTerm fuel renames) core
+  let core ← mapCorePlaces fuel (renamePlace renames) core
+  let id := fun identity => (lookup identity renames).getD identity
   let slot := fun (slot : TypedSlot) => { slot with id := id slot.id }
   let bindings := fun (bindings : List PatternBinding) => bindings.map (fun b => { b with slot := slot b.slot })
   let rec visit : Nat → Core → Check Core
@@ -79,7 +81,7 @@ def renameCore (fuel : Nat) (renaming : List (Id × Id)) (core : Core) : Check C
           | _ => operation
         return .step operation (← visit fuel next)
       | .bind s a b => return .bind (slot s) (← visit fuel a) (← visit fuel b)
-      | .scoped identity body => return .scoped (id identity) (← visit fuel body)
+      | .scopeBlock identity body => return .scopeBlock (id identity) (← visit fuel body)
       | .label identity brand region type body => return .label (id identity) brand region type (← visit fuel body)
       | .cases subject clauses => return .cases subject (← clauses.mapM fun (.clause p bs body) =>
           return .clause p (bindings bs) (← visit fuel body))
@@ -137,7 +139,7 @@ mutual
         return .bind result body (← fuseCore fuel active slots next)
       | .step operation next => return .step operation (← fuseCore fuel active slots next)
       | .bind slot a b => return .bind slot (← fuseCore fuel active slots a) (← fuseCore fuel active slots b)
-      | .scoped scope body => return .scoped scope (← fuseCore fuel active slots body)
+      | .scopeBlock scope body => return .scopeBlock scope (← fuseCore fuel active slots body)
       | .label identity brand region type body => return .label identity brand region type (← fuseCore fuel active slots body)
       | .cases subject clauses => return .cases subject (← clauses.mapM fun (.clause p bs body) =>
           return .clause p bs (← fuseCore fuel active slots body))
@@ -163,10 +165,10 @@ mutual
       (⟨capture.parameter, capture.type, capture.mode == .unique, call.span⟩ : TypedSlot)
     let slots := function.parameters ++ captured ++ localSlots
     let ids := ((slots.map (·.id)) ++ (← coreBrands fuel function.body)).eraseDups
-    let renaming := ids.zipIdx |>.map fun (identity, index) => (identity, state.nextId + index)
+    let renames := ids.zipIdx |>.map fun (identity, index) => (identity, state.nextId + index)
     set { state with nextId := state.nextId + ids.length + 1 }
-    let renamed := fun (slot : TypedSlot) => { slot with id := (lookup slot.id renaming).getD slot.id }
-    let body ← renameCore fuel renaming function.body
+    let renamed := fun (slot : TypedSlot) => { slot with id := (lookup slot.id renames).getD slot.id }
+    let body ← renameCore fuel renames function.body
     let body ← fuseCore fuel (function.declaration :: active) (slots.map renamed) body
     let arguments := (function.parameters.zip call.inputs).flatMap fun (parameter, input) =>
       let parameter := renamed parameter
@@ -176,7 +178,7 @@ mutual
         [.field index], none⟩ : PatternBinding)
     let pattern := CheckedPattern.constructor (.callable function.declaration [])
       (.product captures.length) (captures.map (fun capture => .wildcard capture.slot.type))
-    return .scoped (state.nextId + ids.length)
+    return .scopeBlock (state.nextId + ids.length)
       (coreStepList (arguments ++ [.deconstruct call.callee pattern captures]) body)
 end
 

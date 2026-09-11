@@ -22,9 +22,9 @@ structure Variant where
   tag : Option Nat := none
   deriving BEq, Repr
 
-inductive Type where
+inductive ValueType where
   | builtin (name : String)
-  | restricted (base : Type) (duplicable discardable : Bool)
+  | restricted (base : ValueType) (duplicable discardable : Bool)
   | staticData (element : Nat) (tag : Nat) (alignment : Nat)
   | array (element : Nat)
   | reference (unique : Bool) (referent : Nat)
@@ -91,7 +91,9 @@ structure Function where
   signature : Signature
   receiver : Option Nat
   registers : List Nat
-  start length labels : Nat
+  start : Nat
+  length : Nat
+  labels : Nat
   deriving Repr
 
 structure Operation where
@@ -110,7 +112,8 @@ structure Protocol where
   deriving Repr
 
 structure HandlerClause where
-  protocol operation : Nat
+  protocol : Nat
+  operation : Nat
   signature : Signature
   resumption : Option Nat
   deriving Repr
@@ -118,11 +121,12 @@ structure HandlerClause where
 structure Handler where
   result : Nat
   clauses : List HandlerClause
-  partial : Bool
+  isPartial : Bool
   deriving Repr
 
 structure Import where
-  capability symbol : String
+  capability : String
+  symbol : String
   signature : Signature
   mayTrap : Bool
   deriving Repr
@@ -130,7 +134,7 @@ structure Import where
 structure Artifact where
   entry : Option Nat
   requiredFeatures : Nat := 1
-  types : List Type := []
+  types : List ValueType := []
   constants : List Constant := []
   imports : List Import := []
   protocols : List Protocol := []
@@ -159,7 +163,7 @@ def Field.json (field : Field) : Json := obj [("name", str field.name), ("ty", n
 def Variant.json (value : Variant) : Json := obj [("name", str value.name),
   ("fields", arr (value.fields.map Field.json)), ("tag", optional nat value.tag)]
 
-def Type.json : Type → Json
+def ValueType.json : ValueType → Json
   | .builtin name => str name
   | .restricted base copy discard => variant "Restricted" [("base", base.json), ("duplicable", bool copy), ("zero_use_allowed", bool discard)]
   | .staticData element tag alignment => variant "StaticData" [("element", nat element), ("tag", nat tag), ("alignment", nat alignment)]
@@ -194,7 +198,7 @@ def Constant.json : Constant → Json
 
 def Instruction.json : Instruction → Json
   | .nop => str "Nop"
-  | .constant dst constant => variant "Const" [("dst", nat dst), ("constant", nat constant)]
+  | .constant dst index => variant "Const" [("dst", nat dst), ("constant", nat index)]
   | .move dst src => variant "Move" [("dst", nat dst), ("src", nat src)]
   | .copy dst src => variant "Copy" [("dst", nat dst), ("src", nat src)]
   | .borrow unique reborrow dst src => variant
@@ -213,7 +217,7 @@ def Instruction.json : Instruction → Json
   | .primitive dst op args => variant "Primitive" [("dst", nat dst), ("op", str op), ("args", arr (args.map nat))]
   | .jump target => variant "Jump" [("target", nat target)]
   | .switch discr cases otherwise => variant "Switch" [("discr", nat discr),
-      ("cases", arr (cases.map (fun (constant, target) => arr [nat constant, nat target]))), ("otherwise", nat otherwise)]
+      ("cases", arr (cases.map (fun (index, target) => arr [nat index, nat target]))), ("otherwise", nat otherwise)]
   | .call dst function args => variant "Call" [("dst", optional nat dst), ("function", nat function), ("args", arr (args.map nat))]
   | .tailCall function args => variant "TailCall" [("function", nat function), ("args", arr (args.map nat))]
   | .makeCallable dst type function captures => variant "MakeCallable" [("dst", nat dst), ("callable_type", nat type),
@@ -248,15 +252,23 @@ def Protocol.json (protocol : Protocol) : Json := obj [
     ("name", str operation.name), ("payload_signature", operation.payload.json), ("result_type", nat operation.result),
     ("resumption_lower", nat operation.lower), ("resumption_upper", optional nat operation.upper), ("terminal", bool operation.terminal)])))]
 
-def Handler.json (handler : Handler) : Json := obj [("result_type", nat handler.result), ("partial", bool handler.partial),
+def Handler.json (handler : Handler) : Json := obj [("result_type", nat handler.result), ("partial", bool handler.isPartial),
   ("clauses", arr (handler.clauses.map (fun clause => obj [("protocol", nat clause.protocol), ("operation", nat clause.operation),
     ("callable_signature", clause.signature.json), ("resumption_type", optional nat clause.resumption)])))]
+
+def referenceRouteJson (route : List Nat × Nat × List Nat) : Json :=
+  let (path, parameter, origin) := route
+  obj [("result_path", arr (path.map nat)),
+    ("origin", variant "Parameter" [("parameter", nat parameter), ("path", arr (origin.map nat))])]
+
+def referenceContractJson (contract : Nat × List (List Nat × Nat × List Nat)) : Json :=
+  obj [("function", nat contract.1), ("routes", arr (contract.2.map referenceRouteJson))]
 
 def Artifact.json (artifact : Artifact) (target : Target) : Json := obj [
   ("target_pointer_bits", nat target.pointerBits), ("target_layout_identity", str target.layoutIdentity),
   ("target_little_endian", bool target.littleEndian),
   ("required_features", nat artifact.requiredFeatures), ("entry_function", optional nat artifact.entry),
-  ("types", arr (artifact.types.map Type.json)), ("constants", arr (artifact.constants.map Constant.json)),
+  ("types", arr (artifact.types.map ValueType.json)), ("constants", arr (artifact.constants.map Constant.json)),
   ("imports", arr (artifact.imports.map (fun i => obj [("capability", str i.capability), ("symbol", str i.symbol),
     ("signature", i.signature.json), ("may_trap", bool i.mayTrap)]))),
   ("protocols", arr (artifact.protocols.map Protocol.json)), ("handler_defs", arr (artifact.handlers.map Handler.json)),
@@ -264,8 +276,6 @@ def Artifact.json (artifact : Artifact) (target : Target) : Json := obj [
   ("cleanups", arr []),
   ("exports", arr (artifact.exports.map (fun (name, function, signature) => obj [("name", str name), ("function", nat function), ("signature", signature.json)]))),
   ("drop_glue", arr (artifact.dropGlue.map (fun (type, function) => obj [("ty", nat type), ("function", nat function)]))),
-  ("reference_return_contracts", arr (artifact.referenceReturns.map (fun (function, routes) => obj [
-    ("function", nat function), ("routes", arr (routes.map (fun (path, parameter, origin) => obj [
-      ("result_path", arr (path.map nat)), ("origin", variant "Parameter" [("parameter", nat parameter), ("path", arr (origin.map nat))]) ))]))) ]
+  ("reference_return_contracts", arr (artifact.referenceReturns.map referenceContractJson))]
 
 end Glorious.Semantics.VM

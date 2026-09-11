@@ -61,7 +61,7 @@ def worldAction (action : WorldM α) (state : MachineState) : Check (α × Machi
 
 def opInputs : CoreOp → List Place
   | .read _ source _ | .discard source | .borrow _ _ _ source => [source]
-  | .assign destination source | .initialize destination source => [source, destination]
+  | .assign destination source | .initializeOwner destination source => [source, destination]
   | .construct _ _ fields => fields
   | .closure _ _ _ captures _ => captures.map (·.source)
   | .invoke _ call => call.callee :: call.inputs.map (·.value)
@@ -76,7 +76,7 @@ def coreInputs : Nat → Core → Check (List Place)
   | _, .result value => return [value]
   | fuel + 1, .step operation next => return opInputs operation ++ (← coreInputs fuel next)
   | fuel + 1, .bind _ computation next => return (← coreInputs fuel computation) ++ (← coreInputs fuel next)
-  | fuel + 1, .scoped _ body | fuel + 1, .label _ _ _ _ body => coreInputs fuel body
+  | fuel + 1, .scopeBlock _ body | fuel + 1, .label _ _ _ _ body => coreInputs fuel body
   | fuel + 1, .cases subject clauses => return subject :: (← clauses.mapM (fun (.clause _ _ body) => coreInputs fuel body)).flatten
   | fuel + 1, .handle _ body clauses => return (← coreInputs fuel body) ++ (← clauses.mapM (fun clause =>
       match clause with | .completion _ _ body | .operation _ _ _ _ _ _ body => coreInputs fuel body)).flatten
@@ -168,7 +168,7 @@ def refineValue (program : Program) (inference : Inference) (pattern : CheckedPa
     (value : Value) : WorldM Value := do
   match pattern with
   | .wildcard _ | .binder .. => return value
-  | .constructor type key fields =>
+  | .constructor _type key fields =>
     match value.head with
     | .symbolic origin =>
       let head := match key with
@@ -227,7 +227,7 @@ def simpleOperation (program : CoreProgram) (operation : CoreOp) : WorldM Unit :
   | .read destination place forced =>
     let value ← takeValue source place forced
     initializeValue source ⟨destination, []⟩ value
-  | .initialize destination place =>
+  | .initializeOwner destination place =>
     let value ← takeValue source place true
     initializeValue source destination value
   | .assign destination place =>
@@ -295,10 +295,11 @@ def cleanupFrame (program : CoreProgram) (frame : Frame) (payload : List Value)
     | .scope _ prior entry | .label _ _ _ _ prior entry | .handler _ _ prior entry =>
       (entry, some prior, none)
     | .call _ prior scope entry => (entry, some scope, some prior)
-    | _ => (state.world.slots.map (fun s => s.declaration.id), none, none)
+    | _ => (state.world.slots.map (fun (s : Slot) => s.declaration.id), none, none)
   let ending := slotsSince state.world entry
   let (_, state) ← worldAction (cleanupSlots program.source ending payload boundary) state
-  return { state with world.scope := priorScope.getD state.world.scope,
+  return { state with
+    world.scope := priorScope.getD state.world.scope,
     world.frame := priorFrame.getD state.world.frame }
 
 def snapshotReplayable (program : CoreProgram) (snapshot : World) (slots : List Id) : Check Unit := do
@@ -358,14 +359,15 @@ mutual
         execute program fuel next state
       | .bind destination computation next =>
         execute program fuel computation { state with frames := .bind destination next :: state.frames }
-      | .scoped identity body =>
+      | .scopeBlock identity body =>
         let frame := Frame.scope identity state.world.scope (state.world.slots.map (fun s => s.declaration.id))
         execute program fuel body { state with world.scope := identity, frames := frame :: state.frames }
       | .label identity brand region resultType body =>
         require (!(state.world.labels.any (fun l => l.brand == brand))) .escapingBrand "label brand is already active"
         let label : LabelState := ⟨brand, region, resultType, state.world.frame, identity⟩
         let frame := Frame.label identity brand region resultType state.world.scope (state.world.slots.map (fun s => s.declaration.id))
-        execute program fuel body { state with world.scope := identity,
+        execute program fuel body { state with
+          world.scope := identity,
           world.labels := label :: state.world.labels, frames := frame :: state.frames }
       | .handle identity body clauses =>
         let frame := Frame.handler identity clauses state.world.scope (state.world.slots.map (fun s => s.declaration.id))
@@ -376,6 +378,7 @@ mutual
         let (value, state) ← worldAction (takeValue program.source place true) state
         transferLabel program fuel brand value state
       | .fatal reason => return [⟨state, .fatal reason⟩]
+  termination_by fuel _ _ => fuel
 
   def finish (program : CoreProgram) (fuel : Nat) (value : Value) (state : MachineState) : Check Executions := do
     match fuel with
@@ -409,10 +412,12 @@ mutual
         | .resume returnStack returnWorld captured =>
           let ending := state.world.slots.filter (fun s => captured.contains s.declaration.id) |>.map (fun s => s.declaration.id)
           let (_, state) ← worldAction (cleanupSlots program.source ending [value] .normalReturn) state
-          let world := { returnWorld with nextOwner := max returnWorld.nextOwner state.world.nextOwner,
+          let world := { returnWorld with
+            nextOwner := max returnWorld.nextOwner state.world.nextOwner,
             nextLoan := max returnWorld.nextLoan state.world.nextLoan,
             cleanup := state.world.cleanup, effects := state.world.effects }
           finish program fuel value { state with world, frames := returnStack }
+  termination_by fuel
 
   def selectCases (program : CoreProgram) (fuel : Nat) (subject : Place)
       (clauses : List CoreCase) (state : MachineState) : Check Executions := do
@@ -438,6 +443,7 @@ mutual
         if consistentGuards noState.world.guards then
           return yes ++ (← selectCases program fuel subject rest noState)
         else return yes
+  termination_by fuel
 
   def transferLabel (program : CoreProgram) (fuel : Nat) (brand : Term)
       (value : Value) (state : MachineState) : Check Executions := do
@@ -456,6 +462,8 @@ mutual
           finish program fuel value state
         else transferLabel program fuel brand value state
       | _ => transferLabel program fuel brand value (← cleanupFrame program frame [value] (.labelTransfer ⟨⟨0, 0⟩, 0⟩) state)
+  termination_by fuel
+  decreasing_by all_goals simp [wfParam]
 
   def invoke (program : CoreProgram) (fuel : Nat) (destination : Id) (next : Core)
       (call : CallSite) (state : MachineState) (tail : Bool) : Check Executions := do
@@ -487,7 +495,8 @@ mutual
           let frames := if tail then state.frames else
             .call declaration previousFrame previousScope entry :: .bind ⟨destination, call.signature.output, false, call.span⟩ next :: state.frames
           let frame := if tail then previousFrame else state.nextFrame
-          let state := { state with world.frame := frame, world.scope := frame,
+          let state := { state with
+            world.frame := frame, world.scope := frame,
             frames, nextFrame := state.nextFrame + (if tail then 0 else 1) }
           let (_, state) ← worldAction (do
             require (function.parameters.length == arguments.length || function.parameters.length == 1)
@@ -516,12 +525,17 @@ mutual
       | .reference _ => reject .missingEvidence "borrowed callable requires its selected receiver/capture binding relation"
       | .symbolic _ => return [⟨state, .unknown .opaqueInvocation⟩]
       | _ => reject .typeMismatch "value has no callable identity"
+  termination_by fuel
 
   def deliverCall (program : CoreProgram) (fuel destination : Nat) (next : Core)
       (value : Value) (state : MachineState) (tail : Bool) : Check Executions := do
-    if tail then finish program fuel value state else
-      let (_, state) ← worldAction (initializeValue program.source ⟨destination, []⟩ value) state
-      execute program fuel next state
+    match fuel with
+    | 0 => return [⟨state, .unknown .resourceLimit⟩]
+    | fuel + 1 =>
+      if tail then finish program fuel value state else
+        let (_, state) ← worldAction (initializeValue program.source ⟨destination, []⟩ value) state
+        execute program fuel next state
+  termination_by fuel
 
   def performOperation (program : CoreProgram) (fuel destination : Nat) (next : Core)
       (operation : DeclId) (effectInstance : List Term) (signature : Signature)
@@ -529,7 +543,7 @@ mutual
     match fuel with
     | 0 => return [⟨state, .unknown .resourceLimit⟩]
     | fuel + 1 =>
-      let (effect, declaration) ← getRequired (program.source.operation operation) .unknownName "performed operation has no declaration"
+      let (effect, _declaration) ← getRequired (program.source.operation operation) .unknownName "performed operation has no declaration"
       let exact := Term.effect effect.header.id effectInstance
       let state := { state with world.effects := state.world.effects ++ [exact] }
       let rec search : Nat → List Frame → List Frame → Check Executions
@@ -537,15 +551,15 @@ mutual
         | _, _, [] => return [⟨state, .outwardOperation operation effectInstance payload⟩]
         | remaining + 1, inner, frame :: outer =>
           match frame with
-          | .handler identity clauses priorScope entry => do
+          | .handler _identity clauses priorScope entry => do
             let candidates := clauses.filterMap fun clause => match clause with
               | .operation candidate arguments patterns bindings continuation policy body =>
                 if candidate == operation && arguments == effectInstance then some (patterns, bindings, continuation, policy, body) else none
               | _ => none
             let rec select : Nat → List (List CheckedPattern × List PatternBinding × Option TypedSlot × Option ResumptionPolicy × Core) → Check Executions
               | 0, _ => return [⟨state, .unknown .resourceLimit⟩]
-              | _, [] => search remaining (inner ++ [frame]) outer
-              | count + 1, (patterns, bindings, continuation, policy, body) :: rest => do
+              | count + 1, [] => search count (inner ++ [frame]) outer
+              | count + 1, (patterns, _bindings, continuation, policy, body) :: rest => do
                 require (patterns.length == payload.length) .typeMismatch "operation payload arity differs from handler"
                 let accepted ← (payload.zip patterns).mapM (fun (value, pattern) => patternPossible program.source.limits.analysis value pattern)
                 if !(accepted.all id) then select count rest else
@@ -561,7 +575,8 @@ mutual
                       let target : TypedSlot := ⟨destination, signature.output, false, {}⟩
                       let saved : ContinuationState := ⟨id, policy, policy.maximum, target, next, inner,
                         state.world, captured, frame, false⟩
-                      let clauseState := { clauseState with nextContinuation := id + 1,
+                      let clauseState := { clauseState with
+                        nextContinuation := id + 1,
                         continuations := clauseState.continuations ++ [saved],
                         world.slots := clauseState.world.slots.filter (fun s => !captured.contains s.declaration.id) }
                       let type := match continuation with
@@ -579,17 +594,21 @@ mutual
                     if let some slot := continuation then
                       declareSlot slot
                       initializeValue program.source ⟨slot.id, []⟩ (← getRequired continuationValue .invalidResumption "missing continuation authority")) clauseState
-                  let results ← execute program fuel body clauseState
+                  let results ← execute program count body clauseState
                   if continuation.isNone && continuationValue.isSome then
-                    let continuationValue := continuationValue.get!
-                    let id := match continuationValue.head with | .continuation id => id | _ => 0
+                    let continuationValue ← getRequired continuationValue .invalidResumption "missing implicit resumption authority"
+                    let .continuation id := continuationValue.head
+                      | reject .invalidResumption "implicit resumption value has no continuation identity"
                     return (← results.mapM fun result => match result.outcome with
-                      | .returned value => resumeContinuation program fuel destination next id value result.state true
+                      | .returned value => resumeContinuation program count destination next id value result.state true
                       | _ => pure [result]).flatten
                   else return results
+            termination_by count _ => count
             select remaining candidates
           | _ => search remaining (inner ++ [frame]) outer
+      termination_by remaining _ _ => remaining
       search fuel [] state.frames
+  termination_by fuel
 
   def resumeContinuation (program : CoreProgram) (fuel destination : Nat) (next : Core)
       (identity : Id) (value : Value) (state : MachineState) (tail : Bool) : Check Executions := do
@@ -609,7 +628,8 @@ mutual
         let action : WorldM (List Slot) := captured.mapM fun slot => do
           return { slot with value := ← slot.value.mapM (cloneValue program.source.limits.normalization) }
         action.run state.world
-      let world := { authority.snapshot with
+      let world := {
+        authority.snapshot with
         slots := copyWorld.slots ++ captured,
         nextOwner := max copyWorld.nextOwner authority.snapshot.nextOwner,
         nextLoan := max copyWorld.nextLoan authority.snapshot.nextLoan,
@@ -622,6 +642,7 @@ mutual
         if !((← get).slots.any (fun s => s.declaration.id == authority.destination.id)) then declareSlot authority.destination
         initializeValue program.source ⟨authority.destination.id, []⟩ value) resumed
       execute program fuel authority.next resumed
+  termination_by fuel
 end
 
 structure FunctionFacts where
@@ -650,7 +671,7 @@ def collectReferenceReturns (program : CoreProgram) (parameters : List TypedSlot
 
 def analyzeFunction (program : CoreProgram) (function : CoreFunction) : Check FunctionFacts := do
   let initial : World := { frame := 1, scope := 1 }
-  let initialize : WorldM (List (InputPosition × Id)) := do
+  let initializeOwner : WorldM (List (InputPosition × Id)) := do
     let ordinary ← function.parameters.zipIdx |>.mapM fun (parameter, index) => do
       declareSlot parameter
       let value ← instantiateSymbolic program.source program.inference parameter.type
@@ -663,12 +684,13 @@ def analyzeFunction (program : CoreProgram) (function : CoreFunction) : Check Fu
       initializeValue program.source ⟨slot.id, []⟩ value
       pure (InputPosition.capture [index], value.identity)
     return ordinary ++ captured
-  let (inputs, world) ← initialize.run initial
+  let (inputs, world) ← initializeOwner.run initial
   let outcomes ← execute program program.source.limits.analysis function.body ⟨world, [], [], 0, 2, .symbolic⟩
   require (outcomes.length ≤ program.source.limits.alternatives) .resourceLimit "guarded execution alternatives exceed the declared limit"
   let referenceReturns ← outcomes.mapM fun execution => do
     match execution.outcome with
-    | .unknown reason => reject (if reason == .resourceLimit then .resourceLimit else .missingEvidence)
+    | .unknown reason =>
+      reject (if reason == .resourceLimit then .resourceLimit else .missingEvidence)
         "semantic control obligation remains unknown; it is not an empty outcome set" function.span
     | .returned value =>
       require (value.type == function.signature.output || value.type == .bottom) .typeMismatch "function result differs from its declared type"

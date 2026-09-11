@@ -373,7 +373,7 @@ mutual
     | unit (span : Span)
     | literal (span : Span) (literal : Literal)
     | name (span : Span) (path : Path) (arguments : List Term)
-    | «local» (span : Span) (id : Id)
+    | «localValue» (span : Span) (id : Id)
     | tuple (span : Span) (fields : List Expr)
     | array (span : Span) (fields : List Expr)
     | construct (span : Span) (declaration : DeclId) (arguments : List Term)
@@ -419,7 +419,7 @@ mutual
 end
 
 def Expr.span : Expr → Span
-  | .unit s | .literal s .. | .name s .. | .local s .. | .tuple s .. | .array s ..
+  | .unit s | .literal s .. | .name s .. | .localValue s .. | .tuple s .. | .array s ..
   | .construct s .. | .record s .. | .project s .. | .block s .. | .apply s .. | .tail s ..
   | .lambda s .. | .patternCallable s .. | .borrow s .. | .move s .. | .test s ..
   | .label s .. | .handle s .. | .unsafeScope s .. | .operatorChain s .. => s
@@ -444,7 +444,7 @@ structure ConstDecl where
   deriving Repr
 
 inductive Associativity where
-  | left | right | none | «prefix»
+  | left | right | none | «prefixOp»
   deriving BEq, DecidableEq, Repr, Inhabited
 
 structure Fixity where
@@ -460,7 +460,7 @@ structure Fixity where
 structure Import where
   module : ModuleId
   source : Path
-  «namespace» : Namespace
+  «nameSpace» : Namespace
   aliasName : Option String := none
   glob : Bool := false
   prelude : Bool := false

@@ -19,9 +19,9 @@ def declarationName (declaration : DeclId) : String := s!"g{declaration.packageI
 def typeName (type : Term) : String := toString (repr type)
 def receiverNumber : ReceiverMode → Nat | .shared => 0 | .unique => 1 | .owned => 2
 
-def builtinTypes : List VM.Type :=
+def builtinTypes : List VM.ValueType :=
   ["Unit", "Never", "U8", "U16", "U32", "U64", "U128", "I8", "I16", "I32", "I64", "I128",
-    "Usize", "Isize", "F32", "F64", "Char", "Text", "Bytes"].map VM.Type.builtin
+    "Usize", "Isize", "F32", "F64", "Char", "Text", "Bytes"].map VM.ValueType.builtin
 
 def builtinId : Term → Option Nat
   | .unit => some 0 | .bottom => some 1
@@ -53,12 +53,13 @@ mutual
       if let some id := lookup type state.typeIds then return id
       let _ ← layoutOf program state.analyzed.core.inference program.limits.layout [] type
       let id := state.artifact.types.length
-      modify fun state => { state with typeIds := state.typeIds ++ [(type, id)],
+      modify fun state => { state with
+        typeIds := state.typeIds ++ [(type, id)],
         artifact.types := state.artifact.types ++ [.builtin "Unit"] }
       let capability ← deriveUse program state.analyzed.core.inference type
       let copy := capability == .duplicable
       let discard := capability != .exact
-      let representation ← match type with
+      let representation : VM.ValueType ← match type with
         | .tuple fields => pure (.tuple (← fields.mapM (lowerType fuel)) copy)
         | .array element (.constant (.integer _ _ count)) =>
           let element ← lowerType fuel element
@@ -86,11 +87,11 @@ mutual
           let signature ← substituteSignature program.limits.normalization subs signature
           let captureTypes := coreFunction.map (fun f => f.captures.map captureResidentType) |>.getD []
           let captures ← lowerType fuel (.tuple captureTypes)
-          let classes ← captureTypes.mapM (deriveUse program state.analyzed.core.inference)
-          let class := Principal.residents classes
+          let classes ← (captureTypes.mapM (deriveUse program state.analyzed.core.inference) : Check (List Principal))
+          let capability := Principal.residents classes
           let mode := coreFunction.map (fun f => receiverNumber f.receiver) |>.getD 0
           pure (.callable (← lowerSignature fuel signature) captures mode (typeName type)
-            (class == .duplicable) (class != .exact))
+            (capability == .duplicable) (capability != .exact))
         | .continuation identity argument output effects =>
           modify fun state => { state with artifact.requiredFeatures := Nat.lor state.artifact.requiredFeatures 8 }
           pure (.resumption (← lowerType fuel argument) (← lowerType fuel output)
@@ -99,7 +100,7 @@ mutual
         | _ => reject .missingEvidence "VM lowering received a non-runtime or unresolved type"
       let representation := match representation with
         | .reference .. | .callable .. | .resumption .. => representation
-        | _ => VM.Type.restricted representation copy discard
+        | _ => VM.ValueType.restricted representation copy discard
       modify fun state => { state with artifact.types := state.artifact.types.set id representation }
       return id
 
@@ -122,7 +123,8 @@ mutual
       let effect ← getRequired (program.effects.find? (fun e => e.header.id == declaration)) .unknownName "unknown effect protocol"
       let subs ← bindArguments effect.generics arguments
       let id := state.artifact.protocols.length
-      modify fun state => { state with protocolIds := state.protocolIds ++ [(effectInstance, id)],
+      modify fun state => { state with
+        protocolIds := state.protocolIds ++ [(effectInstance, id)],
         artifact.protocols := state.artifact.protocols ++ [⟨typeName effectInstance, [], []⟩],
         artifact.requiredFeatures := Nat.lor state.artifact.requiredFeatures 8 }
       let operations ← effect.operations.mapM fun operation => do
@@ -156,6 +158,7 @@ structure FunctionLowering where
   function : CoreFunction
   registers : List Nat := [0]
   locals : List RegisterInfo := []
+  flags : List (Nat × Bool) := []
   code : List VM.Instruction := []
   labels : List (Term × Nat × Nat) := []
   nextLabel : Nat := 0
@@ -186,22 +189,34 @@ def temporary (type : Nat) : EmitM Nat := do
 
 def setFlag (info : RegisterInfo) (initialized : Bool) : EmitM Unit := do
   let constant ← global (internConstant (.scalar (.integer false .w32 (if initialized then 1 else 0))))
+  let _ ← emit (.drop info.flag)
   let _ ← emit (.constant info.flag constant)
   pure ()
 
-def allocateRegister (slot : TypedSlot) (parameter : Bool := false) : EmitM RegisterInfo := do
-  let state ← get
-  require (!(state.locals.any (fun local => local.source == slot.id))) .duplicate "VM slot allocated twice"
-  let type ← global (lowerType state.global.analyzed.core.source.limits.layout slot.type)
-  let register ← temporary type
+/-- Flag storage is initialized once in the function prologue, even when its
+source owner is declared only on one branch. Later writes always replace a live
+flag; the flag's value describes the separate resident register. -/
+def initializationFlag (initialized : Bool) : EmitM Nat := do
   let flag ← temporary 4
+  modify fun state => { state with flags := state.flags ++ [(flag, initialized)] }
+  return flag
+
+def allocateRegister (slot : TypedSlot) (parameter : Option Nat := none) : EmitM RegisterInfo := do
+  let state ← get
+  require (!(state.locals.any (fun localValue => localValue.source == slot.id))) .duplicate "VM slot allocated twice"
+  let type ← global (lowerType state.global.analyzed.core.source.limits.layout slot.type)
+  let register ← match parameter with
+    | none => temporary type
+    | some index => do
+      require (state.registers[index]? == some type) .incompatibleABI "parameter home differs from the receiving signature"
+      pure index
+  let flag ← initializationFlag parameter.isSome
   let info : RegisterInfo := ⟨slot.id, register, slot.type, flag⟩
   modify fun state => { state with locals := state.locals ++ [info] }
-  setFlag info parameter
   return info
 
 def localRegister (identity : Id) : EmitM RegisterInfo := do
-  getRequired ((← get).locals.find? (fun local => local.source == identity)) .malformedCore "typed Core refers to an unallocated VM slot"
+  getRequired ((← get).locals.find? (fun localValue => localValue.source == identity)) .malformedCore "typed Core refers to an unallocated VM slot"
 
 def conditionalDrop (info : RegisterInfo) : EmitM Unit := do
   let one ← global (internConstant (.scalar (.integer false .w32 1)))
@@ -212,9 +227,9 @@ def conditionalDrop (info : RegisterInfo) : EmitM Unit := do
   let end_ := (← get).code.length
   patch branch (.switch info.flag [(one, yes)] end_)
 
-def cleanupRegisters (registers : List RegisterInfo) (protected : List Nat := []) : EmitM Unit := do
+def cleanupRegisters (registers : List RegisterInfo) (protectedValues : List Nat := []) : EmitM Unit := do
   for register in registers.reverse do
-    if !protected.contains register.register then conditionalDrop register
+    if !protectedValues.contains register.register then conditionalDrop register
 
 def projectType (program : Program) (type : Term) (projection : Projection) : Check Term := do
   match projection, type with
@@ -265,7 +280,8 @@ def lowerPlace (fuel : Nat) (place : Place) (mode : Nat) : EmitM (Nat × Term) :
 def consumePlace (place : Place) : EmitM Unit := do
   if place.projections.isEmpty then setFlag (← localRegister place.root) false
 
-def initialized (destination : Id) : EmitM Unit := setFlag (← localRegister destination) true
+def initialized (destination : Id) : EmitM Unit := do
+  setFlag (← localRegister destination) true
 
 def lowerConstant (fuel : Nat) (destination : Nat) (type : Term) (constant : Term) : EmitM Unit := do
   match fuel with
@@ -302,8 +318,8 @@ def lowerConstant (fuel : Nat) (destination : Nat) (type : Term) (constant : Ter
 def lowerPatternBindings (fuel : Nat) (subject : Place) (pattern : CheckedPattern)
     (bindings : List PatternBinding) : EmitM Unit := do
   for binding in bindings do
-    let exists := (← get).locals.any (fun local => local.source == binding.slot.id)
-    let destination ← if exists then localRegister binding.slot.id else allocateRegister binding.slot
+    let allocated := (← get).locals.any (fun localValue => localValue.source == binding.slot.id)
+    let destination ← if allocated then localRegister binding.slot.id else allocateRegister binding.slot
     let source := { subject with projections := subject.projections ++ binding.projections }
     let mode := match binding.borrowed with | none => 1 | some (.shared, _) => 2 | some (.unique, _) => 3
     let (register, _) ← lowerPlace fuel source mode
@@ -325,7 +341,7 @@ def testPattern (fuel : Nat) (subject : Place) (pattern : CheckedPattern) : Emit
   | fuel + 1 =>
     match pattern with
     | .wildcard _ | .binder .. => return []
-    | .constructor type key fields =>
+    | .constructor _type key fields =>
       let (register, _) ← lowerPlace fuel subject 0
       let own ← match key with
         | .constructor declaration => do
@@ -391,32 +407,33 @@ mutual
       | .bind slot computation next =>
         let result ← allocateRegister slot
         lowerCore fuel computation (some result) (lowerCore fuel next destination onReturn)
-      | .scoped _ body =>
+      | .scopeBlock _ body =>
         let entry := (← get).locals.map (·.source)
         lowerCore fuel body destination (do
-          let ending := (← get).locals.filter (fun local => !entry.contains local.source)
+          let ending := (← get).locals.filter (fun localValue => !entry.contains localValue.source)
           cleanupRegisters ending (destination.toList.map (·.register))
           onReturn)
       | .cases subject clauses =>
-        let rec cases : List CoreCase → EmitM Unit
-          | [] => let _ ← emit .unreachable; pure ()
-          | .clause pattern bindings body :: rest => do
-            let tests ← testPattern fuel subject pattern
-            lowerPatternBindings fuel subject pattern bindings
-            lowerCore fuel body destination onReturn
+        let rec lowerCases : Nat → List CoreCase → EmitM Unit
+          | 0, _ => reject .resourceLimit "VM pattern-clause lowering exhausted"
+          | _, [] => do let _ ← emit .unreachable; pure ()
+          | remaining + 1, .clause pattern bindings body :: rest => do
+            let tests ← testPattern remaining subject pattern
+            lowerPatternBindings remaining subject pattern bindings
+            lowerCore remaining body destination onReturn
             let failure := (← get).code.length
             patchFailure tests failure
-            cases rest
-        cases clauses
+            lowerCases remaining rest
+        lowerCases fuel clauses
       | .label _ brand _ type body =>
         let state ← get
         let slot := state.nextLabel
         let result ← temporary (← global (lowerType fuel type))
-        modify fun s => { s with nextLabel := s.nextLabel + 1, labels := (brand, slot, result) :: s.labels,
+        modify fun s => { s with
+          nextLabel := s.nextLabel + 1, labels := (brand, slot, result) :: s.labels,
           global.artifact.requiredFeatures := Nat.lor s.global.artifact.requiredFeatures 4 }
         let start ← emit (.nop)
-        let before := (← get).locals
-        let info : RegisterInfo := ⟨0, result, type, ← temporary 4⟩
+        let info : RegisterInfo := ⟨0, result, type, ← initializationFlag false⟩
         lowerCore fuel body (some info) (do let _ ← emit (.labelPop slot); pure ())
         let target := (← get).code.length
         patch start (.labelPush slot result target)
@@ -464,7 +481,7 @@ mutual
       let _ ← emit (if move then .move destination.register register else .copy destination.register register)
       if move then consumePlace source
       setFlag destination true
-    | .initialize destination source | .assign destination source =>
+    | .initializeOwner destination source | .assign destination source =>
       let (register, _) ← lowerPlace fuel source 1
       consumePlace source
       if destination.projections.isEmpty then
@@ -529,13 +546,13 @@ mutual
       let registers ← arguments.mapM (fun value => return (← lowerPlace fuel value 1).1)
       for value in arguments do consumePlace value
       let output ← localRegister destination
-      let import ← getRequired (program.source.imports.find? (fun i => i.identity == binding)) .missingImport "unadmitted machine leaf"
-      if let some operation := import.primitive then
+      let runtimeImport ← getRequired (program.source.imports.find? (fun i => i.identity == binding)) .missingImport "unadmitted machine leaf"
+      if let some operation := runtimeImport.primitive then
         let _ ← emit (.primitive output.register operation registers)
         pure ()
       else
-        let import ← global (lowerImport fuel binding)
-        let _ ← emit (.hostCall (some output.register) import registers)
+        let runtimeImport ← global (lowerImport fuel binding)
+        let _ ← emit (.hostCall (some output.register) runtimeImport registers)
         pure ()
       setFlag output true
     | .seal _ => pure ()
@@ -575,8 +592,8 @@ mutual
         if let some output := destination then setFlag output true
       else if let some function := program.function declaration then
         if let some binding := function.runtimeBinding then
-          let import ← getRequired (program.imports.find? (fun i => i.identity == binding)) .missingImport "runtime leaf binding is absent"
-          if let some operation := import.primitive then
+          let runtimeImport ← getRequired (program.imports.find? (fun i => i.identity == binding)) .missingImport "runtime leaf binding is absent"
+          if let some operation := runtimeImport.primitive then
             let output ← getRequired destination .tail "machine primitive cannot directly realize a proper tail invocation"
             let _ ← emit (.primitive output.register operation registers)
             setFlag output true
@@ -607,13 +624,13 @@ mutual
     let outputType := destination.map (·.type) |>.getD state.function.signature.output
     let dependencies := (← coreInputs fuel (.handle identity body clauses)).map (·.root) |>.eraseDups
     let captures ← dependencies.mapM fun id => do
-      let local ← localRegister id
-      return (⟨⟨id, []⟩, .shared, id, local.type⟩ : Capture)
+      let localValue ← localRegister id
+      return (⟨⟨id, []⟩, .shared, id, localValue.type⟩ : Capture)
     let bodyFunction ← liftBody fuel body outputType captures []
     let operationClauses := clauses.filterMap fun clause => match clause with
       | .operation op args patterns bindings continuation policy body => some (op, args, patterns, bindings, continuation, policy, body)
       | _ => none
-    let lifted ← operationClauses.mapM fun (operation, effectInstance, patterns, bindings, continuation, policy, body) => do
+    let lifted ← operationClauses.mapM fun (operation, effectInstance, _patterns, bindings, continuation, _policy, body) => do
       let parameters := bindings.map (·.slot) ++ continuation.toList
       let function ← liftBody fuel body outputType captures parameters
       let (effect, _) ← getRequired (program.source.operation operation) .unknownName "handler operation is absent"
@@ -624,12 +641,14 @@ mutual
       return (function, (⟨protocol, operation, signature, resumption⟩ : VM.HandlerClause))
     let definition := (← get).global.artifact.handlers.length
     let result ← global (lowerType fuel outputType)
-    modify fun state => { state with global.artifact.handlers := state.global.artifact.handlers ++
+    modify fun state => { state with
+      global.artifact.handlers := state.global.artifact.handlers ++
       [⟨result, lifted.map Prod.snd, true⟩],
       global.artifact.requiredFeatures := Nat.lor state.global.artifact.requiredFeatures 8 }
     let handlerType := (← get).global.artifact.types.length
     let captureType ← global (lowerType fuel (.tuple (captures.map captureResidentType)))
-    modify fun state => { state with global.artifact.types := state.global.artifact.types ++
+    modify fun state => { state with
+      global.artifact.types := state.global.artifact.types ++
       [.handler definition captureType s!"handler#{identity}"] }
     let handler ← temporary handlerType
     let _ ← emit (.makeHandler handler definition (lifted.map Prod.fst))
@@ -643,11 +662,13 @@ mutual
       (parameters : List TypedSlot) : EmitM Nat := do
     let state ← get
     let identity : DeclId := ⟨state.function.declaration.packageId, state.global.nextSynthetic⟩
-    let signature : Signature := { arguments := parameters.map (·.type), output,
+    let signature : Signature := {
+      arguments := parameters.map (·.type), output,
       effects := state.function.signature.effects, receiver := some .shared }
     let function : CoreFunction := ⟨identity, signature, parameters, captures, .shared, body, none, state.function.span⟩
     let index := state.global.functionIds.length
-    modify fun state => { state with global.nextSynthetic := state.global.nextSynthetic + 1,
+    modify fun state => { state with
+      global.nextSynthetic := state.global.nextSynthetic + 1,
       global.pending := state.global.pending ++ [function],
       global.functionIds := state.global.functionIds ++ [(identity, index)],
       global.analyzed.core.functions := state.global.analyzed.core.functions ++ [function] }
@@ -655,7 +676,8 @@ mutual
     let captureType ← global (lowerType fuel (.tuple (captures.map captureResidentType)))
     let vmSignature ← global (lowerSignature fuel signature)
     let type := (← get).global.artifact.types.length
-    modify fun state => { state with global.artifact.types := state.global.artifact.types ++
+    modify fun state => { state with
+      global.artifact.types := state.global.artifact.types ++
       [.callable vmSignature captureType 0 (declarationName identity) true true] }
     let register ← temporary type
     let _ ← emit (.makeCallable register type index captureRegisters)
@@ -686,7 +708,8 @@ mutual
       let body := Core.step (.declare result) (.step operation (.result ⟨result.id, []⟩))
       let function : CoreFunction := ⟨declaration, signature, parameters, [], .shared, body, none, {}⟩
       let index := state.functionIds.length
-      set { state with functionIds := state.functionIds ++ [(declaration, index)], pending := state.pending ++ [function],
+      set { state with
+        functionIds := state.functionIds ++ [(declaration, index)], pending := state.pending ++ [function],
         nextSynthetic := state.nextSynthetic + parameters.length + 2 }
       return index
 
@@ -696,21 +719,39 @@ mutual
     let binding ← getRequired (state.analyzed.core.source.imports.find? (fun i => i.identity == identity)) .missingImport "runtime import is not admitted"
     let signature ← lowerSignature fuel binding.signature
     let index := (← get).artifact.imports.length
-    modify fun state => { state with importIds := state.importIds ++ [(identity, index)],
+    modify fun state => { state with
+      importIds := state.importIds ++ [(identity, index)],
       artifact.imports := state.artifact.imports ++ [⟨binding.capability.getD "", binding.symbol, signature, true⟩],
       artifact.requiredFeatures := Nat.lor state.artifact.requiredFeatures 32 }
     return index
 end
+
+/-- Instruction destinations are function-relative. Adding a prologue shifts
+all local control destinations together, including nonlocal label rejoins. -/
+def shiftCodeTargets (offset : Nat) : VM.Instruction → VM.Instruction
+  | .jump target => .jump (offset + target)
+  | .switch register cases otherwise =>
+    .switch register (cases.map (fun (constant, target) => (constant, offset + target))) (offset + otherwise)
+  | .labelPush slot result target => .labelPush slot result (offset + target)
+  | instruction => instruction
+
+def initializeFlags : EmitM Unit := do
+  let state ← get
+  let prologue ← state.flags.mapM fun (flag, live) => do
+    let constant ← global (internConstant (.scalar (.integer false .w32 (if live then 1 else 0))))
+    return VM.Instruction.constant flag constant
+  modify fun current => { current with code := prologue ++ current.code.map (shiftCodeTargets prologue.length) }
 
 def lowerFunction (function : CoreFunction) : LowerM Unit := do
   let state ← get
   let signature ← lowerSignature state.analyzed.core.source.limits.layout function.signature
   let captureType ← lowerType state.analyzed.core.source.limits.layout (.tuple (function.captures.map captureResidentType))
   let state ← get
-  let initial : FunctionLowering := { global := state, function,
-    registers := [if function.captures.isEmpty then 0 else captureType] }
+  let initial : FunctionLowering := {
+    global := state, function,
+    registers := (if function.captures.isEmpty then 0 else captureType) :: signature.params }
   let action : EmitM Unit := do
-    for parameter in function.parameters do let _ ← allocateRegister parameter true; pure ()
+    for (parameter, index) in function.parameters.zipIdx do let _ ← allocateRegister parameter (some (index + 1)); pure ()
     for (capture, index) in function.captures.zipIdx do
       let type := captureResidentType capture
       let slot : TypedSlot := ⟨capture.parameter, type, capture.mode == .unique, function.span⟩
@@ -718,18 +759,21 @@ def lowerFunction (function : CoreFunction) : LowerM Unit := do
       let _ ← emit (.project (if function.receiver == .owned then 1 else 0) register.register 0 index)
       setFlag register true
     lowerCore state.analyzed.core.source.limits.elaboration function.body none (pure ())
+    initializeFlags
   let (_, emitted) ← action.run initial
   let start := emitted.global.artifact.code.length
   let flags := if function.signature.output == .bottom then 4 else 0
   let vmFunction : VM.Function := ⟨declarationName function.declaration, flags, signature,
     if function.captures.isEmpty then none else some (receiverNumber function.receiver),
     emitted.registers, start, emitted.code.length, emitted.nextLabel⟩
-  set { emitted.global with artifact.functions := emitted.global.artifact.functions ++ [vmFunction],
+  set { emitted.global with
+    artifact.functions := emitted.global.artifact.functions ++ [vmFunction],
     artifact.code := emitted.global.artifact.code ++ emitted.code }
 
 def lowerProgram (program : AnalyzedProgram) (entry : DeclId) : Check VM.Artifact := do
   let functions := program.core.functions
-  let initial : Lowering := { analyzed := program,
+  let initial : Lowering := {
+    analyzed := program,
     artifact := { entry := functions.findIdx? (fun f => f.declaration == entry), types := builtinTypes },
     functionIds := functions.zipIdx |>.map (fun (function, index) => (function.declaration, index)),
     pending := functions }

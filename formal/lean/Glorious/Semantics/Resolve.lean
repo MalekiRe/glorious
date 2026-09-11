@@ -5,7 +5,7 @@ namespace Glorious.Semantics
 structure Binding where
   module : ModuleId
   name : String
-  namespace : Namespace
+  nameSpace : Namespace
   declaration : DeclId
   authority : DeclHeader
   priority : Nat
@@ -15,15 +15,15 @@ structure Binding where
 def descendant (child ancestor : ModuleId) : Bool :=
   child.packageId == ancestor.packageId && ancestor.path.isPrefixOf child.path
 
-def visible (from : ModuleId) (header : DeclHeader) : Bool :=
+def visible (sourceContext : ModuleId) (header : DeclHeader) : Bool :=
   match header.visibility with
   | .public => true
-  | .package => from.packageId == header.module.packageId
-  | .private => descendant from header.module
-  | .parent => descendant from { header.module with path := header.module.path.dropLast }
+  | .package => sourceContext.packageId == header.module.packageId
+  | .private => descendant sourceContext header.module
+  | .parent => descendant sourceContext { header.module with path := header.module.path.dropLast }
 
-def directBinding (namespace : Namespace) (header : DeclHeader) : Binding :=
-  ⟨header.module, header.name, namespace, header.id, header, 3, header.visibility == .public⟩
+def directBinding (nameSpace : Namespace) (header : DeclHeader) : Binding :=
+  ⟨header.module, header.name, nameSpace, header.id, header, 3, header.visibility == .public⟩
 
 def directBindings (program : Program) : List Binding :=
   program.dataTypes.flatMap (fun data =>
@@ -34,9 +34,9 @@ def directBindings (program : Program) : List Binding :=
   program.functions.map (fun f => directBinding .value f.header) ++
   program.constants.map (fun c => directBinding .value c.header)
 
-def selectBinding (from : ModuleId) (namespace : Namespace) (name : String)
+def selectBinding (sourceContext : ModuleId) (nameSpace : Namespace) (name : String)
     (bindings : List Binding) : Check Binding := do
-  let candidates := bindings.filter fun b => b.module == from && b.namespace == namespace && b.name == name
+  let candidates := bindings.filter fun b => b.module == sourceContext && b.nameSpace == nameSpace && b.name == name
   let priority := candidates.foldl (fun highest b => max highest b.priority) 0
   let candidates := candidates.filter (fun b => b.priority == priority)
   let identities := candidates.map (·.declaration) |>.eraseDups
@@ -45,36 +45,36 @@ def selectBinding (from : ModuleId) (namespace : Namespace) (name : String)
   | [_] => getRequired candidates.head? .unknownName s!"unresolved name {name}"
   | _ => reject .ambiguous s!"ambiguous name {name}; declaration selection does not use argument types"
 
-def pathModule (program : Program) (from : ModuleId) (components : List String) : Check (ModuleId × String) := do
+def pathModule (program : Program) (sourceContext : ModuleId) (components : List String) : Check (ModuleId × String) := do
   let name ← getRequired components.getLast? .unknownName "empty path"
   let qualifiers := components.dropLast
   let (base, rest) ← match qualifiers with
-    | "crate" :: rest => pure (⟨from.packageId, []⟩, rest)
-    | "self" :: rest => pure (from, rest)
+    | "crate" :: rest => pure (⟨sourceContext.packageId, []⟩, rest)
+    | "self" :: rest => pure (sourceContext, rest)
     | "super" :: rest => do
-      require (!from.path.isEmpty) .unknownName "crate root has no parent"
-      pure ({ from with path := from.path.dropLast }, rest)
+      require (!sourceContext.path.isEmpty) .unknownName "crate root has no parent"
+      pure ({ sourceContext with path := sourceContext.path.dropLast }, rest)
     | first :: rest =>
       match program.packages.find? (fun p => p.name == first) with
       | some dependency => do
-        let own ← getRequired (program.packages.find? (fun p => p.id == from.packageId)) .unknownName "unknown package"
+        let own ← getRequired (program.packages.find? (fun p => p.id == sourceContext.packageId)) .unknownName "unknown package"
         require (own.id == dependency.id || own.dependencies.contains dependency.id) .privacy "package is outside the supplied dependency closure"
         pure (dependency.root, rest)
-      | none => pure (from, qualifiers)
-    | [] => pure (from, [])
+      | none => pure (sourceContext, qualifiers)
+    | [] => pure (sourceContext, [])
   let target := { base with path := base.path ++ rest }
   require (program.modules.any (fun m => m.identity == target)) .unknownName "path does not name a declared module"
   return (target, name)
 
-def resolve (program : Program) (bindings : List Binding) (from : ModuleId)
-    (namespace : Namespace) (path : Path) : Check Binding := do
-  let (target, name) ← pathModule program from path.components
-  let binding ← selectBinding target namespace name bindings
-  require (visible from binding.authority || (binding.exported && target != from)) .privacy s!"{name} is private"
+def resolve (program : Program) (bindings : List Binding) (sourceContext : ModuleId)
+    (nameSpace : Namespace) (path : Path) : Check Binding := do
+  let (target, name) ← pathModule program sourceContext path.components
+  let binding ← selectBinding target nameSpace name bindings
+  require (visible sourceContext binding.authority || (binding.exported && target != sourceContext)) .privacy s!"{name} is private"
   return binding
 
 def bindingEquivalent (a b : Binding) : Bool :=
-  a.module == b.module && a.name == b.name && a.namespace == b.namespace &&
+  a.module == b.module && a.name == b.name && a.nameSpace == b.nameSpace &&
   a.declaration == b.declaration && a.priority == b.priority && a.exported == b.exported
 
 def addBindings (current additions : List Binding) : List Binding :=
@@ -87,7 +87,7 @@ def importBindings (program : Program) (current : List Binding) (item : Import) 
       pure (current.filter fun b => b.module == source &&
         (visible item.module b.authority || b.exported))
     else do
-      let binding ← resolve program current item.module item.namespace item.source
+      let binding ← resolve program current item.module item.nameSpace item.source
       let operations := if item.includeOperations then
         match program.effects.find? (fun e => e.header.id == binding.declaration) with
         | none => []
@@ -98,8 +98,10 @@ def importBindings (program : Program) (current : List Binding) (item : Import) 
   imported.mapM fun binding => do
     require (!item.public || binding.exported || binding.authority.visibility == .public)
       .privacy "re-export would expose a private declaration" item.span
-    return { binding with module := item.module, priority, exported := item.public,
-      name := if item.glob || binding.namespace != item.namespace then binding.name else item.aliasName.getD binding.name }
+    return {
+      binding with
+      module := item.module, priority, exported := item.public,
+      name := if item.glob || binding.nameSpace != item.nameSpace then binding.name else item.aliasName.getD binding.name }
 
 /-- Benign cycles converge because the finite binding relation only grows.
     Unresolved imports are retried; final ambiguity remains an error. -/
@@ -107,7 +109,7 @@ def resolveImports (program : Program) : Check (List Binding) := do
   let direct := directBindings program
   for binding in direct do
     let duplicates := direct.filter fun other => binding.module == other.module &&
-      binding.namespace == other.namespace && binding.name == other.name
+      binding.nameSpace == other.nameSpace && binding.name == other.name
     require (duplicates.length == 1) .duplicate s!"duplicate declaration {binding.name}" binding.authority.span
   let imports := program.modules.flatMap (·.imports)
   let rec iterate : Nat → List Binding → List Import → Check (List Binding)
@@ -124,7 +126,7 @@ def resolveImports (program : Program) : Check (List Binding) := do
         let final := addBindings next expanded.flatten
         if final.length != next.length then iterate fuel final imports else
           for binding in final do
-            let _ ← selectBinding binding.module binding.namespace binding.name final
+            let _ ← selectBinding binding.module binding.nameSpace binding.name final
           return final
       else if next.length == current.length then
         let first ← getRequired unresolved.head? .unknownName "unresolved import"
@@ -156,7 +158,7 @@ def validateFixities (program : Program) : Check Unit := do
       .unknownName "fixity target is not a resolved callable" fixity.span
     let duplicates := program.fixities.filter fun other => other.module == fixity.module &&
       other.spelling == fixity.spelling &&
-      (other.associativity == .prefix) == (fixity.associativity == .prefix)
+      (other.associativity == .prefixOp) == (fixity.associativity == .prefixOp)
     require (duplicates.length == 1) .duplicate "duplicate positional operator binding" fixity.span
 
 end Glorious.Semantics

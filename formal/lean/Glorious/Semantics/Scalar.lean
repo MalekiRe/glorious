@@ -190,7 +190,7 @@ def floatOperation (fuel : Nat) (width : FloatWidth) (operation : FloatOperation
     return float (match left with | .nan => canonicalNaN width | _ => Nat.xor leftBits (signBits width true))
   let unordered := match left, right with | .nan, _ | _, .nan => true | _, _ => false
   if [.eq, .ne, .lt, .le, .gt, .ge].contains operation then
-    let ordering := match left, right with
+    let ordering : Int := match left, right with
       | .infinity false, .infinity false | .infinity true, .infinity true => 0
       | .infinity true, _ | _, .infinity false => -1
       | .infinity false, _ | _, .infinity true => 1

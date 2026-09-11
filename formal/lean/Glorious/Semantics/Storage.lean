@@ -32,7 +32,7 @@ inductive ValueHead where
   | bindingPack (brand : Term)
   | staticView (segment : Id) (length : Nat)
   | symbolic (origin : Id)
-  deriving BEq, DecidableEq, Repr, Inhabited
+  deriving BEq, Repr, Inhabited
 
 /-- One logical owner; its children are inline residents, not reference
     pointees. Partial initialization is represented by `none`, never by a
@@ -141,8 +141,9 @@ def declareSlot (declaration : TypedSlot) : WorldM Unit := do
   let world ← get
   require (!(world.slots.any (fun slot => slot.declaration.id == declaration.id))) .duplicate "slot identity already exists" declaration.span
   let storage : StorageId := ⟨world.nextAllocation, []⟩
-  set { world with nextAllocation := world.nextAllocation + 1,
-    slots := world.slots ++ [⟨declaration, world.frame, world.scope, storage, none⟩] }
+  set { world with
+    nextAllocation := world.nextAllocation + 1,
+    slots := world.slots ++ [(⟨declaration, world.frame, world.scope, storage, none⟩ : Slot)] }
 
 def createValue (program : Program) (inference : Inference) (type : Term) (head : ValueHead)
     (fields : List (Option Value) := []) : WorldM Value := do
@@ -319,7 +320,8 @@ def takeValue (program : Program) (place : Place) (forcedMove : Bool := true) : 
     updateAddress program located.address none
     match located.throughLoan with
     | none => pure ()
-    | some identity => modify fun s => { s with loans := s.loans.map fun loan =>
+    | some identity => modify fun s => { s with
+      loans := s.loans.map fun loan =>
         if loan.identity == identity then { loan with hole := true } else loan }
     return value
 
@@ -330,7 +332,8 @@ def initializeValue (program : Program) (destination : Place) (value : Value) : 
   require (← lookupAddress program world located.address |>.map Option.isNone) .uninitialized "initialization would overwrite a live owner"
   checkAccess program world located .write
   updateAddress program located.address (some value)
-  modify fun s => { s with loans := s.loans.map fun loan =>
+  modify fun s => { s with
+    loans := s.loans.map fun loan =>
     if loan.live && loan.origin == located.address then { loan with hole := false } else loan }
 
 def borrowValue (program : Program) (inference : Inference) (source : Place)
@@ -349,7 +352,7 @@ def endLoan (identity : Id) : WorldM Unit := do
   let loan ← getRequired (world.loans.find? (fun l => l.identity == identity && l.live)) .missingEvidence "cannot end an unknown or ended loan"
   require (!loan.hole) .loanHole "ending a loan with an unrestored hole"
   require (!(world.loans.any (fun l => l.live && l.parent == some identity))) .loanConflict "parent loan still has live reborrows"
-  set { world with loans := world.loans.map fun l => if l.identity == identity then { l with live := false } else l }
+  set { world with loans := world.loans.map (fun (l : Loan) => if l.identity == identity then { l with live := false } else l) }
 
 def valueResident (program : Program) (world : World) : Nat → StorageId → Value → Check Resident
   | 0, _, _ => reject .resourceLimit "cleanup resident projection exhausted"
@@ -368,6 +371,10 @@ def valueResident (program : Program) (world : World) : Nat → StorageId → Va
     let capability := if value.shellConsumed then .duplicable else value.capability
     return .owned storage ⟨value.identity⟩ capability value.dropHook fields
 
+def cleanupDiagnostic (span : Span) (problem : CleanupError) : Diagnostic :=
+  ⟨match problem with | .resourceLimit => .resourceLimit | .unrestoredLoan .. => .loanHole | _ => .illegalDiscard,
+    span, s!"unlawful cleanup: {repr problem}", []⟩
+
 def discardValue (program : Program) (place : Place) : WorldM Unit := do
   let world ← get
   let located ← locate program world place
@@ -376,9 +383,8 @@ def discardValue (program : Program) (place : Place) : WorldM Unit := do
   let value ← lookupAddress program world located.address >>= fun v => getRequired v .moved "destruction of an unavailable resident"
   let storage := { slot.storage with path := slot.storage.path ++ located.address.fields }
   let resident ← valueResident program world program.limits.normalization storage value
-  let plan ← (compileResident program.limits.analysis resident).mapError fun problem =>
-    ⟨match problem with | .resourceLimit => .resourceLimit | .unrestoredLoan .. => .loanHole | _ => .illegalDiscard,
-      slot.declaration.span, s!"unlawful cleanup: {repr problem}", []⟩
+  let plan ← ((compileResident program.limits.analysis resident).mapError
+    (cleanupDiagnostic slot.declaration.span) : Check (CleanupPlan resident))
   updateAddress program located.address none
   modify fun world => { world with cleanup := world.cleanup ++ plan.val }
 
@@ -409,7 +415,7 @@ def validateWorld (program : Program) (world : World) : Check Unit := do
 
 def sealValues (program : Program) (values : List Value) : WorldM Unit := do
   let world ← get
-  let reachable ← values.mapM (valueTree program.limits.normalization)
+  let reachable ← (values.mapM (valueTree program.limits.normalization) : Check (List (List Value)))
   let reachable := reachable.flatten
   for value in reachable do
     match value.head with
@@ -418,32 +424,34 @@ def sealValues (program : Program) (values : List Value) : WorldM Unit := do
         .openAvailability "unresolved guarded environment cannot escape into plain storage"
     | .label brand =>
       require (world.labels.any (fun label => label.brand == brand)) .escapingBrand "label brand is not active"
-    | .reference identity => checkHandle world value
+    | .reference _ => checkHandle world value
     | _ => pure ()
 
-def cleanupSlots (program : Program) (ending : List Id) (protected : List Value)
+def cleanupSlots (program : Program) (ending : List Id) (protectedValues : List Value)
     (boundary : CleanupBoundary) : WorldM Unit := do
   let world ← get
-  let protectedIds := (← protected.mapM (valueTree program.limits.normalization)).flatten.map Value.identity
+  let protectedTrees ← (protectedValues.mapM (valueTree program.limits.normalization) : Check (List (List Value)))
+  let protectedIds := protectedTrees.flatten.map Value.identity
   for loan in world.loans.filter (·.live) do
     if ending.contains loan.origin.slot then
       require (!loan.hole) .loanHole "cleanup-bearing exit ends an unrestored unique loan"
       let surviving := world.slots.filter (fun s => !ending.contains s.declaration.id) |>.filterMap (·.value)
-      let carriers := (← (protected ++ surviving).mapM (valueTree program.limits.normalization)).flatten
+      let trees ← ((protectedValues ++ surviving).mapM (valueTree program.limits.normalization) : Check (List (List Value)))
+      let carriers := trees.flatten
       require (!(carriers.any (fun value => value.head == .reference loan.identity)))
         .escapingReference "a surviving reference points into reclaimed local storage"
-  let residents ← world.slots.filter (fun s => ending.contains s.declaration.id) |>.mapM fun slot => do
+  let residents ← (world.slots.filter (fun s => ending.contains s.declaration.id) |>.mapM fun slot => do
     match slot.value with
     | none => pure (.vacant slot.storage)
     | some value =>
       require (!(protectedIds.contains value.identity)) .duplicateOwner "protected payload is still resident in the ending scope"
-      valueResident program world program.limits.normalization slot.storage value
-  let plan ← (compileExit program.limits.analysis boundary residents).mapError fun problem =>
-    ⟨match problem with | .resourceLimit => .resourceLimit | .unrestoredLoan .. => .loanHole | _ => .illegalDiscard,
-      {}, s!"unlawful exit cleanup: {repr problem}", []⟩
-  set { world with
+      valueResident program world program.limits.normalization slot.storage value : Check (List Resident))
+  let plan ← ((compileExit program.limits.analysis boundary residents).mapError
+    (cleanupDiagnostic {}) : Check (ExitPlan residents))
+  set {
+    world with
     slots := world.slots.filter (fun s => !ending.contains s.declaration.id)
-    loans := world.loans.map (fun loan => if ending.contains loan.origin.slot then { loan with live := false } else loan)
+    loans := world.loans.map (fun (loan : Loan) => if ending.contains loan.origin.slot then { loan with live := false } else loan)
     cleanup := world.cleanup ++ plan.cleanup.val }
 
 end Glorious.Semantics
