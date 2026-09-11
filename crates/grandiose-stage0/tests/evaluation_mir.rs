@@ -14,6 +14,51 @@ fn normalize(source: &str) -> EvaluationMir {
 }
 
 #[test]
+fn callable_initializers_and_reads_share_their_resolved_value_join() {
+    let mir = normalize("pub fn main() -> i64 {
+        let first = 42; let second = 0;
+        let mut callback:(i64)->i64 = (argument:i64)->i64 {first};
+        let replacement:(i64)->i64 = (argument:i64)->i64 {second};
+        callback({callback = replacement; 0})
+    }");
+    let instructions = mir.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
+    let binding = instructions.iter().find(|instruction|
+        matches!(&instruction.operation, Op::Bind(name) if name == "callback")).unwrap();
+    let [EvaluationOperand::Value(value)] = binding.operands.as_slice() else { panic!("binding input") };
+    let initializer = instructions.iter().find(|instruction| instruction.value == *value).unwrap();
+    assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_none()));
+    let receiver = instructions.iter().find(|instruction|
+        matches!(instruction.operation, Op::PrepareInvocation)).unwrap();
+    assert_eq!(initializer.ty, receiver.ty);
+    grandiose_stage0::control_mir::ControlMir::lower(&mir).unwrap();
+}
+
+#[test]
+fn generic_callable_arguments_share_the_resolved_value_join() {
+    let mir = normalize("fn keep<T>(value:T) -> T {value}
+        pub fn main() -> i64 {
+            let first = 42; let second = 0;
+            let mut callback:(i64)->i64 = (argument:i64)->i64 {first};
+            let replacement:(i64)->i64 = (argument:i64)->i64 {second};
+            let saved = keep(callback);
+            callback = replacement;
+            saved(0)
+        }");
+    let instructions = mir.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
+    let binding = instructions.iter().find(|instruction|
+        matches!(&instruction.operation, Op::Bind(name) if name == "callback")).unwrap();
+    let [EvaluationOperand::Value(value)] = binding.operands.as_slice() else { panic!("binding input") };
+    let initializer = instructions.iter().find(|instruction| instruction.value == *value).unwrap();
+    let argument = instructions.iter().find_map(|instruction| match &instruction.operation {
+        Op::Function { arguments, .. } if arguments.len() == 1 => Some(&arguments[0]),
+        _ => None,
+    }).unwrap();
+    assert_eq!(argument, &grandiose_stage0::GenericArgument::Type(initializer.ty.clone()));
+    assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_none()));
+    grandiose_stage0::control_mir::ControlMir::lower(&mir).unwrap();
+}
+
+#[test]
 fn strict_calls_are_ordered_before_their_aggregate() {
     let mir = normalize(
         "fn first() -> i64 { 1 } fn second() -> i64 { 2 } pub fn main() -> (i64, i64) { (first(), second()) }",

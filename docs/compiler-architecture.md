@@ -2092,3 +2092,26 @@ lifetime fix. The original owned-receiver replacement still fails natively;
 a capture-bearing replacement regression additionally exposes Control's exact
 receiver/place type check conflating stored and value-refined callable contracts.
 Both remain active, not ignored or counted as passing acceptance gates.
+
+## Normalized callable value joins
+
+Core applies retained callable joins to the value and both sides of each join
+after resolving them in the same inference world. Previously an initializer
+containing an already-solved inference cell could miss a join that its later,
+resolved local read received. The constructor/binding then retained a nominal
+capture environment while its invocation used the joined environment view.
+
+Types, generic arguments and effect rows now consume the same kind-preserving,
+binder-aware join application. This changes normalization order, not the join's
+receiver, capture, region or residual-predicate rules. No additional binding-type
+table, Core field or downstream callable coercion is introduced. Existing typed
+consumers receive the corrected source product.
+
+Cache 153 fixes the capture-bearing replacement case's Control type mismatch.
+Its execution gate remains failing in the VM with a result error (`ResultType`,
+I64 on both sides); receiver lifetime is not proved by type agreement. All 17 Evaluation
+integration checks pass, including direct and generic join consistency. Selected
+generic/quantified callback checks and wrong receiver/post-state rejection pass.
+The 31-test borrowed-callable run had 27 passes and four failures; each failure
+also reproduced with this normalization change removed. Their cancellation and
+residual-predicate expectations remain active and are not claimed as solved.

@@ -8437,6 +8437,8 @@ impl Elaborator<'_> {
     }
 
     fn zonk_effect_row(&mut self, effects: EffectRow, span: Span) -> EffectRow {
+        let GenericArgument::EffectRow(effects) = self.joined_callable_value_argument(GenericArgument::EffectRow(effects))
+            else { unreachable!("kind-preserving callable join") };
         match self.inference.zonk_effects_allowing_generic_tail(effects) {
             Ok(effects) => effects,
             Err(_) => {
@@ -8463,7 +8465,7 @@ impl Elaborator<'_> {
     }
 
     fn zonk_generic_argument(&mut self, argument: GenericArgument, span: Span) -> GenericArgument {
-        let argument = crate::CallableContract::replace_value_types(argument, &self.callable_value_joins, 0);
+        let argument = self.joined_callable_value_argument(argument);
         let fallback = argument.clone();
         match self.inference.zonk_generic_argument(argument) {
             Ok(argument) => argument,

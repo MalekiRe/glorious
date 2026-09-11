@@ -5,6 +5,24 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 153: normalized callable joins
+
+Core resolves a value and both retained join operands in the same inference
+world before applying the existing callable join. Types, generic arguments and
+effect rows share this kind-preserving, binder-aware application. Initializer
+and later local-read contracts no longer disagree merely because one retained
+a solved inference cell. No binding metadata or new downstream coercion remains.
+
+All 17 Evaluation integration checks pass, including initializer/receiver and
+generic-argument consistency. Selected generic/quantified callback checks pass.
+The capture-bearing replacement case now passes the former Control mismatch,
+but its VM execution still fails (`ResultType` with I64 on both sides); the
+owned receiver lifetime gate is not complete. A borrowed-callable run had 27
+passes and four failures: borrowed callback cancellation, standard iterator
+cancellation, standard array cancellation, and written-ABI residual predicates.
+All four failures were reproduced with this change removed and remain active.
+Cache 153 changes; verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+
 ## Cache 152: stored loan identity versus storage type
 
 Both MIR Store validators now use the common region-term traversal to compare

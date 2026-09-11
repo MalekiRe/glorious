@@ -365,7 +365,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 150 freezes strict quantity inputs before later operand mutations.
 // Cache 151 acquires strict operand storage at its evaluation point.
 // Cache 152 distinguishes stored loan identity from its runtime value type.
-pub const STAGE0_CACHE_GENERATION: u32 = 152;
+// Cache 153 resolves both sides of retained callable value joins.
+pub const STAGE0_CACHE_GENERATION: u32 = 153;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

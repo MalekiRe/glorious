@@ -171,12 +171,21 @@ impl Elaborator<'_> {
         }
     }
 
-    pub(super) fn joined_callable_value_type(&self, mut ty: Type) -> Type {
+    pub(super) fn joined_callable_value_argument(&self, mut argument: GenericArgument) -> GenericArgument {
+        // Normalize the value and both sides of each retained join in the
+        // same inference world. Otherwise a pre-inference initializer can
+        // miss a join that its later, already-resolved local read receives.
+        argument = self.inference.resolve_argument_structure(argument);
         for (from, to) in &self.callable_value_joins {
             let replacement = [(self.inference.resolve_type_structure(from.clone()), self.inference.resolve_type_structure(to.clone()))];
-            let GenericArgument::Type(value) = CallableContract::replace_value_types(GenericArgument::Type(ty), &replacement, 0) else { unreachable!() };
-            ty = value;
+            argument = CallableContract::replace_value_types(argument, &replacement, 0);
         }
+        argument
+    }
+
+    pub(super) fn joined_callable_value_type(&self, ty: Type) -> Type {
+        let GenericArgument::Type(ty) = self.joined_callable_value_argument(GenericArgument::Type(ty))
+            else { unreachable!("kind-preserving callable join") };
         ty
     }
 
