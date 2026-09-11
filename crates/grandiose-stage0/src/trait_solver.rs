@@ -1442,6 +1442,14 @@ impl TraitSolver {
         self.normalize_type_projections(value, &mut vec![])
     }
 
+    /// Normalize a term owned by one explicit surrounding region binder.
+    /// The caller retains that binder while consuming the result. Ordinary
+    /// unscoped entry points continue to reject escaped bound regions.
+    pub(crate) fn normalize_type_in_region_binder(&mut self, value: Type, lifetime_binders: u32)
+        -> Result<Type, Box<TraitProjectionAnswer>> {
+        self.normalize_type_projections_in_hrtb(value, &mut vec![], &[lifetime_binders])
+    }
+
     /// Normalize a kinded argument through the same traversal and resource
     /// budget, including rows nested inside types and types nested in rows.
     pub fn normalize_generic_argument(
@@ -4778,6 +4786,43 @@ mod tests {
         let Type::Callable { safety, .. } = &mut unsafe_callable else { unreachable!() };
         *safety = crate::Safety::Unsafe;
         assert_eq!(solver.normalize_effect_row(projected_row(unsafe_callable.clone())).unwrap(), projected_row(unsafe_callable));
+    }
+
+    #[test]
+    fn explicitly_bound_projection_normalization_retains_scope_and_outlives_evidence() {
+        let source = "struct Wrapper<'a,'b> {} trait Family { type Item; }
+            impl<'a,'b> Family for Wrapper<'a,'b> where 'a: 'b { type Item = &'a i64; }";
+        let package = crate::PackageKey("bound-projection-regions@0.1.0".into());
+        let lexed = crate::LexedFile::lex(crate::FileKey::new(&package, "src/lib.glorious"), source);
+        let scan = crate::DeclarationScan::scan(&lexed, source);
+        let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+        let key = |name: &str| interface.definitions.iter().find(|definition| definition.name.as_deref() == Some(name)).unwrap().key;
+        let first = Lifetime::Bound { depth: 0, index: 0 };
+        let second = Lifetime::Bound { depth: 0, index: 1 };
+        let projected = Type::Projection {
+            subject: Box::new(Type::Nominal { definition: key("Wrapper"), arguments: vec![
+                GenericArgument::Lifetime(first), GenericArgument::Lifetime(second)] }),
+            trait_definition: key("Family"), trait_arguments: vec![], name: "Item".into(),
+            item_generic_kinds: vec![], item_arguments: vec![],
+        };
+        let mut solver = TraitSolver::new(&signatures);
+        assert_eq!(solver.normalize_type(projected.clone()).unwrap(), projected,
+            "a public unscoped query cannot own these bound regions");
+        assert!(solver.normalize_type_in_region_binder(projected.clone(), 2).is_err(),
+            "ownership of the binder does not supply an outlives predicate");
+        solver.set_outlives_assumptions(vec![crate::OutlivesPredicate::Region { longer: first, shorter: second }]);
+        assert_eq!(solver.normalize_type_in_region_binder(projected.clone(), 2).unwrap(),
+            Type::Reference { lifetime: first, mutability: crate::Mutability::Shared,
+                referent: Box::new(Type::Scalar(ScalarType::I64)) });
+        assert_eq!(solver.normalize_type_in_region_binder(projected.clone(), 1).unwrap(), projected,
+            "an out-of-range bound region cannot enter a smaller scope");
+        assert_eq!(solver.normalize_type(projected.clone()).unwrap(), projected,
+            "a scoped result cannot authorize a later unscoped query");
+        solver.set_outlives_assumptions(vec![]);
+        assert!(solver.normalize_type_in_region_binder(projected, 2).is_err(),
+            "removing lexical evidence invalidates the previous selected answer");
     }
 
     #[test]

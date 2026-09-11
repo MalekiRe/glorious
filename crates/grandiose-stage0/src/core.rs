@@ -16333,6 +16333,72 @@ pub(crate) fn callable_reference_origin_from_contract(
     parameters: &[Type],
     result: &Type,
 ) -> CallReferenceOrigin {
+    callable_reference_origin_in_layout(&ReferenceLayout::new(signatures), parameters, result)
+}
+
+/// The field query and its lexical region scope travel together. Reference
+/// and callable-path consumers still use the interface's one field producer;
+/// a bound analysis signature does not become an unscoped solver request when
+/// a nominal field exposes a previously hidden associated projection.
+pub(crate) struct ReferenceLayout<'a> {
+    signatures: &'a ElaboratedInterface,
+    scoped: Option<(u32, &'a crate::CallableSignature, std::cell::OnceCell<std::cell::RefCell<TraitSolver>>)>,
+}
+
+impl<'a> ReferenceLayout<'a> {
+    pub(crate) fn new(signatures: &'a ElaboratedInterface) -> Self {
+        Self { signatures, scoped: None }
+    }
+
+    pub(crate) fn in_region_binder(signatures: &'a ElaboratedInterface, count: u32,
+        contract: &'a crate::CallableSignature) -> Self {
+        Self { signatures, scoped: Some((count, contract, std::cell::OnceCell::new())) }
+    }
+
+    fn normalize_fields(&self, fields: &mut [crate::signature::NominalField]) -> Result<(), crate::signature::InstantiationError> {
+        if let Some((count, contract, solver)) = &self.scoped {
+            for field in fields {
+                if crate::trait_solver::type_projection_normalization_is_identity(&field.ty) { continue; }
+                let mut solver = solver.get_or_init(|| {
+                    let mut solver = TraitSolver::new(self.signatures);
+                    solver.set_lexical_assumptions(contract.where_bounds.iter().map(|(subject, relation)|
+                        TraitGoal { subject: subject.clone(), relation: relation.clone() }).collect());
+                    solver.set_outlives_assumptions(contract.where_outlives.clone());
+                    solver.set_associated_bindings(contract.where_associated_type_bindings.clone(), contract.where_associated_effect_bindings.clone());
+                    solver.set_universal_assumptions(contract.universal_bounds.clone());
+                    std::cell::RefCell::new(solver)
+                }).borrow_mut();
+                solver.reset_query();
+                field.ty = solver.normalize_type_in_region_binder(field.ty.clone(), *count)
+                    .map_err(|_| crate::signature::InstantiationError::WrongLayout)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn instantiate_struct_fields_generic(&self, definition: DefKey, arguments: &[GenericArgument])
+        -> Result<Vec<crate::signature::NominalField>, crate::signature::InstantiationError> {
+        let mut fields = self.signatures.instantiate_struct_fields_generic(definition, arguments)?;
+        self.normalize_fields(&mut fields)?;
+        Ok(fields)
+    }
+
+    pub(crate) fn instantiate_enum_fields_generic(&self, definition: DefKey, arguments: &[GenericArgument], variant: u32)
+        -> Result<Vec<crate::signature::NominalField>, crate::signature::InstantiationError> {
+        let mut fields = self.signatures.instantiate_enum_fields_generic(definition, arguments, variant)?;
+        self.normalize_fields(&mut fields)?;
+        Ok(fields)
+    }
+}
+
+impl std::ops::Deref for ReferenceLayout<'_> {
+    type Target = ElaboratedInterface;
+    fn deref(&self) -> &Self::Target { self.signatures }
+}
+
+pub(crate) fn callable_reference_origin_in_layout(
+    signatures: &ReferenceLayout<'_>, parameters: &[Type], result: &Type,
+) -> CallReferenceOrigin {
     let mut result_leaves = vec![];
     let mut complete = reachable_reference_leaf_paths(signatures, result, &mut result_leaves, true).is_ok();
     if result_leaves.is_empty() {
@@ -16352,7 +16418,7 @@ pub(crate) fn callable_reference_origin_from_contract(
     let mut argument_leaves = vec![];
     for (argument, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
-        complete &= input_reference_leaf_paths(signatures, parameter, &mut leaves).is_ok();
+        complete &= input_reference_leaf_paths_in_layout(signatures, parameter, &mut leaves).is_ok();
         argument_leaves.extend(
             leaves
                 .into_iter()
@@ -16421,16 +16487,22 @@ pub(crate) fn input_reference_leaf_paths(
     ty: &Type,
     leaves: &mut Vec<(Vec<u32>, Type)>,
 ) -> Result<(), ()> {
+    input_reference_leaf_paths_in_layout(&ReferenceLayout::new(signatures), ty, leaves)
+}
+
+pub(crate) fn input_reference_leaf_paths_in_layout(
+    signatures: &ReferenceLayout<'_>, ty: &Type, leaves: &mut Vec<(Vec<u32>, Type)>,
+) -> Result<(), ()> {
     reachable_reference_leaf_paths(signatures, ty, leaves, false)
 }
 
 fn reachable_reference_leaf_paths(
-    signatures: &ElaboratedInterface,
+    signatures: &ReferenceLayout<'_>,
     ty: &Type,
     leaves: &mut Vec<(Vec<u32>, Type)>,
     result: bool,
 ) -> Result<(), ()> {
-    fn visit(signatures: &ElaboratedInterface, ty: &Type, prefix: &[u32],
+    fn visit(signatures: &ReferenceLayout<'_>, ty: &Type, prefix: &[u32],
         active: &mut Vec<Type>, leaves: &mut Vec<(Vec<u32>, Type)>, result: bool) -> Result<(), ()> {
         if active.contains(ty) { return if result { Err(()) } else { Ok(()) }; }
         if let Type::Nominal { definition, .. } = ty
@@ -16471,11 +16543,11 @@ pub(crate) fn reference_leaf_paths(
     path: &mut Vec<u32>,
     leaves: &mut Vec<(Vec<u32>, Type)>,
 ) -> Result<(), ()> {
-    reference_leaf_paths_active(signatures, ty, path, leaves, &mut std::collections::BTreeMap::new(), false)
+    reference_leaf_paths_active(&ReferenceLayout::new(signatures), ty, path, leaves, &mut std::collections::BTreeMap::new(), false)
 }
 
 fn reference_leaf_paths_active(
-    signatures: &ElaboratedInterface,
+    signatures: &ReferenceLayout<'_>,
     ty: &Type,
     path: &mut Vec<u32>,
     leaves: &mut Vec<(Vec<u32>, Type)>,
@@ -16512,7 +16584,7 @@ impl ReferenceLeaves {
 }
 
 fn collect_reference_leaf_paths(
-    signatures: &ElaboratedInterface,
+    signatures: &ReferenceLayout<'_>,
     ty: &Type,
     path: &mut Vec<u32>,
     leaves: &mut ReferenceLeaves,
@@ -16637,11 +16709,11 @@ fn reference_layout_weight(ty: &Type) -> usize {
     nested.saturating_add(1)
 }
 
-fn type_has_raw_storage(signatures: &ElaboratedInterface, ty: &Type, active: &mut std::collections::BTreeSet<DefKey>) -> bool {
+fn type_has_raw_storage(signatures: &ReferenceLayout<'_>, ty: &Type, active: &mut std::collections::BTreeSet<DefKey>) -> bool {
     type_has_reference_storage(signatures, ty, active, false)
 }
 
-fn type_has_reference_storage(signatures: &ElaboratedInterface, ty: &Type,
+fn type_has_reference_storage(signatures: &ReferenceLayout<'_>, ty: &Type,
     active: &mut std::collections::BTreeSet<DefKey>, include_borrowed: bool) -> bool {
     match ty {
         Type::RawPointer { .. } => true,
@@ -16673,7 +16745,7 @@ fn type_has_reference_storage(signatures: &ElaboratedInterface, ty: &Type,
 }
 
 fn collect_structural_reference_leaf_paths(
-    signatures: &ElaboratedInterface,
+    signatures: &ReferenceLayout<'_>,
     ty: &Type,
     path: &mut Vec<u32>,
     leaves: &mut ReferenceLeaves,
@@ -16805,7 +16877,7 @@ fn collect_structural_reference_leaf_paths(
     }
 }
 
-fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bool {
+fn type_may_contain_reference(signatures: &ReferenceLayout<'_>, ty: &Type) -> bool {
     // Dynamic-array elements cannot name direct projection paths. The fixed
     // array branch also needs to detect opaque reference-bearing elements
     // before constructing a homogeneous projection. Do that with
@@ -16814,7 +16886,7 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
     // runtime, whereas recursively opening its element layout here used to
     // overflow the compiler stack.
     fn visit(
-        signatures: &ElaboratedInterface,
+        signatures: &ReferenceLayout<'_>,
         ty: &Type,
         active: &mut std::collections::BTreeSet<crate::DefKey>,
     ) -> bool {

@@ -5,6 +5,47 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Bound region scope in selected reference contracts
+
+Cache 187 closes the borrowed associated-field factory failure preserved by
+the preceding checkpoint. Selected callable analysis previously replaced input
+lifetimes with unscoped universal placeholders. It now produces an explicitly
+bound signature and retains that binder through returned-reference analysis,
+parameter-store relations and callable-result forwarding. Independent declaration
+regions remain distinct even when actual callers use the same lifetime;
+substituted residents retain cross-input equality. Captured regions shift under
+their callable's own binder without capturing its parameter/result regions.
+
+The same nominal-field query now carries the selected lexical predicates and
+region scope into the existing projection solver. An ordinary field needs no
+additional solver snapshot; a field with a remaining projection initializes one
+lazy scoped query. The public solver's escaped-region and unsolved-inference
+rules are unchanged. Scope ownership does not supply missing trait or outlives
+evidence, and scoped answers do not authorize later unscoped requests.
+
+The unchanged `associated_nominal_result_fields_preserve_borrowed_residents`
+test now passes its positive factory/helper composition through fresh and
+decoded VM execution at O0/O2, while both mutation-rejection checks still pass.
+The full reference-result suite advances to **33 passes and one failure**,
+including all 30 original cases and their existing generated-code checks.
+The remaining active `associated_nominal_inferred_lifetime_field_dereference`
+case fails G4140: dereference still demands a reference shape before its caller
+lifetime inference cell permits associated-head normalization. No annotation,
+test suppression or weakened mutation check hides that remaining obligation.
+
+All 22 focused projection checks pass, including a new bound-scope test that
+requires the exact outlives predicate, refuses an undersized binder, refuses a
+subsequent unscoped normalization and invalidates selection when the predicate
+is removed. All six region-relation checks pass, retaining independent elision,
+cross-argument equality, writable-handle access, callable capture debt and
+future-store joins. The strengthened nested-callable binder check additionally
+keeps captured and invocation-bound regions separate.
+
+The iterator's raw-backed mandatory-tail provenance failure and the isolated
+I/O timeout remain open; this checkpoint does not rerun or claim either gate.
+Full language, standard-library and subsequent self-hosted acceptance remain
+unfinished.
+
 ## Shared normalized nominal fields
 
 Cache 186 removes the reference/ownership analyses' partial nominal-field

@@ -2968,3 +2968,31 @@ acceptance tests reject at those boundaries. Unscoped universal placeholders
 must not be legalized merely because they are rigid; eligibility alone does not
 provide their missing scope. No trait-solver admission rule, executable proof,
 portable encoding or runtime ABI is changed by this checkpoint.
+
+## Bound region queries for selected reference contracts
+
+Cache 187 replaces selected-region analysis's synthetic universal placeholders
+with an explicitly owned region binder. Independently declared lifetime inputs
+receive distinct slots; substituted residents retain their existing cross-input
+region equality; independently elided outer inputs receive separate slots in
+that same binder. Callable captures shift beneath the callable's own binder,
+whose parameter/result regions remain closed and unchanged. The selected
+signature and its binder count are one query product, not an unscoped type.
+
+Returned-reference contracts, parameter-store relations and callable-result
+forwarding consume that product through `ReferenceLayout`. This query retains
+the binder and selected lexical trait, outlives, associated-equality and
+quantified predicates while opening the interface's instantiated nominal fields.
+The shared projection normalizer checks terms within the actual binder; it does
+not gain permission to normalize escaped placeholders through its ordinary
+public entry point. Missing scope or prerequisite evidence remains unresolved
+or rejected. Query tables reset between fields, and the additional scoped solver
+snapshot is created lazily only when a field still contains a projection.
+
+The preserved borrowed associated-field factory now compiles and executes;
+mutation while its result retains a loan still rejects. This closes the
+selected-contract scope gap recorded above. The direct caller-field dereference
+still encounters an unresolved inference-region projection before sealing and
+remains an active source failure. No source inference cell is made rigid by
+this correction, and no runtime reference identity, wire format or executable
+ownership permission changes.

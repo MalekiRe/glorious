@@ -388,7 +388,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 184 shares immutable native paths and reuses empty initialization-loan backing.
 // Cache 185 separates private scalar segment backing from addressable native homes.
 // Cache 186 shares normalized nominal fields across reference and callable ownership analysis.
-pub const STAGE0_CACHE_GENERATION: u32 = 186;
+// Cache 187 retains explicit region binders across selected nominal field queries.
+pub const STAGE0_CACHE_GENERATION: u32 = 187;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

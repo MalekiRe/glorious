@@ -96,6 +96,10 @@ pub(crate) struct ResidentRelations {
 /// erased the producer's capture refinements. These paths never participate
 /// in Core's physical-reference authority or manufacture a reference leaf.
 pub(crate) fn callable_paths(signatures: &crate::ElaboratedInterface, ty: &crate::Type, input: bool) -> Vec<(Vec<u32>, crate::Type)> {
+    callable_paths_in_layout(&crate::core::ReferenceLayout::new(signatures), ty, input)
+}
+
+fn callable_paths_in_layout(signatures: &crate::core::ReferenceLayout<'_>, ty: &crate::Type, input: bool) -> Vec<(Vec<u32>, crate::Type)> {
     use crate::{ElaboratedHeader, ElaboratedNominalLayout, GenericArgument, Type};
     fn weight(ty: &Type) -> usize {
         let arguments = |values: &[GenericArgument]| values.iter().fold(0usize, |sum, value|
@@ -108,7 +112,7 @@ pub(crate) fn callable_paths(signatures: &crate::ElaboratedInterface, ty: &crate
             _ => 0,
         })
     }
-    fn visit(signatures: &crate::ElaboratedInterface, ty: &Type, input: bool, path: &mut Vec<u32>,
+    fn visit(signatures: &crate::core::ReferenceLayout<'_>, ty: &Type, input: bool, path: &mut Vec<u32>,
         active: &mut BTreeMap<crate::DefKey, usize>, leaves: &mut Vec<(Vec<u32>, Type)>) {
         match ty {
             Type::Callable { .. } => leaves.push((path.clone(), ty.clone())),
@@ -177,15 +181,17 @@ fn same_callable_abi(left: &crate::Type, right: &crate::Type) -> bool {
 pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr,
     noncapturing: &BTreeSet<Vec<u32>>) -> Vec<crate::core::CallReferencePath> {
     let crate::Type::Callable { parameters, result, contract: declaration, .. } = &expression.ty else { return vec![]; };
-    if callable_paths(signatures, result, false).is_empty() { return vec![]; }
     let rigid = rigid_callable_signature(signatures, expression);
-    let (parameters, result) = rigid.as_ref().map(|signature| (&signature.parameters, &signature.result)).unwrap_or((parameters, result));
+    let layout = rigid.as_ref().map_or_else(|| crate::core::ReferenceLayout::new(signatures), |selected|
+        crate::core::ReferenceLayout::in_region_binder(signatures, selected.regions.next, &selected.signature));
+    let (parameters, result) = rigid.as_ref().map(|selected| (&selected.signature.parameters, &selected.signature.result)).unwrap_or((parameters, result));
+    if callable_paths_in_layout(&layout, result, false).is_empty() { return vec![]; }
     let inputs = parameters.iter().enumerate().flat_map(|(index, parameter)|
-        callable_paths(signatures, parameter, true).into_iter().map(move |(path, ty)| (index, path, ty))).collect::<Vec<_>>();
+        callable_paths_in_layout(&layout, parameter, true).into_iter().map(move |(path, ty)| (index, path, ty))).collect::<Vec<_>>();
     let literal_results = crate::callable_declarations::declared_invocation_contract(signatures, expression)
         .map(|(signature, _)| callable_paths(signatures, &signature.result, false));
     let mut paths = vec![];
-    for (result_fields, result_ty) in callable_paths(signatures, result, false) {
+    for (result_fields, result_ty) in callable_paths_in_layout(&layout, result, false) {
         let mut matched = false;
         for (argument, argument_fields, ty) in &inputs {
             if !same_callable_abi(&result_ty, ty) { continue; }
@@ -197,7 +203,7 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
         let captures = contract.open(|_| None).map(|contract| contract.captures).unwrap_or_else(|| contract.captures.clone());
         let mut captured_regions = vec![];
         for capture in &captures {
-            let _ = crate::core::input_reference_leaf_paths(signatures, capture, &mut captured_regions);
+            let _ = crate::core::input_reference_leaf_paths_in_layout(&layout, capture, &mut captured_regions);
         }
         // A declared plain Fn result can close over a non-callable input even
         // though its ABI mentions no region. In contrast, `pop<T> -> T`
@@ -214,13 +220,13 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
         }).is_some();
         let known_owned = noncapturing.contains(&result_fields) && regions_known && !free_region
             && !declaration.has_residual() && declaration.body_regions.facts().is_empty()
-            && rigid.as_ref().is_none_or(|signature| signature.where_outlives.is_empty());
+            && rigid.as_ref().is_none_or(|selected| selected.signature.where_outlives.is_empty());
         let unknown_factory = !known_owned && contract.environment.is_none() && (!matched || literal_results.as_ref()
             .is_none_or(|results| results.iter().any(|(path, _)| crate::core::reference_path_matches(path, &result_fields))));
         if !unknown_factory && captured_regions.is_empty() { continue; }
         for (argument, parameter) in parameters.iter().enumerate() {
             let mut references = vec![];
-            let _ = crate::core::input_reference_leaf_paths(signatures, parameter, &mut references);
+            let _ = crate::core::input_reference_leaf_paths_in_layout(&layout, parameter, &mut references);
             for (argument_fields, ty) in references {
                 let crate::Type::Reference { lifetime, .. } = ty else { continue; };
                 if !unknown_factory && !captured_regions.iter().any(|(_, ty)|
@@ -240,8 +246,10 @@ pub(crate) fn expression_relations(signatures: &crate::ElaboratedInterface, expr
     body_regions: &crate::types::BodyRegionConstraints) -> ResidentRelations {
     use crate::Type;
     let Type::Callable { parameters, contract, .. } = &expression.ty else { return ResidentRelations::default(); };
-    if let Some(signature) = rigid_callable_signature(signatures, expression) {
-        return parameter_relations(signatures, &rigid_declaration_parameters(&signature.parameters), &signature.where_outlives);
+    if let Some(mut selected) = rigid_callable_signature(signatures, expression) {
+        let parameters = rigid_declaration_parameters(&selected.signature.parameters, &mut selected.regions);
+        let layout = crate::core::ReferenceLayout::in_region_binder(signatures, selected.regions.next, &selected.signature);
+        return parameter_relations_in_layout(&layout, &parameters, &selected.signature.where_outlives);
     }
     let mut outlives = contract.residual.where_outlives.clone();
     outlives.extend_from_slice(contract.body_regions.facts());
@@ -250,44 +258,58 @@ pub(crate) fn expression_relations(signatures: &crate::ElaboratedInterface, expr
 }
 
 pub(crate) fn call_origin(signatures: &crate::ElaboratedInterface, callee: &crate::core::CoreExpr) -> Option<crate::core::CallReferenceOrigin> {
-    let signature = rigid_callable_signature(signatures, callee)?;
-    let origin = crate::core::callable_reference_origin_from_contract(signatures, &signature.parameters, &signature.result);
+    let selected = rigid_callable_signature(signatures, callee)?;
+    let layout = crate::core::ReferenceLayout::in_region_binder(signatures, selected.regions.next, &selected.signature);
+    let origin = crate::core::callable_reference_origin_in_layout(&layout, &selected.signature.parameters, &selected.signature.result);
     (!matches!(origin, crate::core::CallReferenceOrigin::Opaque)).then_some(origin)
 }
 
-fn rigid_callable_signature(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Option<crate::CallableSignature> {
+struct RigidSignature {
+    signature: crate::CallableSignature,
+    regions: RigidRegions,
+}
+
+#[derive(Default)]
+struct RigidRegions {
+    next: u32,
+    residents: BTreeMap<crate::Lifetime, crate::Lifetime>,
+}
+
+impl RigidRegions {
+    fn fresh(&mut self) -> crate::Lifetime {
+        let index = self.next;
+        self.next = self.next.checked_add(1).expect("region binder fits the checked source index space");
+        crate::Lifetime::Bound { depth: 0, index }
+    }
+}
+
+fn rigid_callable_signature(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Option<RigidSignature> {
     let selected = crate::callable_declarations::selected_template(signatures, expression, None)?;
     // Distinct type slots can be related by ordinary trait conversion. Keep
     // their realized region equality, while declaration-local elision stays
     // separate from substituted residents in both functions and methods.
-    let mut regions = BTreeMap::new();
-    let arguments = selected.arguments.iter().enumerate().map(|(index, argument)| match argument {
+    let mut regions = RigidRegions::default();
+    let arguments = selected.arguments.iter().map(|argument| match argument {
         // A function's independently bound lifetimes are distinct permission
         // variables even when the realized caller encodes both as Elided.
         // Substituted type residents retain their existing shared region map.
         // Caller equality cannot grant an operation the generic body lacked.
-        crate::GenericArgument::Lifetime(_) => crate::GenericArgument::Lifetime(crate::Lifetime::Placeholder(
-            crate::types::UniversalRegion { universe: u32::MAX - 1, index: index as u32 })),
+        crate::GenericArgument::Lifetime(_) => crate::GenericArgument::Lifetime(regions.fresh()),
         argument => rigid_resident_argument(argument, &mut regions),
     }).collect::<Vec<_>>();
-    selected.signature.instantiate_generic(&arguments).ok()
+    Some(RigidSignature { signature: selected.signature.instantiate_generic(&arguments).ok()?, regions })
 }
 
-fn rigid_declaration_parameters(parameters: &[crate::Type]) -> Vec<crate::Type> {
+fn rigid_declaration_parameters(parameters: &[crate::Type], regions: &mut RigidRegions) -> Vec<crate::Type> {
     // Omitted declaration regions are independently bound inputs. Their
     // shared spelling (`Elided`) is not equality or permission to store an
     // outer short borrow into another input's nested handle. Substituted
     // resident regions have already been rigidified by declaration selection.
-    let mut next = 0;
     parameters.iter().map(|parameter| {
         let crate::GenericArgument::Type(parameter) = crate::types::regions::map_argument_regions(
             crate::GenericArgument::Type(parameter.clone()), &mut |lifetime, depth| {
                 Some(if lifetime == crate::Lifetime::Elided && depth == 0 {
-                    let region = crate::Lifetime::Placeholder(crate::types::UniversalRegion {
-                        universe: u32::MAX - 2, index: next,
-                    });
-                    next += 1;
-                    region
+                    regions.fresh()
                 } else { lifetime })
             }).expect("rigid declaration-region mapping is total") else { unreachable!() };
         parameter
@@ -296,13 +318,18 @@ fn rigid_declaration_parameters(parameters: &[crate::Type]) -> Vec<crate::Type> 
 
 pub(crate) fn parameter_relations(signatures: &crate::ElaboratedInterface, parameters: &[crate::Type],
     assumptions: &[crate::OutlivesPredicate]) -> ResidentRelations {
+    parameter_relations_in_layout(&crate::core::ReferenceLayout::new(signatures), parameters, assumptions)
+}
+
+fn parameter_relations_in_layout(signatures: &crate::core::ReferenceLayout<'_>, parameters: &[crate::Type],
+    assumptions: &[crate::OutlivesPredicate]) -> ResidentRelations {
     let mut assumptions = assumptions.to_vec();
     for parameter in parameters { crate::OutlivesPredicate::implied_by_type(parameter, &mut assumptions); }
     let mut inputs = vec![];
     for (index, parameter) in parameters.iter().enumerate() {
         let mut leaves = vec![];
-        let _ = crate::core::input_reference_leaf_paths(signatures, parameter, &mut leaves);
-        leaves.extend(callable_paths(signatures, parameter, true));
+        let _ = crate::core::input_reference_leaf_paths_in_layout(signatures, parameter, &mut leaves);
+        leaves.extend(callable_paths_in_layout(signatures, parameter, true));
         inputs.extend(leaves.into_iter().map(|(path, ty)| (index, path, ty)));
     }
     let mut relations = ResidentRelations::default();
@@ -345,13 +372,15 @@ pub(crate) fn parameter_relations(signatures: &crate::ElaboratedInterface, param
     relations
 }
 
-fn rigid_resident_lifetime(lifetime: crate::Lifetime, regions: &mut BTreeMap<crate::Lifetime, crate::Lifetime>) -> crate::Lifetime {
+fn rigid_resident_lifetime(lifetime: crate::Lifetime, regions: &mut RigidRegions) -> crate::Lifetime {
     if lifetime == crate::Lifetime::Static { return lifetime; }
-    let next = crate::Lifetime::Placeholder(crate::types::UniversalRegion { universe: u32::MAX, index: regions.len() as u32 });
-    *regions.entry(lifetime).or_insert(next)
+    if let Some(region) = regions.residents.get(&lifetime) { return *region; }
+    let next = regions.fresh();
+    regions.residents.insert(lifetime, next);
+    next
 }
 
-fn rigid_resident_argument(argument: &crate::GenericArgument, regions: &mut BTreeMap<crate::Lifetime, crate::Lifetime>) -> crate::GenericArgument {
+fn rigid_resident_argument(argument: &crate::GenericArgument, regions: &mut RigidRegions) -> crate::GenericArgument {
     use crate::GenericArgument;
     match argument {
         GenericArgument::Type(ty) => GenericArgument::Type(rigid_resident_type(ty, regions)),
@@ -360,7 +389,7 @@ fn rigid_resident_argument(argument: &crate::GenericArgument, regions: &mut BTre
     }
 }
 
-fn rigid_resident_type(ty: &crate::Type, regions: &mut BTreeMap<crate::Lifetime, crate::Lifetime>) -> crate::Type {
+fn rigid_resident_type(ty: &crate::Type, regions: &mut RigidRegions) -> crate::Type {
     use crate::Type;
     match ty {
         Type::Reference { lifetime, mutability, referent } => Type::Reference {
@@ -377,8 +406,12 @@ fn rigid_resident_type(ty: &crate::Type, regions: &mut BTreeMap<crate::Lifetime,
             // just like an ordinary substituted reference. They are not the
             // independently elided &mut Owner<T> receiver. Its invocation
             // binder and proof-only environment identities stay untouched.
-            contract.captures = contract.captures.iter().map(|capture| rigid_resident_type(capture, regions)).collect();
-            contract.body_regions = contract.body_regions.map_terms(|argument| rigid_resident_argument(&argument, regions));
+            contract.captures = contract.captures.iter().map(|capture|
+                crate::types::regions::shift_type_argument(rigid_resident_type(capture, regions), 1)
+                    .expect("capture remains in the owned region binder")).collect();
+            contract.body_regions = contract.body_regions.map_terms(|argument|
+                crate::types::regions::shift_argument(rigid_resident_argument(&argument, regions), 1)
+                    .expect("capture predicate remains in the owned region binder"));
             Type::Callable { contract: Box::new(contract), safety: *safety, lifetime_binders: *lifetime_binders,
                 parameters: parameters.clone(), result: result.clone(), effects: effects.clone(), invocation: *invocation }
         }
@@ -401,8 +434,9 @@ mod tests {
             mutability: crate::Mutability::Unique, lifetime: crate::Lifetime::Elided, referent: Box::new(referent),
         };
         let slot = reference(crate::Type::Tuple(vec![reference(crate::Type::Unit)]));
+        let mut regions = RigidRegions::default();
         let relations = parameter_relations(&crate::ElaboratedInterface::default(),
-            &rigid_declaration_parameters(&[slot, reference(crate::Type::Unit)]), &[]);
+            &rigid_declaration_parameters(&[slot, reference(crate::Type::Unit)], &mut regions), &[]);
         assert!(relations.stores.is_empty());
         assert!(relations.reference_writes.iter().all(|write| write.sources.is_empty()),
             "independent short input loans cannot enter the writable slot");
@@ -497,18 +531,26 @@ mod tests {
             lifetime: crate::Lifetime::Elided, mutability: crate::types::Mutability::Shared,
             referent: Box::new(crate::Type::Unit),
         };
-        let mut regions = BTreeMap::new();
+        let mut regions = RigidRegions::default();
         let first = rigid_resident_type(&crate::Type::Tuple(vec![reference.clone()]), &mut regions);
         let second = rigid_resident_type(&reference, &mut regions);
         assert_eq!(first, crate::Type::Tuple(vec![second.clone()]));
-        assert!(matches!(second, crate::Type::Reference { lifetime: crate::Lifetime::Placeholder(_), .. }));
+        assert!(matches!(second, crate::Type::Reference { lifetime: crate::Lifetime::Bound { depth: 0, index: 0 }, .. }));
         assert_eq!(rigid_resident_lifetime(crate::Lifetime::Static, &mut regions), crate::Lifetime::Static);
+        let bound = crate::Type::Reference {
+            lifetime: crate::Lifetime::Bound { depth: 0, index: 0 }, mutability: crate::Mutability::Shared,
+            referent: Box::new(crate::Type::Unit),
+        };
         let callable = crate::Type::Callable {
             contract: Box::new(crate::CallableContract { captures: vec![reference], ..Default::default() }),
-            safety: crate::Safety::Safe, lifetime_binders: 0, parameters: vec![], result: Box::new(crate::Type::Unit),
+            safety: crate::Safety::Safe, lifetime_binders: 1, parameters: vec![bound.clone()], result: Box::new(bound.clone()),
             effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE,
         };
-        let crate::Type::Callable { contract, .. } = rigid_resident_type(&callable, &mut regions) else { unreachable!() };
-        assert_eq!(contract.captures, vec![second]);
+        let crate::Type::Callable { contract, lifetime_binders, parameters, result, .. } = rigid_resident_type(&callable, &mut regions) else { unreachable!() };
+        assert_eq!(lifetime_binders, 1);
+        assert_eq!(parameters, vec![bound.clone()], "the callable's own bound region remains closed");
+        assert_eq!(*result, bound);
+        assert_eq!(contract.captures, vec![crate::types::regions::shift_type_argument(second, 1).unwrap()]);
+        assert_eq!(regions.next, 1, "the invocation's binder cannot consume an outer resident slot");
     }
 }
