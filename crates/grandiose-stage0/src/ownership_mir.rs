@@ -718,7 +718,7 @@ impl OwnershipMir {
                             })
                             .collect(),
                     },
-                    ControlOperation::Forward(value) => OwnershipOperation::Transfer {
+                    ControlOperation::Forward(value) | ControlOperation::Acquire(value) => OwnershipOperation::Transfer {
                         value,
                         mode: transfer(value),
                     },

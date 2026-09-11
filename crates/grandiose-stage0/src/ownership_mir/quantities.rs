@@ -80,7 +80,7 @@ impl Rules {
                 | ControlOperation::Capability(ControlCapabilityOperation::HostFunction { .. }
                     | ControlCapabilityOperation::TraitMethod { .. }) => Rule::Constant(Quantity::UNRESTRICTED),
                 ControlOperation::Tuple(fields) | ControlOperation::Array(fields) => Rule::Product(fields.clone()),
-                ControlOperation::Read(source) | ControlOperation::Forward(source)
+                ControlOperation::Read(source) | ControlOperation::Forward(source) | ControlOperation::Acquire(source)
                 | ControlOperation::EndScope { value: source, .. } => Rule::Forward(*source),
                 ControlOperation::Capability(ControlCapabilityOperation::Closure { closure, captures }) =>
                     Rule::Environment(captures.iter().zip(&control.closures()[closure.0 as usize].environment.captures)

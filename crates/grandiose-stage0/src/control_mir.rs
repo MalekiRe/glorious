@@ -66,6 +66,9 @@ pub enum ControlOperation {
     /// Value flow; Ownership MIR decides whether this copies or transfers an
     /// owner. Control construction must not assert duplicability.
     Forward(ControlValue),
+    /// Establish independent value storage at this strict evaluation point.
+    /// This cannot become an alias merely because a later consumer observes it.
+    Acquire(ControlValue),
     /// An observational view of lexical storage. The owning use occurs at
     /// its consumer; merely resolving a local does not move a unique loan.
     Read(ControlValue),
@@ -446,7 +449,7 @@ impl ControlMir {
             ControlOperation::ConstValue(argument) => crate::types::integer_const_argument_type(argument).as_ref() == Some(ty)
                 && crate::types::is_canonical_generic_argument_identity(argument),
             ControlOperation::Unit | ControlOperation::Discard(_) => ty == &Type::Unit,
-            ControlOperation::Forward(value) | ControlOperation::Read(value) => call_type_matches(ty, self.ty(*value)?),
+            ControlOperation::Forward(value) | ControlOperation::Acquire(value) | ControlOperation::Read(value) => call_type_matches(ty, self.ty(*value)?),
             ControlOperation::EndScope {
                 scope,
                 value,
@@ -485,7 +488,7 @@ impl ControlMir {
 impl ControlOperation {
     pub(crate) fn inputs(&self) -> Vec<ControlValue> {
         match self {
-            Self::Forward(value) | Self::Read(value) | Self::Discard(value) | Self::EndScope { value, .. } => {
+            Self::Forward(value) | Self::Acquire(value) | Self::Read(value) | Self::Discard(value) | Self::EndScope { value, .. } => {
                 vec![*value]
             }
             Self::Intrinsic { arguments, .. } | Self::Tuple(arguments) | Self::Array(arguments) => {
@@ -867,6 +870,7 @@ impl Builder<'_> {
             let operation = match instruction.operation {
                 EvalOp::Literal(value) => ControlOperation::Literal(value),
                 EvalOp::ConstValue(value) => ControlOperation::ConstValue(value),
+                EvalOp::AcquireValue => ControlOperation::Acquire(operands[0]),
                 EvalOp::ReadLocal(name) => {
                     let value = *names.get(&name).ok_or_else(|| ControlError::Invalid(format!("unbound local {name}")))?;
                     if let Type::Reference { referent, .. } = self.result.ty(value)?

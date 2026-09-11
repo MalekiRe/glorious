@@ -5,6 +5,26 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 151: strict operand acquisition
+
+Evaluation MIR acquires each strict argument, aggregate field, operation payload,
+intrinsic input and assignment RHS before the next operand. Acquired rvalues
+remain unchanged; deferred place reads receive explicit acquisition. Receiving
+validation rejects bypasses and conversion of invocation-only views into owners.
+Control preserves this operation separately from observational forwarding;
+Ownership supplies the existing checked transfer mode and temporary inventory.
+The original affine owner is moved at acquisition, and its temporary is
+transferred at the call. No new runtime copying permission is introduced.
+
+Both argument/aggregate source-replacement execution regressions pass, as do all
+51 handler-reentry cases other than the still-active prepared-receiver lifetime
+failure. Focused checks pass: 15 Evaluation integration tests, 33 Ownership unit
+tests and six Ownership integration tests. Seven of eight Specialization
+integration tests pass; associated-effect forwarding fails earlier at source
+G5024 on `value`, before the changed MIR boundary. This is not a passing full
+conformance checkpoint. Cache 151 changes; verifier 49, bytecode 75/schema 119
+and native ABI 18 are unchanged.
+
 ## Cache 150: evaluated quantity inputs
 
 UseFlow's existing execution freezes each strict input at its evaluation point:

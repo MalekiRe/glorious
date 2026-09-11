@@ -137,6 +137,10 @@ pub struct EvaluationCompletionArm {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EvaluationOperation {
+    /// Acquire this strict operand's value now, before evaluating the next
+    /// operand. Ownership chooses Copy, move or checked carrier retention;
+    /// this is not a borrowed observation of its source storage.
+    AcquireValue,
     /// Evaluate the callable resident without source Copy or ownership transfer.
     /// Only the associated invocation may consume this temporary view.
     PrepareInvocation,
@@ -227,6 +231,35 @@ pub enum EvaluationOperation {
         arms: Vec<EvaluationCompletionArm>,
         handles_operations: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValueRole { Deferred, Acquired, Invocation }
+
+impl EvaluationOperation {
+    fn value_role(&self) -> ValueRole {
+        use EvaluationOperation::*;
+        match self {
+            ReadLocal(_) | Resumption { .. } | Field { .. } | Deref | Scope(_)
+            | Label { .. } | Handle { .. } | Completion { .. } => ValueRole::Deferred,
+            PrepareInvocation => ValueRole::Invocation,
+            AcquireValue | Literal(_) | ConstValue(_) | Function { .. } | TraitMethod { .. }
+            | Constant { .. } | Tuple | Array | Record(_) | Enum { .. } | PatternTest { .. }
+            | Bind(_) | Discard | ReleaseAvailable | Assign | Borrow { .. } | Move | Call(_)
+            | Perform { .. } | Intrinsic(_) | LazyBoolean { .. } | LabelValue(_) | Transfer(_)
+            | Closure { .. } => ValueRole::Acquired,
+        }
+    }
+
+    fn requires_acquired_operand(&self, index: usize) -> bool {
+        match self {
+            Self::Call(contract) => index != 0 || !contract.prepared_receiver,
+            Self::Tuple | Self::Array | Self::Record(_) | Self::Enum { .. }
+            | Self::Perform { .. } | Self::Intrinsic(_) => true,
+            Self::Assign => index == 0,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -351,7 +384,7 @@ impl EvaluationMir {
                     "region has multiple owners or a cycle".into(),
                 ));
             }
-            let mut available = BTreeSet::new();
+            let mut available = BTreeMap::new();
             for (index, instruction) in region.instructions.iter().enumerate() {
                 instruction.validate_shape()?;
                 if instruction.operation == EvaluationOperation::ReleaseAvailable {
@@ -374,7 +407,7 @@ impl EvaluationMir {
                 {
                     return Err(EvaluationError("completion is not attached to its direct operation handler".into()));
                 }
-                for operand in &instruction.operands {
+                for (operand_index, operand) in instruction.operands.iter().enumerate() {
                     if let EvaluationOperand::Place(place) = operand {
                         let mut root = place;
                         while let EvaluationPlace::Field { base, .. } = root { root = base; }
@@ -385,16 +418,26 @@ impl EvaluationMir {
                     }
                     let mut dependencies = vec![];
                     operand.dependencies(&mut dependencies);
-                    if dependencies.iter().any(|value| !available.contains(value)) {
+                    if dependencies.iter().any(|value| !available.contains_key(value)) {
                         return Err(EvaluationError(
                             "operand is not an earlier value in its region".into(),
                         ));
+                    }
+                    if let EvaluationOperand::Value(value) = operand {
+                        if instruction.operation.requires_acquired_operand(operand_index)
+                            && available.get(value) != Some(&ValueRole::Acquired) {
+                            return Err(EvaluationError("strict operand has not acquired its evaluated value".into()));
+                        }
+                        if matches!(instruction.operation, EvaluationOperation::AcquireValue)
+                            && available.get(value) == Some(&ValueRole::Invocation) {
+                            return Err(EvaluationError("invocation view cannot become an acquired owner".into()));
+                        }
                     }
                 }
                 if !values.insert(instruction.value) {
                     return Err(EvaluationError("value has multiple definitions".into()));
                 }
-                available.insert(instruction.value);
+                available.insert(instruction.value, instruction.operation.value_role());
                 match &instruction.operation {
                     EvaluationOperation::Resumption { id, name } => {
                         if resumptions.get(name) != Some(&(*id, instruction.ty.clone())) {
@@ -454,7 +497,7 @@ impl EvaluationMir {
                 EvaluationExit::Yield(value) => (value, false),
                 EvaluationExit::Diverge(value) => (value, true),
             };
-            if !available.contains(&value)
+            if !available.contains_key(&value)
                 || diverges != last.is_terminal()
                 || (diverges && value != last.value)
             {
@@ -519,6 +562,7 @@ impl EvaluationInstruction {
             Op::Tuple | Op::Array | Op::Record(_) | Op::Enum { .. } | Op::Intrinsic(_) => values,
             Op::Field { index, field_count } => values && arity == 1 && index < field_count,
             Op::PatternTest { .. }
+            | Op::AcquireValue
             | Op::Bind(_)
             | Op::Discard
             | Op::Deref
@@ -598,6 +642,33 @@ mod tests {
                 exit: EvaluationExit::Yield(EvaluationValue(0)),
             }],
         }
+    }
+
+    #[test]
+    fn strict_value_consumers_reject_deferred_and_invocation_only_carriers() {
+        let mut mir = fixture();
+        mir.parameters.push(("place".into(), Type::Unit));
+        let mut read = mir.regions[0].instructions[0].clone();
+        read.operation = EvaluationOperation::ReadLocal("place".into());
+        let mut acquired = read.clone();
+        acquired.value = EvaluationValue(1);
+        acquired.operation = EvaluationOperation::AcquireValue;
+        acquired.operands = vec![EvaluationOperand::Value(read.value)];
+        let mut tuple = acquired.clone();
+        tuple.value = EvaluationValue(2);
+        tuple.ty = Type::Tuple(vec![Type::Unit]);
+        tuple.operation = EvaluationOperation::Tuple;
+        tuple.operands = vec![EvaluationOperand::Value(acquired.value)];
+        mir.regions[0].instructions = vec![read, acquired, tuple];
+        mir.regions[0].exit = EvaluationExit::Yield(EvaluationValue(2));
+        mir.validate().unwrap();
+        let mut late = mir.clone();
+        late.regions[0].instructions[2].operands[0] = EvaluationOperand::Value(EvaluationValue(0));
+        assert!(late.validate().unwrap_err().0.contains("has not acquired"));
+        let read = &mut mir.regions[0].instructions[0];
+        read.operation = EvaluationOperation::PrepareInvocation;
+        read.operands = vec![EvaluationOperand::Place(EvaluationPlace::Local { name:"place".into(), ty:Type::Unit })];
+        assert!(mir.validate().unwrap_err().0.contains("invocation view cannot become"));
     }
 
     #[test]
@@ -790,7 +861,7 @@ struct Builder<'a> {
 #[derive(Default)]
 struct Sequence {
     instructions: Vec<EvaluationInstruction>,
-    values: BTreeMap<CoreId, EvaluationValue>,
+    values: BTreeMap<CoreId, (EvaluationValue, ValueRole)>,
     terminal: Option<EvaluationValue>,
 }
 
@@ -837,6 +908,8 @@ impl Builder<'_> {
                 }
                 if index + 1 < count {
                     let statement = value.expect("evaluated statement");
+                    let original = *sequence.values.get(&item)
+                        .ok_or_else(|| EvaluationError("statement has no evaluated value role".into()))?;
                     self.emit(
                         item,
                         Type::Unit,
@@ -846,7 +919,7 @@ impl Builder<'_> {
                     )?;
                     // Synthetic disposal is an effect, not a new meaning for
                     // the original expression's once-evaluated value.
-                    sequence.values.insert(item, statement);
+                    sequence.values.insert(item, original);
                 }
             }
             match value {
@@ -896,7 +969,8 @@ impl Builder<'_> {
         if ty == Type::Never || matches!(&operation, EvaluationOperation::Call(contract) if contract.mandatory_tail) {
             sequence.terminal = Some(value);
         }
-        let caches_expression = !matches!(operation, EvaluationOperation::PrepareInvocation);
+        let caches_expression = !matches!(operation, EvaluationOperation::PrepareInvocation | EvaluationOperation::AcquireValue);
+        let role = operation.value_role();
         sequence.instructions.push(EvaluationInstruction {
             value,
             source,
@@ -905,10 +979,10 @@ impl Builder<'_> {
             operation,
             operands,
         });
-        // A prepared receiver belongs to this call, not to the Core value's
-        // ordinary expression cache. Shared Core operands can still be read
-        // or transferred normally at another occurrence.
-        if caches_expression { sequence.values.insert(source, value); }
+        // Receiver preparation and value acquisition belong to this operand,
+        // not to the Core expression's ordinary value/category cache. Another
+        // occurrence may still observe its place or acquire its value normally.
+        if caches_expression { sequence.values.insert(source, (value, role)); }
         Ok(value)
     }
 
@@ -923,6 +997,23 @@ impl Builder<'_> {
             if sequence.terminal.is_some() {
                 break;
             }
+        }
+        Ok(result)
+    }
+
+    fn acquired_values(&mut self, ids: &[CoreId], sequence: &mut Sequence)
+        -> Result<Vec<EvaluationOperand>, EvaluationError> {
+        let mut result = vec![];
+        for source in ids {
+            let value = self.expression(*source, sequence)?;
+            if sequence.terminal.is_some() { break; }
+            let role = sequence.values.get(source).map(|(_, role)| *role)
+                .ok_or_else(|| EvaluationError("strict operand has no evaluated value role".into()))?;
+            let value = if role == ValueRole::Acquired { value } else {
+                self.emit(*source, self.body.expression(*source).ty.clone(),
+                    EvaluationOperation::AcquireValue, vec![EvaluationOperand::Value(value)], sequence)?
+            };
+            result.push(EvaluationOperand::Value(value));
         }
         Ok(result)
     }
@@ -1017,7 +1108,7 @@ impl Builder<'_> {
         if let Some(value) = sequence.terminal {
             return Ok(value);
         }
-        if let Some(value) = sequence.values.get(&source) {
+        if let Some((value, _)) = sequence.values.get(&source) {
             return Ok(*value);
         }
         if !self.active.insert(source) {
@@ -1072,15 +1163,15 @@ impl Builder<'_> {
                 arguments,
             },
             CoreKind::Tuple(items) => {
-                operands = self.values(&items, sequence)?;
+                operands = self.acquired_values(&items, sequence)?;
                 Op::Tuple
             }
             CoreKind::Array(items) => {
-                operands = self.values(&items, sequence)?;
+                operands = self.acquired_values(&items, sequence)?;
                 Op::Array
             }
             CoreKind::Record { definition, fields } => {
-                operands = self.values(&fields, sequence)?;
+                operands = self.acquired_values(&fields, sequence)?;
                 Op::Record(definition)
             }
             CoreKind::Enum {
@@ -1088,7 +1179,7 @@ impl Builder<'_> {
                 variant,
                 fields,
             } => {
-                operands = self.values(&fields, sequence)?;
+                operands = self.acquired_values(&fields, sequence)?;
                 Op::Enum {
                     definition,
                     variant,
@@ -1120,7 +1211,7 @@ impl Builder<'_> {
             CoreKind::Assign { place, value } => {
                 // The language's assignment contract evaluates the RHS before
                 // the target reference, matching Core/PlaceFlow and legacy MIR.
-                operands = self.values(&[value], sequence)?;
+                operands = self.acquired_values(&[value], sequence)?;
                 if sequence.terminal.is_none() {
                     operands.push(EvaluationOperand::Place(self.place(&place, sequence)?));
                 }
@@ -1165,9 +1256,9 @@ impl Builder<'_> {
                     let value = self.emit(callee, self.body.expression(callee).ty.clone(),
                         Op::PrepareInvocation, vec![EvaluationOperand::Place(place)], sequence)?;
                     vec![EvaluationOperand::Value(value)]
-                } else { self.values(&[callee], sequence)? };
+                } else { self.acquired_values(&[callee], sequence)? };
                 if sequence.terminal.is_none() {
-                    operands.extend(self.values(&arguments, sequence)?);
+                    operands.extend(self.acquired_values(&arguments, sequence)?);
                 }
                 if !mandatory_tail && arguments.len() == 1
                     && let Some(brand) = self.facts.and_then(|facts| facts.invocation(source))
@@ -1200,7 +1291,7 @@ impl Builder<'_> {
                 reference_origin,
                 reference_shape,
             } => {
-                operands = self.values(&arguments, sequence)?;
+                operands = self.acquired_values(&arguments, sequence)?;
                 if terminal {
                     ty = Type::Never;
                 }
@@ -1232,7 +1323,7 @@ impl Builder<'_> {
                         right: self.region(arguments[1])?,
                     }
                 } else {
-                    operands = self.values(&arguments, sequence)?;
+                    operands = self.acquired_values(&arguments, sequence)?;
                     Op::Intrinsic(operator)
                 }
             }

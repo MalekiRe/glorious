@@ -2043,3 +2043,31 @@ it. Both new execution regressions remain active, alongside the prepared receive
 native lifetime failure. A correct quantity snapshot is not a runtime lifetime
 or materialization proof, and none of the remaining native-handler acceptance
 requirements is waived.
+
+## Strict runtime value acquisition
+
+Evaluation MIR now distinguishes deferred place reads, acquired values and
+invocation-only views. Every strict ordinary argument, aggregate field, operation
+payload, intrinsic input and assignment RHS is acquired before the next operand
+is evaluated. Existing rvalues already own their storage and need no additional
+acquisition. Place projections and invocation preparation retain their distinct
+observational contracts; neither a late consumer nor expression-cache reuse may
+turn an acquisition back into an alias of replaceable source storage.
+
+The receiving Evaluation validator derives operand roles from instruction
+definitions and rejects unacquired strict inputs and acquisition of an
+invocation-only view. Control carries an explicit acquisition, distinct from a
+forwarded observation. Ownership selects the existing checked Copy, move or
+resumption-retention operation at that point and tracks the resulting temporary
+through the ordinary inventory. An affine argument therefore leaves its source
+owner before the call, and the call transfers the acquired owner. No runtime
+opcode, callable ABI or independent source analysis is introduced.
+
+Cache 151 fixes both ordinary argument and aggregate-field replacement execution
+regressions. All 51 other handler-reentry tests pass across their fresh/decoded VM,
+native and mixed execution matrix. The prepared-receiver native lifetime
+regression remains active and excluded from that passing count: observation of
+an invocation resident still does not itself preserve ownership against a later
+replacement. The existing associated-effect forwarding integration fixture also
+fails at the earlier source G5024 minimum-use check; this checkpoint does not
+claim that suite passes.

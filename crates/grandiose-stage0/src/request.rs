@@ -363,7 +363,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 144 composes ordered capability execution paths through checked helpers.
 // Cache 147 audits delimiter-wide executable replay counts.
 // Cache 150 freezes strict quantity inputs before later operand mutations.
-pub const STAGE0_CACHE_GENERATION: u32 = 150;
+// Cache 151 acquires strict operand storage at its evaluation point.
+pub const STAGE0_CACHE_GENERATION: u32 = 151;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

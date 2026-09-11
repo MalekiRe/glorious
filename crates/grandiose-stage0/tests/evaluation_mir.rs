@@ -53,6 +53,24 @@ fn a_callable_field_prepares_its_receiver_before_strict_arguments() {
 }
 
 #[test]
+fn a_strict_argument_acquires_its_value_before_the_next_operand_scope() {
+    let mir = normalize("fn first(value:i64) -> i64 {42} fn second(value:i64) -> i64 {0}
+        fn invoke(task:(i64)->i64, value:i64) -> i64 {task(value)}
+        pub fn main() -> i64 {
+            let mut callback:(i64)->i64=first;
+            let replacement:(i64)->i64=second;
+            invoke(callback, {callback=replacement; 0})
+        }");
+    let instructions = &mir.regions()[mir.entry().0 as usize].instructions;
+    let call = instructions.iter().rposition(|instruction| matches!(instruction.operation, Op::Call(_))).unwrap();
+    let EvaluationOperand::Value(first) = instructions[call].operands[1] else { panic!("argument value") };
+    let acquired = instructions.iter().position(|instruction| instruction.value == first).unwrap();
+    assert!(matches!(instructions[acquired].operation, Op::AcquireValue));
+    let later = instructions.iter().position(|instruction| matches!(instruction.operation, Op::Scope(_))).unwrap();
+    assert!(acquired < later && later < call);
+}
+
+#[test]
 fn lazy_rhs_is_a_deferred_region() {
     let mir = normalize("fn probe() -> Bool { true } pub fn main() -> Bool { false and { probe() } }");
     let root = &mir.regions()[mir.entry().0 as usize];

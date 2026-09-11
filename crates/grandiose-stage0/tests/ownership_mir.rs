@@ -89,11 +89,17 @@ fn a_copied_call_argument_preserves_the_original_suspended_owner() {
 }
 
 #[test]
-fn a_moved_call_argument_transfers_the_original_owner() {
+fn a_moved_call_argument_acquires_then_transfers_the_owner() {
     let (mir, _) = ownership(
         "pub struct Ticket {} impl Use<[0, 1]> for Ticket {} fn consume(ticket: Ticket) -> i64 { 42 } pub fn main(ticket: Ticket) -> i64 { consume(ticket) }",
     );
     let parameter = OwnerId(mir.parameters()[0].0);
+    let acquired = mir.blocks().iter().flat_map(|block| &block.instructions)
+        .find_map(|instruction| match instruction.operation {
+            OwnershipOperation::Transfer { value, mode: ValueTransfer::Move }
+                if mir.owners()[value.0 as usize].kind == OwnerKind::View => Some(OwnerId(instruction.destination.0)),
+            _ => None,
+        }).expect("the argument must move out of its source view before invocation");
     let call = mir
         .blocks()
         .iter()
@@ -102,7 +108,7 @@ fn a_moved_call_argument_transfers_the_original_owner() {
     assert!(
         call.terminator
             .dispositions
-            .contains(&(parameter, OwnerDisposition::Transfer))
+            .contains(&(acquired, OwnerDisposition::Transfer))
     );
     assert!(
         !call
@@ -110,6 +116,12 @@ fn a_moved_call_argument_transfers_the_original_owner() {
             .dispositions
             .contains(&(parameter, OwnerDisposition::Suspend))
     );
+    assert!(!call.terminator.dispositions.contains(&(parameter, OwnerDisposition::Transfer)));
+    assert!(mir.blocks().iter().flat_map(|block| &block.instructions).all(|instruction|
+        match &instruction.operation {
+            OwnershipOperation::ExitScope { owners, .. } => !owners.contains(&parameter),
+            _ => true,
+        }));
 }
 
 #[test]
