@@ -18,6 +18,36 @@ fn parse_higher_ranked_header(source: &str) -> HeaderParse {
 }
 
 #[test]
+fn parenthesized_types_preserve_grouping_and_tuple_arity() {
+    let scalar = HeaderType::Path(vec!["i64".into()]);
+    for (spelling, expected) in [
+        ("(i64)", scalar.clone()),
+        ("((i64))", scalar.clone()),
+        ("(i64,)", HeaderType::Tuple(vec![scalar.clone()])),
+        ("((i64,),)", HeaderType::Tuple(vec![HeaderType::Tuple(vec![scalar.clone()])])),
+        ("()", HeaderType::Tuple(vec![])),
+    ] {
+        let parsed = parse_higher_ranked_header(&format!("fn accept(value: {spelling}) -> {spelling} {{ value }}"));
+        assert!(parsed.diagnostics.is_empty(), "{spelling}: {parsed:#?}");
+        let ParsedHeader::Function(header) = parsed.header else { panic!("callable"); };
+        assert_eq!(header.parameters[0].ty, expected, "{spelling}");
+        assert_eq!(header.result, Some(expected), "{spelling}");
+    }
+    for (spelling, expected) in [
+        ("(i64) -> i64", scalar.clone()),
+        ("((i64)) -> i64", scalar.clone()),
+        ("((i64,)) -> i64", HeaderType::Tuple(vec![scalar])),
+    ] {
+        let parsed = parse_higher_ranked_header(&format!("fn accept(value: &({spelling})) {{}}"));
+        assert!(parsed.diagnostics.is_empty(), "{spelling}: {parsed:#?}");
+        let ParsedHeader::Function(header) = parsed.header else { panic!("callable"); };
+        let HeaderType::Reference { referent, .. } = &header.parameters[0].ty else { panic!("reference"); };
+        let HeaderType::Callable { parameters, .. } = referent.as_ref() else { panic!("grouped callable: {referent:?}"); };
+        assert_eq!(parameters, &[expected], "{spelling}");
+    }
+}
+
+#[test]
 fn plus_separated_where_bounds_preserve_each_subject_and_universal_binder() {
     let parsed = parse_higher_ranked_header(
         "fn observe<T>() where T: Eq + Use<[0,1]>, for<'a> &'a T: Inspect<'a> + Stable<'a> {}",

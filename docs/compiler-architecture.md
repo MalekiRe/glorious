@@ -2742,3 +2742,17 @@ Opaque callable and resumption contracts retain the existing quantitative lane;
 missing environment evidence does not grant Copy or establish physical absence.
 The source and execution gates above do not prove complete guarded ownership
 through every opaque/generic control boundary.
+
+## Normalize grouped types at the syntax boundary
+
+The declaration and body type parsers retain comma presence until they have
+distinguished a callable parameter list from a parenthesized type. Both then
+use one HeaderType constructor: a single comma-free item is its grouped child;
+all other lists retain tuple arity. Elaborators, associated Fn argument-pack
+validation, and later representations receive the normalized type, not an
+artificial singleton tuple requiring consumer-specific repairs.
+
+Cache 176 invalidates earlier parsing. No executable wire format or ABI changes.
+Parser and VM/decoded/LLVM grouping checks pass, including rejection of scalar
+Fn argument packs and lack of implicit tuple conversions. Grouping does not add
+an effect-row equality or borrowed-call authority to an opaque callable.

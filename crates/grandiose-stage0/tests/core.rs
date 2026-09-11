@@ -846,7 +846,7 @@ fn ordinary_fn_bounds_reject_noncallable_arguments_during_elaboration() {
 
 #[test]
 fn ordinary_fn_bounds_require_matching_lexical_evidence() {
-    for (bound, valid) in [("Fn<(), Output = i64>", true), ("Fn<(), Output = ()>", false), ("Fn<(i64), Output = i64>", false)] {
+    for (bound, valid) in [("Fn<(), Output = i64>", true), ("Fn<(), Output = ()>", false), ("Fn<(i64,), Output = i64>", false)] {
         let source = format!("fn invoke<F>(next: F) -> i64 where F: Fn<(), Output = i64> {{ next() }} pub fn main<F>(next: F) -> i64 where F: {bound} {{ invoke(next) }}");
         let core = core_for("lexical-fn-bound@0.1.0", &source);
         assert_eq!(core.diagnostics.is_empty(), valid, "{bound}: {:#?}", core.diagnostics);
@@ -8274,7 +8274,7 @@ fn contextual_binding_pack_arguments_activate_source_binders() {
         "let pair = (Owner { value: 40 }, Owner { value: 2 }); visit(pair is (left, right)) { left.value + right.value }",
         "let test = identity(42 is found); visit(test) { found }",
     ] {
-        let source = format!("use std::*; struct Owner {{ value: i64 }} impl Use<[0, 1]> for Owner {{}} fn identity<T>(value: T) -> T {{ value }} fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64>, N: Use<[0,1]> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} pub fn main() -> i64 {{ {main} }}");
+        let source = format!("use std::*; struct Owner {{ value: i64 }} impl Use<[0, 1]> for Owner {{}} fn identity<T>(value: T) -> T {{ value }} fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y,), Output = i64>, N: Use<[0,1]> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} pub fn main() -> i64 {{ {main} }}");
         let core = core_for("core-hidden-binding-context@0.1.0", &source);
         assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
         assert!(core.expressions.iter().any(|expression| matches!(&expression.kind,
@@ -8291,7 +8291,7 @@ fn contextual_binding_pack_arguments_do_not_activate_foreign_or_negative_binders
         ("let found = 7; visit(42 is found) { found }", "G4170"),
         ("let test = 42 is found; found", "G4104"),
     ] {
-        let source = format!("use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N), Output = i64> {{ handle test {{ Test::Yes(_) => 0, Test::No(value) => no(value) }} }} pub fn main() -> i64 {{ {main} }}");
+        let source = format!("use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(Y,), Output = i64> {{ handle test {{ Test::Yes(value) => yes(value), Test::No(_) => 0 }} }} fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N,), Output = i64> {{ handle test {{ Test::Yes(_) => 0, Test::No(value) => no(value) }} }} pub fn main() -> i64 {{ {main} }}");
         let core = core_for("core-hidden-binding-scope@0.1.0", &source);
         assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == code), "{main}: {:#?}", core.diagnostics);
     }
@@ -8300,9 +8300,9 @@ fn contextual_binding_pack_arguments_do_not_activate_foreign_or_negative_binders
 #[test]
 fn contextual_binding_packs_support_shared_arguments_and_explicit_user_parameters() {
     for source in [
-        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(&Y), Output = i64>, Y: Use<[0,1]>, N: Use<[0,1]> { handle test { Test::Yes(value) => yes(&value), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }",
+        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where F: Fn<(&Y,), Output = i64>, Y: Use<[0,1]>, N: Use<[0,1]> { handle test { Test::Yes(value) => yes(&value), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }",
         "use std::*; fn invoke<P, F>(pack: P, extra: i64, body: F) -> i64 where F: Fn<(P, i64), Output = i64> { body(pack, extra) } pub fn main() -> i64 { handle (40 is found) { Test::Yes(pack) => invoke(pack, 2, (extra: i64) -> i64 { found + extra }), Test::No(_) => 0 } }",
-        "use std::*; fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N), Output = i64>, Y: Use<[0,1]> { handle test { Test::Yes(_) => 0, Test::No(value) => no(value) } } pub fn main() -> i64 { reject(41 is 42) { 42 } }",
+        "use std::*; fn reject<Y, N, F>(test: Test<Y, N>, no: F) -> i64 where F: Fn<(N,), Output = i64>, Y: Use<[0,1]> { handle test { Test::Yes(_) => 0, Test::No(value) => no(value) } } pub fn main() -> i64 { reject(41 is 42) { 42 } }",
     ] {
         assert_eq!(compile_source(source).run_i64().unwrap(), 42);
     }
@@ -8310,7 +8310,7 @@ fn contextual_binding_packs_support_shared_arguments_and_explicit_user_parameter
 
 #[test]
 fn frozen_binding_pack_projections_reject_forged_field_contracts() {
-    let source = "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }";
+    let source = "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y,), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { found } }";
     let core = core_for("core-frozen-pack-projections@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let projection = core.expressions.iter().position(|expression| matches!(expression.kind, CoreKind::Field { .. })).unwrap();
@@ -8356,7 +8356,7 @@ fn frozen_binding_pack_projections_reject_forged_field_contracts() {
         assert!(grandiose_stage0::evaluation_mir::EvaluationMir::lower(DefKey(Digest::of_bytes(b"forged-pack-field")), &forged).is_err());
     }
     let mut borrowed = core_for("core-pack-projection-authority@0.1.0",
-        "use std::*; struct Owner { value: i64 } fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { let owner = Owner { value: 42 }; visit(owner is found) { found.value } }");
+        "use std::*; struct Owner { value: i64 } fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y,), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { let owner = Owner { value: 42 }; visit(owner is found) { found.value } }");
     assert!(borrowed.diagnostics.is_empty(), "{:#?}", borrowed.diagnostics);
     let projection = borrowed.expressions.iter().position(|expression| match expression.kind {
         CoreKind::Field { base, .. } => matches!(&borrowed.expressions[base.0 as usize].ty,
@@ -8450,7 +8450,7 @@ fn refinement_binder_keys_are_generative_and_standalone_evidence_is_checked() {
 
 #[test]
 fn copied_refinement_bindings_can_be_captured_by_returned_closures() {
-    let source = "use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B>, N: Use<[0,1]> { handle test { Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) } } pub fn main() -> i64 { let delayed = map(42 is found) { (ignored: i64) -> i64 { found } }; handle delayed { Result::Ok(callable) => callable(0), Result::Err(_) => 0 } }";
+    let source = "use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y,), Output = B>, N: Use<[0,1]> { handle test { Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) } } pub fn main() -> i64 { let delayed = map(42 is found) { (ignored: i64) -> i64 { found } }; handle delayed { Result::Ok(callable) => callable(0), Result::Err(_) => 0 } }";
     assert_eq!(compile_source(source).run_i64().unwrap(), 42);
 }
 
@@ -8461,7 +8461,7 @@ fn binding_pack_callbacks_infer_outputs_independently_of_known_inputs() {
         "let mapped = map(40 is found) { (found, 2) }; handle mapped { Result::Ok((left, right)) => left + right, Result::Err(_) => 0 }",
         "let mapped = map(41 is 42) { 7 }; handle mapped { Result::Ok(value) => value, Result::Err(_) => 42 }",
     ] {
-        let source = format!("use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y), Output = B>, N: Use<[0,1]> {{ handle test {{ Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) }} }} pub fn main() -> i64 {{ {main} }}");
+        let source = format!("use std::*; fn map<Y, N, B, F>(test: Test<Y, N>, body: F) -> Result<B, ()> where F: Fn<(Y,), Output = B>, N: Use<[0,1]> {{ handle test {{ Test::Yes(pack) => Result::Ok(body(pack)), Test::No(_) => Result::Err(()) }} }} pub fn main() -> i64 {{ {main} }}");
         assert_eq!(compile_source(&source).run_i64().unwrap(), 42, "{main}");
     }
 }
@@ -8470,7 +8470,7 @@ fn binding_pack_callbacks_infer_outputs_independently_of_known_inputs() {
 fn an_unused_nested_closure_does_not_escape_its_refinement_context() {
     let core = core_for(
         "core-is-refinement-closure-escape@0.1.0",
-        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { let delayed = (ignored: i64) -> i64 { found }; 0 } }",
+        "use std::*; fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64 where F: Fn<(Y,), Output = i64> { handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 } } pub fn main() -> i64 { visit(42 is found) { let delayed = (ignored: i64) -> i64 { found }; 0 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     assert!(core.validate().is_empty(), "{:#?}", core.validate());

@@ -21,6 +21,20 @@ fn parse(source: &str) -> BodySyntax {
 }
 
 #[test]
+fn parenthesized_local_types_preserve_grouping_and_tuple_arity() {
+    for (spelling, expected) in [
+        ("((i64))", HeaderType::Path(vec!["i64".into()])),
+        ("(i64,)", HeaderType::Tuple(vec![HeaderType::Path(vec!["i64".into()])])),
+    ] {
+        let body = parse(&format!("{{ let value: {spelling} = source; value }}"));
+        assert!(body.diagnostics.is_empty(), "{spelling}: {body:#?}");
+        assert!(body.expressions.iter().any(|expression| matches!(
+            &expression.kind, ExprKind::Let { annotation: Some(ty), .. } if ty == &expected
+        )), "{spelling}: {body:#?}");
+    }
+}
+
+#[test]
 fn trailing_semicolons_preserve_statement_discard_in_the_block_sequence() {
     let source = "{ value(); }";
     let body = parse(source);

@@ -129,7 +129,7 @@ fn request_bool(source: &str) -> CompilationRequest {
 }
 
 fn request_with_test_visit(source: &str) -> CompilationRequest {
-    request(&format!("use std::Test; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(pack) => yes(pack), Test::No(_) => 0 }} }} {source}"))
+    request(&format!("use std::Test; fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64 where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {{ handle test {{ Test::Yes(pack) => yes(pack), Test::No(_) => 0 }} }} {source}"))
 }
 
 // Library Bool is a nominal Result<(), ()>, not the VM's private predicate
@@ -9469,7 +9469,7 @@ fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
 
 #[test]
 fn service_executes_positive_is_refinements_through_completion_dispatch() {
-    let with_visit = |source: &str| request(&format!("use std::Test; fn visit<Y, N, F>(test: Test<Y, N>, fallback: i64, yes: F) -> i64 where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{ handle test {{ Test::Yes(pack) => yes(pack), Test::No(_) => fallback }} }} {source}"));
+    let with_visit = |source: &str| request(&format!("use std::Test; fn visit<Y, N, F>(test: Test<Y, N>, fallback: i64, yes: F) -> i64 where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {{ handle test {{ Test::Yes(pack) => yes(pack), Test::No(_) => fallback }} }} {source}"));
     let enum_source = "pub enum Result { Ok(i64), Err } pub fn main() -> i64 { visit(Result::Ok(42) is Result::Ok(found), 0) { found } }";
     let outcome = StageZeroCompiler::new()
         .compile(with_visit(enum_source))
@@ -12607,7 +12607,7 @@ fn service_allows_an_immediately_invoked_closure_to_capture_a_refinement_binder(
         use std::Test;
         pub enum Result { Ok(i64), Err }
         fn visit<Y, N, F>(test: Test<Y, N>, yes: F) -> i64
-        where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
+        where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {
             handle test { Test::Yes(pack) => yes(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
@@ -12801,7 +12801,7 @@ fn service_composes_generic_effects_closures_and_finite_replay_across_a_call() {
     let source = r#"
         effect Echo<T> { [2, 2] echo(value: T) -> T; }
         pub fn relay<T, F>(value: T, transform: F) -> T / Echo<T>
-        where F: Fn<(T), Output = T>, F: Use<[0, *]> {
+        where F: Fn<(T,), Output = T>, F: Use<[0, *]> {
             transform(Echo<T>::echo(value))
         }
         pub fn main() -> i64 {
@@ -14215,7 +14215,7 @@ fn service_replays_an_ordered_refutable_operation_matrix_across_calls() {
         ),
         (
             true,
-            "effect Ask { [2,2] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn invoke<F>(operation: F) -> i64 where F: Fn<(i64), Output = i64, Effects = {Ask}>, F: Use<[0, *]> { handle operation(40) { Ask::ask(0) with k => k(1) + k(2); Ask::ask(value) with k => k(value) + k(value + 1) } } pub fn main() -> i64 { invoke(helper) }",
+            "effect Ask { [2,2] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn invoke<F>(operation: F) -> i64 where F: Fn<(i64,), Output = i64, Effects = {Ask}>, F: Use<[0, *]> { handle operation(40) { Ask::ask(0) with k => k(1) + k(2); Ask::ask(value) with k => k(value) + k(value + 1) } } pub fn main() -> i64 { invoke(helper) }",
         ),
     ] {
         let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -14312,7 +14312,7 @@ fn service_replays_a_projected_multi_operation_row_through_refutable_forwarding_
         ),
         (
             true,
-            "use bridge::{Console, invoke}; pub fn execute<F>(action: F) -> i64 where F: Fn<(Bool), Output = i64, Effects = {Console}>, F: Use<[0, *]> { handle { handle { handle action(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } } pub fn main() -> i64 { execute(invoke) }",
+            "use bridge::{Console, invoke}; pub fn execute<F>(action: F) -> i64 where F: Fn<(Bool,), Output = i64, Effects = {Console}>, F: Use<[0, *]> { handle { handle { handle action(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } } pub fn main() -> i64 { execute(invoke) }",
         ),
     ] {
         let mut input = request(root);

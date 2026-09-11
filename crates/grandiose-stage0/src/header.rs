@@ -138,6 +138,19 @@ pub enum HeaderType {
     Recovered,
 }
 
+impl HeaderType {
+    /// Parentheses group a single type unless a comma makes it a tuple.
+    /// Header and body annotations publish the same normalized syntax product;
+    /// callable parameter lists are handled before applying this distinction.
+    pub(crate) fn parenthesized(mut values: Vec<Self>, has_comma: bool) -> Self {
+        if values.len() == 1 && !has_comma {
+            values.pop().expect("one grouped type")
+        } else {
+            Self::Tuple(values)
+        }
+    }
+}
+
 /// An explicitly supplied nominal generic argument.  Structural constants are
 /// kept distinct from source types before elaboration, preventing value syntax
 /// from entering the type namespace by accident.
@@ -2248,11 +2261,13 @@ impl Parser<'_> {
         }
         if self.punctuation('(') {
             let mut values = vec![];
+            let mut has_comma = false;
             while self.current().is_some() && !self.at_punctuation(')') {
                 values.push(self.ty());
                 if !self.punctuation(',') {
                     break;
                 }
+                has_comma = true;
             }
             if !self.punctuation(')') {
                 self.error("G3206", "expected `)` in tuple type");
@@ -2267,7 +2282,7 @@ impl Parser<'_> {
                     effects: self.effect_row_annotation(),
                 };
             }
-            return HeaderType::Tuple(values);
+            return HeaderType::parenthesized(values, has_comma);
         }
         let path = self.path();
         if path.is_empty() {

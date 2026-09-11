@@ -1730,7 +1730,7 @@ fn capture_free_named_predicates_are_duplicable_callbacks() {
         use std::*;
         pub fn below_two(value: &i64) -> Bool { *value < 2 }
         pub fn twice<F>(predicate: F, first: &i64, second: &i64) -> i64
-            where F: Fn<(&i64), Output = Bool>, F: Use<[0, *]> {
+            where F: Fn<(&i64,), Output = Bool, Effects = {}>, F: Use<[0, *]> {
             handle predicate(first) {
                 false => 0,
                 true => handle predicate(second) { true => 42, false => 0 },

@@ -1311,7 +1311,7 @@ fn a_refinement_binder_borrows_the_selected_noncopy_owner() {
             struct Pair {{ field: Owner }}
             fn inspect(value: &Owner) -> i64 {{ value.value }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
@@ -1385,7 +1385,7 @@ fn a_refinement_borrow_cannot_escape_its_owning_scope() {
             struct Owner {{ value: i64 }}
             impl Use<[0, 1]> for Owner {{}}
             fn visit<Y, N, R, F>(test: Test<Y, N>, fallback: R, body: F) -> R
-            where N: Use<[0,1]>, F: Fn<(Y), Output = R>, R: Use<[0, 1]> {{
+            where N: Use<[0,1]>, F: Fn<(Y,), Output = R>, R: Use<[0, 1]> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => fallback }}
             }}
             {body}
@@ -1401,7 +1401,7 @@ fn a_refinement_borrow_cannot_escape_its_owning_scope() {
 fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed() {
     assert_eq!(run(r#"
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
@@ -1415,7 +1415,7 @@ fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed()
     assert_eq!(run(r#"
         struct Owner { value: i64 }
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
@@ -1432,7 +1432,7 @@ fn observing_a_unique_reference_preserves_its_owner_after_the_pack_is_consumed()
 fn a_live_observational_pack_suspends_its_unique_reference_subject() {
     let outcome = compile(r#"
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
@@ -1449,7 +1449,7 @@ fn a_live_observational_pack_suspends_its_unique_reference_subject() {
     assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"), "{diagnostics:#?}");
     assert_eq!(run(r#"
         fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-            where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {
+            where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {
             handle test { Test::Yes(pack) => body(pack), Test::No(_) => 0 }
         }
         pub fn main() -> i64 {
@@ -1468,7 +1468,7 @@ fn hidden_refinement_arguments_do_not_grant_unique_access() {
         let outcome = compile(&format!(r#"
             enum Holder<'a> {{ Held(&'a mut i64), Empty }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
@@ -1490,7 +1490,7 @@ fn an_observational_refinement_cannot_recover_unique_access() {
         let outcome = compile(&format!(r#"
             enum Holder<'a> {{ Held(&'a mut i64), Empty }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{
@@ -1548,7 +1548,7 @@ fn a_live_refinement_view_protects_its_source_place() {
             struct Pair {{ field: Owner }}
             fn inspect(value: &Owner) -> i64 {{ value.value }}
             fn visit<Y, N, F>(test: Test<Y, N>, body: F) -> i64
-                where N: Use<[0,1]>, F: Fn<(Y), Output = i64> {{
+                where N: Use<[0,1]>, F: Fn<(Y,), Output = i64> {{
                 handle test {{ Test::Yes(pack) => body(pack), Test::No(_) => 0 }}
             }}
             pub fn main() -> i64 {{

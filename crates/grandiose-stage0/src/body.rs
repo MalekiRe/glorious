@@ -1790,12 +1790,14 @@ impl Parser<'_> {
         if self.at_punctuation('(') {
             self.position += 1;
             let mut values = vec![];
+            let mut has_comma = false;
             while !self.at_punctuation(')') && self.current().is_some() {
                 values.push(self.closure_type()?);
                 if !self.at_punctuation(',') {
                     break;
                 }
                 self.position += 1;
+                has_comma = true;
             }
             self.expect_punctuation(')')?;
             if self.at_operator("->") {
@@ -1810,7 +1812,7 @@ impl Parser<'_> {
                     effects,
                 });
             }
-            return Some(HeaderType::Tuple(values));
+            return Some(HeaderType::parenthesized(values, has_comma));
         }
         if self.at_punctuation('[') {
             self.position += 1;

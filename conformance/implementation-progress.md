@@ -5,6 +5,36 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Parenthesized type grouping and current library baseline
+
+Cache 176 corrects both declaration-header and body-annotation parsing: `(T)`
+groups T, `(T,)` is a singleton tuple, and the parentheses before an arrow
+remain a callable parameter list. Both parsers publish the same normalized
+HeaderType through one constructor; elaboration and Fn argument-pack validation
+consume that product without spelling-dependent exceptions. Existing callback
+fixtures now use explicit singleton packs. The named-predicate library fixture
+also declares its required empty callback effect row; an unresolved associated
+effect row is retained as a separate negative regression, not inferred as pure.
+
+All 83 header/body parser checks pass. Five positive programs pass fresh VM,
+decoded VM and LLVM O0/O2, covering grouped aliases, local annotations, nested
+singleton tuples, referenced concrete callables, and tuple-valued arguments.
+Three non-tuple Fn packs and five shape/effect/borrow-authority negatives pass.
+The changed service replay fixture compiles its first case but fails its existing
+structural assertion (zero returning-resumption calls in the selected entry,
+expected four); that gate is not claimed to pass.
+
+The optimized, budget-guarded library integration checkpoint completed with
+173/183 main tests and 16/32 source-family tests passing. Named predicates and
+indexed hash lookup pass. Main failures remain in six replay destructor-count
+checks, three tight native-memory checks, and collection allocation cost. Source
+failures include tail-carrier provenance in format, UTF-8/FFI, codecs, random,
+float routines and source maps, plus ownership, visibility and lifetime failures
+in budget, IO and traversal/iterator/sorting families. No limits or expected
+destructor counts were relaxed. The earlier unoptimized run aborted with a host
+stack overflow and is not a completed baseline. These results establish neither
+full compiler conformance nor library/self-hosted compiler completion.
+
 ## Source ownership of materialized callable carriers
 
 Cache 175 resolves the unique-capture source rejection gap recorded below.

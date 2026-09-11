@@ -763,7 +763,7 @@ fn resident_invocation_cases() -> &'static [(&'static str, &'static str, &'stati
         ("generic callback", "fn invoke<F>(task:F) where F:Fn<(),Output=()> { task() }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(task)"),
         ("callback argument", "fn invoke<'a>(task:(&'a i64) -> (), value:&'a i64) { task(value) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,&a)"),
         ("nested callback", "", "let inner = () -> () { SharedSlot::set(&alias,&a); }; let task = () -> () { inner() };", "task()"),
-        ("generic callback argument", "fn invoke<'a,F>(task:F, value:&'a i64) where F:Fn<(&'a i64),Output=()> { task(value) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,&a)"),
+        ("generic callback argument", "fn invoke<'a,F>(task:F, value:&'a i64) where F:Fn<(&'a i64,),Output=()> { task(value) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,&a)"),
         ("tuple callback argument", "fn invoke<'a>(task:(&'a i64) -> (), pair:(&'a i64,i64)) { task(pair.0) }", "let task = (value:&i64) -> () { SharedSlot::set(&alias,value); };", "invoke(task,(&a,0))"),
         ("shared generic receiver", "fn invoke<F>(task:&F) where for<'b> &'b F:Fn<(),Output=()> { task() }", "let task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(&task)"),
         ("unique generic receiver", "fn invoke<F>(task:&mut F) where for<'b> &'b mut F:Fn<(),Output=()> { task() }", "let mut task = () -> () { SharedSlot::set(&alias,&a); };", "invoke(&mut task)"),
