@@ -110,11 +110,20 @@ structure Loan where
   live : Bool
   deriving Repr, Inhabited
 
+inductive Authority where
+  | owner | loan (identity : Identity)
+  deriving DecidableEq, BEq, Repr, Inhabited
+
+structure ReservedPlace where
+  address : Address
+  authority : Authority
+  deriving Repr, Inhabited
+
 structure Availability where
   identity : Identity
   brand : Term
   region : Identity
-  reserved : List Address
+  reserved : List ReservedPlace
   active : Bool
   deriving Repr, Inhabited
 
@@ -181,10 +190,6 @@ inductive AncestorLoan (world : World) : Identity → Identity → Prop where
   | parent {ancestor parent child loan} : world.loans.get child = some loan → loan.parent = some parent →
       AncestorLoan world ancestor parent → AncestorLoan world ancestor child
 
-inductive Authority where
-  | owner | loan (identity : Identity)
-  deriving DecidableEq, BEq, Repr, Inhabited
-
 def Conflict (requested : Access) (existing : Mutability) : Prop :=
   requested ≠ .shared ∨ existing = .unique
 
@@ -203,6 +208,11 @@ def Permitted (world : World) (authority : Authority) (requested : Access) (addr
 def World.WellFormed (world : World) : Prop :=
   world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧ world.bindings.Unique ∧
   world.liveRegions.Nodup ∧
+  (∀ id available, world.availability.get id = some available →
+    id = available.identity ∧ id < world.nextProof ∧ available.brand = .runtimeBrand (.proof id) ∧
+    (available.active = true → available.region ∈ world.liveRegions ∧
+      ∀ place ∈ available.reserved, (world.root place.address).isSome = true)) ∧
+  (∀ id pack, world.bindings.get id = some pack → id = pack.identity ∧ id < world.nextProof) ∧
   (∀ address value, world.Resident address value → value.owner < world.nextOwner) ∧
   (∀ a b x y, world.Resident a x → world.Resident b y → x.owner = y.owner → a = b) ∧
   (∀ id root, world.roots.get id = some root → id < world.nextRoot ∧
@@ -222,6 +232,21 @@ def World.WellFormed (world : World) : Prop :=
   (∀ a b left right, world.loans.get a = some left → world.loans.get b = some right →
     left.live = true → right.live = true → left.referent.Overlaps right.referent →
     left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a)
+
+theorem World.freshProof {world : World} (valid : world.WellFormed) :
+    world.availability.get world.nextProof = none ∧ world.bindings.get world.nextProof = none := by
+  rcases valid with ⟨_,_,_,_,_,availableBounds,packBounds,_⟩
+  constructor
+  · cases found : world.availability.get world.nextProof with
+    | none => rfl
+    | some available =>
+      have impossible := (availableBounds world.nextProof available found).2.1
+      exact False.elim (Nat.lt_irrefl world.nextProof impossible)
+  · cases found : world.bindings.get world.nextProof with
+    | none => rfl
+    | some pack =>
+      have impossible := (packBounds world.nextProof pack found).2
+      exact False.elim (Nat.lt_irrefl world.nextProof impossible)
 
 mutual
   inductive CopyValue (program : Program) : Nat → Value → Nat → Value → Prop where

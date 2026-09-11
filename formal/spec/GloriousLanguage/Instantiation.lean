@@ -37,8 +37,13 @@ def Atom.mapTerms (f : Term → Term) : Atom → Atom
   | .primitive id arguments operands => .primitive id (arguments.map f) operands
   | atom => atom
 
+def EnvironmentAccess.mapTerms (f : Term → Term) (access : EnvironmentAccess) : EnvironmentAccess :=
+  { access with region := f access.region, after := f access.after }
+
 def Invocation.instantiate (call : Invocation) (substitution : Substitution) : Invocation :=
-  { call with signature := call.signature.instantiate substitution }
+  { call with
+    signature := call.signature.instantiate substitution
+    environment := call.environment.map (EnvironmentAccess.mapTerms (Term.substitute substitution)) }
 
 /-- Only the selected clause's header is closed here. Its body remains lexical
 until execution enters it, including its fresh continuation binder. -/

@@ -34,7 +34,9 @@ def Context.term (context : Context) := context.instantiation.term
 def Context.local (context : Context) (localSlot : Local) := localSlot.mapTerms context.term
 
 def Context.invocation (context : Context) (call : Invocation) : Invocation :=
-  { call with signature := call.signature.close context.instantiation }
+  { call with
+    signature := call.signature.close context.instantiation
+    environment := call.environment.map (EnvironmentAccess.mapTerms context.term) }
 
 structure InstalledHandler where
   identity : Identity
@@ -266,7 +268,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
   | tailRequest {before context call} : before.task = .run context (.tail call) →
       LocalStep program before none { before with task := .apply context (context.invocation call) true }
   | call {before context call tail receiver authority id arguments function captures inputs consumed} :
-      before.task = .apply context call tail →
+      before.task = .apply context call tail → call.environment = none →
       ResolvesPlace before.world context.environment call.callee receiver authority →
       CallableReceiver before.world receiver authority call.receiver id arguments → Instance program id arguments function →
       function.signature = call.signature → CaptureInputs before.world receiver authority call.receiver function.captures captures →

@@ -214,3 +214,41 @@ heads, generic/default inference and proof-carrier types. No theorem here proves
 that every legal source closure has an elaboration, or that every generated
 instance satisfies semantic admission. Constructive nonvacuity, control-state
 authority, snapshot simulation and global soundness remain open.
+
+## Availability witnesses and contextual invocation authority
+
+`lake build` passes all 33 jobs, including the new `ControlChecks`. Availability
+and binding-pack atoms now name ordinary `Place` operands. Structural typing and
+execution resolve the same place; execution no longer scans unrelated locals
+for a value whose runtime token number happens to equal a source local number.
+A concrete transition moves local 17's witness for runtime proof 3, and negative
+propositions reject substituting the live table key for an absent local binding.
+
+Contextual invocations carry a witness place, independently selected environment
+access, lifetime and post-environment. The shared `RunsInEnvironment` obligation
+requires the selected Fn/RunsIn evidence and borrowed post-state preservation.
+Both structural typing and execution consume it. Ordinary callable, operation,
+continuation and label dispatch cannot ignore a supplied environment witness.
+Contextual dispatch checks the receiver's permission/signature, resolves the
+actual live witness, and consumes owned receiver and environment authority
+separately. Owned environment invocation clears the witness and marks its
+reservation spent; borrowed invocation retains the reservation.
+
+Reservations retain resolved address/authority pairs through capture-input
+planning and cleanup instead of fabricating owner permission. Capture-input
+planning checks the real resident types, initialization and selected access.
+The previously unused `ReservedTypes` predicate was removed. Explicit closure
+of availability and the `availableClose` primitive now schedule the common
+destructor path; unit production follows cleanup, not proof erasure. World
+well-formedness checks proof-table identity/counter bounds and active reservation
+storage. A theorem proves the next proof key is absent from both tables.
+
+These are integrated execution/admission repairs, not complete contextual-call
+adequacy. Nonmaterialized correlated callable representation still needs a
+typed/layout-compatible model; a zero-field receiver cannot stand in for an
+ordinary callable with nonempty resident captures. Lent invocation bindings and
+borrowed pattern bindings still need their full access/loan interpretation.
+Binding-pack address/provenance relocation, sealed projection/combination and
+complete control-state validity also remain open. The concrete transition
+regression is not a fully source-admitted whole-program nonvacuity theorem.
+Compiler and library files/tests were left untouched.

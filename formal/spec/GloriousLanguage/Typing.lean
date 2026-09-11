@@ -60,18 +60,28 @@ def CallSignature (program : Language.Program) (context : Language.Context) (id 
     program.operation id = some operation ∧ Instantiates operation.signature.generics arguments substitution ∧
     ConstraintsHold program context substitution operation.signature.constraints ∧ signature = operation.signature.instantiate substitution)
 
+def InvocationEnvironment (program : Language.Program) (context : Context)
+    (call : Invocation) (receiver : Term) : Prop :=
+  call.environment = none ∨ ∃ selected brand region writable,
+    call.environment = some selected ∧
+    PlaceType program context selected.witness (.available brand region) writable ∧
+    RunsInEnvironment program context.static call receiver brand region
+
 inductive InvocationType (program : Language.Program) (context : Context) : Invocation → Prop where
   | function {call id arguments writable signature} : PlaceType program context call.callee (.callable id arguments) writable →
+      InvocationEnvironment program context call (.callable id arguments) →
       CallSignature program context.static id arguments signature → signature = call.signature →
       PlacesType program context call.arguments signature.parameters →
       (signature.unsafeAllowed = true → context.static.unsafeAllowed = true) → RowSubset program context.static signature.effects context.effects →
       (call.receiver = .unique → writable = true) → InvocationType program context call
   | continuation {call brand argument answer effects quantity writable} :
+      call.environment = none →
       PlaceType program context call.callee (.continuation brand argument answer effects quantity) writable →
       call.signature.parameters = [argument] → call.signature.result = answer → call.signature.effects = effects →
       PlacesType program context call.arguments [argument] → RowSubset program context.static effects context.effects →
       InvocationType program context call
-  | label {call brand region result writable} : PlaceType program context call.callee (.label brand region result) writable →
+  | label {call brand region result writable} : call.environment = none →
+      PlaceType program context call.callee (.label brand region result) writable →
       PlacesType program context call.arguments [result] → call.signature.result = .bottom →
       call.signature.effects = .row [] [] → InvocationType program context call
 
@@ -144,10 +154,10 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
       (signature.unsafeAllowed = true → context.static.unsafeAllowed = true) →
       RowSubset program.declarations context.static signature.effects context.effects →
       AtomType program context (.primitive id arguments operands) signature.result
-  | available {id brand region localSlot} : localSlot ∈ context.locals → localSlot.id = id → localSlot.type = .available brand region →
-      AtomType program context (.available id) localSlot.type
-  | bindings {id brand region arguments localSlot} : localSlot ∈ context.locals → localSlot.id = id → localSlot.type = .bindings brand region arguments →
-      AtomType program context (.bindings id) localSlot.type
+  | available {place brand region writable} : PlaceType program.declarations context place (.available brand region) writable →
+      AtomType program context (.available place) (.available brand region)
+  | bindings {place brand region arguments writable} : PlaceType program.declarations context place (.bindings brand region arguments) writable →
+      AtomType program context (.bindings place) (.bindings brand region arguments)
 
 mutual
   inductive ValueTyped (program : Kernel.Program) (world : World) : Value → Prop where

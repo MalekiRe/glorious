@@ -53,17 +53,40 @@ inductive Atom where
   | operation (operation : DeclId) (familyArguments itemArguments : List Term)
   | label (brand : Term)
   | primitive (declaration : DeclId) (arguments : List Term) (operands : List Place)
-  | available (environment : Identity)
-  | bindings (pack : Identity)
+  | available (witness : Place)
+  | bindings (pack : Place)
+  deriving Repr, Inhabited
+
+/-- Receiver access and environment access are independent. The witness is
+a lexical place, never a forgeable runtime availability-table key. -/
+structure EnvironmentAccess where
+  witness : Place
+  access : Access
+  region : Term
+  after : Term
   deriving Repr, Inhabited
 
 structure Invocation where
   callee : Place
   arguments : List Place
   receiver : Access
-  environment : Option Identity
+  environment : Option EnvironmentAccess
   signature : Signature
   deriving Repr, Inhabited
+
+/-- The same selected Fn/RunsIn obligation is consumed by structural typing
+and contextual execution. A witness's presence is not an invocation proof. -/
+def RunsInEnvironment (program : Language.Program) (context : Language.Context)
+    (call : Invocation) (receiver brand region : Term) : Prop :=
+  ∃ selected, call.environment = some selected ∧
+    WellKinded program context selected.region .region ∧
+    RegionIncludes context.assumptions region selected.region ∧
+    Entails program context (.callable (call.receiver.type selected.region receiver)
+      call.signature.parameters call.signature.result call.signature.effects call.signature.unsafeAllowed) ∧
+    Entails program context (.runsIn (call.receiver.type selected.region receiver)
+      (selected.access.type selected.region (.environment brand region)) call.signature.parameters
+      selected.after call.signature.unsafeAllowed) ∧
+    (selected.access ≠ .owned → selected.after = .environment brand region)
 
 mutual
   inductive Code where
@@ -165,6 +188,11 @@ inductive ResolvesPlace (world : World) (environment : Environment) : Place → 
       ResolvesProjections world binding.address binding.authority prefixForm middle permission →
       ResolvesProjections world middle permission (.field integer.toNat :: suffix) address authority →
       ResolvesPlace world environment place address authority
+
+theorem ResolvesPlace.binding {world environment place address authority}
+    (resolved : ResolvesPlace world environment place address authority) :
+    ∃ binding ∈ environment, binding.localSlot = place.localSlot := by
+  cases resolved <;> refine ⟨_, ?_, by assumption⟩ <;> assumption
 
 mutual
   inductive Matches (program : Language.Program) (world : World) : Address → Pattern → Prop where

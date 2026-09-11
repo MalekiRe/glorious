@@ -149,7 +149,8 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       before.task = .run context (.handle id computation syntaxNode) → Installs program before context syntaxNode handler after →
       EffectStep program before none { before with world := after, task := .run handler.computation computation, frames := .handler handler true :: before.frames, nextActivation := before.nextActivation+1, nextHandler := before.nextHandler+1 }
   | operationCall {before context call receiver authority value id arguments operation signature payload} :
-      before.task = .apply context call false → ResolvesPlace before.world context.environment call.callee receiver authority →
+      before.task = .apply context call false → call.environment = none →
+      ResolvesPlace before.world context.environment call.callee receiver authority →
       before.world.Stores receiver value → value.head = .operation id arguments →
       Permitted before.world authority .shared receiver → OperationInstance program id arguments operation signature →
       signature = call.signature → Addresses before.world context.environment call.arguments payload →
@@ -187,7 +188,8 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,quantity,bound,0,true,true⟩ →
       EffectStep program before (some (.suspend before.nextContinuation)) { before with world := suspendRoots moved roots before.nextContinuation, task := .pattern clause (ScheduledPattern actions) arm.body, frames := .tailResume clause before.nextContinuation :: .serviced handler owns clause (some before.nextContinuation) :: outer, resumptions := before.resumptions.set before.nextContinuation suspension, nextContinuation := before.nextContinuation+1, nextActivation := before.nextActivation+1 }
   | continuationCall {before context call tail receiver authority value id argument permission} :
-      before.task = .apply context call tail → ResolvesPlace before.world context.environment call.callee receiver authority →
+      before.task = .apply context call tail → call.environment = none →
+      ResolvesPlace before.world context.environment call.callee receiver authority →
       before.world.Stores receiver value → value.head = .continuation id → Permitted before.world authority .shared receiver →
       (∃ place, call.arguments = [place] ∧ ResolvesPlace before.world context.environment place argument permission) →
       EffectStep program before none { before with task := .resume context id argument tail }

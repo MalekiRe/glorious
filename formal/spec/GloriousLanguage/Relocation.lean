@@ -96,8 +96,13 @@ mutual
     | .assign destination value next => .assign destination value (map.code next)
     | .discard value next => .discard value (map.code next)
     | .invoke localSlot call next => .invoke (localSlot.mapTerms map.term)
-        { call with signature := map.signature call.signature } (map.code next)
-    | .tail call => .tail { call with signature := map.signature call.signature }
+        { call with
+          signature := map.signature call.signature
+          environment := call.environment.map (EnvironmentAccess.mapTerms map.term) } (map.code next)
+    | .tail call => .tail
+        { call with
+          signature := map.signature call.signature
+          environment := call.environment.map (EnvironmentAccess.mapTerms map.term) }
     | .scope id body => .scope id (map.code body)
     | .label brand region result body => .label brand region (map.term result) (map.code body)
     | .choose subject arms => .choose subject (arms.map map.arm)

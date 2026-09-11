@@ -112,6 +112,12 @@ def Term.mapChildren (f : Term → Term) : Term → Term
 
 def SameHead (a b : Term) : Prop := a.mapChildren (fun _ => .unit) = b.mapChildren (fun _ => .unit)
 
+def Access.type (access : Access) (region type : Term) : Term :=
+  match access with
+  | .owned => type
+  | .shared => .reference .shared region type
+  | .unique => .reference .unique region type
+
 inductive Occurs : Term → Term → Prop where
   | here {term} : Occurs term term
   | child {needle parent child} : child ∈ parent.children → Occurs needle child → Occurs needle parent
