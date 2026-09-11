@@ -583,7 +583,7 @@ impl RuntimeMir {
                 return Err(format!("MIR resumption {index} is in a tombstoned block"));
             }
         }
-        for (&block, _) in &self.control.leave_handler_depths {
+        for (&block, _) in &self.control.leave_handler_prefixes {
             if self.control.tombstoned_blocks.contains(&block) {
                 return Err(format!(
                     "MIR leave-handler depth names tombstoned block {}",
@@ -603,7 +603,7 @@ impl RuntimeMir {
         }
         for (index, block) in self.blocks.iter().enumerate() {
             if matches!(block.terminator, RuntimeTerminator::Leave { .. })
-                && !self.control.leave_handler_depths.contains_key(&MirBlockId(index as u32)) {
+                && !self.control.leave_handler_prefixes.contains_key(&MirBlockId(index as u32)) {
                 return Err("Runtime leave has no retained-handler contract".into());
             }
         }
@@ -794,6 +794,7 @@ impl RuntimeMir {
                 ..
             } = &block.terminator
             {
+                self.control.handler_exit(block_id, scope)?;
                 let entry = self
                     .control
                     .labels
@@ -825,8 +826,8 @@ impl RuntimeMir {
     /// purpose nonlocal jump capability.
     fn validate_label_contracts(&self) -> Result<(), String> {
         let mut contracts =
-            BTreeMap::<crate::LabelBrand, (MirBlockId, Vec<MirLocal>, Vec<Type>)>::new();
-        for block in &self.blocks {
+            BTreeMap::<crate::LabelBrand, (MirBlockId, Vec<MirLocal>, Vec<Type>, Vec<MirHandlerSiteId>)>::new();
+        for (index, block) in self.blocks.iter().enumerate() {
             let RuntimeTerminator::Leave { brand, target, .. } = &block.terminator else {
                 continue;
             };
@@ -839,7 +840,9 @@ impl RuntimeMir {
                 .iter()
                 .map(|local| self.local_type(*local).cloned())
                 .collect::<Result<Vec<_>, _>>()?;
-            let contract = (*target, destinations, layout);
+            let retained = self.control.leave_handler_prefixes.get(&MirBlockId(index as u32))
+                .ok_or("missing retained-handler contract")?.clone();
+            let contract = (*target, destinations, layout, retained);
             match contracts.get(brand) {
                 Some(previous) if previous != &contract => {
                     return Err(

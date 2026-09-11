@@ -153,7 +153,7 @@ fn all_false_drop_flag_exit() -> CandidateVmArtifact {
                 VmInstruction::Leave {
                     brand_owner: DefKey(Digest::of_bytes(b"storage-statement-all-false-label")),
                     brand_label: 0,
-                    handler_depth: 0,
+                    retained_handlers: vec![], exited_handlers: vec![],
                     target: 2,
                     arguments: vec![],
                     destinations: vec![],

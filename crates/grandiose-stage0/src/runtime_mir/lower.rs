@@ -176,7 +176,17 @@ impl CleanupMir {
             label_landings.insert(id, landing);
         }
         let mut lifted = BTreeMap::new();
-        let mut leave_handler_depths = BTreeMap::new();
+        let mut leave_handler_prefixes = BTreeMap::new();
+        // Preserve the source handler identity through its clause expansion.
+        // Freezing remaps these builder identities together with the leaves.
+        let mut next_handler_site = 0u32;
+        let handler_sites = self.handlers.iter().map(|handler| {
+            handler.clauses.iter().map(|_| {
+                let site = crate::MirHandlerSiteId(next_handler_site);
+                next_handler_site += 1;
+                site
+            }).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
         for (block_index, block) in self.blocks.iter().enumerate() {
             let mut instructions = vec![];
             for clause in self.handlers.iter().flat_map(|handler| &handler.clauses) {
@@ -976,7 +986,9 @@ impl CleanupMir {
                         ControlTransfer::Leave { label, .. } => {
                             let target = label_landings.get(label).copied().unwrap_or(routes[0].0);
                             let label = &self.labels[label.0 as usize];
-                            leave_handler_depths.insert(MirBlockId(block_index as u32), u32::try_from(label.handler_prefix.len()).ok()?);
+                            leave_handler_prefixes.insert(MirBlockId(block_index as u32),
+                                label.handler_prefix.iter().map(|(handler, clause)|
+                                    handler_sites[handler.0 as usize][*clause as usize]).collect());
                             blocks.push(RuntimeBlock {
                                 scope: MirScopeId::ROOT,
                                 parameters: block.parameters.iter().copied().map(local).collect(),
@@ -1005,7 +1017,7 @@ impl CleanupMir {
                             computation,
                             ..
                         } => {
-                            for clause in self.handlers[handler.0 as usize].clauses.iter().rev() {
+                            for (clause_index, clause) in self.handlers[handler.0 as usize].clauses.iter().enumerate().rev() {
                                 let (resume_type, continuation) = match &clause.contract {
                                     Some(contract) => (
                                         contract.parameter.clone(),
@@ -1014,7 +1026,7 @@ impl CleanupMir {
                                     None => (Type::Never, crate::MirContinuationPolicy::Terminal),
                                 };
                                 instructions.push(RuntimeOperation::InstallHandler {
-                                    site: crate::MirHandlerSiteId::UNASSIGNED,
+                                    site: handler_sites[handler.0 as usize][clause_index],
                                     effect: clause.effect.definition,
                                     effect_arguments: clause.effect.arguments.clone(),
                                     operation: clause.operation,
@@ -1183,7 +1195,7 @@ impl CleanupMir {
             parameters: self.parameters.iter().copied().map(local).collect(),
             locals,
             result: declared_result,
-            control: MirControlTables { leave_handler_depths, ..MirControlTables::default() },
+            control: MirControlTables { leave_handler_prefixes, ..MirControlTables::default() },
             frame: RuntimeFrame::default(),
             entry: MirBlockId(self.entry.0),
             blocks,

@@ -30,7 +30,8 @@ pub enum VmLirTerminator {
     Leave {
         brand_owner: DefKey,
         brand_label: u32,
-        handler_depth: u32,
+        retained_handlers: Vec<(VmLirBlockId, u32)>,
+        exited_handlers: Vec<(VmLirBlockId, u32)>,
         target: VmLirBlockId,
         arguments: Vec<u32>,
         destinations: Vec<u32>,

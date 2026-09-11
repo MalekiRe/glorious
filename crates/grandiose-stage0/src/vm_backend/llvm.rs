@@ -22,8 +22,8 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 20;
-pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:shared-resumable-frames-v2";
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 21;
+pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:shared-resumable-frames-v3";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
 pub const LLVM_NATIVE_STACK_BYTES: u64 = 1024 * 1024;
@@ -540,7 +540,7 @@ mod tests {
                 I::ConstI64 { dst: 0, value: 17 }, I::ConstI64 { dst: 1, value: 42 },
                 I::MakeTupleOwned { dst: 2, fields: vec![0,1] },
                 I::TakeProjection { dst: 3, base: 2, fields: vec![0] },
-                I::Leave { brand_owner: entry, brand_label: 0, handler_depth: 0, target: 6,
+                I::Leave { brand_owner: entry, brand_label: 0, retained_handlers: vec![], exited_handlers: vec![], target: 6,
                     arguments: vec![2], destinations: vec![4], cleanup: super::super::VmCleanupProof {
                         moved_places: vec![], active_loans: vec![],
                         storage_erasure: super::super::VmStorageErasureWitness::without_source_storage(),

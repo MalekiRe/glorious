@@ -5,9 +5,24 @@ pub(super) enum MirScopeEntry {
     Handler(MirHandlerSiteId),
 }
 impl RuntimeMir {
+    pub(crate) fn handler_exit(&self, block: MirBlockId) -> Result<(Vec<MirHandlerSiteId>, Vec<MirHandlerSiteId>), String> {
+        let data = &self.blocks[block.0 as usize];
+        let mut scope = data.scope;
+        for operation in &data.instructions {
+            scope = match operation {
+                RuntimeOperation::MakeLabel { label, .. } => self.control.labels[label.0 as usize].scope,
+                RuntimeOperation::InstallHandler { site, .. } => self.control.handlers[site.0 as usize].scope,
+                RuntimeOperation::UninstallHandler => scope_after_uninstall(&self.control, scope)
+                    .ok_or("handler exit escapes its scope")?,
+                _ => scope,
+            };
+        }
+        self.control.handler_exit(block, scope)
+    }
+
     pub fn with_frozen_control_tables(mut self) -> Self {
         let mut control = MirControlTables {
-            leave_handler_depths: self.control.leave_handler_depths.clone(),
+            leave_handler_prefixes: self.control.leave_handler_prefixes.clone(),
             move_paths: self.control.move_paths.clone(),
             tombstoned_blocks: self.control.tombstoned_blocks.clone(),
             source_storage: self.control.source_storage.clone(),
@@ -16,6 +31,7 @@ impl RuntimeMir {
             ..MirControlTables::default()
         };
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
+        let mut handler_remap = BTreeMap::new();
 
         for (block_index, block) in self.blocks.iter_mut().enumerate() {
             let block_id = MirBlockId(block_index as u32);
@@ -50,6 +66,7 @@ impl RuntimeMir {
                         ..
                     } => {
                         let id = MirHandlerSiteId(control.handlers.len() as u32);
+                        handler_remap.insert(*site, id);
                         control.handlers.push(MirHandlerSiteData {
                             block: block_id,
                             scope: MirScopeId::ROOT,
@@ -92,7 +109,10 @@ impl RuntimeMir {
             }
         }
 
-        let contexts = lexical_scope_contexts(&self.blocks, self.entry);
+        for prefix in control.leave_handler_prefixes.values_mut() {
+            for site in prefix { *site = handler_remap.get(site).copied().unwrap_or(MirHandlerSiteId::UNASSIGNED); }
+        }
+        let contexts = lexical_scope_contexts(&self.blocks, self.entry, &control.leave_handler_prefixes);
         let handler_bodies = control
             .handlers
             .iter()
@@ -140,6 +160,7 @@ impl RuntimeMir {
 pub(super) fn lexical_scope_contexts(
     blocks: &[RuntimeBlock],
     entry: MirBlockId,
+    leave_prefixes: &BTreeMap<MirBlockId, Vec<MirHandlerSiteId>>,
 ) -> BTreeMap<MirBlockId, Vec<MirScopeEntry>> {
     let mut contexts = BTreeMap::new();
     let mut pending = VecDeque::new();
@@ -191,14 +212,19 @@ pub(super) fn lexical_scope_contexts(
                 merge_lexical_context(&mut contexts, &mut pending, *else_target, &context);
             }
             RuntimeTerminator::Leave { label, target, .. } => {
-                let exit = context
+                let mut exit = context
                     .iter()
                     .rposition(|entry| *entry == MirScopeEntry::Label(*label))
                     .map(|index| context[..index].to_vec())
-                    // Direct branded leaves need not materialize a
-                    // first-class label value. Their explicit cleanups have
-                    // already left the lexical target prefix in `context`.
+                    // Direct branded leaves need not materialize a label.
+                    // Their retained installation product below still
+                    // supplies the exact destination handler prefix.
                     .unwrap_or_else(|| context.clone());
+                if let Some(retained) = leave_prefixes.get(&block_id)
+                    && let Some(crossed) = exit.iter().position(|entry|
+                        matches!(entry, MirScopeEntry::Handler(site) if !retained.contains(site))) {
+                    exit.truncate(crossed);
+                }
                 merge_lexical_context(&mut contexts, &mut pending, *target, &exit);
             }
             RuntimeTerminator::Return { .. } | RuntimeTerminator::TailCall { .. } | RuntimeTerminator::Unreachable => {}

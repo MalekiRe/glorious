@@ -35,7 +35,7 @@ fn compact_exit_without_storage_witness() -> CandidateVmArtifact {
                 VmInstruction::Leave {
                     brand_owner: DefKey(Digest::of_bytes(b"storage-erasure-label")),
                     brand_label: 0,
-                    handler_depth: 0,
+                    retained_handlers: vec![], exited_handlers: vec![],
                     target: 3,
                     arguments: vec![1],
                     destinations: vec![2],
@@ -97,7 +97,7 @@ fn witnessed_storage_exit() -> CandidateVmArtifact {
                 VmInstruction::Leave {
                     brand_owner: DefKey(Digest::of_bytes(b"storage-erasure-witnessed-label")),
                     brand_label: 0,
-                    handler_depth: 0,
+                    retained_handlers: vec![], exited_handlers: vec![],
                     target: 2,
                     arguments: vec![0],
                     destinations: vec![1],

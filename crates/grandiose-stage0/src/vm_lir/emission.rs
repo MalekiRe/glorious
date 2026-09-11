@@ -114,6 +114,13 @@ impl VmLirFunction {
                 actions: self.frame_cleanup.clone(),
             });
         }
+        let handler_pc = |(block, offset): &(VmLirBlockId, u32)| -> Result<u32, VmArtifactError> {
+            let data = self.blocks.get(block.0 as usize).ok_or_else(|| invalid("VM LIR leave names an absent handler block"))?;
+            if !matches!(data.instructions.get(*offset as usize), Some(VmInstruction::InstallHandlerOwned { .. })) {
+                return Err(invalid("VM LIR leave does not name a handler installation"));
+            }
+            starts[block.0 as usize].checked_add(*offset).ok_or_else(|| invalid("VM LIR handler PC overflows"))
+        };
         for index in order {
             let block = &self.blocks[index];
             for instruction in &block.instructions {
@@ -147,7 +154,8 @@ impl VmLirFunction {
                 VmLirTerminator::Leave {
                     brand_owner,
                     brand_label,
-                    handler_depth,
+                    retained_handlers,
+                    exited_handlers,
                     target,
                     arguments,
                     destinations,
@@ -155,7 +163,8 @@ impl VmLirFunction {
                 } => VmInstruction::Leave {
                     brand_owner: *brand_owner,
                     brand_label: *brand_label,
-                    handler_depth: *handler_depth,
+                    retained_handlers: retained_handlers.iter().map(handler_pc).collect::<Result<_, _>>()?,
+                    exited_handlers: exited_handlers.iter().map(handler_pc).collect::<Result<_, _>>()?,
                     target: starts[target.0 as usize],
                     arguments: arguments.clone(),
                     destinations: destinations.clone(),

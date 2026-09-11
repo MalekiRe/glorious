@@ -188,9 +188,9 @@ pub struct MirControlTables {
     pub performs: Vec<MirPerformSiteData>,
     pub resumptions: Vec<MirResumptionSiteData>,
     /// Explicit lexical handler prefix retained by a direct nonlocal leave.
-    /// Absent entries retain the historical empty prefix; specialized lowering
-    /// records this only when a label target stays inside an outer handler.
-    pub leave_handler_depths: BTreeMap<MirBlockId, u32>,
+    /// Entries name exact installations, including every clause of a source
+    /// handler. A function-local depth is not a dynamic stack boundary.
+    pub leave_handler_prefixes: BTreeMap<MirBlockId, Vec<MirHandlerSiteId>>,
     /// Body-wide operation identities share the frozen table boundary with
     /// control identities.  This keeps existing raw `MirFunction` literals
     /// source-compatible while still serializing one stable, body-local arena.
@@ -211,6 +211,28 @@ pub struct MirControlTables {
     /// Cleanup MIR's complete owner inventory includes unnamed temporaries.
     /// Older hand-built MIR fixtures have only source-binding provenance.
     pub cleanup_owners: Option<Vec<MirLocal>>,
+}
+
+impl MirControlTables {
+    pub(crate) fn handler_exit(&self, block: MirBlockId, scope: MirScopeId)
+        -> Result<(Vec<MirHandlerSiteId>, Vec<MirHandlerSiteId>), String> {
+        let retained = self.leave_handler_prefixes.get(&block).ok_or("missing retained-handler contract")?;
+        let mut active = Vec::new();
+        let mut current = Some(scope);
+        let mut visited = BTreeSet::new();
+        while let Some(scope) = current {
+            if !visited.insert(scope) { return Err("cyclic handler scope".into()); }
+            let data = self.scopes.get(scope.0 as usize).ok_or("missing handler scope")?;
+            if let Some(site) = data.entered_handler {
+                if self.handlers.get(site.0 as usize).is_none() { return Err("missing handler installation".into()); }
+                active.push(site);
+            }
+            current = data.parent;
+        }
+        active.reverse();
+        if !active.starts_with(retained) { return Err("handler exit does not retain a lexical prefix".into()); }
+        Ok((retained.clone(), active[retained.len()..].to_vec()))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -241,7 +263,7 @@ impl Default for MirControlTables {
             handlers: vec![],
             performs: vec![],
             resumptions: vec![],
-            leave_handler_depths: BTreeMap::new(),
+            leave_handler_prefixes: BTreeMap::new(),
             operations: MirOperationArena::default(),
             move_paths: MirMovePathTables::default(),
             tombstoned_blocks: BTreeSet::new(),
@@ -2231,8 +2253,8 @@ impl MirEditor {
             // block that owns the `Leave` terminator.  Splitting moves that
             // terminator to the suffix, so retaining the old key would make
             // VM lowering reconstruct a different handler prefix.
-            if let Some(depth) = function.control.leave_handler_depths.remove(&block) {
-                function.control.leave_handler_depths.insert(suffix, depth);
+            if let Some(depth) = function.control.leave_handler_prefixes.remove(&block) {
+                function.control.leave_handler_prefixes.insert(suffix, depth);
             }
             relocate_operations_after_split(function, block, suffix, at);
             refresh_control_block_sites(function, suffix)?;
@@ -2303,7 +2325,7 @@ impl MirEditor {
             // predecessor's terminator, so carry its explicit VM unwind
             // prefix to the surviving block identity before tombstoning the
             // successor.
-            let leave_handler_depth = function.control.leave_handler_depths.remove(&successor);
+            let leave_handler_depth = function.control.leave_handler_prefixes.remove(&successor);
             let (instructions, terminator) = {
                 let successor_block = function.blocks.get_mut(successor.0 as usize).unwrap();
                 let instructions = std::mem::take(&mut successor_block.instructions);
@@ -2317,7 +2339,7 @@ impl MirEditor {
             if let Some(depth) = leave_handler_depth {
                 function
                     .control
-                    .leave_handler_depths
+                    .leave_handler_prefixes
                     .insert(predecessor, depth);
             }
             for entry in &mut function.control.operations.entries {
@@ -2836,7 +2858,7 @@ fn terminator_references(terminator: &MirTerminator) -> Vec<MirLocal> {
     }
 }
 
-fn scope_after_block_prefix(
+pub(crate) fn scope_after_block_prefix(
     function: &MirFunction,
     block: MirBlockId,
     at: usize,
@@ -3005,7 +3027,7 @@ fn removable_unreachable_blocks(function: &MirFunction) -> Result<Vec<MirBlockId
             .any(|resumption| retired_set.contains(&resumption.block))
         || function
             .control
-            .leave_handler_depths
+            .leave_handler_prefixes
             .keys()
             .any(|block| retired_set.contains(block))
     {
@@ -4999,7 +5021,7 @@ impl MirFunction {
     /// wire instructions as before.
     pub fn with_frozen_control_tables(mut self) -> Self {
         let mut control = MirControlTables {
-            leave_handler_depths: self.control.leave_handler_depths.clone(),
+            leave_handler_prefixes: self.control.leave_handler_prefixes.clone(),
             move_paths: self.control.move_paths.clone(),
             tombstoned_blocks: self.control.tombstoned_blocks.clone(),
             source_storage: self.control.source_storage.clone(),
@@ -5008,6 +5030,7 @@ impl MirFunction {
             ..MirControlTables::default()
         };
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
+        let mut handler_remap = BTreeMap::new();
 
         for (block_index, block) in self.blocks.iter_mut().enumerate() {
             let block_id = MirBlockId(block_index as u32);
@@ -5042,6 +5065,7 @@ impl MirFunction {
                         ..
                     } => {
                         let id = MirHandlerSiteId(control.handlers.len() as u32);
+                        handler_remap.insert(*site, id);
                         control.handlers.push(MirHandlerSiteData {
                             block: block_id,
                             scope: MirScopeId::ROOT,
@@ -5084,7 +5108,10 @@ impl MirFunction {
             }
         }
 
-        let contexts = lexical_scope_contexts(&self.blocks, self.entry);
+        for prefix in control.leave_handler_prefixes.values_mut() {
+            for site in prefix { *site = handler_remap.get(site).copied().unwrap_or(MirHandlerSiteId::UNASSIGNED); }
+        }
+        let contexts = lexical_scope_contexts(&self.blocks, self.entry, &control.leave_handler_prefixes);
         let handler_bodies = control
             .handlers
             .iter()
@@ -5113,6 +5140,11 @@ impl MirFunction {
             }
             if let MirTerminator::Leave { label, .. } = &block.terminator {
                 let id = *label;
+                let position = context.iter().rposition(|entry| *entry == MirScopeEntry::Label(id));
+                control.leave_handler_prefixes.entry(block_id).or_insert_with(||
+                    context[..position.unwrap_or(0)].iter().filter_map(|entry| match entry {
+                        MirScopeEntry::Handler(site) => Some(*site), _ => None,
+                    }).collect());
                 if let Some(position) = context
                     .iter()
                     .rposition(|entry| *entry == MirScopeEntry::Label(id))
@@ -5724,7 +5756,7 @@ impl MirFunction {
                 return Err(format!("MIR resumption {index} is in a tombstoned block"));
             }
         }
-        for (&block, _) in &self.control.leave_handler_depths {
+        for (&block, _) in &self.control.leave_handler_prefixes {
             if self.control.tombstoned_blocks.contains(&block) {
                 return Err(format!(
                     "MIR leave-handler depth names tombstoned block {}",
@@ -5928,6 +5960,7 @@ impl MirFunction {
                 ..
             } = &block.terminator
             {
+                self.control.handler_exit(block_id, scope)?;
                 let entry = self
                     .control
                     .labels
@@ -5959,8 +5992,8 @@ impl MirFunction {
     /// purpose nonlocal jump capability.
     fn validate_label_contracts(&self) -> Result<(), String> {
         let mut contracts =
-            BTreeMap::<crate::LabelBrand, (MirBlockId, Vec<MirLocal>, Vec<Type>)>::new();
-        for block in &self.blocks {
+            BTreeMap::<crate::LabelBrand, (MirBlockId, Vec<MirLocal>, Vec<Type>, Vec<MirHandlerSiteId>)>::new();
+        for (index, block) in self.blocks.iter().enumerate() {
             let MirTerminator::Leave { brand, target, .. } = &block.terminator else {
                 continue;
             };
@@ -5973,7 +6006,9 @@ impl MirFunction {
                 .iter()
                 .map(|local| self.local_type(*local).cloned())
                 .collect::<Result<Vec<_>, _>>()?;
-            let contract = (*target, destinations, layout);
+            let retained = self.control.leave_handler_prefixes.get(&MirBlockId(index as u32))
+                .ok_or("missing retained-handler contract")?.clone();
+            let contract = (*target, destinations, layout, retained);
             match contracts.get(brand) {
                 Some(previous) if previous != &contract => {
                     return Err(
@@ -7069,6 +7104,7 @@ impl MirFunction {
 fn lexical_scope_contexts(
     blocks: &[MirBlock],
     entry: MirBlockId,
+    leave_prefixes: &BTreeMap<MirBlockId, Vec<MirHandlerSiteId>>,
 ) -> BTreeMap<MirBlockId, Vec<MirScopeEntry>> {
     let mut contexts = BTreeMap::new();
     let mut pending = VecDeque::new();
@@ -7120,14 +7156,19 @@ fn lexical_scope_contexts(
                 merge_lexical_context(&mut contexts, &mut pending, *else_target, &context);
             }
             MirTerminator::Leave { label, target, .. } => {
-                let exit = context
+                let mut exit = context
                     .iter()
                     .rposition(|entry| *entry == MirScopeEntry::Label(*label))
                     .map(|index| context[..index].to_vec())
-                    // Direct branded leaves need not materialize a
-                    // first-class label value. Their explicit cleanups have
-                    // already left the lexical target prefix in `context`.
+                    // Direct branded leaves need not materialize a label.
+                    // Their retained installation product below still
+                    // supplies the exact destination handler prefix.
                     .unwrap_or_else(|| context.clone());
+                if let Some(retained) = leave_prefixes.get(&block_id)
+                    && let Some(crossed) = exit.iter().position(|entry|
+                        matches!(entry, MirScopeEntry::Handler(site) if !retained.contains(site))) {
+                    exit.truncate(crossed);
+                }
                 merge_lexical_context(&mut contexts, &mut pending, *target, &exit);
             }
             MirTerminator::Return { .. } | MirTerminator::Unreachable => {}

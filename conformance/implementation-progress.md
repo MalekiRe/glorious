@@ -5,6 +5,37 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 171: exact lexical handler exits
+
+The existing Cleanup label prefix now reaches Runtime MIR, frozen control
+tables, block editing, VM LIR relocation and bytecode as exact installation
+identities. Leaves name retained and crossed entries; local counts and the
+legacy instruction-local fallback are removed. Receiving validators reject
+missing, reordered, repeated and non-installation identities.
+
+Installation-time outside-handler frontiers preserve dynamically interposed
+resumption call-site handlers when a local label stays inside its delimiter,
+and remove them when their owning clause path is crossed. Only crossed return
+edges are abandoned; their saved paths reuse ordinary branch cleanup. First-class
+labels retain their actual handler prefix and authenticate the original owning
+activation without searching unrelated saved branches.
+
+The five new label-control execution regressions pass fresh/decoded VM, native
+and both mixed directions at O0/O2 with zero measured resident-entry allocation
+and copy bytes. The handler integration run passes **81 tests**, explicitly
+excluding the active source regression described below. Six MIR label/editor
+checks and 13 bytecode leave checks pass,
+including hostile retained-prefix mutations and updated wire offsets.
+The additional clause-Drop composition test still fails source G5016 because
+ownership skips the clause after a later label transfer in the protected body.
+Its failing assertion remains intact; cleanup execution for that source gate
+has not yet passed. Full native-handler acceptance remains open.
+
+Cache is 171, verifier 52, bytecode 76/schema 120 and native ABI 21/control v3.
+An attempted all-test debug build exhausted disk during linking; it is not a
+passing compilation gate. Generated Stage0 outputs were removed and focused
+tests rebuilt with reduced debug information. Source files were not removed.
+
 ## Cache 170: retained-control budgets across saved branches
 
 The shared runtime counts both pending performances and returning-resumption

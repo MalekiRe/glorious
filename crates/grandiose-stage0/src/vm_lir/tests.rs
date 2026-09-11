@@ -270,9 +270,10 @@ fn lir_lexical_leave_retains_its_enclosing_handler() {
             .any(|block| matches!(
                 block.terminator,
                 VmLirTerminator::Leave {
-                    handler_depth: 1,
+                    ref retained_handlers,
+                    ref exited_handlers,
                     ..
-                }
+                } if retained_handlers.len() == 1 && exited_handlers.is_empty()
             ))
     );
     assert_eq!(
@@ -282,4 +283,20 @@ fn lir_lexical_leave_retains_its_enclosing_handler() {
             .unwrap(),
         42
     );
+}
+
+#[test]
+fn lir_leave_rejects_invalid_handler_relocations() {
+    let original = fixture("effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle label done { transfer done 42 } { Ask::ask() with _ => 0 } }");
+    let body = &original.functions[&original.entry];
+    let nonhandler = body.blocks.iter().enumerate().find_map(|(block, data)|
+        data.instructions.iter().position(|instruction| !matches!(instruction, VmInstruction::InstallHandlerOwned { .. }))
+            .map(|offset| (VmLirBlockId(block as u32), offset as u32))).unwrap();
+    for location in [(VmLirBlockId(u32::MAX), 0), (VmLirBlockId(0), u32::MAX), nonhandler] {
+        let mut forged = original.clone();
+        let prefix = forged.functions.get_mut(&forged.entry).unwrap().blocks.iter_mut().find_map(|block|
+            match &mut block.terminator { VmLirTerminator::Leave { retained_handlers, .. } => Some(retained_handlers), _ => None }).unwrap();
+        prefix[0] = location;
+        assert!(forged.emit().is_err());
+    }
 }

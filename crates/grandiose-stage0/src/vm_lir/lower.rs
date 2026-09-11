@@ -260,17 +260,21 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
                     target,
                     cleanup,
                     ..
-                } => VmLirTerminator::Leave {
+                } => {
+                    let (retained, exited) = source.handler_exit(crate::MirBlockId(index as u32))
+                        .map_err(|_| invalid("VM LIR leave has an invalid lexical handler exit"))?;
+                    let location = |site: crate::MirHandlerSiteId| -> Result<_, VmArtifactError> {
+                        let handler = &source.control.handlers[site.0 as usize];
+                        let offset = source.blocks[handler.block.0 as usize].instructions.iter().position(|operation|
+                            matches!(operation, RuntimeOperation::InstallHandler { site: actual, .. } if *actual == site))
+                            .ok_or_else(|| invalid("VM LIR handler installation is missing"))?;
+                        Ok((VmLirBlockId(handler.block.0), offset as u32))
+                    };
+                    VmLirTerminator::Leave {
                     brand_owner: brand.owner,
                     brand_label: brand.label,
-                    handler_depth: source
-                        .control
-                        .leave_handler_depths
-                        .get(&crate::mir::MirBlockId(index as u32))
-                        .copied()
-                        .ok_or_else(|| {
-                            invalid("VM LIR leave is missing its checked handler depth")
-                        })?,
+                    retained_handlers: retained.into_iter().map(location).collect::<Result<_, _>>()?,
+                    exited_handlers: exited.into_iter().map(location).collect::<Result<_, _>>()?,
                     target: VmLirBlockId(target.0),
                     arguments: transfers[&(index, block.instructions.len())]
                         .arguments
@@ -287,7 +291,7 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
                         &source.control.move_paths,
                         &source.control.source_storage,
                     )?,
-                },
+                } },
                 RuntimeTerminator::Unreachable => VmLirTerminator::Trap,
             }
         };

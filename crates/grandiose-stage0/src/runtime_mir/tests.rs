@@ -205,15 +205,25 @@ fn runtime_saved_frame_excludes_handed_off_effect_owners() {
 }
 
 #[test]
-fn runtime_requires_an_explicit_leave_handler_depth() {
+fn runtime_requires_an_explicit_leave_handler_prefix() {
     let mut body = fixture("pub fn main() -> i64 { label done { transfer done 42 } }");
-    assert!(!body.control.leave_handler_depths.is_empty());
-    body.control.leave_handler_depths.clear();
+    assert!(!body.control.leave_handler_prefixes.is_empty());
+    body.control.leave_handler_prefixes.clear();
     assert!(
         body.validate()
             .unwrap_err()
             .contains("retained-handler contract")
     );
+}
+
+#[test]
+fn runtime_rejects_nonprefix_and_missing_handler_installations_on_leave() {
+    let original = fixture("effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle label done { transfer done 42 } { Ask::ask() with _ => 0 } }");
+    for prefix in [vec![crate::MirHandlerSiteId(u32::MAX)], vec![crate::MirHandlerSiteId(0); 2]] {
+        let mut body = original.clone();
+        *body.control.leave_handler_prefixes.values_mut().next().unwrap() = prefix;
+        assert!(body.validate().unwrap_err().contains("lexical prefix"));
+    }
 }
 
 #[test]

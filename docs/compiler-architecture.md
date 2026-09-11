@@ -2613,3 +2613,38 @@ O0/O2, branch/replay alias identity, protected cleanup, and the existing bounded
 1,000-iteration handler/tail cycle. Verifier 51, native ABI 20/control v2 and
 bytecode 75/schema 119 are unchanged. Local-label transfer composition remains
 under milestone review. The counters do not claim exact allocator/RSS accounting.
+
+## Lexical handler exits and dynamic return frontiers
+
+Cleanup's existing label contract retains exact handler-clause identities.
+Runtime lowering now preserves those identities through clause installation,
+control-table freezing, block editing and VM LIR relocation. Executable leaves
+name both their retained lexical prefix and their crossed installations. The
+old function-local depth and instruction-local fallback are removed. Receiving
+MIR validates the prefix against its frozen scope product; LIR rejects missing
+or non-installation relocation targets; the bytecode verifier checks ordered,
+live, nonrepeated identities and consistent branded destinations.
+
+An installation retains its actual outside-handler frontier in the existing
+control frame. Resumption call-site handlers can be interposed among lexical
+entries, including within the same logical activation. Leaving a local label
+preserves those entries when no delimiter is crossed. Crossing a delimiter
+also leaves call-site entries belonging to its discarded clause path, using
+the installation frontier rather than a count of same-owner frames. Verifier
+and runtime consume this same distinction. First-class label carriers retain
+the actual handler prefix and authenticate their original activation coordinate;
+they gain no new opaque-call or structural-fusion permission.
+
+The shared runtime removes only crossed resumption-return edges. Their saved
+clause paths use the existing abandonment worklist and storage frontier; an
+unrelated outer resumption return survives. No independent label stack, new
+resident representation or native marshalling bridge is introduced.
+
+Cache 171, verifier 52, bytecode 76/schema 120 and native ABI 21/control v3
+record these contracts. Focused tests cover local and callee labels, interposed
+call-site handlers, selective return-edge abandonment, malformed prefixes,
+relocation and wire rejection. The clause-Drop composition test remains an
+active source failure: ownership currently skips a handler clause when the
+protected computation eventually transfers to a label, despite its earlier
+performance. That source suspension-input boundary remains to be repaired;
+this checkpoint does not claim full native-handler or language acceptance.

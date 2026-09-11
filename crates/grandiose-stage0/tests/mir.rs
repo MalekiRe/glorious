@@ -2445,18 +2445,17 @@ fn checked_mir_editor_splits_leave_edges_and_updates_the_label_rejoin() {
 }
 
 #[test]
-fn checked_mir_editor_relocates_leave_handler_depth_when_splitting_a_block() {
-    let mut function = externally_visible_label_merge_function();
-    function.control.leave_handler_depths.insert(MirBlockId(0), 1);
+fn checked_mir_editor_relocates_leave_handler_prefix_when_splitting_a_block() {
+    let function = with_editor_test_handler(externally_visible_label_merge_function(), MirBlockId(0));
     function.validate().unwrap();
 
     let mut editor = MirEditor::open(function).unwrap();
     let suffix = editor.split_block(MirBlockId(0), 1).unwrap();
     let split = editor.finish();
 
-    assert_eq!(suffix, MirBlockId(3));
-    assert_eq!(split.control.leave_handler_depths.get(&suffix), Some(&1));
-    assert!(!split.control.leave_handler_depths.contains_key(&MirBlockId(0)));
+    assert_eq!(suffix, MirBlockId(4));
+    assert_eq!(split.control.leave_handler_prefixes.get(&suffix), Some(&vec![grandiose_stage0::MirHandlerSiteId(0)]));
+    assert!(!split.control.leave_handler_prefixes.contains_key(&MirBlockId(0)));
     assert!(matches!(
         split.blocks[suffix.0 as usize].terminator,
         MirTerminator::Leave { .. }
@@ -2467,7 +2466,7 @@ fn checked_mir_editor_relocates_leave_handler_depth_when_splitting_a_block() {
 fn leave_handler_depth_merge_function() -> MirFunction {
     let owner = DefKey(Digest::of_bytes(b"editor-merge-leave-handler-depth"));
     let i64_ty = Type::Scalar(ScalarType::I64);
-    let mut function = MirFunction {
+    let function = MirFunction {
         safety: grandiose_stage0::Safety::Safe,
         unsafe_execution: false,
         nominal_copy_descriptors: vec![],
@@ -2521,24 +2520,44 @@ fn leave_handler_depth_merge_function() -> MirFunction {
         ],
     }
     .with_frozen_control_tables();
-    function.control.leave_handler_depths.insert(MirBlockId(1), 1);
-    function
+    with_editor_test_handler(function, MirBlockId(1))
+}
+
+fn with_editor_test_handler(mut function: MirFunction, leave: MirBlockId) -> MirFunction {
+    let target = match function.blocks[leave.0 as usize].terminator {
+        MirTerminator::Leave { target, .. } => target, _ => panic!("leave fixture"),
+    };
+    let clause = MirBlockId(function.blocks.len() as u32);
+    function.blocks[0].instructions.insert(0, MirInstruction::InstallHandler {
+        site: grandiose_stage0::MirHandlerSiteId(0), effect: function.definition, effect_arguments: vec![],
+        operation: 0, payload_destinations: vec![], resume_type: Type::Scalar(ScalarType::I64),
+        continuation: grandiose_stage0::MirContinuationPolicy::Consume, target: clause,
+    });
+    function.blocks[target.0 as usize].instructions.insert(0, MirInstruction::UninstallHandler);
+    function.blocks.push(MirBlock { scope: MirScopeId::ROOT, parameters: vec![], instructions: vec![],
+        terminator: MirTerminator::Unreachable });
+    function.control = MirControlTables::default();
+    function.control.leave_handler_prefixes.insert(leave, vec![grandiose_stage0::MirHandlerSiteId(0)]);
+    function.with_frozen_control_tables()
 }
 
 #[test]
-fn checked_mir_editor_relocates_leave_handler_depth_when_merging_blocks() {
+fn checked_mir_editor_relocates_leave_handler_prefix_when_merging_blocks() {
     let function = leave_handler_depth_merge_function();
     function.validate().unwrap();
 
     let mut editor = MirEditor::open(function).unwrap();
-    editor.merge_blocks(MirBlockId(0), MirBlockId(1)).unwrap();
+    // Keep the installation in its own lexical-entry block. Both merged
+    // blocks then begin inside the same retained handler scope.
+    let predecessor = editor.split_block(MirBlockId(0), 1).unwrap();
+    editor.merge_blocks(predecessor, MirBlockId(1)).unwrap();
     let merged = editor.finish();
 
-    assert_eq!(merged.control.leave_handler_depths.get(&MirBlockId(0)), Some(&1));
-    assert!(!merged.control.leave_handler_depths.contains_key(&MirBlockId(1)));
+    assert_eq!(merged.control.leave_handler_prefixes.get(&predecessor), Some(&vec![grandiose_stage0::MirHandlerSiteId(0)]));
+    assert!(!merged.control.leave_handler_prefixes.contains_key(&MirBlockId(1)));
     assert!(merged.control.tombstoned_blocks.contains(&MirBlockId(1)));
     assert!(matches!(
-        merged.blocks[0].terminator,
+        merged.blocks[predecessor.0 as usize].terminator,
         MirTerminator::Leave { .. }
     ));
     assert!(merged.validate().is_ok(), "{:#?}", merged.validate());
@@ -2547,7 +2566,7 @@ fn checked_mir_editor_relocates_leave_handler_depth_when_merging_blocks() {
 #[test]
 fn mir_rejects_leave_handler_depth_for_a_block_without_a_leave() {
     let mut function = externally_visible_label_merge_function();
-    function.control.leave_handler_depths.insert(MirBlockId(1), 1);
+    function.control.leave_handler_prefixes.insert(MirBlockId(1), vec![]);
     assert!(
         function
             .validate()

@@ -269,7 +269,7 @@ impl Duplication<'_> {
 
 fn shallow_handler(frame: &RuntimeHandlerFrame, scope: &RuntimeHandlerScope) -> RuntimeHandlerFrame {
     RuntimeHandlerFrame {
-        id: frame.id, scope: frame.scope.clone(), effect: frame.effect,
+        id: frame.id, installation: frame.installation, scope: frame.scope.clone(), effect: frame.effect,
         effect_arguments: frame.effect_arguments.clone(), operation: frame.operation,
         payload_destinations: frame.payload_destinations.clone(), continuation: frame.continuation,
         target: frame.target, owned_payloads: frame.owned_payloads,
@@ -431,7 +431,7 @@ mod tests {
             let child = empty_continuation(RuntimeRegisters::default());
             let child_scope = RuntimeHandlerScope::new(&child.registers, &[], &[], BTreeMap::new(), &mut budget).unwrap();
             let frame = RuntimeHandlerFrame {
-                id: 1, scope: child_scope, effect: child.performed.effect, effect_arguments: vec![], operation: 0,
+                id: 1, installation: 0, scope: child_scope, effect: child.performed.effect, effect_arguments: vec![], operation: 0,
                 payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
                 target: 0, owned_payloads: true, suspended: RuntimeSuspension::new_pending(child),
             };
@@ -476,7 +476,7 @@ mod tests {
         let scope = RuntimeHandlerScope::new(&registers, &[], &[], shared, &mut budget).unwrap();
         let original = empty_continuation(registers.clone());
         let frame = RuntimeHandlerFrame {
-            id: 1, scope, effect: original.performed.effect, effect_arguments: vec![], operation: 0,
+            id: 1, installation: 0, scope, effect: original.performed.effect, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], continuation: VmContinuationPolicy::Consume,
             target: 0, owned_payloads: true, suspended: RuntimeSuspension::new_pending(original.clone()),
         };
@@ -550,7 +550,7 @@ mod tests {
         };
         let scope = RuntimeHandlerScope::new(&original.registers, &[], &[], BTreeMap::new(), &mut budget).unwrap();
         let mut frame = RuntimeHandlerFrame {
-            id: 1, scope, effect: definition, effect_arguments: vec![], operation: 0,
+            id: 1, installation: 0, scope, effect: definition, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 3 },
             target: 2, owned_payloads: true,
             suspended: RuntimeSuspension::new_pending(original),
@@ -670,7 +670,7 @@ mod tests {
         };
         let inner_scope = RuntimeHandlerScope::new(&original.registers, &[], &[], BTreeMap::from([(1, Some(2))]), &mut budget).unwrap();
         original.above.push(RuntimeHandlerFrame {
-            id: 1, scope: inner_scope, effect: original.performed.effect,
+            id: 1, installation: 0, scope: inner_scope, effect: original.performed.effect,
             effect_arguments: vec![], operation: 0, payload_destinations: vec![],
             continuation: VmContinuationPolicy::Replay { uses: 2 }, target: 0,
             owned_payloads: true,
@@ -780,7 +780,7 @@ mod tests {
             restored.clear(&[]);
             assert!(home.is_initialized(&[]));
             let mut frame = RuntimeHandlerFrame {
-                id: 1, scope, effect: definition, effect_arguments: vec![], operation: 0,
+                id: 1, installation: 0, scope, effect: definition, effect_arguments: vec![], operation: 0,
                 payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
                 target: 0, owned_payloads: true,
                 suspended: RuntimeSuspension::new_pending(original),

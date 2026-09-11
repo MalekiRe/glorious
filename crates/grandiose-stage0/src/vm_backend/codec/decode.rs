@@ -1228,7 +1228,12 @@ impl<'a> Decoder<'a> {
             55 => {
                 let brand_owner = self.def_key()?;
                 let brand_label = self.u32()?;
-                let handler_depth = self.u32()?;
+                let mut handler_prefix = || -> Result<Vec<u32>, VmArtifactError> {
+                    let count = self.count("leave handlers", MAX_DECODE_INSTRUCTIONS)?;
+                    (0..count).map(|_| self.u32()).collect()
+                };
+                let retained_handlers = handler_prefix()?;
+                let exited_handlers = handler_prefix()?;
                 let target = self.u32()?;
                 let count = self.count("leave arguments", MAX_DECODE_REGISTERS)?;
                 let mut arguments = Vec::with_capacity(count);
@@ -1248,7 +1253,8 @@ impl<'a> Decoder<'a> {
                 Ok(VmInstruction::Leave {
                     brand_owner,
                     brand_label,
-                    handler_depth,
+                    retained_handlers,
+                    exited_handlers,
                     target,
                     arguments,
                     destinations,

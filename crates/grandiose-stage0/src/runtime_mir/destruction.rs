@@ -220,10 +220,10 @@ pub(super) fn expand(
         if current.0 as usize != block_index
             && let Some(depth) = function
                 .control
-                .leave_handler_depths
+                .leave_handler_prefixes
                 .remove(&MirBlockId(block_index as u32))
         {
-            function.control.leave_handler_depths.insert(current, depth);
+            function.control.leave_handler_prefixes.insert(current, depth);
         }
     }
     if !sites.is_empty() {

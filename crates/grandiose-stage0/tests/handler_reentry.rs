@@ -152,6 +152,78 @@ fn ordinary_resumption_helpers_handle_effects_from_the_resumed_caller() {
 }
 
 #[test]
+fn local_label_leaves_preserve_the_enclosing_resumption_return() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { handle {
+            let value=Ask::ask(); @done:i64 { @done(value); 99 }
+        } { Ask::ask() with k => k(40) + 2 } }");
+}
+
+#[test]
+fn callee_local_label_leaves_preserve_the_callers_handler() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        fn local(value:i64) -> i64 { @done:i64 { @done(value); 99 } }
+        pub fn main() -> i64 { handle {
+            let value=Ask::ask(); local(value)
+        } { Ask::ask() with k => k(40) + 2 } }");
+}
+
+#[test]
+fn local_label_leaves_preserve_resumption_callsite_handlers_in_the_same_activation() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Log { [1,1] log() -> i64; }
+        fn leaf() -> i64 / Log { handle {
+            let value=Ask::ask(); @done:i64 { @done(value); 99 }
+        } { Ask::ask() with k => {
+            let value=handle k(40) { Log::log() => 99 }; value + 2
+        } } }
+        pub fn main() -> i64 { handle leaf() { Log::log() => 99 } }");
+}
+
+#[test]
+fn local_label_exit_discards_only_the_crossed_resumption_return() {
+    candidate(r#"effect Ask { [1,1] ask() -> i64; }
+        effect Log { [1,1] log() -> i64; }
+        pub fn main() -> i64 { handle {
+            let outer=Ask::ask();
+            @done:i64 { handle {
+                let inner=Log::log(); @done(outer + inner); 99
+            } { Log::log() with k => k(1) + 100 } }
+        } { Ask::ask() with k => k(39) + 2 } }"#);
+}
+
+#[test]
+fn local_label_exit_discards_handlers_in_the_crossed_resumption_callsite() {
+    candidate(r#"effect Ask { [1,1] ask() -> i64; }
+        effect Log { [1,1] log() -> i64; }
+        pub fn main() -> i64 { @done:i64 { handle {
+            let value=Ask::ask(); @done(value); 99
+        } { Ask::ask() with k => handle k(42) { Log::log() => 99 } } } }"#);
+}
+
+#[test]
+fn local_label_exit_cleans_the_crossed_returning_clause_path_once() {
+    candidate(r#"use std::*;
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.target = *self.target + 1; } }
+        effect Ask { [1,1] ask() -> i64; }
+        effect Log { [1,1] log() -> i64; }
+        pub fn main() -> i64 { let mut count=0;
+            let result=handle {
+                let outer=Ask::ask();
+                let inner = @done:i64 { handle {
+                    let value=Log::log(); @done(value); 99
+                } { Log::log() with k => {
+                    let owner=Probe { target: &mut count }; k(1) + 100
+                } } };
+                @second:i64 { @second(outer + inner); 99 }
+            } { Ask::ask() with k => k(38) + 2 };
+            result + count
+        }"#);
+}
+
+#[test]
 fn terminal_inner_handlers_preserve_the_enclosing_resumption_return() {
     candidate("effect Ask { [1,1] ask() -> i64; }
         effect Stop { stop() -> !; }

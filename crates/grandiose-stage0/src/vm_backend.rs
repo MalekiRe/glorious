@@ -1252,7 +1252,11 @@ pub enum VmInstruction {
     Leave {
         brand_owner: DefKey,
         brand_label: u32,
-        handler_depth: u32,
+        /// Function-local installation PCs, outermost first. The receiving
+        /// verifier checks their ordered live entries; dynamic call-site
+        /// delimiters retain their installation-time outside frontier.
+        retained_handlers: Vec<u32>,
+        exited_handlers: Vec<u32>,
         target: u32,
         arguments: Vec<u32>,
         destinations: Vec<u32>,
@@ -2997,15 +3001,13 @@ fn emit_with_specialized_lifted_targets(
                     .iter()
                     .map(|argument| argument.0)
                     .collect::<Vec<_>>();
+                let (retained_handlers, exited_handlers) = lower_handler_exit(function,
+                    crate::MirBlockId(block_index as u32), &starts)?;
                 instructions.push(VmInstruction::Leave {
                     brand_owner: brand.owner,
                     brand_label: brand.label,
-                    handler_depth: function
-                        .control
-                        .leave_handler_depths
-                        .get(&crate::mir::MirBlockId(block_index as u32))
-                        .copied()
-                        .unwrap_or_else(|| retained_handler_depth(&block.instructions)),
+                    retained_handlers,
+                    exited_handlers,
                     target,
                     arguments: arguments.clone(),
                     destinations: function.blocks[target_index(target, &starts)?]
@@ -3107,15 +3109,20 @@ fn emit_with_specialized_lifted_targets(
         function,
     })
 }
-fn retained_handler_depth(instructions: &[MirInstruction]) -> u32 {
-    instructions
-        .iter()
-        .fold(0i64, |depth, instruction| match instruction {
-            MirInstruction::InstallHandler { .. } => depth + 1,
-            MirInstruction::UninstallHandler => depth - 1,
-            _ => depth,
-        })
-        .max(0) as u32
+fn lower_handler_exit(function: &MirFunction, block: crate::MirBlockId, starts: &[u32])
+    -> Result<(Vec<u32>, Vec<u32>), VmArtifactError> {
+    let scope = crate::mir::scope_after_block_prefix(function, block,
+        function.blocks[block.0 as usize].instructions.len()).map_err(|_| VmArtifactError::HandlerStateMismatch)?;
+    let (retained, exited) = function.control.handler_exit(block, scope).map_err(|_| VmArtifactError::HandlerStateMismatch)?;
+    let pc = |site: &crate::MirHandlerSiteId| -> Result<u32, VmArtifactError> {
+        let data = function.control.handlers.get(site.0 as usize).ok_or(VmArtifactError::HandlerStateMismatch)?;
+        let index = function.blocks[data.block.0 as usize].instructions.iter().position(|instruction|
+            matches!(instruction, MirInstruction::InstallHandler { site: actual, .. } if actual == site))
+            .ok_or(VmArtifactError::HandlerStateMismatch)?;
+        Ok(starts[data.block.0 as usize] + index as u32)
+    };
+    Ok((retained.iter().map(pc).collect::<Result<_, _>>()?,
+        exited.iter().map(pc).collect::<Result<_, _>>()?))
 }
 
 /// Compute the normal-control half of a function's ABI before it crosses the
@@ -6167,6 +6174,7 @@ struct VerifierHandlerFrame {
     /// callable with the same signature must never be mistaken for a captured
     /// continuation.
     id: u32,
+    outside_handlers: Vec<u32>,
     effect: DefKey,
     effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
@@ -6487,7 +6495,14 @@ impl DerefMut for VerifierState {
 /// block (or write a different set of registers) under an existing brand.
 fn verify_label_brand_contracts(function: &VmFunction) -> Result<(), VmArtifactError> {
     let mut contracts = BTreeMap::<(DefKey, u32), (u32, Vec<u32>, Vec<VmType>)>::new();
+    let mut retained_prefixes = BTreeMap::new();
     for instruction in &function.instructions {
+        if let VmInstruction::Leave { brand_owner, brand_label, retained_handlers, .. } = instruction {
+            if let Some(previous) = retained_prefixes.insert((*brand_owner, *brand_label), retained_handlers)
+                && previous != retained_handlers {
+                return Err(VmArtifactError::InvalidLabelContract { message: "label brand has contradictory retained handlers" });
+            }
+        }
         let (brand_owner, brand_label, target, destinations) = match instruction {
             VmInstruction::Leave {
                 brand_owner,
@@ -8045,6 +8060,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 states.handlers.push(VerifierHandlerFrame {
                     id: pc as u32,
+                    outside_handlers: states.handlers.iter().map(|frame| frame.id).collect(),
                     effect: *effect,
                     effect_arguments: effect_arguments.clone(),
                     operation: *operation,
@@ -9137,7 +9153,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 advances = false;
             }
             VmInstruction::Leave {
-                handler_depth,
+                retained_handlers,
+                exited_handlers,
                 target,
                 arguments,
                 destinations,
@@ -9177,15 +9194,23 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         });
                     }
                 }
-                // A leave is a nonlocal exit: suspended continuations and all
-                // frame-branded snapshot capabilities are invalidated before
-                // control reaches its lexical destination.
-                let handler_depth = *handler_depth as usize;
-                if handler_depth > states.handlers.len() {
-                    return Err(VmArtifactError::HandlerStateMismatch);
+                // Only crossed delimiters expire. A local rejoin can still
+                // be inside an enclosing returning resumption.
+                let mut position = 0;
+                let mut boundary = states.handlers.len();
+                let mut seen = BTreeSet::new();
+                for (index, site) in retained_handlers.iter().chain(exited_handlers).enumerate() {
+                    if !seen.insert(*site) { return Err(VmArtifactError::HandlerStateMismatch); }
+                    let found = states.handlers[position..].iter().position(|frame| frame.id == *site)
+                        .map(|offset| position + offset).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                    if index == retained_handlers.len() {
+                        boundary = handler_frontier_depth(&states.handlers[found].outside_handlers,
+                            &states.handlers.iter().map(|frame| frame.id).collect::<Vec<_>>())?;
+                    }
+                    position = found + 1;
                 }
-                states.handlers.truncate(handler_depth);
-                for value in &mut states.resumptions { *value = value.opaque(); }
+                for handler in &states.handlers[boundary..] { expire_snapshot_brand(&mut states.resumptions, handler.id); }
+                states.handlers.truncate(boundary);
                 let transferred = arguments.iter().map(|argument| VerifierValue::snapshot(function, &states, *argument)).collect::<Vec<_>>();
                 for argument in arguments { states.retire_value(*argument); }
                 for (&destination, value) in destinations.iter().zip(transferred) {
@@ -9844,6 +9869,7 @@ fn merge_handler_states(
     let mut changed = false;
     for (left, right) in existing.iter_mut().zip(incoming) {
         if left.id != right.id
+            || left.outside_handlers != right.outside_handlers
             || left.effect != right.effect
             || left.effect_arguments != right.effect_arguments
             || left.operation != right.operation
@@ -10353,7 +10379,8 @@ enum VmValue {
         target: u32,
         destination: u32,
         call_depth: usize,
-        handler_depth: usize,
+        activation: RuntimeActivation,
+        handler_prefix: Vec<u64>,
         signature: VmType,
     },
     /// A frame-branded callable token. Returning indirect calls and terminal
@@ -10511,6 +10538,7 @@ enum ReferenceTarget {
 #[derive(Clone)]
 struct RuntimeHandlerFrame {
     id: u64,
+    installation: u32,
     scope: RuntimeHandlerScope,
     effect: DefKey,
     effect_arguments: Vec<VmGenericArgument>,
@@ -10522,7 +10550,7 @@ struct RuntimeHandlerFrame {
     suspended: RuntimeSuspension,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct RuntimeActivation(Arc<()>);
 
 impl RuntimeActivation {
@@ -10536,6 +10564,7 @@ impl RuntimeActivation {
 #[derive(Clone)]
 struct RuntimeHandlerScope {
     owner: RuntimeActivation,
+    outside_handlers: Vec<u64>,
     shared_frames: Vec<(RuntimeActivation, BTreeMap<u32, Option<u64>>)>,
     outside_pending: Vec<Arc<Cell<u32>>>,
 }
@@ -10561,7 +10590,8 @@ impl RuntimeHandlerScope {
         budget.reserve_value("outer continuation authorities", handlers.len())?;
         let outside_pending = handlers.iter().filter_map(|handler|
             handler.suspended.pending().map(|saved| saved.remaining_uses.clone())).collect();
-        Ok(Self { owner: registers.activation.clone(), shared_frames, outside_pending })
+        Ok(Self { owner: registers.activation.clone(), outside_handlers: handlers.iter().map(|frame| frame.id).collect(),
+            shared_frames, outside_pending })
     }
 
     fn shared_for(&self, registers: &RuntimeRegisters) -> Option<&BTreeMap<u32, Option<u64>>> {
@@ -11091,6 +11121,36 @@ fn take_crossed_resumption_returns(
         }
     }
     Ok(Vec::new())
+}
+
+/// Resolve an already verified lexical exit in this execution branch. Dynamic
+/// caller and resumption-callsite delimiters are not function-local entries.
+fn runtime_handler_exit_depth(
+    registers: &RuntimeRegisters, handlers: &[RuntimeHandlerFrame],
+    retained: &[u32], exited: &[u32],
+) -> Result<usize, VmArtifactError> {
+    let mut position = 0;
+    let mut boundary = handlers.len();
+    for (index, site) in retained.iter().chain(exited).enumerate() {
+        let found = handlers[position..].iter().position(|frame|
+            frame.scope.owner.same(&registers.activation) && frame.installation == *site)
+            .map(|offset| position + offset).ok_or(VmArtifactError::HandlerStateMismatch)?;
+        if index == retained.len() {
+            boundary = handler_frontier_depth(&handlers[found].scope.outside_handlers,
+                &handlers.iter().map(|frame| frame.id).collect::<Vec<_>>())?;
+        }
+        position = found + 1;
+    }
+    Ok(boundary)
+}
+
+fn handler_frontier_depth<T: Eq>(outside: &[T], current: &[T]) -> Result<usize, VmArtifactError> {
+    let mut position = 0;
+    for id in outside {
+        position += current[position..].iter().position(|found| found == id)
+            .ok_or(VmArtifactError::HandlerStateMismatch)? + 1;
+    }
+    Ok(position)
 }
 
 #[derive(Clone)]
@@ -14426,6 +14486,7 @@ fn execute_in_float_profile(
                 let shared = replay::shared_registers(&registers, owned_payloads, &continuation_owned, budget)?;
                 let scope = RuntimeHandlerScope::new(&registers, &[], &handlers, shared, budget)?;
                 handlers.push(RuntimeHandlerFrame {
+                    installation: pc as u32,
                     id: {
                         let id = next_handler_id;
                         next_handler_id = next_handler_id.saturating_add(1);
@@ -15364,7 +15425,8 @@ fn execute_in_float_profile(
                     target,
                     destination,
                     call_depth: 0,
-                    handler_depth: handlers.len(),
+                    activation: registers.activation.clone(),
+                    handler_prefix: handlers.iter().map(|frame| frame.id).collect(),
                     signature,
                 });
             }
@@ -15376,7 +15438,8 @@ fn execute_in_float_profile(
                 let VmValue::Label {
                     target,
                     destination,
-                    handler_depth,
+                    activation,
+                    handler_prefix,
                     ..
                 } = registers[callee as usize]
                     .as_ref()
@@ -15385,6 +15448,9 @@ fn execute_in_float_profile(
                 else {
                     return Err(VmArtifactError::CallRequiresProgram);
                 };
+                if !activation.same(&registers.activation) { return Err(VmArtifactError::HandlerStateMismatch); }
+                let handler_depth = handler_frontier_depth(&handler_prefix,
+                    &handlers.iter().map(|frame| frame.id).collect::<Vec<_>>())?;
                 let [argument] = arguments.as_slice() else {
                     return Err(VmArtifactError::CallArity {
                         expected: 1,
@@ -15395,11 +15461,8 @@ fn execute_in_float_profile(
                 if consumes_arguments { registers.retire_call_arguments(&arguments); }
                 registers[destination as usize] = Some(payload);
                 registers.native_write(destination);
+                let _crossed = take_crossed_resumption_returns(&mut resumption_returns, &handlers[handler_depth..], budget)?;
                 handlers.truncate(handler_depth);
-                // A dynamic label invocation is the same nonlocal control
-                // boundary as a direct Leave: no suspended clause-return
-                // path may survive to resurrect an abandoned replay frame.
-                resumption_returns.clear();
                 pc = target as usize;
                 continue;
             }
@@ -15420,19 +15483,22 @@ fn execute_in_float_profile(
             VmInstruction::Leave {
                 brand_owner,
                 brand_label,
-                handler_depth,
+                retained_handlers,
+                exited_handlers,
                 target,
                 arguments,
                 destinations,
                 cleanup,
             } => {
+                let handler_depth = runtime_handler_exit_depth(&registers, &handlers, &retained_handlers, &exited_handlers)?;
+                let _crossed = take_crossed_resumption_returns(&mut resumption_returns, &handlers[handler_depth..], budget)?;
                 pc = complete_pending_leave(
                     &mut registers,
                     &mut handlers,
                     PendingLeave {
                         brand_owner,
                         brand_label,
-                        handler_depth,
+                        handler_depth: handler_depth as u32,
                         target,
                         arguments,
                         destinations,
@@ -15440,10 +15506,6 @@ fn execute_in_float_profile(
                     },
                     budget,
                 )?;
-                // A lexical leave abandons every suspended clause-return
-                // path it crosses.  Restoring one after reaching the label
-                // would resurrect the cancelled continuation and its frames.
-                resumption_returns.clear();
                 continue;
             }
             VmInstruction::BranchBool {
@@ -15541,9 +15603,8 @@ fn complete_pending_leave(
         *slot = Some(value);
         registers.native_write(destination);
     }
-    // A leave has crossed every active lexical handler. Any captured one-shot
-    // continuation was abandoned by the source control transfer, so no frame
-    // survives that could later re-authorize a stale snapshot.
+    // The caller resolved this exact dynamic frontier before abandoning its
+    // owned branches. Retained enclosing delimiters remain live.
     handlers.truncate(handler_depth);
     Ok(leave.target as usize)
 }
@@ -15891,11 +15952,39 @@ fn abandon_program_handlers(
     Ok(())
 }
 
+fn abandon_program_handler_exit(
+    program: &CandidateVmProgram,
+    handlers: &mut Vec<RuntimeHandlerFrame>,
+    returns: &mut Vec<RuntimeResumptionReturn>,
+    retained_depth: usize,
+    current: &mut RuntimeRegisters,
+    current_callers: &mut [RuntimeProgramCaller],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
+    if retained_depth > handlers.len() { return Err(VmArtifactError::HandlerStateMismatch); }
+    let crossed = take_crossed_resumption_returns(returns, &handlers[retained_depth..], budget)?;
+    let abandoned = crossed.into_iter().map(|returned| {
+        let frame = handlers.iter().find(|frame| frame.id == returned.handler_id)
+            .ok_or(VmArtifactError::HandlerStateMismatch)?;
+        Ok(Abandonment::Return(returned, frame.scope.clone(), frame.owned_payloads))
+    }).collect::<Result<Vec<_>, VmArtifactError>>()?;
+    abandon_program_handlers(program, handlers, retained_depth, current, current_callers, depth, budget, host)?;
+    abandon_program_paths(program, abandoned, current, current_callers, depth, budget, host)
+}
+
 /// Abandon deeper call frames and the protected roots in the handler owner.
 /// Its outer and clause storage survive according to the frozen ownership
 /// partition. The clause may itself have called a helper before cancellation.
 /// Process retained inner branches and deeper frames before their callers so
 /// a destructor never observes an already-ended ancestor loan.
+enum Abandonment {
+    Continuation(RuntimeContinuation, RuntimeHandlerScope, bool),
+    Return(RuntimeResumptionReturn, RuntimeHandlerScope, bool),
+    Path(RuntimeRegisters, RuntimeProgramContinuation, RuntimeHandlerScope, bool),
+}
+
 fn abandon_program_continuation(
     program: &CandidateVmProgram,
     suspended: RuntimeContinuation,
@@ -15907,16 +15996,24 @@ fn abandon_program_continuation(
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
 ) -> Result<(), VmArtifactError> {
-    enum Work {
-        Continuation(RuntimeContinuation, RuntimeHandlerScope, bool),
-        Return(RuntimeResumptionReturn, RuntimeHandlerScope, bool),
-        Path(RuntimeRegisters, RuntimeProgramContinuation, RuntimeHandlerScope, bool),
-    }
+    abandon_program_paths(program, vec![Abandonment::Continuation(suspended, scope, owned)],
+        current, current_callers, depth, budget, host)
+}
+
+fn abandon_program_paths(
+    program: &CandidateVmProgram,
+    mut pending: Vec<Abandonment>,
+    current: &mut RuntimeRegisters,
+    current_callers: &mut [RuntimeProgramCaller],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<(), VmArtifactError> {
+    use Abandonment as Work;
     // The currently suspended execution ends before the clause paths to which
     // it would have returned. Pending inner continuations end before their
     // retaining frame. Ordinary caller depth is only a coordinate in each path.
     budget.reserve_allocation(1)?;
-    let mut pending = vec![Work::Continuation(suspended, scope, owned)];
     while let Some(work) = pending.pop() {
         budget.tick()?;
         let (frames, scope) = match work {
@@ -16997,6 +17094,7 @@ fn execute_program_in_float_profile(
                 let shared = replay::shared_registers(&registers, owned_payloads, continuation_owned, budget)?;
                 let scope = RuntimeHandlerScope::new(&registers, &callers, &handlers, shared, budget)?;
                 handlers.push(RuntimeHandlerFrame {
+                    installation: pc as u32,
                     id: {
                         let id = next_handler_id;
                         next_handler_id = next_handler_id.saturating_add(1);
@@ -18305,7 +18403,8 @@ fn execute_program_in_float_profile(
                     target: *target,
                     destination: *destination,
                     call_depth: callers.len(),
-                    handler_depth: handlers.len(),
+                    activation: registers.activation.clone(),
+                    handler_prefix: handlers.iter().map(|frame| frame.id).collect(),
                     signature,
                 });
             }
@@ -18351,7 +18450,8 @@ fn execute_program_in_float_profile(
                     target,
                     destination,
                     call_depth,
-                    handler_depth,
+                    activation,
+                    handler_prefix,
                     ..
                 } = callee_value
                 {
@@ -18361,15 +18461,18 @@ fn execute_program_in_float_profile(
                             found: arguments.len() as u32,
                         });
                     };
-                    let destination_owner = if call_depth == callers.len() { Some(definition) }
-                        else { callers.get(call_depth).map(|caller| caller.definition) };
-                    if call_depth < return_floor || destination_owner != Some(owner) {
+                    let destination_owner = if call_depth == callers.len() { Some((definition, &registers.activation)) }
+                        else { callers.get(call_depth).map(|caller| (caller.definition, &caller.registers.activation)) };
+                    if call_depth < return_floor || !destination_owner.is_some_and(|(definition, actual)|
+                        definition == owner && activation.same(actual)) {
                         return Err(VmArtifactError::HandlerStateMismatch);
                     }
                     let payload = transfer_to_ancestor_frame(registers.copy_value(*argument, budget)?,
                         &registers, &callers, call_depth, budget)?;
                     if consumes_arguments { registers.retire_call_arguments(arguments); }
-                    abandon_program_handlers(program, &mut handlers, handler_depth,
+                    let handler_depth = handler_frontier_depth(&handler_prefix,
+                        &handlers.iter().map(|frame| frame.id).collect::<Vec<_>>())?;
+                    abandon_program_handler_exit(program, &mut handlers, &mut resumption_returns, handler_depth,
                         &mut registers, &mut callers, depth, budget, host)?;
                     let mut transferred = Some(*argument);
                     while callers.len() > call_depth {
@@ -18390,11 +18493,6 @@ fn execute_program_in_float_profile(
                     )?;
                     *slot = Some(payload);
                     registers.native_write(destination);
-                    handlers.truncate(handler_depth);
-                    // See the standalone interpreter above. Restoring the
-                    // captured lexical label prefix abandons every pending
-                    // handler-clause return path it crossed.
-                    resumption_returns.clear();
                     pc = target as usize;
                     continue;
                 }
@@ -18476,13 +18574,15 @@ fn execute_program_in_float_profile(
             VmInstruction::Leave {
                 brand_owner,
                 brand_label,
-                handler_depth,
+                retained_handlers,
+                exited_handlers,
                 target,
                 arguments,
                 destinations,
                 cleanup,
             } => {
-                abandon_program_handlers(program, &mut handlers, *handler_depth as usize,
+                let handler_depth = runtime_handler_exit_depth(&registers, &handlers, retained_handlers, exited_handlers)?;
+                abandon_program_handler_exit(program, &mut handlers, &mut resumption_returns, handler_depth,
                     &mut registers, &mut callers, depth, budget, host)?;
                 pc = complete_pending_leave(
                     &mut registers,
@@ -18490,7 +18590,7 @@ fn execute_program_in_float_profile(
                     PendingLeave {
                         brand_owner: *brand_owner,
                         brand_label: *brand_label,
-                        handler_depth: *handler_depth,
+                        handler_depth: handler_depth as u32,
                         target: *target,
                         arguments: arguments.clone(),
                         destinations: destinations.clone(),
@@ -18498,9 +18598,6 @@ fn execute_program_in_float_profile(
                     },
                     budget,
                 )?;
-                // See the standalone interpreter above. A branded leave is
-                // terminal with respect to replay clause-return frames.
-                resumption_returns.clear();
                 continue;
             }
             VmInstruction::BranchBool {
@@ -19350,7 +19447,7 @@ mod tests {
             },
             VmValue::Label {
                 owner: definition, label: 0, target: 0, destination: 0,
-                call_depth: 0, handler_depth: 0, signature: VmType::Unit,
+                call_depth: 0, activation: RuntimeActivation::default(), handler_prefix: vec![], signature: VmType::Unit,
             },
             VmValue::Resumption { frame: 1, signature: VmType::Unit },
         ];
@@ -19438,7 +19535,7 @@ mod tests {
         let capabilities = vec![
             VmValue::Label {
                 owner: definition, label: 0, target: 0, destination: 0,
-                call_depth: 1, handler_depth: 0, signature: VmType::Unit,
+                call_depth: 1, activation: RuntimeActivation::default(), handler_prefix: vec![], signature: VmType::Unit,
             },
             VmValue::Resumption { frame: 1, signature: VmType::Unit },
             VmValue::Reference {

@@ -427,7 +427,8 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         VmInstruction::Leave {
             brand_owner,
             brand_label,
-            handler_depth,
+            retained_handlers,
+            exited_handlers,
             target,
             arguments,
             destinations,
@@ -436,7 +437,10 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(55);
             output.extend_from_slice(&brand_owner.0.as_bytes());
             output.extend_from_slice(&brand_label.to_le_bytes());
-            output.extend_from_slice(&handler_depth.to_le_bytes());
+            for handlers in [retained_handlers, exited_handlers] {
+                output.extend_from_slice(&(handlers.len() as u64).to_le_bytes());
+                for handler in handlers { output.extend_from_slice(&handler.to_le_bytes()); }
+            }
             output.extend_from_slice(&target.to_le_bytes());
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments {
