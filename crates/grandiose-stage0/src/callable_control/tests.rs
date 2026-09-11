@@ -20,6 +20,70 @@ struct Fixture {
 }
 
 #[test]
+fn trusted_integer_control_requires_the_bound_identity_and_closed_abi() {
+    use crate::PrimitiveRole;
+    let mut fixture = Fixture::new("#![no_std]
+        fn primitive<T>(left:T, right:T) -> T {left}
+        fn answer(value:i64) -> i64 {value}
+        fn main(value:i64) -> (i64)->i64 {primitive(value, value); answer}
+        fn open<T>(value:T, other:T) -> T {primitive(value,other)}
+        fn reference(value:&i64) -> &i64 {primitive(value,value)}");
+    let primitive = fixture.names["primitive"];
+    fixture.bodies.remove(&primitive);
+    assert!(PrimitiveRole::IntCheckedAdd.matches_declaration(&fixture.signatures[&primitive]));
+    let inputs = fixture.inputs();
+    let unbound = derive_control_summaries(&inputs, Default::default());
+    let main = fixture.names["main"];
+    assert!(!unbound.get(CallableBrand::Named(main)).unwrap().is_complete());
+    for role in [PrimitiveRole::IntCheckedAdd, PrimitiveRole::IntWrappingAdd] {
+        let primitives = BTreeMap::from([(primitive, role)]);
+        let summaries = derive_control_summaries_with_check(&inputs, Some(&primitives), Default::default(),
+            &mut |_, _| Ok::<_, ()>(())).unwrap();
+        let summary = summaries.get(CallableBrand::Named(main)).unwrap();
+        assert!(summary.is_complete(), "{summary:?}");
+        assert_eq!(summary.only_returns_normally(), !role.integer_may_trap());
+        let coverage = ControlCallCoverage::Alternatives(summary.alternatives());
+        assert!(coverage.storage_read_only(None));
+        assert!(coverage.without_performance(None));
+        assert!(summary.alternatives().iter().any(|path| matches!(&path.outcome,
+            ControlOutcome::Return(ControlValue { shape: ControlValueShape::Callable { .. }, .. }))));
+        assert_eq!(summary.alternatives().iter().any(|path| matches!(path.outcome, ControlOutcome::RuntimeTrap)),
+            role.integer_may_trap());
+        for name in ["open", "reference"] {
+            assert!(!summaries.get(CallableBrand::Named(fixture.names[name])).unwrap().is_complete(), "{name}");
+        }
+        assert!(!summary.matches(&inputs), "body-only matching cannot bind runtime authority");
+        assert!(summaries.bind(&inputs).is_err());
+        let changed = BTreeMap::from([(primitive, PrimitiveRole::IntCheckedDiv)]);
+        assert!(summaries.bind_with_primitives(&inputs, Some(&changed)).is_err());
+        let bound = summaries.bind_with_primitives(&inputs, Some(&primitives)).unwrap();
+        let body = bound.body(main).unwrap();
+        let call = body.get(fixture.call_to(main, primitive)).unwrap();
+        assert!(call.normal && !call.unknown && call.without_performance() && call.storage_read_only());
+        assert_eq!(call.runtime_trap, role.integer_may_trap());
+        assert!(!call.cancellation && !call.terminal_operation && !call.divergence);
+    }
+    let wrong_role = BTreeMap::from([(primitive, PrimitiveRole::IntEqual)]);
+    let invalid = derive_control_summaries_with_check(&inputs, Some(&wrong_role), Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    assert!(!invalid.get(CallableBrand::Named(main)).unwrap().is_complete());
+    let primitives = BTreeMap::from([(primitive, PrimitiveRole::IntCheckedAdd)]);
+    let limited = derive_control_summaries_with_check(&inputs, Some(&primitives),
+        ControlSummaryLimits { max_alternatives: 1, ..Default::default() }, &mut |_, _| Ok::<_, ()>(())).unwrap();
+    assert!(!limited.get(CallableBrand::Named(main)).unwrap().is_complete(),
+        "a truncated trap/return alternative cannot prove coverage");
+    let summaries = derive_control_summaries_with_check(&inputs, Some(&primitives), Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    let mut changed_interface = fixture.interface.clone();
+    let ElaboratedHeader::Callable(signature) = changed_interface.definitions.get_mut(&primitive).unwrap() else { panic!() };
+    signature.safety = crate::Safety::Unsafe;
+    let changed_inputs = inputs.iter().map(|(key, input)| (*key,
+        ControlBody { interface: &changed_interface, ..*input })).collect();
+    assert!(summaries.bind_with_primitives(&changed_inputs, Some(&primitives)).is_err(),
+        "the same runtime identity cannot validate a changed declaration");
+}
+
+#[test]
 fn exact_mutations_share_ordered_storage_across_scopes_aliases_and_calls() {
     for source in [
         "fn main() -> i64 { let mut value = 0; { value = 42; }; value }",
@@ -478,7 +542,7 @@ fn returned_factory_capability_requires_the_exact_checked_body_batch() {
         fn wrap(task:(i64) -> i64) -> () -> i64 { move (task) { task(42) } }
         fn main(task:(i64) -> i64) -> i64 { wrap(task)() }");
     let inputs = fixture.inputs();
-    let summaries = derive_control_summaries_with_check(&inputs, Default::default(),
+    let summaries = derive_control_summaries_with_check(&inputs, None, Default::default(),
         &mut |_, _| Ok::<_, ()>(())).unwrap();
     let bound = summaries.bind(&inputs).unwrap();
     let solver = crate::TraitSolver::new(&fixture.interface);
@@ -517,7 +581,7 @@ fn pending_control_is_sealed_and_discharged_before_ordinary_core() {
     let owner = fixture.names["main"];
     let inputs = fixture.inputs();
     assert!(!fixture.bodies[&owner].validate().is_empty());
-    let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
+    let summaries = derive_fusion_summaries_with_check(&inputs, None, Default::default(),
         &mut |_, _| Ok::<_, ()>(())).unwrap();
     let bound = summaries.bind(&inputs).unwrap();
     let body = &fixture.bodies[&owner];
@@ -549,7 +613,7 @@ fn resumption_capture_lifetime_authority_rejects_missing_invalid_and_stale_input
         } } }", true);
     let owner = fixture.names["main"];
     let inputs = fixture.inputs();
-    let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
+    let summaries = derive_fusion_summaries_with_check(&inputs, None, Default::default(),
         &mut |_, _| Ok::<_, ()>(())).unwrap();
     let bound = summaries.bind(&inputs).unwrap();
     let body = &fixture.bodies[&owner];
@@ -582,7 +646,7 @@ fn resumption_handler_label_invocations_use_only_nominal_binder_authority() {
         } }");
     let owner = fixture.names["main"];
     let inputs = fixture.inputs();
-    let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(),
+    let summaries = derive_fusion_summaries_with_check(&inputs, None, Default::default(),
         &mut |_, _| Ok::<_, ()>(())).unwrap();
     let bound = summaries.bind(&inputs).unwrap();
     let body = &fixture.bodies[&owner];
@@ -620,7 +684,7 @@ fn captured_payload_reborrows_require_storage_identity_not_equal_contents() {
             }}"), true);
         let owner = fixture.names["main"];
         let inputs = fixture.inputs();
-        let summaries = derive_fusion_summaries_with_check(&inputs, Default::default(), &mut |_, _| Ok::<_, ()>(())).unwrap();
+        let summaries = derive_fusion_summaries_with_check(&inputs, None, Default::default(), &mut |_, _| Ok::<_, ()>(())).unwrap();
         let bound = summaries.bind(&inputs).unwrap();
         let body = &fixture.bodies[&owner];
         let call = body.expressions.iter().enumerate().find_map(|(index, expression)| {
@@ -792,6 +856,7 @@ fn a_failed_work_checkpoint_returns_no_partial_control_product() {
     let mut charged = 0;
     let result = derive_control_summaries_with_check(
         &fixture.inputs(),
+        None,
         Default::default(),
         &mut |_, cost| {
             checkpoints += 1;

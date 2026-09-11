@@ -2378,3 +2378,27 @@ strict-argument conflict. Unknown/mixed return and declared/forwarded-debt tests
 remain enforced. The original arithmetic-prefix receiver is still blocked by
 missing-body control outcomes, and point-sensitive borrowed receiver contracts
 and full native-handler acceptance remain open. Runtime generations are unchanged.
+
+## Manifest-bound scalar control outcomes
+
+The staged control producer consumes the same runtime identity bindings as MIR
+lowering. Declaration admission shares the manifest's exact signature check;
+closed integer inputs/results share the existing materialized scalar ABI. No
+source name, empty effect row or missing body establishes runtime authority.
+Open generic, non-scalar and unsupported primitive contracts remain unknown.
+The frozen summary batch includes the runtime bindings in its dependency seal;
+body-only binding, changed selectors and changed declarations cannot reuse it.
+
+Returning integer leaves produce unknown scalar values, not invented literals
+or forwarding provenance. Checked arithmetic, shifts and checked conversions
+retain a distinct possible runtime trap. Traps stop their strict suffix without
+becoming algebraic cancellation, label transfer or divergence. Ordered execution,
+coverage limits, return footprints and both resource consumers continue through
+the same invocation relation; no new consumer-side primitive analysis is added.
+
+Cache 164 fixes the preserved arithmetic-prefix computed receiver across fresh/
+decoded VM and native/mixed O0/O2. Binding/ABI rejection, trap/return distinctions
+and truncated coverage remain checked. Earlier point-sensitive borrowed receiver
+contracts, general borrowed resumptions, guarded interleavings, mandatory-tail
+fusion, foreign-control admission and full performance acceptance remain open.
+Executable and runtime generations are unchanged.

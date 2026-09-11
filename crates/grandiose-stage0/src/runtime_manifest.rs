@@ -649,6 +649,28 @@ impl PrimitiveRole {
         matches!(self, Self::Float(_))
     }
 
+    /// Check the same declaration contract used when binding the trusted
+    /// manifest. A selector identity without its frozen ABI is not authority.
+    pub(crate) fn matches_declaration(self, signature: &crate::CallableSignature) -> bool {
+        signature == &expected_signature(self)
+    }
+
+    /// Source control coverage for closed integer leaves. ABI admission stays
+    /// with `integer_scalar_signature`; unknown/new roles retain a possible
+    /// runtime trap until their nontrapping behavior is explicitly established.
+    pub(crate) fn integer_may_trap(self) -> bool {
+        !matches!(self,
+            Self::IntWrappingAdd | Self::IntWrappingSub | Self::IntWrappingMul
+            | Self::IntBitAnd | Self::IntBitOr | Self::IntBitXor | Self::IntBitNot
+            | Self::IntWrappingNeg | Self::IntEqual | Self::IntLess | Self::IntGreater
+            | Self::IntConvertWrappingToI64 | Self::IntConvertWrappingToU32
+            | Self::IntConvertWrappingToUsize | Self::IntConvertWrappingToU8
+            | Self::IntConvertWrappingToU16 | Self::IntConvertWrappingToI16
+            | Self::IntConvertWrappingToI32 | Self::IntConvertWrappingToI8
+            | Self::IntConvertWrappingToU64 | Self::IntConvertWrappingToIsize
+            | Self::IntConvertWrappingToU128 | Self::IntConvertWrappingToI128)
+    }
+
     /// The closed ABI of one concrete materialization of a generic integer
     /// runtime leaf. Both MIR validation and VM verification consume this
     /// authority so a new manifest selector cannot make their contracts
@@ -1071,7 +1093,7 @@ impl RuntimeManifestInput {
                     definition: definition.key,
                 });
             };
-            if signature != &expected_signature(role) {
+            if !role.matches_declaration(signature) {
                 return Err(ManifestError::IncompatibleSignature {
                     role,
                     definition: definition.key,

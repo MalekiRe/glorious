@@ -262,6 +262,9 @@ pub enum ControlOutcome {
     UnresolvedInvocation(ControlSite),
     Cancellation,
     Divergence,
+    /// A checked runtime primitive can terminate execution without invoking
+    /// an algebraic handler, cancelling a continuation, or transferring a label.
+    RuntimeTrap,
     Unknown(ControlUnknown),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -393,6 +396,9 @@ pub struct CallableControlSummary {
     /// projection must compare storage against these same invocation inputs,
     /// not reconstruct slots from a second interpretation of the body.
     inputs: ControlInputs,
+    /// Runtime identities are an additional input, not inferred from missing
+    /// source bodies. All summaries share the frozen batch binding.
+    primitives: Arc<BTreeMap<DefKey, crate::PrimitiveRole>>,
 }
 
 #[derive(Clone, Debug)]
@@ -438,7 +444,9 @@ impl CallableControlSummary {
     /// All depended-on bodies, contracts and arena identities must still be
     /// present. Private seals prevent callers from fabricating this evidence.
     pub fn matches(&self, bodies: &BTreeMap<DefKey, ControlBody<'_>>) -> bool {
-        self.dependencies.iter().all(|(key, seal)| {
+        // This public, body-only query cannot validate runtime authority.
+        // Production consumers use the full batch binding below.
+        self.primitives.is_empty() && self.dependencies.iter().all(|(key, seal)| {
             bodies.get(key).is_some_and(|input| {
                 self.matches_body(*key, input.body)
                     && crate::signature::host_contract_fingerprint(*key, input.signature)
@@ -478,6 +486,7 @@ impl CallableControlSummary {
 #[derive(Clone, Debug, Default)]
 pub struct ControlSummarySet {
     summaries: BTreeMap<CallableBrand, CallableControlSummary>,
+    primitives: Arc<BTreeMap<DefKey, crate::PrimitiveRole>>,
 }
 impl ControlSummarySet {
     pub fn get(&self, callable: CallableBrand) -> Option<&CallableControlSummary> {
@@ -491,10 +500,23 @@ impl ControlSummarySet {
 
     /// Validate dependency seals once for the frozen analysis batch. A local
     /// body match alone cannot validate a helper whose implementation changed.
+    #[cfg(test)]
     pub(crate) fn bind<'a>(
         &'a self,
         bodies: &BTreeMap<DefKey, ControlBody<'_>>,
     ) -> Result<BoundControlSummaries<'a>, ControlUnknown> {
+        self.bind_with_primitives(bodies, None)
+    }
+
+    pub(crate) fn bind_with_primitives<'a>(
+        &'a self,
+        bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+        primitives: Option<&BTreeMap<DefKey, crate::PrimitiveRole>>,
+    ) -> Result<BoundControlSummaries<'a>, ControlUnknown> {
+        if primitives.is_some_and(|bindings| bindings != self.primitives.as_ref())
+            || (primitives.is_none() && !self.primitives.is_empty()) {
+            return Err(ControlUnknown::Unsupported("changed runtime primitive bindings"));
+        }
         let mut checked = std::collections::BTreeSet::new();
         let mut interfaces = std::collections::BTreeSet::new();
         for summary in self.summaries.values() {
@@ -530,6 +552,7 @@ pub(crate) struct InvocationControl {
     pub terminal_operation: bool,
     pub cancellation: bool,
     pub divergence: bool,
+    pub runtime_trap: bool,
     pub unknown: bool,
     pub transfers: Vec<InvocationTransfer>,
     pub returns: Vec<InvocationPayload>,
@@ -622,6 +645,7 @@ impl InvocationControl {
             ControlOutcome::TerminalOperation { .. } => self.terminal_operation = true,
             ControlOutcome::Cancellation => self.cancellation = true,
             ControlOutcome::Divergence => self.divergence = true,
+            ControlOutcome::RuntimeTrap => self.runtime_trap = true,
             ControlOutcome::UnresolvedInvocation(_) | ControlOutcome::Unknown(_) => self.unknown = true,
         }
     }
@@ -1077,6 +1101,7 @@ impl State {
             ControlOutcome::Return(_)
             | ControlOutcome::LabelExit { .. }
             | ControlOutcome::TerminalOperation { .. }
+            | ControlOutcome::RuntimeTrap
             | ControlOutcome::Divergence => None,
         }
     }
@@ -1126,28 +1151,31 @@ pub fn derive_control_summaries(
     bodies: &BTreeMap<DefKey, ControlBody<'_>>,
     limits: ControlSummaryLimits,
 ) -> ControlSummarySet {
-    derive_control_summaries_with_check(bodies, limits, &mut |_, _| Ok::<_, std::convert::Infallible>(()))
+    derive_control_summaries_with_check(bodies, None, limits, &mut |_, _| Ok::<_, std::convert::Infallible>(()))
         .unwrap_or_else(|never| match never {})
 }
 
 pub(crate) fn derive_control_summaries_with_check<E>(
     bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    primitives: Option<&BTreeMap<DefKey, crate::PrimitiveRole>>,
     limits: ControlSummaryLimits,
     check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
 ) -> Result<ControlSummarySet, E> {
-    derive_control_phase(bodies, limits, check, false)
+    derive_control_phase(bodies, primitives, limits, check, false)
 }
 
 pub(crate) fn derive_fusion_summaries_with_check<E>(
     bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    primitives: Option<&BTreeMap<DefKey, crate::PrimitiveRole>>,
     limits: ControlSummaryLimits,
     check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
 ) -> Result<ControlSummarySet, E> {
-    derive_control_phase(bodies, limits, check, true)
+    derive_control_phase(bodies, primitives, limits, check, true)
 }
 
 fn derive_control_phase<E>(
     bodies: &BTreeMap<DefKey, ControlBody<'_>>,
+    primitives: Option<&BTreeMap<DefKey, crate::PrimitiveRole>>,
     limits: ControlSummaryLimits,
     check: &mut impl FnMut(DefKey, u64) -> Result<(), E>,
     pending_control: bool,
@@ -1185,7 +1213,8 @@ fn derive_control_phase<E>(
             labels: crate::core::label_dependencies::LabelDependencies::derive(&input.body.expressions).ok(),
         }));
     }
-    let mut output = ControlSummarySet::default();
+    let primitives = Arc::new(primitives.cloned().unwrap_or_default());
+    let mut output = ControlSummarySet { primitives: primitives.clone(), ..Default::default() };
     let cleanup_solvers = bodies.iter().map(|(owner, input)| (*owner,
         interfaces[&(input.interface as *const ElaboratedInterface as usize)].1.fresh_query())).collect();
     let mut cleanup_cache = BTreeMap::new();
@@ -1261,6 +1290,7 @@ fn derive_control_phase<E>(
             };
             let mut analyzer = Analyzer {
                 bodies,
+                primitives: &primitives,
                 seals: &seals,
                 limits,
                 steps: 0,
@@ -1296,6 +1326,7 @@ fn derive_control_phase<E>(
                     calls: analyzer.calls,
                     call_gaps: analyzer.call_gaps,
                     inputs,
+                    primitives: primitives.clone(),
                 },
             );
         }
@@ -1377,6 +1408,7 @@ fn unknown(frame: &Frame, id: CoreId, ty: Type) -> ControlValue {
 
 struct Analyzer<'a, 'b> {
     bodies: &'a BTreeMap<DefKey, ControlBody<'b>>,
+    primitives: &'a BTreeMap<DefKey, crate::PrimitiveRole>,
     seals: &'a BTreeMap<DefKey, Arc<Seal>>,
     limits: ControlSummaryLimits,
     steps: usize,
@@ -2206,6 +2238,35 @@ impl Analyzer<'_, '_> {
                     CallableBrand::Closure(environment) => (environment.owner, Some(*environment)),
                     _ => return vec![state.stop(ControlUnknown::MissingBody(*brand))],
                 };
+                if closure.is_none() && let Some(role) = self.primitives.get(&owner) {
+                    let Some(crate::ElaboratedHeader::Callable(signature)) =
+                        self.seals[&frame.owner].interface.definitions.get(&owner) else {
+                        return vec![state.stop(ControlUnknown::InvalidContract(owner))];
+                    };
+                    if !role.matches_declaration(signature) || !captures.is_empty() || !labels.is_empty() {
+                        return vec![state.stop(ControlUnknown::InvalidContract(owner))];
+                    }
+                    let Some([GenericArgument::Type(Type::Scalar(scalar))]) = generic_arguments.as_deref() else {
+                        return vec![state.stop(ControlUnknown::Unsupported("open runtime primitive ABI"))];
+                    };
+                    let Some((parameters, result)) = role.integer_scalar_signature(*scalar) else {
+                        return vec![state.stop(ControlUnknown::Unsupported("runtime primitive control contract"))];
+                    };
+                    if arguments.iter().map(|value| value.ty.clone()).ne(parameters.into_iter().map(Type::Scalar))
+                        || result_ty != Type::Scalar(result) {
+                        return vec![state.stop(ControlUnknown::InvalidContract(owner))];
+                    }
+                    // Scalar-only inputs/results cannot conceal callbacks or
+                    // caller storage. Preserve both returning and trapping
+                    // alternatives; this is not constant evaluation.
+                    state.outcome = ControlOutcome::Return(unknown(frame, id, result_ty));
+                    if role.integer_may_trap() {
+                        let mut trapped = state.clone();
+                        trapped.outcome = ControlOutcome::RuntimeTrap;
+                        return vec![state, trapped];
+                    }
+                    return vec![state];
+                }
                 let Some(input) = self.bodies.get(&owner) else {
                     return vec![state.stop(ControlUnknown::MissingBody(*brand))];
                 };

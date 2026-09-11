@@ -5,6 +5,30 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 164: manifest-bound integer control coverage
+
+Control analysis and lowering now consume the same trusted primitive identity
+table. Runtime declaration checking shares manifest binding's signature rule,
+and concrete integer parameters/results use the existing scalar ABI producer.
+The summary batch seals those bindings with its body/interface dependencies.
+Unbound bodies, changed selectors/declarations, reference operands, open generic
+inputs and unsupported primitives cannot obtain complete coverage.
+
+The shared invocation relation retains normal scalar results and distinct
+possible runtime traps. Neither traps nor a pure signature imply handler
+cancellation, label transfer or guaranteed normal return. Work limits remain
+unknown and no constant arithmetic evaluation is introduced.
+
+The original arithmetic-prefix computed receiver now passes fresh/decoded VM,
+all-native and both mixed directions at O0/O2. Unit checks cover trusted and
+untrusted identities, closed ABI admission, checked versus wrapping outcomes,
+stale bindings/declarations and bounded-alternative rejection. Runtime and
+executable generations are unchanged; cache generation is 164.
+
+The earlier-borrowed-receiver G4304 regression and general borrowed resumption,
+guarded resource, mandatory-tail, foreign-control and full performance gates
+remain open. This is not a declaration of full native-handler completion.
+
 ## Cache 163: checked owned factory-result footprints
 
 The shared invocation return product records callable paths whose complete

@@ -1345,7 +1345,7 @@ impl StageZeroCompiler {
                 ));
             }
         }
-        // The reverse table is the only authority passed to MIR lowering.
+        // The reverse table is the authority passed to control analysis and MIR lowering.
         // Source names and package paths intentionally disappear here: a
         // primitive leaf is selected exclusively by the frozen declaration
         // identity produced by manifest binding.
@@ -1955,9 +1955,9 @@ impl StageZeroCompiler {
                 .collect::<BTreeMap<_, _>>();
             let budgets = staged_bodies.iter().map(|staged| (staged.definition, staged.budget.clone())).collect::<BTreeMap<_, _>>();
             let summaries = crate::callable_control::derive_fusion_summaries_with_check(
-                &control_bodies, Default::default(), &mut |definition, cost|
+                &control_bodies, runtime_primitives.as_ref(), Default::default(), &mut |definition, cost|
                     session.checkpoint_in(&budgets[&definition], cost))?;
-            let bound = summaries.bind(&control_bodies).map_err(|reason| ServiceError::Failed(vec![
+            let bound = summaries.bind_with_primitives(&control_bodies, runtime_primitives.as_ref()).map_err(|reason| ServiceError::Failed(vec![
                 CompileDiagnostic::invariant("G4180", format!("staged control batch failed validation: {reason:?}"))]))?;
             let mut control_captures = crate::escape::ControlCaptures::default();
             let mut source_flows = BTreeMap::new();
@@ -2030,10 +2030,10 @@ impl StageZeroCompiler {
             .collect::<BTreeMap<_, _>>();
         let control_summaries = if let Some(summaries) = unchanged_control { summaries } else {
             crate::callable_control::derive_control_summaries_with_check(
-            &control_bodies, Default::default(), &mut |definition, cost|
+            &control_bodies, runtime_primitives.as_ref(), Default::default(), &mut |definition, cost|
                 session.checkpoint_in(&control_budgets[&definition], cost),
         )? };
-        let bound_control = control_summaries.bind(&control_bodies)
+        let bound_control = control_summaries.bind_with_primitives(&control_bodies, runtime_primitives.as_ref())
             .map_err(|reason| ServiceError::Failed(vec![CompileDiagnostic::invariant("G4180",
                 format!("callable control batch failed dependency validation: {reason:?}"))]))?;
         for obligation in bound_control.label_address_obligations() {
