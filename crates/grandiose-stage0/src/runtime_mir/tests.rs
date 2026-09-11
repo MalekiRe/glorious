@@ -24,6 +24,15 @@ const CALL: &str = "pub fn main(action: () -> i64) -> i64 { action() }";
 const PERFORM: &str = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(42) { Ask::ask(value) with _ => value } }";
 
 #[test]
+fn a_stored_reference_can_change_its_body_local_loan_without_changing_its_type() {
+    let body = fixture("pub fn main() -> i64 {let first = 41; let second = 42; let mut pointer = &first; pointer = &second; *pointer}");
+    assert!(body.blocks.iter().flat_map(|block| &block.instructions).any(|operation|
+        matches!(operation, RuntimeOperation::Store { dst, src }
+            if matches!(body.locals[dst.0 as usize].ty, Type::Reference { .. })
+                && body.locals[dst.0 as usize].ty != body.locals[src.0 as usize].ty)));
+}
+
+#[test]
 fn handler_candidate_order_follows_scopes_not_arena_numbers() {
     let mut body = fixture("effect Ask { [1, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle { handle Ask::ask(1) { Ask::ask(0) => 0 } } { Ask::ask(value) => value } }");
     assert_eq!(body.control.handlers.len(), 2);

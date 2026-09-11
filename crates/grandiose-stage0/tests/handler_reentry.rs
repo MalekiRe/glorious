@@ -362,6 +362,38 @@ fn prepared_receiver_keeps_the_value_selected_before_argument_mutation() {
 }
 
 #[test]
+fn prepared_receiver_keeps_captures_before_argument_replacement() {
+    candidate("pub fn main() -> i64 {
+            let first = 42;
+            let second = 0;
+            let mut callback:(i64)->i64 = (argument:i64)->i64 {first};
+            let replacement:(i64)->i64 = (argument:i64)->i64 {second};
+            callback({callback = replacement; 0})
+        }");
+}
+
+#[test]
+fn repeated_owned_receiver_invocation_preserves_mutable_capture_storage() {
+    candidate("pub fn main() -> i64 {
+        let mut count = 19;
+        let task = move(count) {count = count + 1; count};
+        task() + task() + 1
+    }");
+}
+
+#[test]
+fn prepared_borrowed_receiver_keeps_its_selected_reference_handle() {
+    candidate("fn first(value:i64) -> i64 {42}
+        fn second(value:i64) -> i64 {0}
+        pub fn main() -> i64 {
+            let first:(i64)->i64=first;
+            let second:(i64)->i64=second;
+            let mut callback = &first;
+            callback({callback = &second; 0})
+        }");
+}
+
+#[test]
 fn field_receiver_prepared_before_an_argument_performance_survives_replay() {
     candidate("effect Ask { [2,2] ask() -> i64; }
         fn answer(value:i64) -> i64 { value }

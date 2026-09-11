@@ -5,6 +5,24 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 152: stored loan identity versus storage type
+
+Both MIR Store validators now use the common region-term traversal to compare
+storage types modulo body-local inferred regions. The source lifetime relation
+and runtime provenance remain distinct obligations. Rigid/bound regions,
+mutability, callable receiver authority and other type contracts are not erased.
+The borrowed receiver/reference-handle replacement regression passes across
+fresh/decoded VM and native/mixed O0/O2 execution. The storage comparison and
+lowering unit checks pass, as do both selected reference-result replacement
+checks and the assigned-tuple outlives service check.
+
+Repeated owned-callable invocation with mutable scalar captures also passes the
+full matrix. This preserves capture identity and rules out a copy-every-receiver
+repair. The original owned-receiver replacement still fails natively. A new
+capture-bearing replacement case stops earlier at Control's exact comparison of
+stored versus value-refined callable types. Both failures remain active. Cache
+152 changes; verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+
 ## Cache 151: strict operand acquisition
 
 Evaluation MIR acquires each strict argument, aggregate field, operation payload,

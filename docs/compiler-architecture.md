@@ -2071,3 +2071,24 @@ an invocation resident still does not itself preserve ownership against a later
 replacement. The existing associated-effect forwarding integration fixture also
 fails at the earlier source G5024 minimum-use check; this checkpoint does not
 claim that suite passes.
+
+## Stored body-region views
+
+Runtime and legacy MIR Store validation share the existing region-term traversal
+to compare storage types modulo closed body-local loan identities. Source/Core
+still establish directional lifetime validity, and executable reference
+provenance still governs actual storage access and escape. A store does not
+equate those source loans or acquire a new outlives proof. Rigid, generic and
+bound regions, reference mutability, callable receiver permission, safety and
+all remaining type contracts are retained by this comparison.
+
+Cache 152 fixes assignment between checked reference handles whose body-local
+loan IDs differ. The borrowed receiver selected before replacement of its
+reference handle now passes the full VM/native/mixed matrix. Existing reference
+replacement/escape checks and assigned-tuple outlives checks also pass. Repeated
+invocation of an owned callable with mutable scalar captures preserves its
+capture storage, demonstrating why indiscriminate receiver copying is not a
+lifetime fix. The original owned-receiver replacement still fails natively;
+a capture-bearing replacement regression additionally exposes Control's exact
+receiver/place type check conflating stored and value-refined callable contracts.
+Both remain active, not ignored or counted as passing acceptance gates.

@@ -1736,7 +1736,7 @@ impl RuntimeMir {
             return Ok(());
         }
         if let RuntimeOperation::Store { dst, src } = instruction {
-            if self.local_type(*dst)? != self.local_type(*src)? {
+            if !crate::types::regions::same_body_storage(self.local_type(*dst)?, self.local_type(*src)?) {
                 return Err("MIR store value does not match its destination type".into());
             }
             return Ok(());

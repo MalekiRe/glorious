@@ -5,6 +5,20 @@
 
 use super::{EffectRow, GenericArgument, Lifetime, Type};
 
+/// Body-local region identities constrain source loans, not stored bits. A
+/// checked store may replace one such loan with another without changing its
+/// storage type. Retain rigid/bound regions, mutability and every other type
+/// contract; this is not a new outlives proof or callable coercion.
+pub(crate) fn same_body_storage(left: &Type, right: &Type) -> bool {
+    if left == right { return true; }
+    let erase = |value: &Type| map_argument_regions(GenericArgument::Type(value.clone()),
+        &mut |region, _| Some(match region {
+            Lifetime::Inferred(_) => Lifetime::Elided,
+            region => region,
+        }));
+    matches!((erase(left), erase(right)), (Some(left), Some(right)) if left == right)
+}
+
 /// Move a caller-owned argument beneath `amount` additional scopes. Regions
 /// bound inside the argument keep their identity; only its free bound regions
 /// move. Overflow is rejected instead of wrapping into a different binder.
@@ -140,6 +154,41 @@ fn map_type(value: &mut Type, cutoff: u32, map: &mut dyn FnMut(Lifetime, u32) ->
 mod tests {
     use super::*;
     use crate::{DefKey, Digest, EffectRowProjection, GenericKind, Mutability, Quantity, Safety};
+
+    #[test]
+    fn stored_loan_regions_do_not_erase_rigid_or_callable_contracts() {
+        let owner = DefKey(Digest::of_bytes(b"stored-loan-regions"));
+        let reference = |index| Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Inferred(crate::types::BodyRegion { owner, index }),
+            referent: Box::new(Type::Unit),
+        };
+        let first = reference(0);
+        let second = reference(1);
+        assert!(same_body_storage(&first, &second));
+        assert!(same_body_storage(&Type::Tuple(vec![first.clone()]), &Type::Tuple(vec![second.clone()])));
+        for rigid in [Lifetime::Static, Lifetime::Generic(0), Lifetime::Bound { depth: 0, index: 0 }] {
+            let mut changed = second.clone();
+            let Type::Reference { lifetime, .. } = &mut changed else { unreachable!() };
+            *lifetime = rigid;
+            assert!(!same_body_storage(&first, &changed));
+        }
+        let mut unique = second;
+        let Type::Reference { mutability, .. } = &mut unique else { unreachable!() };
+        *mutability = Mutability::Unique;
+        assert!(!same_body_storage(&first, &unique));
+        let callable = Type::Callable { contract: Default::default(), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![first], result: Box::new(Type::Unit),
+            effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let mut changed = callable.clone();
+        let Type::Callable { safety, .. } = &mut changed else { unreachable!() };
+        *safety = Safety::Unsafe;
+        assert!(!same_body_storage(&callable, &changed));
+        let mut changed = callable.clone();
+        let Type::Callable { contract, .. } = &mut changed else { unreachable!() };
+        contract.shared_receiver = true;
+        assert!(!same_body_storage(&callable, &changed));
+    }
 
     fn region(depth: u32, index: u32) -> GenericArgument {
         GenericArgument::Lifetime(Lifetime::Bound { depth, index })
